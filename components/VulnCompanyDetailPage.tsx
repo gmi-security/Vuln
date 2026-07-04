@@ -34,11 +34,15 @@ import { exposureClass } from "@/lib/format";
 
 const assetSourceLabel: Record<string, string> = {
   tidal: "Tidal",
+  intune: "Intune",
+  crowdstrike: "CrowdStrike",
   manual: "Manual",
   inferred: "Inferred",
 };
 const assetSourceClass: Record<string, string> = {
   tidal: "bg-[rgba(74,163,255,0.10)] text-sky-300 border border-sky-900/60",
+  intune: "bg-[rgba(74,163,255,0.10)] text-sky-300 border border-sky-900/60",
+  crowdstrike: "bg-[rgba(179,14,20,0.10)] text-[#ff8f96] border border-[rgba(179,14,20,0.35)]",
   manual: "bg-zinc-900 text-zinc-300 border border-zinc-800",
   inferred: "bg-zinc-900 text-zinc-500 border border-zinc-800",
 };

@@ -67,7 +67,12 @@ export type Folder = {
 
 export type AssetExposure = "Internet-facing" | "Internal" | "Isolated";
 export type AssetCriticality = "Crown Jewel" | "High" | "Normal" | "Low";
-export type AssetSource = "tidal" | "manual" | "inferred";
+export type AssetSource =
+  | "tidal"
+  | "intune"
+  | "crowdstrike"
+  | "manual"
+  | "inferred";
 
 // An asset in the inventory (sourced from Tidal.io, or entered manually).
 // This is the authoritative environmental context for real-risk scoring.

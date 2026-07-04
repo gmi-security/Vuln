@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { Building2, Database, DownloadCloud, FolderKanban, Plus, Radar, X } from "lucide-react";
+import { Building2, Database, DownloadCloud, FolderKanban, Laptop, Plus, Radar, ShieldCheck, X } from "lucide-react";
 import { IconAlertTriangle, IconBug } from "@tabler/icons-react";
 import VulnShell from "@/components/VulnShell";
 import {
@@ -63,6 +63,55 @@ export default function VulnCompaniesPage() {
       await load();
     } catch {
       setImportMsg({ ok: false, text: "Failed to reach the import API." });
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  async function syncIntune() {
+    setImporting(true);
+    setImportMsg(null);
+    try {
+      const res = await fetch("/api/intune/import", { method: "POST" });
+      const json = await res.json();
+      if (!res.ok) {
+        setImportMsg({ ok: false, text: json.error ?? "Intune sync failed." });
+        return;
+      }
+      const r = json.result;
+      const auto = r.autoScan?.assetsQueued
+        ? ` Auto-scan launched ${r.autoScan.scansLaunched} scan${r.autoScan.scansLaunched === 1 ? "" : "s"} for ${r.autoScan.assetsQueued} new asset${r.autoScan.assetsQueued === 1 ? "" : "s"}.`
+        : "";
+      setImportMsg({
+        ok: true,
+        text: `Synced ${r.assetsUpserted} Intune device${r.assetsUpserted === 1 ? "" : "s"} to ${r.company}; repriced ${r.findingsRescored} findings.${auto}`,
+      });
+      await load();
+    } catch {
+      setImportMsg({ ok: false, text: "Failed to reach the Intune API." });
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  async function syncCrowdstrike() {
+    setImporting(true);
+    setImportMsg(null);
+    try {
+      const res = await fetch("/api/crowdstrike/import", { method: "POST" });
+      const json = await res.json();
+      if (!res.ok) {
+        setImportMsg({ ok: false, text: json.error ?? "CrowdStrike sync failed." });
+        return;
+      }
+      const r = json.result;
+      setImportMsg({
+        ok: true,
+        text: `Synced ${r.assetsUpserted} CrowdStrike host${r.assetsUpserted === 1 ? "" : "s"} to ${r.company}; repriced ${r.findingsRescored} findings.`,
+      });
+      await load();
+    } catch {
+      setImportMsg({ ok: false, text: "Failed to reach the CrowdStrike API." });
     } finally {
       setImporting(false);
     }
@@ -136,6 +185,22 @@ export default function VulnCompaniesPage() {
           >
             <Database size={16} className="text-zinc-400" />
             Sync from Tidal
+          </button>
+          <button
+            onClick={() => void syncIntune()}
+            disabled={importing}
+            className={`${ghostButtonClass} disabled:opacity-50`}
+          >
+            <Laptop size={16} className="text-zinc-400" />
+            Sync from Intune
+          </button>
+          <button
+            onClick={() => void syncCrowdstrike()}
+            disabled={importing}
+            className={`${ghostButtonClass} disabled:opacity-50`}
+          >
+            <ShieldCheck size={16} className="text-zinc-400" />
+            Sync CrowdStrike hosts
           </button>
           <button
             onClick={() => void importNessus()}

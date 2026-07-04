@@ -5,6 +5,7 @@ import { ExternalLink } from "lucide-react";
 import {
   IconCloudLock,
   IconDatabaseCog,
+  IconDeviceLaptop,
   IconPackage,
   IconRadar,
   IconShieldSearch,
@@ -32,6 +33,8 @@ const cardIcon: Record<string, React.ElementType> = {
   crowdstrike: IconShieldSearch,
   qualys: IconCloudLock,
   tidal: IconDatabaseCog,
+  intune: IconDeviceLaptop,
+  "crowdstrike-devices": IconShieldSearch,
 };
 
 const statusClass: Record<ConnectorStatus, string> = {

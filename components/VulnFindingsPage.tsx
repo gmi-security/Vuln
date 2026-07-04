@@ -452,9 +452,13 @@ export default function VulnFindingsPage() {
                   Environment context:{" "}
                   {focus.assetSource === "tidal"
                     ? "Tidal.io inventory"
-                    : focus.assetSource === "manual"
-                      ? "manual inventory"
-                      : "inferred from hostname"}
+                    : focus.assetSource === "intune"
+                      ? "Intune device inventory"
+                      : focus.assetSource === "crowdstrike"
+                        ? "CrowdStrike host inventory"
+                        : focus.assetSource === "manual"
+                          ? "manual inventory"
+                          : "inferred from hostname"}
                   .
                 </span>
               </p>

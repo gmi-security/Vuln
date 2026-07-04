@@ -11,6 +11,8 @@ import {
 } from "@/lib/nessus";
 import { classifyAsset, computeRealRisk, isKev } from "@/lib/threat";
 import { tidalConfig, tidalListAssets } from "@/lib/tidal";
+import { intuneConfig, intuneListAssets } from "@/lib/intune";
+import { falconConfig, falconListAssets } from "@/lib/crowdstrike";
 import { loadSnapshot, persistenceEnabled, saveSnapshot } from "@/lib/persist";
 import type {
   AssetSource,
@@ -1174,6 +1176,125 @@ export async function importFromTidal(): Promise<
 
   await flushNow();
   return { companiesCreated, assetsUpserted, findingsRescored, autoScan };
+}
+
+export type IntuneImportResult = {
+  assetsUpserted: number;
+  findingsRescored: number;
+  company: string;
+  autoScan?: AutoScanResult;
+};
+
+// Sync Intune managed devices as inventory assets. Devices belong to the
+// tenant — our own organization — so they attach to the internal company
+// (GMI), created if it doesn't exist yet. Honest linkage: Intune endpoints are
+// never attributed to an external client.
+export async function importFromIntune(): Promise<
+  IntuneImportResult | { error: string }
+> {
+  if (!intuneConfig()) {
+    return {
+      error:
+        "Intune is not configured. Set INTUNE_TENANT_ID, INTUNE_CLIENT_ID, and INTUNE_CLIENT_SECRET to sync managed devices.",
+    };
+  }
+  const s = store();
+  try {
+    const devices = await intuneListAssets();
+    return await importEndpoints(s, devices, "intune");
+  } catch (err) {
+    return {
+      error: err instanceof Error ? err.message : "Failed to reach Microsoft Graph.",
+    };
+  }
+}
+
+export type EndpointImportResult = {
+  assetsUpserted: number;
+  findingsRescored: number;
+  company: string;
+  autoScan?: AutoScanResult;
+};
+
+// Shared endpoint-inventory upsert for Intune / CrowdStrike device sources.
+// Devices belong to the tenant — our own organization — so they attach to the
+// internal company, created if absent. Endpoints are never attributed to an
+// external client (honest linkage).
+async function importEndpoints(
+  s: StoreShape,
+  devices: {
+    externalId: string;
+    hostname: string;
+    ipAddresses: string[];
+    os: string;
+    owner: string;
+    tags: string[];
+    criticality: InternalAsset["criticality"];
+    exposure: InternalAsset["exposure"];
+  }[],
+  source: AssetSource,
+): Promise<EndpointImportResult> {
+  let internal = Array.from(s.companies.values()).find((c) => c.kind === "internal");
+  if (!internal) {
+    const created = createCompany({ name: "GMI", kind: "internal" });
+    if ("error" in created) throw new Error(created.error);
+    internal = s.companies.get(created.id)!;
+  }
+
+  let assetsUpserted = 0;
+  for (const d of devices) {
+    const identifier = d.hostname || d.externalId;
+    if (!identifier) continue;
+    upsertAsset(s, {
+      identifier,
+      hostname: d.hostname,
+      ipAddresses: d.ipAddresses,
+      companyId: internal.id,
+      companyName: internal.name,
+      exposure: d.exposure,
+      criticality: d.criticality,
+      os: d.os,
+      owner: d.owner,
+      tags: d.tags,
+      source,
+      externalId: d.externalId,
+    });
+    assetsUpserted += 1;
+  }
+
+  let findingsRescored = 0;
+  for (const f of s.findings.values()) {
+    const before = f.realRisk;
+    rescoreFinding(s, f);
+    if (f.realRisk !== before || f.assetSource === source) findingsRescored += 1;
+  }
+
+  let autoScan: AutoScanResult | undefined;
+  if (s.settings.autoScanNewAssets) autoScan = await autoScanGaps();
+
+  await flushNow();
+  return { assetsUpserted, findingsRescored, company: internal.name, autoScan };
+}
+
+// Sync CrowdStrike Falcon host inventory (the scan/coverage perspective).
+export async function importFromCrowdstrike(): Promise<
+  EndpointImportResult | { error: string }
+> {
+  if (!falconConfig()) {
+    return {
+      error:
+        "CrowdStrike is not configured. Set FALCON_CLIENT_ID, FALCON_CLIENT_SECRET, and FALCON_CLOUD to sync host inventory.",
+    };
+  }
+  const s = store();
+  try {
+    const devices = await falconListAssets();
+    return await importEndpoints(s, devices, "crowdstrike");
+  } catch (err) {
+    return {
+      error: err instanceof Error ? err.message : "Failed to reach the CrowdStrike API.",
+    };
+  }
 }
 
 export type NessusImportResult = {
