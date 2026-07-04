@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { Building2, Database, DownloadCloud, FolderKanban, Laptop, Plus, Radar, ShieldCheck, X } from "lucide-react";
+import { Building2, Database, DownloadCloud, FolderKanban, Laptop, Plus, Radar, ShieldAlert, ShieldCheck, X } from "lucide-react";
 import { IconAlertTriangle, IconBug } from "@tabler/icons-react";
 import VulnShell from "@/components/VulnShell";
 import {
@@ -89,6 +89,29 @@ export default function VulnCompaniesPage() {
       await load();
     } catch {
       setImportMsg({ ok: false, text: "Failed to reach the Intune API." });
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  async function importDefender() {
+    setImporting(true);
+    setImportMsg(null);
+    try {
+      const res = await fetch("/api/defender/import", { method: "POST" });
+      const json = await res.json();
+      if (!res.ok) {
+        setImportMsg({ ok: false, text: json.error ?? "Defender import failed." });
+        return;
+      }
+      const r = json.result;
+      setImportMsg({
+        ok: true,
+        text: `Imported ${r.findingsImported} Defender findings across ${r.hostsAffected} host${r.hostsAffected === 1 ? "" : "s"} to ${r.company}.`,
+      });
+      await load();
+    } catch {
+      setImportMsg({ ok: false, text: "Failed to reach the Defender API." });
     } finally {
       setImporting(false);
     }
@@ -209,6 +232,14 @@ export default function VulnCompaniesPage() {
           >
             <DownloadCloud size={16} className="text-zinc-400" />
             {importing ? "Importing..." : "Import from Nessus"}
+          </button>
+          <button
+            onClick={() => void importDefender()}
+            disabled={importing}
+            className={`${ghostButtonClass} disabled:opacity-50`}
+          >
+            <ShieldAlert size={16} className="text-zinc-400" />
+            Import from Defender
           </button>
           <button onClick={() => setShowNew(true)} className={primaryButtonClass}>
             <Plus size={16} />

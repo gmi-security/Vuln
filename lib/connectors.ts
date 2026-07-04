@@ -65,6 +65,24 @@ const CONNECTOR_DEFS: Record<ConnectorId, ConnectorDef> = {
       categories: ["Endpoint", "Operating System", "Application Library"],
     },
   },
+  defender: {
+    id: "defender",
+    name: "Microsoft Defender Vulnerability Management",
+    vendor: "Microsoft",
+    kind: "Endpoint Vulnerability Management",
+    description:
+      "Agent-based vulnerability data from Microsoft Defender for Endpoint / Defender Vulnerability Management. Pulls CVE findings per device from the Microsoft Security API — no active scanning, reflects live Defender telemetry.",
+    capabilities: ["Device vulnerabilities", "CVSS & severity", "Security recommendations", "No active scan"],
+    envVars: ["DEFENDER_TENANT_ID", "DEFENDER_CLIENT_ID", "DEFENDER_CLIENT_SECRET"],
+    docsUrl: "https://learn.microsoft.com/en-us/defender-endpoint/api/exposed-apis-list",
+    demo: {
+      minDurationMs: 20_000,
+      maxDurationMs: 45_000,
+      minFindings: 12,
+      maxFindings: 26,
+      categories: ["Endpoint", "Operating System", "Application Library"],
+    },
+  },
   qualys: {
     id: "qualys",
     name: "Qualys VMDR",

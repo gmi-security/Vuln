@@ -94,7 +94,12 @@ export type InventoryAsset = {
   openFindings: number; // derived
 };
 
-export type ConnectorId = "nessus" | "vulners" | "crowdstrike" | "qualys";
+export type ConnectorId =
+  | "nessus"
+  | "vulners"
+  | "crowdstrike"
+  | "defender"
+  | "qualys";
 
 export type ConnectorStatus = "Connected" | "Demo Mode" | "Planned" | "Error";
 

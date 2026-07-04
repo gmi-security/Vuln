@@ -24,6 +24,7 @@ export const connectorLabels: Record<ConnectorId, string> = {
   nessus: "Nessus",
   vulners: "Vulners",
   crowdstrike: "CrowdStrike",
+  defender: "Defender",
   qualys: "Qualys",
 };
 

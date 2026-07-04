@@ -31,6 +31,7 @@ const cardIcon: Record<string, React.ElementType> = {
   nessus: IconRadar,
   vulners: IconPackage,
   crowdstrike: IconShieldSearch,
+  defender: IconShieldSearch,
   qualys: IconCloudLock,
   tidal: IconDatabaseCog,
   intune: IconDeviceLaptop,

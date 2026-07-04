@@ -13,6 +13,7 @@ import { classifyAsset, computeRealRisk, isKev } from "@/lib/threat";
 import { tidalConfig, tidalListAssets } from "@/lib/tidal";
 import { intuneConfig, intuneListAssets } from "@/lib/intune";
 import { falconConfig, falconListAssets } from "@/lib/crowdstrike";
+import { defenderConfig, defenderListFindings } from "@/lib/defender";
 import { loadSnapshot, persistenceEnabled, saveSnapshot } from "@/lib/persist";
 import type {
   AssetSource,
@@ -1547,6 +1548,151 @@ export async function importFromCrowdstrike(): Promise<
       error: err instanceof Error ? err.message : "Failed to reach the CrowdStrike API.",
     };
   }
+}
+
+export type DefenderImportResult = {
+  findingsImported: number;
+  hostsAffected: number;
+  company: string;
+};
+
+// Import Microsoft Defender device vulnerabilities as findings (the vuln
+// perspective for a Defender estate). Attaches to the DEFENDER_CUSTOMER
+// company when set, else the internal org. Findings land under a "Defender"
+// folder on a synthetic completed scan.
+export async function importFromDefender(): Promise<
+  DefenderImportResult | { error: string }
+> {
+  if (!defenderConfig()) {
+    return {
+      error:
+        "Defender is not configured. Set DEFENDER_TENANT_ID, DEFENDER_CLIENT_ID, and DEFENDER_CLIENT_SECRET.",
+    };
+  }
+  const s = store();
+  let items;
+  try {
+    items = await defenderListFindings();
+  } catch (err) {
+    return {
+      error: err instanceof Error ? err.message : "Failed to reach the Defender API.",
+    };
+  }
+
+  // Resolve the owning company.
+  const customer = (process.env.DEFENDER_CUSTOMER ?? "").trim();
+  let company: InternalCompany | undefined;
+  if (customer) {
+    company =
+      Array.from(s.companies.values()).find(
+        (c) => c.name.toLowerCase() === customer.toLowerCase(),
+      ) ?? undefined;
+    if (!company) {
+      const created = createCompany({ name: customer });
+      if ("error" in created) return { error: created.error };
+      company = s.companies.get(created.id)!;
+    }
+  } else {
+    company = Array.from(s.companies.values()).find((c) => c.kind === "internal");
+    if (!company) {
+      const created = createCompany({ name: "GMI", kind: "internal" });
+      if ("error" in created) return { error: created.error };
+      company = s.companies.get(created.id)!;
+    }
+  }
+
+  const folder = ensureFolder(s, company.id, "Defender");
+  const nowIso = new Date().toISOString();
+  const scanId = nextId(s, "SCAN");
+  const scan: InternalScan = {
+    id: scanId,
+    name: "Defender Vulnerability Sync",
+    companyId: company.id,
+    companyName: company.name,
+    folderId: folder.id,
+    folderName: folder.name,
+    connector: "defender",
+    profile: "agent-sync",
+    targets: [],
+    status: "Completed",
+    createdAt: nowIso,
+    startedAt: nowIso,
+    completedAt: nowIso,
+    findingsCount: 0,
+    severityCounts: emptySeverityCounts(),
+    hostsScanned: 0,
+    requestedBy: "defender@import",
+    durationMs: 1,
+    progressFrozenAt: 100,
+    seed: hashSeed(scanId),
+    vendor: null,
+  };
+  s.scans.set(scanId, scan);
+
+  let findingsImported = 0;
+  for (const item of items) {
+    const dedupeKey = `${item.cve}::${item.asset}`;
+    const existing = Array.from(s.findings.values()).find(
+      (f) =>
+        `${f.cve}::${f.asset}` === dedupeKey &&
+        f.companyId === company!.id &&
+        f.status !== "Resolved",
+    );
+    if (existing) {
+      existing.lastSeen = nowIso;
+      continue;
+    }
+    const id = nextId(s, "VLN");
+    s.findings.set(id, {
+      id,
+      scanId,
+      companyId: company.id,
+      companyName: company.name,
+      connector: "defender",
+      cve: item.cve,
+      title: item.title,
+      severity: item.severity,
+      cvss: item.cvss,
+      cvssV3: item.cvss,
+      cvssV2: 0,
+      vpr: 0,
+      epss: 0,
+      asset: item.asset,
+      port: "N/A",
+      category: item.category,
+      description: item.description,
+      remediation: item.remediation,
+      status: "Open",
+      assignee: null,
+      firstSeen: nowIso,
+      lastSeen: nowIso,
+      resolvedAt: null,
+      exploitAvailable: false,
+      ...riskFields(s, {
+        cve: item.cve,
+        cvss: item.cvss,
+        epss: 0,
+        exploitAvailable: false,
+        asset: item.asset,
+        companyId: company.id,
+      }),
+    });
+    findingsImported += 1;
+  }
+
+  const all = Array.from(s.findings.values()).filter((f) => f.scanId === scanId);
+  scan.findingsCount = all.length;
+  const counts = emptySeverityCounts();
+  for (const f of all) counts[f.severity] += 1;
+  scan.severityCounts = counts;
+  scan.hostsScanned = new Set(all.map((f) => f.asset)).size;
+
+  await flushNow();
+  return {
+    findingsImported,
+    hostsAffected: scan.hostsScanned,
+    company: company.name,
+  };
 }
 
 export type NessusImportResult = {
