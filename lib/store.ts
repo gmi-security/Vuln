@@ -9,6 +9,7 @@ import {
   nessusScanControl,
   nessusScanStatus,
 } from "@/lib/nessus";
+import { classifyAsset, computeRealRisk, isKev } from "@/lib/threat";
 import type {
   Company,
   ConnectorId,
@@ -20,6 +21,34 @@ import type {
   ScanStatus,
   Severity,
 } from "@/lib/types";
+
+// Threat + environment enrichment for a finding: KEV status, the asset's
+// exposure/criticality, and the composite real-risk score.
+function riskFields(input: {
+  cve: string;
+  cvss: number;
+  epss: number;
+  exploitAvailable: boolean;
+  asset: string;
+}) {
+  const kev = isKev(input.cve);
+  const { exposure, criticality } = classifyAsset(input.asset);
+  const { score, priority } = computeRealRisk({
+    cvss: input.cvss,
+    kev,
+    epss: input.epss,
+    exploitAvailable: input.exploitAvailable,
+    exposure,
+    criticality,
+  });
+  return {
+    kev,
+    assetExposure: exposure,
+    assetCriticality: criticality,
+    realRisk: score,
+    riskPriority: priority,
+  };
+}
 
 // In-memory operational store. Scans progress in real time (progress is a
 // function of elapsed wall clock, so it advances between requests without a
@@ -182,6 +211,13 @@ function generateFindings(s: StoreShape, scan: InternalScan): Finding[] {
       lastSeen: completedAt,
       resolvedAt: null,
       exploitAvailable: template.exploitAvailable,
+      ...riskFields({
+        cve: template.cve,
+        cvss: template.cvss,
+        epss: template.epss,
+        exploitAvailable: template.exploitAvailable,
+        asset,
+      }),
     });
   }
   for (const f of created) s.findings.set(f.id, f);
@@ -299,6 +335,13 @@ async function importVendorFindings(s: StoreShape, scan: InternalScan): Promise<
         lastSeen: completedAt,
         resolvedAt: null,
         exploitAvailable: item.exploitAvailable,
+        ...riskFields({
+          cve: item.cve,
+          cvss: item.cvss,
+          epss: 0,
+          exploitAvailable: item.exploitAvailable,
+          asset: item.asset,
+        }),
       },
     );
   }
@@ -854,10 +897,8 @@ export function listFindings(filter?: { scanId?: string; companyId?: string }): 
   let all = Array.from(s.findings.values());
   if (filter?.scanId) all = all.filter((f) => f.scanId === filter.scanId);
   if (filter?.companyId) all = all.filter((f) => f.companyId === filter.companyId);
-  const sevRank: Record<Severity, number> = { Critical: 0, High: 1, Medium: 2, Low: 3, Info: 4 };
-  return all.sort(
-    (a, b) => sevRank[a.severity] - sevRank[b.severity] || b.cvss - a.cvss,
-  );
+  // Default to real-risk order so the most dangerous findings surface first.
+  return all.sort((a, b) => b.realRisk - a.realRisk || b.cvss - a.cvss);
 }
 
 export function updateFinding(
@@ -1018,6 +1059,30 @@ export function computeMetrics(filter?: { companyId?: string }): QuantifyMetrics
     }))
     .sort((a, b) => b.exposureScore - a.exposureScore || b.open - a.open);
 
+  const riskPriorityCounts = {
+    Critical: 0,
+    High: 0,
+    Medium: 0,
+    Low: 0,
+    Info: 0,
+  };
+  for (const f of open) riskPriorityCounts[f.riskPriority] += 1;
+
+  const topRisks = [...open]
+    .sort((a, b) => b.realRisk - a.realRisk)
+    .slice(0, 12)
+    .map((f) => ({
+      id: f.id,
+      cve: f.cve,
+      title: f.title,
+      asset: f.asset,
+      companyName: f.companyName,
+      realRisk: f.realRisk,
+      riskPriority: f.riskPriority,
+      kev: f.kev,
+      exposure: f.assetExposure,
+    }));
+
   return {
     totalOpen: open.length,
     severityCounts,
@@ -1031,6 +1096,9 @@ export function computeMetrics(filter?: { companyId?: string }): QuantifyMetrics
     trend,
     meanTimeToRemediateDays,
     companyBreakdown,
+    kevOpen: open.filter((f) => f.kev).length,
+    riskPriorityCounts,
+    topRisks,
   };
 }
 

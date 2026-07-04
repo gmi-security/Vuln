@@ -14,9 +14,12 @@ import {
 } from "@/components/ui";
 import {
   connectorLabels,
+  exposureClass,
   findingStatusClass,
   formatAge,
   formatDateTime,
+  riskColor,
+  riskPriorityClass,
   severityClass,
 } from "@/lib/format";
 import type { CvssVersion, Finding, FindingStatus } from "@/lib/types";
@@ -252,14 +255,13 @@ export default function VulnFindingsPage() {
         actions={<CvssToggle version={cvssVersion} onChange={setCvssVersion} />}
       >
         <div className="overflow-hidden rounded-[24px] border border-[rgba(179,14,20,0.12)] bg-[#040404]">
-          <div className="grid grid-cols-[110px_150px_1.9fr_1fr_90px_100px_110px_150px_90px] gap-4 border-b border-zinc-900 px-5 py-4 text-xs uppercase tracking-[0.2em] text-zinc-500">
+          <div className="grid grid-cols-[100px_1.9fr_1.1fr_120px_80px_100px_140px_80px] gap-4 border-b border-zinc-900 px-5 py-4 text-xs uppercase tracking-[0.2em] text-zinc-500">
             <div>ID</div>
-            <div>CVE</div>
             <div>Finding</div>
             <div>Asset</div>
+            <div>Real risk</div>
             <div>CVSS {cvssVersion}</div>
             <div>Severity</div>
-            <div>Source</div>
             <div>Status</div>
             <div>Age</div>
           </div>
@@ -269,31 +271,51 @@ export default function VulnFindingsPage() {
                 key={finding.id}
                 onClick={() => setFocusId(finding.id)}
                 className={[
-                  "grid w-full grid-cols-[110px_150px_1.9fr_1fr_90px_100px_110px_150px_90px] items-center gap-4 border-b border-zinc-900/70 px-5 py-4 text-left transition last:border-b-0 hover:bg-[#0a0a0a]",
+                  "grid w-full grid-cols-[100px_1.9fr_1.1fr_120px_80px_100px_140px_80px] items-center gap-4 border-b border-zinc-900/70 px-5 py-4 text-left transition last:border-b-0 hover:bg-[#0a0a0a]",
                   focusId === finding.id ? "bg-[rgba(179,14,20,0.06)]" : "",
                 ].join(" ")}
               >
                 <div className="text-sm font-medium text-[#ff4d57]">
                   {finding.id}
                 </div>
-                <div className="truncate text-sm text-zinc-300">
-                  {finding.cve}
-                </div>
                 <div className="min-w-0">
                   <div className="truncate font-medium text-white">
                     {finding.title}
                   </div>
-                  <div className="mt-1 flex items-center gap-2 text-xs text-zinc-500">
-                    {finding.category}
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+                    <span className="text-[#ff8f96]">{finding.cve}</span>
+                    {finding.kev ? (
+                      <span className="rounded-full border border-[rgba(179,14,20,0.55)] bg-[rgba(179,14,20,0.16)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-[#ff4d57]">
+                        KEV
+                      </span>
+                    ) : null}
                     {finding.exploitAvailable ? (
-                      <span className="rounded-full border border-[rgba(179,14,20,0.40)] bg-[rgba(179,14,20,0.10)] px-2 py-0.5 text-[10px] uppercase tracking-[0.14em] text-[#ff4d57]">
+                      <span className="rounded-full border border-orange-900/60 bg-[rgba(245,110,35,0.12)] px-2 py-0.5 text-[10px] uppercase tracking-[0.14em] text-orange-300">
                         Exploit
                       </span>
                     ) : null}
                   </div>
                 </div>
-                <div className="truncate text-sm text-zinc-300">
-                  {finding.asset}
+                <div className="min-w-0">
+                  <div className="truncate text-sm text-zinc-300">
+                    {finding.asset}
+                  </div>
+                  <div
+                    className={`mt-1 text-xs ${exposureClass[finding.assetExposure] ?? "text-zinc-500"}`}
+                  >
+                    {finding.assetExposure} · {finding.assetCriticality}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span
+                    className="text-lg font-semibold"
+                    style={{ color: riskColor(finding.realRisk) }}
+                  >
+                    {finding.realRisk}
+                  </span>
+                  <Pill className={riskPriorityClass[finding.riskPriority]}>
+                    {finding.riskPriority}
+                  </Pill>
                 </div>
                 <div className="text-sm text-zinc-300">
                   {(() => {
@@ -315,9 +337,6 @@ export default function VulnFindingsPage() {
                   <Pill className={severityClass[finding.severity]}>
                     {finding.severity}
                   </Pill>
-                </div>
-                <div className="text-sm text-zinc-400">
-                  {connectorLabels[finding.connector]}
                 </div>
                 <div>
                   <Pill className={findingStatusClass[finding.status]}>
@@ -355,8 +374,13 @@ export default function VulnFindingsPage() {
                 <Pill className={findingStatusClass[focus.status]}>
                   {focus.status}
                 </Pill>
+                {focus.kev ? (
+                  <Pill className="border border-[rgba(179,14,20,0.55)] bg-[rgba(179,14,20,0.16)] text-[#ff4d57]">
+                    KEV · exploited in the wild
+                  </Pill>
+                ) : null}
                 {focus.exploitAvailable ? (
-                  <Pill className="border border-[rgba(179,14,20,0.40)] bg-[rgba(179,14,20,0.10)] text-[#ff4d57]">
+                  <Pill className="border border-orange-900/60 bg-[rgba(245,110,35,0.12)] text-orange-300">
                     Exploit available
                   </Pill>
                 ) : null}
@@ -372,6 +396,61 @@ export default function VulnFindingsPage() {
           </div>
 
           <div className={`flex-1 space-y-6 px-6 py-6 ${scrollAreaClass}`}>
+            <div className="rounded-2xl border border-[rgba(179,14,20,0.20)] bg-[linear-gradient(180deg,#0c0708,#070707)] p-5">
+              <div className="flex items-center justify-between">
+                <div className="text-xs uppercase tracking-[0.24em] text-zinc-500">
+                  Real risk
+                </div>
+                <Pill className={riskPriorityClass[focus.riskPriority]}>
+                  {focus.riskPriority}
+                </Pill>
+              </div>
+              <div className="mt-2 flex items-end gap-3">
+                <span
+                  className="text-5xl font-semibold tracking-[-0.04em]"
+                  style={{ color: riskColor(focus.realRisk) }}
+                >
+                  {focus.realRisk}
+                </span>
+                <span className="mb-1 text-sm text-zinc-500">/ 100</span>
+              </div>
+              <div className="mt-4 grid grid-cols-2 gap-2 text-xs">
+                <RiskFactor
+                  label="Base CVSS"
+                  value={(focus.cvssV3 || focus.cvssV2).toFixed(1)}
+                />
+                <RiskFactor
+                  label="Exploited in wild"
+                  value={focus.kev ? "Yes (CISA KEV)" : "Not listed"}
+                  hot={focus.kev}
+                />
+                <RiskFactor
+                  label="EPSS"
+                  value={`${Math.round(focus.epss * 100)}%`}
+                />
+                <RiskFactor
+                  label="Public exploit"
+                  value={focus.exploitAvailable ? "Available" : "None"}
+                  hot={focus.exploitAvailable}
+                />
+                <RiskFactor
+                  label="Asset exposure"
+                  value={focus.assetExposure}
+                  hot={focus.assetExposure === "Internet-facing"}
+                />
+                <RiskFactor
+                  label="Asset criticality"
+                  value={focus.assetCriticality}
+                  hot={focus.assetCriticality === "Crown Jewel"}
+                />
+              </div>
+              <p className="mt-4 text-xs leading-relaxed text-zinc-500">
+                Base CVSS adjusted for real-world exploitation (KEV, EPSS,
+                public exploit) and the affected asset&apos;s exposure and
+                business criticality.
+              </p>
+            </div>
+
             <dl className="grid grid-cols-2 gap-x-6 gap-y-4 text-sm">
               <Detail label="Company" value={focus.companyName} />
               <Detail label="Asset" value={focus.asset} />
@@ -493,6 +572,27 @@ function Detail({ label, value }: { label: string; value: React.ReactNode }) {
     <div>
       <dt className="text-zinc-500">{label}</dt>
       <dd className="mt-1 truncate text-zinc-200">{value}</dd>
+    </div>
+  );
+}
+
+function RiskFactor({
+  label,
+  value,
+  hot,
+}: {
+  label: string;
+  value: React.ReactNode;
+  hot?: boolean;
+}) {
+  return (
+    <div className="rounded-xl border border-zinc-900 bg-[#0a0a0a] px-3 py-2">
+      <div className="text-[10px] uppercase tracking-[0.16em] text-zinc-600">
+        {label}
+      </div>
+      <div className={hot ? "mt-1 font-medium text-[#ff4d57]" : "mt-1 text-zinc-200"}>
+        {value}
+      </div>
     </div>
   );
 }

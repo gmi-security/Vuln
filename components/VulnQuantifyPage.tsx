@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { RefreshCcw } from "lucide-react";
 import {
   IconAlertTriangle,
@@ -10,10 +11,26 @@ import {
 } from "@tabler/icons-react";
 import VulnShell from "@/components/VulnShell";
 import { PanelCard, Pill, StatCard, ghostButtonClass } from "@/components/ui";
-import { connectorLabels, severityBarColor, severityClass } from "@/lib/format";
+import {
+  connectorLabels,
+  exposureClass,
+  riskColor,
+  severityBarColor,
+  severityClass,
+} from "@/lib/format";
 import type { QuantifyMetrics, Severity } from "@/lib/types";
 
 const SEVERITIES: Severity[] = ["Critical", "High", "Medium", "Low", "Info"];
+
+type RiskBand = "Critical" | "High" | "Medium" | "Low" | "Info";
+const RISK_BANDS: RiskBand[] = ["Critical", "High", "Medium", "Low", "Info"];
+const riskBandColor: Record<RiskBand, string> = {
+  Critical: "#b30e14",
+  High: "#f97316",
+  Medium: "#f5a623",
+  Low: "#4aa3ff",
+  Info: "#52525b",
+};
 
 export default function VulnQuantifyPage() {
   const [metrics, setMetrics] = useState<QuantifyMetrics | null>(null);
@@ -65,9 +82,9 @@ export default function VulnQuantifyPage() {
           icon={<IconGauge size={26} />}
         />
         <StatCard
-          label="Exploitable open"
-          value={metrics ? metrics.exploitableOpen : "—"}
-          sublabel="Open findings with a public exploit"
+          label="Actively exploited"
+          value={metrics ? metrics.kevOpen : "—"}
+          sublabel={`In CISA KEV · ${metrics?.exploitableOpen ?? 0} with public exploit`}
           icon={<IconFlame size={26} />}
         />
         <StatCard
@@ -90,6 +107,105 @@ export default function VulnQuantifyPage() {
           sublabel="Across resolved findings"
           icon={<IconClockHour4 size={26} />}
         />
+      </div>
+
+      <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
+        <PanelCard
+          eyebrow="Real-risk priority"
+          description="Open findings by composite real-risk band"
+        >
+          <div className="space-y-3">
+            {RISK_BANDS.map((band) => {
+              const count = metrics?.riskPriorityCounts[band] ?? 0;
+              const total = Math.max(
+                1,
+                RISK_BANDS.reduce(
+                  (sum, b) => sum + (metrics?.riskPriorityCounts[b] ?? 0),
+                  0,
+                ),
+              );
+              return (
+                <div key={band} className="flex items-center gap-3">
+                  <div className="w-20 text-sm text-zinc-400">{band}</div>
+                  <div className="h-3 flex-1 overflow-hidden rounded-full bg-[#101010]">
+                    <div
+                      className="h-full rounded-full transition-all duration-500"
+                      style={{
+                        width: `${Math.round((count / total) * 100)}%`,
+                        background: riskBandColor[band],
+                      }}
+                    />
+                  </div>
+                  <div className="w-8 text-right text-sm font-medium text-white">
+                    {count}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <p className="mt-5 text-xs leading-relaxed text-zinc-500">
+            Real risk = base CVSS adjusted for exploitation in the wild (CISA
+            KEV, EPSS, public exploit) and each asset&apos;s exposure and
+            business criticality.
+          </p>
+        </PanelCard>
+
+        <PanelCard
+          eyebrow="Top real-risk findings"
+          description="Highest composite risk across the environment"
+        >
+          <div className="overflow-hidden rounded-[24px] border border-[rgba(179,14,20,0.12)] bg-[#040404]">
+            <div className="grid grid-cols-[70px_1.7fr_1.1fr_130px] gap-4 border-b border-zinc-900 px-5 py-3 text-xs uppercase tracking-[0.2em] text-zinc-500">
+              <div>Risk</div>
+              <div>Finding</div>
+              <div>Asset</div>
+              <div>Client</div>
+            </div>
+            {(metrics?.topRisks ?? []).slice(0, 8).map((r) => (
+              <Link
+                key={r.id}
+                href={`/findings?focus=${r.id}`}
+                className="grid grid-cols-[70px_1.7fr_1.1fr_130px] items-center gap-4 border-b border-zinc-900/70 px-5 py-3 transition last:border-b-0 hover:bg-[#0a0a0a]"
+              >
+                <div
+                  className="text-lg font-semibold"
+                  style={{ color: riskColor(r.realRisk) }}
+                >
+                  {r.realRisk}
+                </div>
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-medium text-white">
+                    {r.title}
+                  </div>
+                  <div className="mt-1 flex items-center gap-2 text-xs text-zinc-500">
+                    <span className="text-[#ff8f96]">{r.cve}</span>
+                    {r.kev ? (
+                      <span className="rounded-full border border-[rgba(179,14,20,0.55)] bg-[rgba(179,14,20,0.16)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-[#ff4d57]">
+                        KEV
+                      </span>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="min-w-0">
+                  <div className="truncate text-sm text-zinc-300">{r.asset}</div>
+                  <div
+                    className={`mt-1 text-xs ${exposureClass[r.exposure] ?? "text-zinc-500"}`}
+                  >
+                    {r.exposure}
+                  </div>
+                </div>
+                <div className="truncate text-sm text-zinc-400">
+                  {r.companyName}
+                </div>
+              </Link>
+            ))}
+            {(metrics?.topRisks ?? []).length === 0 ? (
+              <div className="px-5 py-10 text-center text-sm text-zinc-500">
+                No open findings.
+              </div>
+            ) : null}
+          </div>
+        </PanelCard>
       </div>
 
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">

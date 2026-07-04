@@ -110,6 +110,14 @@ export type Finding = {
   lastSeen: string;
   resolvedAt: string | null;
   exploitAvailable: boolean;
+  // Threat intel
+  kev: boolean; // CISA Known Exploited Vulnerability (exploited in the wild)
+  // Environmental context (from the affected asset)
+  assetExposure: "Internet-facing" | "Internal" | "Isolated";
+  assetCriticality: "Crown Jewel" | "High" | "Normal" | "Low";
+  // Composite real-risk score (0-100) and its priority band
+  realRisk: number;
+  riskPriority: "Critical" | "High" | "Medium" | "Low" | "Info";
 };
 
 export type QuantifyMetrics = {
@@ -130,5 +138,21 @@ export type QuantifyMetrics = {
     open: number;
     critical: number;
     exposureScore: number;
+  }[];
+  kevOpen: number;
+  riskPriorityCounts: Record<
+    "Critical" | "High" | "Medium" | "Low" | "Info",
+    number
+  >;
+  topRisks: {
+    id: string;
+    cve: string;
+    title: string;
+    asset: string;
+    companyName: string;
+    realRisk: number;
+    riskPriority: "Critical" | "High" | "Medium" | "Low" | "Info";
+    kev: boolean;
+    exposure: string;
   }[];
 };
