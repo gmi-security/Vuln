@@ -1,0 +1,30 @@
+# DigitalOcean App Platform spec for the GMI Vuln console.
+# Import via: Apps -> Create App -> or `doctl apps create --spec .do/app.yaml`.
+# Fill in the two SECRET values (Nessus API keys) when prompted.
+name: gmi-vuln
+region: nyc
+services:
+  - name: web
+    environment_slug: node-js
+    github:
+      repo: gmi-security/Vuln
+      branch: claude/vuln-site-design-vxswd6
+      deploy_on_push: true
+    build_command: npm run build
+    run_command: npm start
+    http_port: 3000
+    instance_count: 1
+    instance_size_slug: basic-xxs
+    envs:
+      - key: NESSUS_URL
+        scope: RUN_TIME
+        value: "https://137.184.89.60:8834"
+      - key: NESSUS_ACCESS_KEY
+        scope: RUN_TIME
+        type: SECRET
+      - key: NESSUS_SECRET_KEY
+        scope: RUN_TIME
+        type: SECRET
+      - key: NESSUS_TLS_INSECURE
+        scope: RUN_TIME
+        value: "1"

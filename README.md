@@ -47,6 +47,25 @@ curated CVE catalog, so the full workflow (start → monitor → triage →
 quantify) works end to end out of the box. `lib/connectors.ts` is the single
 integration point where the real vendor API calls plug in.
 
+## Deploying to DigitalOcean App Platform
+
+The repo ships an app spec at `.do/app.yaml`.
+
+1. In DigitalOcean go to **Apps → Create App → GitHub**, authorize the
+   `gmi-security/Vuln` repo, and pick branch `claude/vuln-site-design-vxswd6`
+   (auto-deploy on push). App Platform detects Node and uses
+   `npm run build` / `npm start` on port 3000.
+2. Under **Environment Variables** set `NESSUS_ACCESS_KEY` and
+   `NESSUS_SECRET_KEY` (mark both *Encrypt*). `NESSUS_URL` and
+   `NESSUS_TLS_INSECURE=1` are pre-filled by the spec.
+3. Pick an instance (basic-xxs is fine) and click **Create Resources**.
+
+Alternatively with the CLI: `doctl apps create --spec .do/app.yaml`.
+
+The console has no login yet — anyone with the app URL can start scans, so
+restrict access (App Platform allows trusted-source IP rules, or front it
+with your VPN) until auth lands.
+
 ## Development
 
 ```bash
