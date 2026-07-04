@@ -164,7 +164,7 @@ export default function VulnCompanyDetailPage({
       title={company?.name ?? companyId}
       subtitle={
         company
-          ? `${company.industry || "Client"}${company.contactName ? ` · ${company.contactName}` : ""}${company.contactEmail ? ` · ${company.contactEmail}` : ""}`
+          ? `${company.kind === "internal" ? "Our organization · " : ""}${company.industry || "Client"}${company.contactName ? ` · ${company.contactName}` : ""}${company.contactEmail ? ` · ${company.contactEmail}` : ""}`
           : "Loading company..."
       }
       actions={

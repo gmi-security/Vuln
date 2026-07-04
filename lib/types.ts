@@ -20,6 +20,9 @@ export type FindingStatus =
 export type Company = {
   id: string;
   name: string;
+  // "internal" = our own organization (GMI scans its own assets);
+  // "client" = an external customer we scan on their behalf.
+  kind: "internal" | "client";
   industry: string;
   contactName: string;
   contactEmail: string;

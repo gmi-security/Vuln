@@ -130,8 +130,8 @@ export default function VulnCompaniesPage() {
   return (
     <VulnShell
       eyebrow="Companies"
-      title="Client companies"
-      subtitle="The organizations we run scans for. Each company groups its scans into folders and rolls up its own open findings and exposure."
+      title="Companies"
+      subtitle="GMI (our own organization) plus the external clients we scan. Each company groups its scans into folders and rolls up its own open findings and exposure."
       actions={
         <>
           <button
@@ -187,9 +187,16 @@ export default function VulnCompaniesPage() {
                       <Building2 size={26} />
                     </div>
                     <div>
-                      <h2 className="text-xl font-semibold text-white">
-                        {company.name}
-                      </h2>
+                      <div className="flex items-center gap-2">
+                        <h2 className="text-xl font-semibold text-white">
+                          {company.name}
+                        </h2>
+                        {company.kind === "internal" ? (
+                          <span className="rounded-full border border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.14)] px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-[#ff4d57]">
+                            Our org
+                          </span>
+                        ) : null}
+                      </div>
                       <div className="mt-1 text-sm text-zinc-500">
                         {company.industry || "—"}
                       </div>

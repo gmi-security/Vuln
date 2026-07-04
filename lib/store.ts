@@ -75,11 +75,17 @@ function riskFields(
 type InternalCompany = {
   id: string;
   name: string;
+  kind: "internal" | "client";
   industry: string;
   contactName: string;
   contactEmail: string;
   createdAt: string;
 };
+
+// GMI is our own organization — treat any company named GMI as internal.
+function inferCompanyKind(name: string): "internal" | "client" {
+  return /\bgmi\b/i.test(name) ? "internal" : "client";
+}
 
 type InternalFolder = {
   id: string;
@@ -448,7 +454,12 @@ export function listCompanies(): Company[] {
   tick(s);
   return Array.from(s.companies.values())
     .map((c) => toPublicCompany(s, c))
-    .sort((a, b) => a.name.localeCompare(b.name));
+    // Our own organization (GMI) sorts first, then clients alphabetically.
+    .sort(
+      (a, b) =>
+        (a.kind === "internal" ? 0 : 1) - (b.kind === "internal" ? 0 : 1) ||
+        a.name.localeCompare(b.name),
+    );
 }
 
 export function getCompany(id: string): Company | undefined {
@@ -460,6 +471,7 @@ export function getCompany(id: string): Company | undefined {
 
 export function createCompany(input: {
   name: string;
+  kind?: "internal" | "client";
   industry?: string;
   contactName?: string;
   contactEmail?: string;
@@ -478,6 +490,7 @@ export function createCompany(input: {
   const company: InternalCompany = {
     id,
     name,
+    kind: input.kind ?? inferCompanyKind(name),
     industry: (input.industry ?? "").trim(),
     contactName: (input.contactName ?? "").trim(),
     contactEmail: (input.contactEmail ?? "").trim(),
@@ -1489,6 +1502,13 @@ function seed(s: StoreShape): void {
     folders: string[];
   }> = [
     {
+      name: "GMI",
+      industry: "Managed Security — Our Organization",
+      contactName: "Chuck Helstein",
+      contactEmail: "chuck@gmi.com",
+      folders: ["Corporate", "External", "Servers", "Endpoints"],
+    },
+    {
       name: "Northwind Retail",
       industry: "Retail / eCommerce",
       contactName: "Dana Ruiz",
@@ -1538,6 +1558,10 @@ function seed(s: StoreShape): void {
     os: string;
     owner: string;
   }> = [
+    { company: "GMI", identifier: "dc01.gmi.local", ips: ["10.0.0.10"], exposure: "Internal", criticality: "Crown Jewel", os: "Windows Server 2022", owner: "GMI IT" },
+    { company: "GMI", identifier: "fw-edge-01.gmi.local", ips: ["10.0.0.1"], exposure: "Internet-facing", criticality: "Crown Jewel", os: "FortiOS 7.4", owner: "GMI NetSec" },
+    { company: "GMI", identifier: "jump-01.gmi.local", ips: ["10.0.0.50"], exposure: "Internal", criticality: "High", os: "Ubuntu 22.04", owner: "GMI SecOps" },
+    { company: "GMI", identifier: "ci-build-01.gmi.local", ips: ["10.0.0.60"], exposure: "Internal", criticality: "High", os: "Ubuntu 22.04", owner: "GMI Eng" },
     { company: "Northwind Retail", identifier: "web-prod-01.gmi.com", ips: ["203.0.113.11"], exposure: "Internet-facing", criticality: "Crown Jewel", os: "Ubuntu 22.04", owner: "Platform" },
     { company: "Northwind Retail", identifier: "web-prod-02.gmi.com", ips: ["203.0.113.12"], exposure: "Internet-facing", criticality: "High", os: "Ubuntu 22.04", owner: "Platform" },
     { company: "Northwind Retail", identifier: "sql-prod-01.gmi.local", ips: ["10.10.0.21"], exposure: "Internal", criticality: "Crown Jewel", os: "Windows Server 2022", owner: "DBA" },
@@ -1575,6 +1599,33 @@ function seed(s: StoreShape): void {
     targets: string[];
     daysAgo: number;
   }> = [
+    {
+      name: "GMI Corporate Credentialed Scan",
+      company: "GMI",
+      folder: "Servers",
+      connector: "nessus",
+      profile: "credentialed",
+      targets: ["10.0.0.0/24"],
+      daysAgo: 4,
+    },
+    {
+      name: "GMI Perimeter Scan",
+      company: "GMI",
+      folder: "External",
+      connector: "nessus",
+      profile: "standard",
+      targets: ["gmi.com"],
+      daysAgo: 2,
+    },
+    {
+      name: "GMI Endpoint Telemetry Sync",
+      company: "GMI",
+      folder: "Endpoints",
+      connector: "crowdstrike",
+      profile: "agent-sync",
+      targets: ["ws-eng-207.gmi.local", "ws-ops-052.gmi.local"],
+      daysAgo: 1,
+    },
     {
       name: "Weekly External Vulnerability Scan",
       company: "Northwind Retail",
