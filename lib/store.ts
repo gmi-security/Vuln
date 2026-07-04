@@ -1,5 +1,12 @@
 import { DEMO_ASSETS, DEMO_PORTS, VULN_CATALOG } from "@/lib/catalog";
-import { getDemoProfile, isPlanned, launchVendorScan } from "@/lib/connectors";
+import { getDemoProfile, isPlanned } from "@/lib/connectors";
+import {
+  nessusConfig,
+  nessusImportFindings,
+  nessusLaunchScan,
+  nessusScanControl,
+  nessusScanStatus,
+} from "@/lib/nessus";
 import type {
   ConnectorId,
   Finding,
@@ -28,6 +35,8 @@ type InternalScan = Omit<Scan, "progress" | "status"> & {
   durationMs: number;
   progressFrozenAt: number | null; // progress % locked in when paused/stopped
   seed: number;
+  // Present when the scan runs on a real scanner instead of the demo engine.
+  vendor: { nessusScanId: number; lastPoll: number; imported: boolean } | null;
 };
 
 const globalStore = globalThis as unknown as { __vulnStore?: StoreShape };
@@ -81,6 +90,7 @@ function nextId(s: StoreShape, prefix: string): string {
 }
 
 function computeProgress(scan: InternalScan, now: number): number {
+  if (scan.vendor) return scan.progressFrozenAt ?? 0;
   if (scan.progressFrozenAt !== null) return scan.progressFrozenAt;
   if (!scan.startedAt) return 0;
   const elapsed = now - new Date(scan.startedAt).getTime();
@@ -142,6 +152,7 @@ function generateFindings(s: StoreShape, scan: InternalScan): Finding[] {
 }
 
 function settleScan(s: StoreShape, scan: InternalScan, now: number): void {
+  if (scan.vendor) return; // vendor scans settle via refreshVendorScans()
   if (scan.status !== "Running") return;
   const progress = computeProgress(scan, now);
   if (progress < 100) return;
@@ -160,7 +171,7 @@ function settleScan(s: StoreShape, scan: InternalScan, now: number): void {
 }
 
 function toPublic(scan: InternalScan, now: number): Scan {
-  const { durationMs: _d, progressFrozenAt: _p, seed: _s, ...rest } = scan;
+  const { durationMs: _d, progressFrozenAt: _p, seed: _s, vendor: _v, ...rest } = scan;
   return { ...rest, progress: computeProgress(scan, now) };
 }
 
@@ -169,20 +180,111 @@ function tick(s: StoreShape): void {
   for (const scan of s.scans.values()) settleScan(s, scan, now);
 }
 
+const NESSUS_STATUS_MAP: Record<string, ScanStatus> = {
+  running: "Running",
+  pending: "Queued",
+  paused: "Paused",
+  pausing: "Paused",
+  resuming: "Running",
+  stopping: "Running",
+  completed: "Completed",
+  canceled: "Stopped",
+  stopped: "Stopped",
+  aborted: "Failed",
+  error: "Failed",
+};
+
+// Poll active vendor-backed scans (throttled per scan) and import findings
+// when a scan completes on the scanner.
+async function refreshVendorScans(s: StoreShape): Promise<void> {
+  const now = Date.now();
+  for (const scan of s.scans.values()) {
+    if (!scan.vendor) continue;
+    const active =
+      scan.status === "Running" || scan.status === "Paused" || scan.status === "Queued";
+    if (!active || now - scan.vendor.lastPoll < 4000) continue;
+    scan.vendor.lastPoll = now;
+    try {
+      const remote = await nessusScanStatus(scan.vendor.nessusScanId);
+      scan.progressFrozenAt = remote.progress;
+      scan.status = NESSUS_STATUS_MAP[remote.status] ?? scan.status;
+      if (
+        (scan.status === "Completed" || scan.status === "Stopped") &&
+        !scan.completedAt
+      ) {
+        scan.completedAt = new Date(now).toISOString();
+      }
+      if (scan.status === "Completed" && !scan.vendor.imported) {
+        scan.vendor.imported = true;
+        await importVendorFindings(s, scan);
+      }
+    } catch (err) {
+      scan.error = err instanceof Error ? err.message : "Nessus polling failed.";
+    }
+  }
+}
+
+async function importVendorFindings(s: StoreShape, scan: InternalScan): Promise<void> {
+  const imported = await nessusImportFindings(scan.vendor!.nessusScanId);
+  const completedAt = scan.completedAt ?? new Date().toISOString();
+  for (const item of imported) {
+    const dedupeKey = `${item.cve}::${item.asset}::${item.title}`;
+    const existing = Array.from(s.findings.values()).find(
+      (f) => `${f.cve}::${f.asset}::${f.title}` === dedupeKey && f.status !== "Resolved",
+    );
+    if (existing) {
+      existing.lastSeen = completedAt;
+      continue;
+    }
+    s.findings.set(
+      `VLN-${(s.counter += 1)}`,
+      {
+        id: `VLN-${s.counter}`,
+        scanId: scan.id,
+        connector: scan.connector,
+        cve: item.cve,
+        title: item.title,
+        severity: item.severity,
+        cvss: item.cvss,
+        epss: 0,
+        asset: item.asset,
+        port: item.port,
+        category: item.category,
+        description: item.description,
+        remediation: item.remediation,
+        status: "Open",
+        assignee: null,
+        firstSeen: completedAt,
+        lastSeen: completedAt,
+        resolvedAt: null,
+        exploitAvailable: item.exploitAvailable,
+      },
+    );
+  }
+  const all = Array.from(s.findings.values()).filter((f) => f.scanId === scan.id);
+  scan.findingsCount = all.length;
+  const counts = emptySeverityCounts();
+  for (const f of all) counts[f.severity] += 1;
+  scan.severityCounts = counts;
+  scan.hostsScanned = new Set(all.map((f) => f.asset)).size || scan.targets.length;
+}
+
 // --- public API -----------------------------------------------------------
 
-export function listScans(): Scan[] {
+export async function listScans(): Promise<Scan[]> {
   const s = store();
   tick(s);
+  await refreshVendorScans(s);
   const now = Date.now();
   return Array.from(s.scans.values())
     .map((scan) => toPublic(scan, now))
     .sort((a, b) => (b.createdAt > a.createdAt ? 1 : -1));
 }
 
-export function getScan(id: string): Scan | undefined {
+export async function getScan(id: string): Promise<Scan | undefined> {
   const s = store();
   tick(s);
+  await refreshVendorScans(s);
   const scan = s.scans.get(id);
   return scan ? toPublic(scan, Date.now()) : undefined;
 }
@@ -201,7 +303,20 @@ export async function startScan(input: {
   if (!input.targets.length) {
     return { error: "At least one target is required." };
   }
-  await launchVendorScan(input.connector, input.targets, input.profile);
+
+  const name = input.name || `${input.connector} scan`;
+  let vendor: InternalScan["vendor"] = null;
+  if (input.connector === "nessus" && nessusConfig()) {
+    try {
+      const launched = await nessusLaunchScan(name, input.targets, input.profile);
+      vendor = { nessusScanId: launched.nessusScanId, lastPoll: 0, imported: false };
+    } catch (err) {
+      return {
+        error: err instanceof Error ? err.message : "Failed to launch Nessus scan.",
+      };
+    }
+  }
+
   const demo = getDemoProfile(input.connector);
   const id = nextId(s, "SCAN");
   const nowIso = new Date().toISOString();
@@ -209,11 +324,11 @@ export async function startScan(input: {
   const rand = mulberry32(seedVal);
   const scan: InternalScan = {
     id,
-    name: input.name || `${input.connector} scan`,
+    name,
     connector: input.connector,
     profile: input.profile,
     targets: input.targets,
-    status: "Running",
+    status: vendor ? "Queued" : "Running",
     createdAt: nowIso,
     startedAt: nowIso,
     completedAt: null,
@@ -223,22 +338,54 @@ export async function startScan(input: {
     requestedBy: input.requestedBy || "analyst@gmi.com",
     durationMs:
       demo.minDurationMs + Math.floor(rand() * (demo.maxDurationMs - demo.minDurationMs)),
-    progressFrozenAt: null,
+    progressFrozenAt: vendor ? 0 : null,
     seed: seedVal,
+    vendor,
   };
   s.scans.set(id, scan);
   return toPublic(scan, Date.now());
 }
 
-export function scanAction(
+export async function scanAction(
   id: string,
   action: "pause" | "resume" | "stop" | "delete" | "rescan",
-): Scan | { error: string } | { deleted: true } {
+): Promise<Scan | { error: string } | { deleted: true }> {
   const s = store();
   tick(s);
   const scan = s.scans.get(id);
   if (!scan) return { error: "Scan not found." };
   const now = Date.now();
+
+  // Vendor-backed scans forward lifecycle controls to the scanner; local
+  // state converges on the next poll.
+  if (scan.vendor && (action === "pause" || action === "resume" || action === "stop")) {
+    try {
+      await nessusScanControl(scan.vendor.nessusScanId, action);
+      scan.status =
+        action === "pause" ? "Paused" : action === "resume" ? "Running" : "Stopped";
+      if (action === "stop") scan.completedAt = new Date(now).toISOString();
+      return toPublic(scan, now);
+    } catch (err) {
+      return {
+        error: err instanceof Error ? err.message : `Nessus ${action} failed.`,
+      };
+    }
+  }
+  if (scan.vendor && action === "rescan") {
+    try {
+      const launched = await nessusLaunchScan(scan.name, scan.targets, scan.profile);
+      scan.vendor = { nessusScanId: launched.nessusScanId, lastPoll: 0, imported: false };
+      scan.status = "Queued";
+      scan.startedAt = new Date(now).toISOString();
+      scan.completedAt = null;
+      scan.progressFrozenAt = 0;
+      return toPublic(scan, now);
+    } catch (err) {
+      return {
+        error: err instanceof Error ? err.message : "Nessus relaunch failed.",
+      };
+    }
+  }
 
   switch (action) {
     case "pause": {
@@ -529,6 +676,7 @@ function seed(s: StoreShape): void {
       durationMs,
       progressFrozenAt: null,
       seed: seedVal,
+      vendor: null,
     };
     s.scans.set(id, scan);
     settleScan(s, scan, now);

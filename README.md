@@ -30,10 +30,16 @@ GMI-red console aesthetic).
 
 | Connector | Kind | Status |
 |---|---|---|
-| **Nessus** (Tenable) | Network vulnerability scanner | Demo mode until `NESSUS_URL`, `NESSUS_ACCESS_KEY`, `NESSUS_SECRET_KEY` are set |
+| **Nessus** (Tenable) | Network vulnerability scanner | **Real API implemented** (`lib/nessus.ts`) — set `NESSUS_URL`, `NESSUS_ACCESS_KEY`, `NESSUS_SECRET_KEY` (and `NESSUS_TLS_INSECURE=1` for self-signed certs) |
 | **Vulners** | Package audit & CVE/exploit intelligence | Demo mode until `VULNERS_API_KEY` is set |
 | **CrowdStrike Spotlight** | Endpoint vulnerability telemetry | Demo mode until `FALCON_CLIENT_ID`, `FALCON_CLIENT_SECRET`, `FALCON_CLOUD` are set |
 | **Qualys VMDR** | Cloud vulnerability management | Planned |
+
+With Nessus credentials set (copy `.env.example` to `.env.local`), starting a
+Nessus scan creates and launches a real scan on the scanner via the REST API
+(`X-ApiKeys` auth), polls live status/progress, forwards pause/resume/stop to
+the scanner, and imports per-host findings (with plugin detail enrichment)
+when the scan completes.
 
 Without credentials every connector runs in **demo mode**: launched scans
 progress in real time and complete with realistic findings drawn from a

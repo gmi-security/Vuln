@@ -145,32 +145,15 @@ export function isPlanned(id: ConnectorId): boolean {
 // ---------------------------------------------------------------------------
 // Real API integration points.
 //
-// When credentials are present these functions are where the vendor calls go.
-// They intentionally share one signature so the scan engine (lib/store.ts)
-// does not care which backend runs the scan.
-//
-//   nessus:      POST {NESSUS_URL}/scans (create from policy) then
-//                POST /scans/{id}/launch; poll GET /scans/{id};
-//                export results via /scans/{id}/export.
+//   nessus:      IMPLEMENTED in lib/nessus.ts — X-ApiKeys auth, template
+//                lookup, create + launch, status polling, findings import.
 //   vulners:     POST https://vulners.com/api/v3/audit/audit with package
 //                inventory per host; map returned CVE list to findings.
 //   crowdstrike: OAuth2 token from https://api.{FALCON_CLOUD}/oauth2/token,
 //                then GET /spotlight/queries/vulnerabilities/v2 + entities
 //                lookup; map to findings.
 //   qualys:      planned — VM scan launch via /api/2.0/fo/scan/.
+//
+// Connectors without a real adapter run in demo mode: the in-process scan
+// engine (lib/store.ts) simulates progress and materializes findings.
 // ---------------------------------------------------------------------------
-
-export async function launchVendorScan(
-  connector: ConnectorId,
-  _targets: string[],
-  _profile: string,
-): Promise<{ vendorScanRef: string | null }> {
-  const def = CONNECTOR_DEFS[connector];
-  if (!isConfigured(def) || def.planned) {
-    // Demo mode: the in-process scan engine simulates progress and results.
-    return { vendorScanRef: null };
-  }
-  // TODO(integration): dispatch to the vendor API described above and return
-  // the vendor's scan reference so status polling can resume across restarts.
-  return { vendorScanRef: null };
-}

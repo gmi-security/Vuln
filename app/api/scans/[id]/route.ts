@@ -8,7 +8,7 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  const scan = getScan(id);
+  const scan = await getScan(id);
   if (!scan) {
     return NextResponse.json({ error: "Scan not found." }, { status: 404 });
   }
@@ -30,7 +30,7 @@ export async function PATCH(
   if (!["pause", "resume", "stop", "delete", "rescan"].includes(action)) {
     return NextResponse.json({ error: "Unknown action." }, { status: 400 });
   }
-  const result = scanAction(id, action);
+  const result = await scanAction(id, action);
   if ("error" in result) {
     return NextResponse.json({ error: result.error }, { status: 400 });
   }

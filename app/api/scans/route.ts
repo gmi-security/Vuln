@@ -5,7 +5,7 @@ import type { ConnectorId } from "@/lib/types";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  return NextResponse.json({ scans: listScans() });
+  return NextResponse.json({ scans: await listScans() });
 }
 
 export async function POST(request: Request) {
