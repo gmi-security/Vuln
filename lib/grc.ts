@@ -83,18 +83,32 @@ export async function grcProbe(): Promise<{
   }
 }
 
-// Matches the OpenGRC `Risk` model's fillable columns (name + description).
-// NOTE: the OpenGRC REST API (LeeMangold/OpenGRC) currently has a controller
-// bug — RiskController::validateStore still requires the legacy `title` column
-// while the model/table use `name`, so BaseApiController::store passes `title`
-// into Risk::create() and MySQL rejects it ("Unknown column 'title'"). No
-// client payload can work around this; the fix is on the OpenGRC side (change
-// the validateStore rule from `title` to `name`). We send the model-correct
-// fields so risk creation succeeds the moment that controller is patched.
+// Matches the OpenGRC `Risk` table's NOT-NULL-without-default columns: `name`,
+// `code` (unique), and `description`. Everything else (status, inherent_*,
+// residual_*) carries a DB default, so we don't need to send it.
+//
+// NOTE: the OpenGRC REST API (LeeMangold/OpenGRC) ships a RiskController whose
+// validateStore/validateUpdate only whitelist a subset of columns, and Laravel's
+// $request->validate() strips anything not in the rules before it reaches
+// Risk::create(). So a field only lands in the row if the server-side rules
+// list it. The GMI OpenGRC instance has been patched to whitelist `name` and
+// `code`; we send both (plus description) here to match.
 export type GrcRisk = {
   name: string;
+  code: string;
   description: string;
 };
+
+// Build a unique, human-legible risk code (OpenGRC requires `code` to be unique
+// and non-null). Company slug + base36 timestamp keeps re-pushes collision-free.
+function riskCode(companyName: string): string {
+  const slug = companyName
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 24);
+  return `VULN-${slug || "RISK"}-${Date.now().toString(36).toUpperCase()}`;
+}
 
 export async function grcCreateRisk(risk: GrcRisk): Promise<{ id: unknown }> {
   const config = grcConfig();
@@ -132,6 +146,7 @@ export function buildRisk(input: {
 
   return {
     name: `Unremediated vulnerabilities — ${input.companyName}`,
+    code: riskCode(input.companyName),
     description,
   };
 }
