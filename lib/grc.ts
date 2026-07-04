@@ -44,6 +44,45 @@ async function grcRequest(
   return res.json().catch(() => ({}));
 }
 
+// Read-only probe to learn the live OpenGRC schema (standards + risk fields)
+// before pushing, so the payload matches this instance.
+export async function grcProbe(): Promise<{
+  configured: boolean;
+  standards: unknown[];
+  riskFields: string[];
+  riskSample: unknown;
+  error?: string;
+}> {
+  const config = grcConfig();
+  if (!config) return { configured: false, standards: [], riskFields: [], riskSample: null };
+  try {
+    const [standards, risks] = await Promise.all([
+      grcRequest(config, "GET", "/api/standards?per_page=50").catch(() => null),
+      grcRequest(config, "GET", "/api/risks?per_page=1").catch(() => null),
+    ]);
+    const stdList = standards?.data ?? standards ?? [];
+    const riskList = risks?.data ?? risks ?? [];
+    const sample = Array.isArray(riskList) ? riskList[0] : null;
+    return {
+      configured: true,
+      standards: (Array.isArray(stdList) ? stdList : []).map((s: any) => ({
+        id: s?.id,
+        name: s?.name ?? s?.code ?? s?.title,
+      })),
+      riskFields: sample ? Object.keys(sample) : [],
+      riskSample: sample,
+    };
+  } catch (err) {
+    return {
+      configured: true,
+      standards: [],
+      riskFields: [],
+      riskSample: null,
+      error: err instanceof Error ? err.message : "probe failed",
+    };
+  }
+}
+
 export type GrcRisk = {
   name: string;
   description: string;

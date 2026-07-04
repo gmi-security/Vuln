@@ -20,7 +20,8 @@ export async function proxy(request: NextRequest) {
     pathname.startsWith("/api/auth") ||
     pathname === "/api/nessus/health" ||
     pathname === "/api/health" ||
-    pathname === "/api/admin/resync"
+    pathname === "/api/admin/resync" ||
+    pathname === "/api/grc/probe"
   ) {
     return NextResponse.next();
   }
