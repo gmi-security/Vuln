@@ -2,6 +2,8 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import Image from "next/image";
+import { signOut, useSession } from "next-auth/react";
 import { ChevronDown, LogOut, Settings, UserCircle2 } from "lucide-react";
 import VulnSidebar from "@/components/VulnSidebar";
 
@@ -23,6 +25,12 @@ export default function VulnShell({
   const [collapsed, setCollapsed] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+  const { data: session } = useSession();
+  const user = session?.user as
+    | { name?: string | null; email?: string | null; login?: string; avatar?: string; role?: string }
+    | undefined;
+  const displayName = user?.name || user?.login || "Analyst";
+  const displayRole = user?.role === "ADMIN" ? "Org Admin" : "Member";
 
   useEffect(() => {
     function onClick(event: MouseEvent) {
@@ -59,13 +67,24 @@ export default function VulnShell({
                   onClick={() => setMenuOpen((prev) => !prev)}
                   className="flex items-center gap-3 rounded-2xl border border-zinc-800 bg-zinc-950 px-4 py-2.5 transition hover:bg-zinc-900"
                 >
-                  <UserCircle2 className="text-zinc-300" size={20} />
+                  {user?.avatar ? (
+                    <Image
+                      src={user.avatar}
+                      alt=""
+                      width={24}
+                      height={24}
+                      className="rounded-full"
+                      unoptimized
+                    />
+                  ) : (
+                    <UserCircle2 className="text-zinc-300" size={20} />
+                  )}
                   <span className="text-left">
                     <span className="block max-w-[150px] truncate text-sm font-medium text-white">
-                      Chuck
+                      {displayName}
                     </span>
                     <span className="block text-xs uppercase tracking-[0.2em] text-zinc-500">
-                      Admin
+                      {displayRole}
                     </span>
                   </span>
                   <ChevronDown className="text-zinc-500" size={16} />
@@ -81,10 +100,10 @@ export default function VulnShell({
                 >
                   <div className="border-b border-[rgba(179,14,20,0.12)] px-4 py-3">
                     <div className="truncate text-sm font-medium text-white">
-                      Chuck
+                      {displayName}
                     </div>
                     <div className="mt-1 truncate text-xs text-zinc-500">
-                      GMI Vulnerability Console
+                      {user?.email || user?.login || "GMI Vulnerability Console"}
                     </div>
                   </div>
                   <div className="p-2">
@@ -96,7 +115,10 @@ export default function VulnShell({
                       <Settings size={16} className="text-zinc-400" />
                       Connectors
                     </Link>
-                    <button className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm text-zinc-200 transition hover:bg-zinc-900">
+                    <button
+                      onClick={() => signOut({ callbackUrl: "/login" })}
+                      className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm text-zinc-200 transition hover:bg-zinc-900"
+                    >
                       <LogOut size={16} className="text-zinc-400" />
                       Sign out
                     </button>

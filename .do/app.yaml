@@ -16,6 +16,21 @@ services:
     instance_count: 1
     instance_size_slug: basic-xxs
     envs:
+      - key: GITHUB_CLIENT_ID
+        scope: RUN_TIME
+        type: SECRET
+      - key: GITHUB_CLIENT_SECRET
+        scope: RUN_TIME
+        type: SECRET
+      - key: NEXTAUTH_SECRET
+        scope: RUN_TIME
+        type: SECRET
+      - key: NEXTAUTH_URL
+        scope: RUN_TIME
+        value: "https://gmi-vuln-opmy8.ondigitalocean.app"
+      - key: GMI_ALLOWED_ORG
+        scope: RUN_TIME
+        value: "gmi-security"
       - key: NESSUS_URL
         scope: RUN_TIME
         value: "https://137.184.89.60:8834"
