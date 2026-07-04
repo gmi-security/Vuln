@@ -1041,6 +1041,24 @@ export async function autoScanGaps(): Promise<AutoScanResult> {
   return { scansLaunched, assetsQueued, companies: byCompany.size };
 }
 
+// Wipe all data and repopulate purely from the real Nessus scanner. Used to
+// clear demo/stub data and go live on real scan results. Inventory (Tidal /
+// manual) is preserved unless clearInventory is set.
+export async function resyncFromNessus(options?: {
+  clearInventory?: boolean;
+}): Promise<NessusImportResult | { error: string }> {
+  await ensureHydrated();
+  const s = store();
+  s.companies.clear();
+  s.folders.clear();
+  s.scans.clear();
+  s.findings.clear();
+  if (options?.clearInventory) s.assets.clear();
+  const result = await importFromNessus();
+  await flushNow();
+  return result;
+}
+
 // Recompute a finding's environmental context + real risk against the current
 // inventory. Used after an inventory sync so existing findings reprice.
 function rescoreFinding(s: StoreShape, f: Finding): void {
@@ -1722,6 +1740,9 @@ export function computeMetrics(filter?: { companyId?: string }): QuantifyMetrics
 function seed(s: StoreShape): void {
   if (s.seeded) return;
   s.seeded = true;
+  // Demo/stub data only when explicitly requested. In production the console
+  // is populated from the real Nessus import instead.
+  if (process.env.SEED_DEMO_DATA !== "true") return;
   const now = Date.now();
 
   // Client companies we run scans for, each with Nessus-style folders.
