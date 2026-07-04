@@ -11,6 +11,7 @@ import {
 } from "@/lib/nessus";
 import { classifyAsset, computeRealRisk, isKev } from "@/lib/threat";
 import { tidalConfig, tidalListAssets } from "@/lib/tidal";
+import { loadSnapshot, persistenceEnabled, saveSnapshot } from "@/lib/persist";
 import type {
   AssetSource,
   Company,
@@ -139,6 +140,101 @@ function store(): StoreShape {
     seed(globalStore.__vulnStore);
   }
   return globalStore.__vulnStore;
+}
+
+// --- snapshot persistence --------------------------------------------------
+
+function serializeStore(s: StoreShape) {
+  return {
+    companies: [...s.companies.entries()],
+    folders: [...s.folders.entries()],
+    scans: [...s.scans.entries()],
+    findings: [...s.findings.entries()],
+    assets: [...s.assets.entries()],
+    settings: s.settings,
+    counter: s.counter,
+  };
+}
+
+function deserializeStore(obj: {
+  companies?: [string, InternalCompany][];
+  folders?: [string, InternalFolder][];
+  scans?: [string, InternalScan][];
+  findings?: [string, Finding][];
+  assets?: [string, InternalAsset][];
+  settings?: Settings;
+  counter?: number;
+}): StoreShape {
+  return {
+    companies: new Map(obj.companies ?? []),
+    folders: new Map(obj.folders ?? []),
+    scans: new Map(obj.scans ?? []),
+    findings: new Map(obj.findings ?? []),
+    assets: new Map(obj.assets ?? []),
+    settings: obj.settings ?? { autoScanNewAssets: false },
+    seeded: true,
+    counter: obj.counter ?? 1000,
+  };
+}
+
+const persistGlobal = globalThis as unknown as {
+  __vulnHydrated?: boolean;
+  __vulnHydrating?: Promise<void>;
+  __vulnFlusher?: ReturnType<typeof setInterval>;
+};
+
+// Hydrate the store from the DB snapshot once per process (or seed if empty),
+// then start the background flusher. Every store-touching route awaits this
+// before reading/writing, so a request never seeds an empty store ahead of a
+// pending snapshot load.
+export async function ensureHydrated(): Promise<void> {
+  if (persistGlobal.__vulnHydrated) return;
+  if (!persistGlobal.__vulnHydrating) persistGlobal.__vulnHydrating = doHydrate();
+  await persistGlobal.__vulnHydrating;
+}
+
+async function doHydrate(): Promise<void> {
+  if (persistenceEnabled()) {
+    try {
+      const snap = await loadSnapshot();
+      if (snap) {
+        globalStore.__vulnStore = deserializeStore(snap as never);
+      }
+    } catch (err) {
+      console.error("[persist] hydrate failed, seeding fresh:", err);
+    }
+  }
+  store(); // seed if still uninitialized
+  persistGlobal.__vulnHydrated = true;
+  startFlusher();
+  if (persistenceEnabled() && globalStore.__vulnStore) {
+    try {
+      await saveSnapshot(serializeStore(globalStore.__vulnStore));
+    } catch (err) {
+      console.error("[persist] initial save failed:", err);
+    }
+  }
+}
+
+function startFlusher(): void {
+  if (!persistenceEnabled() || persistGlobal.__vulnFlusher) return;
+  persistGlobal.__vulnFlusher = setInterval(() => {
+    const s = globalStore.__vulnStore;
+    if (!s) return;
+    saveSnapshot(serializeStore(s)).catch((err) =>
+      console.error("[persist] flush failed:", err),
+    );
+  }, 6000);
+}
+
+// Force an immediate snapshot write (used right after large imports).
+export async function flushNow(): Promise<void> {
+  if (!persistenceEnabled() || !globalStore.__vulnStore) return;
+  try {
+    await saveSnapshot(serializeStore(globalStore.__vulnStore));
+  } catch (err) {
+    console.error("[persist] flushNow failed:", err);
+  }
 }
 
 // --- deterministic RNG so demo data is stable per scan -----------------
@@ -1033,6 +1129,7 @@ export async function importFromTidal(): Promise<
     autoScan = await autoScanGaps();
   }
 
+  await flushNow();
   return { companiesCreated, assetsUpserted, findingsRescored, autoScan };
 }
 
@@ -1167,6 +1264,7 @@ export async function importFromNessus(): Promise<
     }
   }
 
+  await flushNow();
   return {
     companiesCreated,
     companiesMatched,

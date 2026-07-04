@@ -1,13 +1,15 @@
 import { NextResponse } from "next/server";
-import { createCompany, listCompanies } from "@/lib/store";
+import { createCompany, ensureHydrated, listCompanies } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
+  await ensureHydrated();
   return NextResponse.json({ companies: listCompanies() });
 }
 
 export async function POST(request: Request) {
+  await ensureHydrated();
   let body: {
     name?: string;
     industry?: string;

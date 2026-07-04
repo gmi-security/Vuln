@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { deleteCompany, getCompany, updateCompany } from "@/lib/store";
+import { deleteCompany, ensureHydrated, getCompany, updateCompany } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
@@ -7,6 +7,7 @@ export async function GET(
   _request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  await ensureHydrated();
   const { id } = await params;
   const company = getCompany(id);
   if (!company) {
@@ -19,6 +20,7 @@ export async function PATCH(
   request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  await ensureHydrated();
   const { id } = await params;
   let body: {
     name?: string;
@@ -42,6 +44,7 @@ export async function DELETE(
   _request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  await ensureHydrated();
   const { id } = await params;
   const result = deleteCompany(id);
   if ("error" in result) {

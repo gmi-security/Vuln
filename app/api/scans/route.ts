@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
-import { listScans, startScan } from "@/lib/store";
+import { ensureHydrated, listScans, startScan } from "@/lib/store";
 import type { ConnectorId } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
+  await ensureHydrated();
   const { searchParams } = new URL(request.url);
   const companyId = searchParams.get("companyId") ?? undefined;
   const folderId = searchParams.get("folderId") ?? undefined;
@@ -12,6 +13,7 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  await ensureHydrated();
   let body: {
     name?: string;
     connector?: ConnectorId;

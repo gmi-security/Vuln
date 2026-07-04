@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { updateFinding } from "@/lib/store";
+import { ensureHydrated, updateFinding } from "@/lib/store";
 import type { FindingStatus } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -16,6 +16,7 @@ export async function PATCH(
   request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  await ensureHydrated();
   const { id } = await params;
   let body: { status?: FindingStatus; assignee?: string | null };
   try {

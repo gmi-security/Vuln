@@ -1,15 +1,17 @@
 import { NextResponse } from "next/server";
-import { createFolder, listFolders } from "@/lib/store";
+import { createFolder, ensureHydrated, listFolders } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
+  await ensureHydrated();
   const { searchParams } = new URL(request.url);
   const companyId = searchParams.get("companyId") ?? undefined;
   return NextResponse.json({ folders: listFolders(companyId) });
 }
 
 export async function POST(request: Request) {
+  await ensureHydrated();
   let body: { companyId?: string; name?: string };
   try {
     body = await request.json();

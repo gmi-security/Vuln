@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getScan, listFindings, scanAction } from "@/lib/store";
+import { ensureHydrated, getScan, listFindings, scanAction } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
@@ -7,6 +7,7 @@ export async function GET(
   _request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  await ensureHydrated();
   const { id } = await params;
   const scan = await getScan(id);
   if (!scan) {
@@ -19,6 +20,7 @@ export async function PATCH(
   request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  await ensureHydrated();
   const { id } = await params;
   let body: { action?: string };
   try {

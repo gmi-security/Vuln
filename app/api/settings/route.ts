@@ -1,13 +1,15 @@
 import { NextResponse } from "next/server";
-import { getSettings, updateSettings } from "@/lib/store";
+import { ensureHydrated, getSettings, updateSettings } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
+  await ensureHydrated();
   return NextResponse.json({ settings: getSettings() });
 }
 
 export async function PATCH(request: Request) {
+  await ensureHydrated();
   let body: { autoScanNewAssets?: boolean };
   try {
     body = await request.json();
