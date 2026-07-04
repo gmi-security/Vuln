@@ -1,5 +1,7 @@
 export type Severity = "Critical" | "High" | "Medium" | "Low" | "Info";
 
+export type CvssVersion = "v2" | "v3";
+
 export type ScanStatus =
   | "Queued"
   | "Running"
@@ -93,7 +95,9 @@ export type Finding = {
   cve: string;
   title: string;
   severity: Severity;
-  cvss: number;
+  cvss: number; // primary score (CVSS v3 when available, else v2)
+  cvssV2: number; // 0 when the source has no v2 score
+  cvssV3: number; // 0 when the source has no v3 score
   epss: number;
   asset: string;
   port: string;

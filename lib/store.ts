@@ -102,6 +102,15 @@ function mulberry32(seed: number) {
 
 const SEVERITIES: Severity[] = ["Critical", "High", "Medium", "Low", "Info"];
 
+// The demo catalog carries CVSS v3 base scores. Derive a stable, plausible
+// CVSS v2 score from the v3 score and CVE id (v2 tends to run slightly lower
+// and is capped at 10). Nessus-imported findings use the scanner's real v2/v3.
+function deriveCvssV2(v3: number, key: string): number {
+  if (v3 <= 0) return 0;
+  const delta = ((hashSeed(`v2:${key}`) % 16) / 10) - 0.9; // -0.9 .. +0.6
+  return Math.max(0, Math.min(10, Math.round((v3 + delta) * 10) / 10));
+}
+
 function emptySeverityCounts(): Record<Severity, number> {
   return { Critical: 0, High: 0, Medium: 0, Low: 0, Info: 0 };
 }
@@ -159,6 +168,8 @@ function generateFindings(s: StoreShape, scan: InternalScan): Finding[] {
       title: template.title,
       severity: template.severity,
       cvss: template.cvss,
+      cvssV3: template.cvss,
+      cvssV2: deriveCvssV2(template.cvss, template.cve),
       epss: template.epss,
       asset,
       port: DEMO_PORTS[Math.floor(rand() * DEMO_PORTS.length)],
@@ -274,6 +285,8 @@ async function importVendorFindings(s: StoreShape, scan: InternalScan): Promise<
         title: item.title,
         severity: item.severity,
         cvss: item.cvss,
+        cvssV3: item.cvssV3,
+        cvssV2: item.cvssV2,
         epss: 0,
         asset: item.asset,
         port: item.port,

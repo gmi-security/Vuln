@@ -19,7 +19,7 @@ import {
   formatDateTime,
   severityClass,
 } from "@/lib/format";
-import type { Finding, FindingStatus } from "@/lib/types";
+import type { CvssVersion, Finding, FindingStatus } from "@/lib/types";
 
 const STATUSES: FindingStatus[] = [
   "Open",
@@ -28,6 +28,49 @@ const STATUSES: FindingStatus[] = [
   "False Positive",
   "Resolved",
 ];
+
+// Score for the selected CVSS version, falling back to the other version when
+// the source only carries one. Returns the number and which version was used.
+function cvssFor(
+  finding: Finding,
+  version: CvssVersion,
+): { value: number; used: CvssVersion | null } {
+  const primary = version === "v3" ? finding.cvssV3 : finding.cvssV2;
+  if (primary > 0) return { value: primary, used: version };
+  const other = version === "v3" ? finding.cvssV2 : finding.cvssV3;
+  if (other > 0) return { value: other, used: version === "v3" ? "v2" : "v3" };
+  return { value: 0, used: null };
+}
+
+function CvssToggle({
+  version,
+  onChange,
+}: {
+  version: CvssVersion;
+  onChange: (v: CvssVersion) => void;
+}) {
+  return (
+    <div className="inline-flex items-center gap-1 rounded-2xl border border-zinc-800 bg-[#090909] p-1">
+      <span className="px-2 text-[11px] uppercase tracking-[0.18em] text-zinc-500">
+        CVSS
+      </span>
+      {(["v3", "v2"] as CvssVersion[]).map((v) => (
+        <button
+          key={v}
+          onClick={() => onChange(v)}
+          className={[
+            "rounded-xl px-3 py-1.5 text-sm transition",
+            version === v
+              ? "bg-[rgba(179,14,20,0.20)] text-white"
+              : "text-zinc-400 hover:text-zinc-200",
+          ].join(" ")}
+        >
+          {v}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 export default function VulnFindingsPage() {
   const searchParams = useSearchParams();
@@ -41,6 +84,7 @@ export default function VulnFindingsPage() {
   );
   const [companies, setCompanies] = useState<{ id: string; name: string }[]>([]);
   const [exploitOnly, setExploitOnly] = useState(false);
+  const [cvssVersion, setCvssVersion] = useState<CvssVersion>("v3");
   const [focusId, setFocusId] = useState<string | null>(
     searchParams.get("focus"),
   );
@@ -205,6 +249,7 @@ export default function VulnFindingsPage() {
       <PanelCard
         eyebrow="Findings"
         description={`${filtered.length} of ${findings.length} findings`}
+        actions={<CvssToggle version={cvssVersion} onChange={setCvssVersion} />}
       >
         <div className="overflow-hidden rounded-[24px] border border-[rgba(179,14,20,0.12)] bg-[#040404]">
           <div className="grid grid-cols-[110px_150px_1.9fr_1fr_90px_100px_110px_150px_90px] gap-4 border-b border-zinc-900 px-5 py-4 text-xs uppercase tracking-[0.2em] text-zinc-500">
@@ -212,7 +257,7 @@ export default function VulnFindingsPage() {
             <div>CVE</div>
             <div>Finding</div>
             <div>Asset</div>
-            <div>CVSS</div>
+            <div>CVSS {cvssVersion}</div>
             <div>Severity</div>
             <div>Source</div>
             <div>Status</div>
@@ -251,7 +296,20 @@ export default function VulnFindingsPage() {
                   {finding.asset}
                 </div>
                 <div className="text-sm text-zinc-300">
-                  {finding.cvss > 0 ? finding.cvss.toFixed(1) : "—"}
+                  {(() => {
+                    const { value, used } = cvssFor(finding, cvssVersion);
+                    if (value <= 0) return "—";
+                    return (
+                      <span>
+                        {value.toFixed(1)}
+                        {used && used !== cvssVersion ? (
+                          <span className="ml-1 text-[10px] text-zinc-600">
+                            {used}
+                          </span>
+                        ) : null}
+                      </span>
+                    );
+                  })()}
                 </div>
                 <div>
                   <Pill className={severityClass[finding.severity]}>
@@ -319,8 +377,12 @@ export default function VulnFindingsPage() {
               <Detail label="Asset" value={focus.asset} />
               <Detail label="Port" value={focus.port} />
               <Detail
-                label="CVSS"
-                value={focus.cvss > 0 ? focus.cvss.toFixed(1) : "—"}
+                label="CVSS v3"
+                value={focus.cvssV3 > 0 ? focus.cvssV3.toFixed(1) : "—"}
+              />
+              <Detail
+                label="CVSS v2"
+                value={focus.cvssV2 > 0 ? focus.cvssV2.toFixed(1) : "—"}
               />
               <Detail
                 label="EPSS"

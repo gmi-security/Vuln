@@ -218,6 +218,8 @@ export type NessusFinding = {
   title: string;
   severity: Severity;
   cvss: number;
+  cvssV2: number;
+  cvssV3: number;
   asset: string;
   port: string;
   category: string;
@@ -281,11 +283,15 @@ export async function nessusImportFindings(
           ? Object.keys(outputs[0].ports)[0].split(" ")[0]
           : "N/A";
 
+      const cvssV3 = Number(attrs?.risk_information?.cvss3_base_score ?? 0);
+      const cvssV2 = Number(attrs?.risk_information?.cvss_base_score ?? 0);
       findings.push({
         cve: cve || `PLUGIN-${vuln.plugin_id}`,
         title: String(vuln.plugin_name ?? `Nessus plugin ${vuln.plugin_id}`),
         severity,
-        cvss: Number(attrs?.risk_information?.cvss3_base_score ?? attrs?.risk_information?.cvss_base_score ?? 0),
+        cvss: cvssV3 || cvssV2,
+        cvssV2,
+        cvssV3,
         asset: hostname,
         port,
         category: String(vuln.plugin_family ?? "Nessus"),
