@@ -227,6 +227,31 @@ function startFlusher(): void {
   }, 6000);
 }
 
+// Non-sensitive counts + a stable seed marker, for the health endpoint. The
+// oldest company's createdAt stays constant if data was hydrated from the DB,
+// but changes if the store was re-seeded — so it proves persistence.
+export async function storeStatus(): Promise<{
+  hydrated: boolean;
+  counts: { companies: number; scans: number; findings: number; assets: number };
+  oldestCompanyCreatedAt: string | null;
+}> {
+  await ensureHydrated();
+  const s = globalStore.__vulnStore!;
+  const oldest = Array.from(s.companies.values())
+    .map((c) => c.createdAt)
+    .sort()[0];
+  return {
+    hydrated: Boolean(persistGlobal.__vulnHydrated),
+    counts: {
+      companies: s.companies.size,
+      scans: s.scans.size,
+      findings: s.findings.size,
+      assets: s.assets.size,
+    },
+    oldestCompanyCreatedAt: oldest ?? null,
+  };
+}
+
 // Force an immediate snapshot write (used right after large imports).
 export async function flushNow(): Promise<void> {
   if (!persistenceEnabled() || !globalStore.__vulnStore) return;

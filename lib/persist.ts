@@ -64,6 +64,22 @@ export function persistenceEnabled(): boolean {
   return Boolean(process.env.DATABASE_URL);
 }
 
+export async function snapshotMeta(): Promise<{ updatedAt: string | null }> {
+  const p = getPool();
+  if (!p) return { updatedAt: null };
+  try {
+    await withTimeout(ensureTable(), 10000, "ensureTable");
+    const res = await withTimeout(
+      p.query("SELECT updated_at FROM vuln_snapshot WHERE id = 1"),
+      10000,
+      "snapshotMeta",
+    );
+    return { updatedAt: res.rows[0]?.updated_at ?? null };
+  } catch {
+    return { updatedAt: null };
+  }
+}
+
 export async function loadSnapshot(): Promise<unknown | null> {
   const p = getPool();
   if (!p) return null;
