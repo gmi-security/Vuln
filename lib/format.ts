@@ -66,6 +66,22 @@ export const exposureClass: Record<string, string> = {
   Isolated: "text-sky-300",
 };
 
+export const compositeBandClass: Record<string, string> = {
+  Critical: "bg-[rgba(179,14,20,0.16)] text-[#ff4d57] border border-[rgba(179,14,20,0.45)]",
+  High: "bg-[rgba(245,110,35,0.12)] text-orange-300 border border-orange-900/60",
+  Elevated: "bg-[rgba(245,166,35,0.10)] text-amber-300 border border-amber-900/60",
+  Guarded: "bg-[rgba(74,163,255,0.10)] text-sky-300 border border-sky-900/60",
+  Low: "bg-emerald-950/60 text-emerald-300 border border-emerald-900/60",
+};
+
+export function compositeColor(score: number): string {
+  if (score >= 80) return "#b30e14";
+  if (score >= 60) return "#f97316";
+  if (score >= 40) return "#f5a623";
+  if (score >= 20) return "#4aa3ff";
+  return "#10b981";
+}
+
 export function riskColor(score: number): string {
   if (score >= 80) return "#b30e14";
   if (score >= 60) return "#f97316";

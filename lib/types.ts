@@ -40,6 +40,21 @@ export type Company = {
   // rather than being inferred from the hostname (-1 when there are none).
   inventoryAssets: number;
   inventoryCoverage: number;
+  // Composite security-posture score (0-100, higher = worse) and its band.
+  compositeScore: number;
+  compositeBand: "Low" | "Guarded" | "Elevated" | "High" | "Critical";
+};
+
+export type CompositeScore = {
+  score: number;
+  band: "Low" | "Guarded" | "Elevated" | "High" | "Critical";
+  components: {
+    // each 0-100, higher = worse, with the weight it contributes
+    exposure: number;
+    kevPressure: number;
+    slaBreach: number;
+    coverageGap: number;
+  };
 };
 
 export type Folder = {
@@ -176,6 +191,7 @@ export type QuantifyMetrics = {
     exposureScore: number;
   }[];
   kevOpen: number;
+  composite: CompositeScore;
   riskPriorityCounts: Record<
     "Critical" | "High" | "Medium" | "Low" | "Info",
     number

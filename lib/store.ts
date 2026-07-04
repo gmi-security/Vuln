@@ -411,6 +411,96 @@ function exposureOf(open: Finding[]): number {
   return Math.round(100 * (1 - Math.exp(-raw / 900)));
 }
 
+const COMPOSITE_SLA_DAYS: Record<Severity, number> = {
+  Critical: 7,
+  High: 30,
+  Medium: 90,
+  Low: 180,
+  Info: 365,
+};
+
+function compositeBand(
+  score: number,
+): "Low" | "Guarded" | "Elevated" | "High" | "Critical" {
+  if (score >= 80) return "Critical";
+  if (score >= 60) return "High";
+  if (score >= 40) return "Elevated";
+  if (score >= 20) return "Guarded";
+  return "Low";
+}
+
+// Composite security-posture score (0-100, higher = worse). Blends four
+// normalized signals with weights; when a signal is unavailable (e.g. no
+// inventory to measure coverage against), its weight is redistributed so the
+// score stays comparable.
+function computeComposite(
+  open: Finding[],
+  coverage: { known: number; scanned: number } | null,
+) {
+  const now = Date.now();
+  const exposure = exposureOf(open); // 0-100 severity×exploit×EPSS load
+  const kevPressure = open.length
+    ? Math.round((open.filter((f) => f.kev).length / open.length) * 100)
+    : 0;
+  const breached = open.filter(
+    (f) =>
+      (now - new Date(f.firstSeen).getTime()) / 86_400_000 >
+      COMPOSITE_SLA_DAYS[f.severity],
+  ).length;
+  const slaBreach = open.length ? Math.round((breached / open.length) * 100) : 0;
+
+  const hasCoverage = coverage && coverage.known > 0;
+  const coverageGap = hasCoverage
+    ? Math.round((1 - coverage!.scanned / coverage!.known) * 100)
+    : 0;
+
+  const weights: Record<string, number> = {
+    exposure: 0.4,
+    kevPressure: 0.25,
+    slaBreach: 0.2,
+    coverageGap: 0.15,
+  };
+  // Drop coverage weight when we can't measure it, and renormalize.
+  if (!hasCoverage) delete weights.coverageGap;
+  const totalWeight = Object.values(weights).reduce((a, b) => a + b, 0);
+  const values: Record<string, number> = {
+    exposure,
+    kevPressure,
+    slaBreach,
+    coverageGap,
+  };
+  let score = 0;
+  for (const [k, w] of Object.entries(weights)) score += values[k] * (w / totalWeight);
+  score = Math.round(score);
+
+  return {
+    score,
+    band: compositeBand(score),
+    components: { exposure, kevPressure, slaBreach, coverageGap },
+  };
+}
+
+// Scan coverage (known vs scanned inventory assets) for a company, cheaply.
+function companyCoverage(
+  s: StoreShape,
+  companyId: string,
+): { known: number; scanned: number } {
+  const known = Array.from(s.assets.values()).filter((a) => a.companyId === companyId);
+  const findingAssets = new Set(
+    Array.from(s.findings.values())
+      .filter((f) => f.companyId === companyId)
+      .map((f) => f.asset.trim().toLowerCase()),
+  );
+  let scanned = 0;
+  for (const a of known) {
+    const keys = [a.identifier, a.hostname, ...a.ipAddresses].map((k) =>
+      k.trim().toLowerCase(),
+    );
+    if (keys.some((k) => findingAssets.has(k))) scanned += 1;
+  }
+  return { known: known.length, scanned };
+}
+
 function companyRollup(s: StoreShape, companyId: string) {
   const scans = Array.from(s.scans.values()).filter((sc) => sc.companyId === companyId);
   const findings = Array.from(s.findings.values()).filter((f) => f.companyId === companyId);
@@ -421,6 +511,10 @@ function companyRollup(s: StoreShape, companyId: string) {
   const withInventory = open.filter(
     (f) => f.assetSource === "tidal" || f.assetSource === "manual",
   ).length;
+  const composite = computeComposite(
+    open,
+    inventoryAssets > 0 ? companyCoverage(s, companyId) : null,
+  );
   return {
     folderCount: Array.from(s.folders.values()).filter((f) => f.companyId === companyId)
       .length,
@@ -435,6 +529,8 @@ function companyRollup(s: StoreShape, companyId: string) {
     inventoryCoverage: open.length
       ? Math.round((withInventory / open.length) * 100)
       : -1,
+    compositeScore: composite.score,
+    compositeBand: composite.band,
   };
 }
 
@@ -1452,6 +1548,17 @@ export function computeMetrics(filter?: { companyId?: string }): QuantifyMetrics
   };
   for (const f of open) riskPriorityCounts[f.riskPriority] += 1;
 
+  // Scan coverage for the composite: scoped to a company, or summed globally.
+  const globalCoverage = filter?.companyId
+    ? companyCoverage(s, filter.companyId)
+    : Array.from(s.companies.keys()).reduce(
+        (acc, cid) => {
+          const c = companyCoverage(s, cid);
+          return { known: acc.known + c.known, scanned: acc.scanned + c.scanned };
+        },
+        { known: 0, scanned: 0 },
+      );
+
   const topRisks = [...open]
     .sort((a, b) => b.realRisk - a.realRisk)
     .slice(0, 12)
@@ -1481,6 +1588,7 @@ export function computeMetrics(filter?: { companyId?: string }): QuantifyMetrics
     meanTimeToRemediateDays,
     companyBreakdown,
     kevOpen: open.filter((f) => f.kev).length,
+    composite: computeComposite(open, globalCoverage),
     riskPriorityCounts,
     topRisks,
   };

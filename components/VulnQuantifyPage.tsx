@@ -12,6 +12,8 @@ import {
 import VulnShell from "@/components/VulnShell";
 import { PanelCard, Pill, StatCard, ghostButtonClass } from "@/components/ui";
 import {
+  compositeBandClass,
+  compositeColor,
   connectorLabels,
   exposureClass,
   riskColor,
@@ -19,6 +21,38 @@ import {
   severityClass,
 } from "@/lib/format";
 import type { QuantifyMetrics, Severity } from "@/lib/types";
+
+const COMPOSITE_COMPONENTS: {
+  key: "exposure" | "kevPressure" | "slaBreach" | "coverageGap";
+  label: string;
+  weight: string;
+  hint: string;
+}[] = [
+  {
+    key: "exposure",
+    label: "Open exposure",
+    weight: "40%",
+    hint: "Severity × exploitability × EPSS across open findings",
+  },
+  {
+    key: "kevPressure",
+    label: "Active exploitation",
+    weight: "25%",
+    hint: "Share of open findings in CISA KEV (exploited in the wild)",
+  },
+  {
+    key: "slaBreach",
+    label: "SLA breaches",
+    weight: "20%",
+    hint: "Share of open findings past their remediation SLA",
+  },
+  {
+    key: "coverageGap",
+    label: "Coverage gap",
+    weight: "15%",
+    hint: "Known inventory assets with no scan coverage",
+  },
+];
 
 const SEVERITIES: Severity[] = ["Critical", "High", "Medium", "Low", "Info"];
 
@@ -108,6 +142,58 @@ export default function VulnQuantifyPage() {
           icon={<IconClockHour4 size={26} />}
         />
       </div>
+
+      <PanelCard
+        eyebrow="Composite security posture"
+        description="One score blending open exposure, active exploitation, SLA breaches, and scan-coverage gaps"
+      >
+        <div className="grid gap-6 lg:grid-cols-[220px_minmax(0,1fr)]">
+          <div className="flex flex-col items-center justify-center rounded-[24px] border border-[rgba(179,14,20,0.16)] bg-[#040404] p-6 text-center">
+            <div
+              className="text-6xl font-semibold tracking-[-0.04em]"
+              style={{ color: compositeColor(metrics?.composite.score ?? 0) }}
+            >
+              {metrics ? metrics.composite.score : "—"}
+            </div>
+            <div className="mt-1 text-sm text-zinc-500">/ 100</div>
+            {metrics ? (
+              <div className="mt-3">
+                <Pill className={compositeBandClass[metrics.composite.band]}>
+                  {metrics.composite.band}
+                </Pill>
+              </div>
+            ) : null}
+          </div>
+          <div className="space-y-4">
+            {COMPOSITE_COMPONENTS.map((comp) => {
+              const val = metrics?.composite.components[comp.key] ?? 0;
+              return (
+                <div key={comp.key}>
+                  <div className="mb-2 flex items-center justify-between text-sm">
+                    <span className="text-zinc-300">
+                      {comp.label}{" "}
+                      <span className="text-xs text-zinc-600">
+                        · weight {comp.weight}
+                      </span>
+                    </span>
+                    <span className="font-medium text-white">{val}</span>
+                  </div>
+                  <div className="h-3 overflow-hidden rounded-full bg-[#101010]">
+                    <div
+                      className="h-full rounded-full transition-all duration-500"
+                      style={{
+                        width: `${val}%`,
+                        background: compositeColor(val),
+                      }}
+                    />
+                  </div>
+                  <p className="mt-1 text-xs text-zinc-600">{comp.hint}</p>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </PanelCard>
 
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
         <PanelCard

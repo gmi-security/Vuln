@@ -12,13 +12,8 @@ import {
   inputClass,
   primaryButtonClass,
 } from "@/components/ui";
+import { compositeBandClass, compositeColor } from "@/lib/format";
 import type { Company } from "@/lib/types";
-
-function exposureTone(score: number) {
-  if (score >= 75) return "bg-[rgba(179,14,20,0.16)] text-[#ff4d57] border border-[rgba(179,14,20,0.45)]";
-  if (score >= 40) return "bg-[rgba(245,166,35,0.10)] text-amber-300 border border-amber-900/60";
-  return "bg-emerald-950/60 text-emerald-300 border border-emerald-900/60";
-}
 
 export default function VulnCompaniesPage() {
   const [companies, setCompanies] = useState<Company[]>([]);
@@ -202,9 +197,17 @@ export default function VulnCompaniesPage() {
                       </div>
                     </div>
                   </div>
-                  <Pill className={exposureTone(company.exposureScore)}>
-                    Exposure {company.exposureScore}
-                  </Pill>
+                  <div className="text-right">
+                    <div
+                      className="text-3xl font-semibold tracking-[-0.03em]"
+                      style={{ color: compositeColor(company.compositeScore) }}
+                    >
+                      {company.compositeScore}
+                    </div>
+                    <Pill className={compositeBandClass[company.compositeBand]}>
+                      {company.compositeBand}
+                    </Pill>
+                  </div>
                 </div>
 
                 <div className="mt-5 grid grid-cols-4 gap-3">

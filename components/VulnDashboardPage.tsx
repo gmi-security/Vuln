@@ -12,6 +12,7 @@ import {
 import VulnShell from "@/components/VulnShell";
 import { PanelCard, Pill, StatCard, primaryButtonClass } from "@/components/ui";
 import {
+  compositeColor,
   connectorLabels,
   formatDateTime,
   scanStatusClass,
@@ -88,9 +89,21 @@ export default function VulnDashboardPage() {
           icon={<IconRadar size={26} />}
         />
         <StatCard
-          label="Exposure score"
-          value={metrics ? metrics.exposureScore : "—"}
-          sublabel={`Avg CVSS ${metrics?.avgCvss ?? "—"} across open`}
+          label="Composite risk"
+          value={
+            metrics ? (
+              <span style={{ color: compositeColor(metrics.composite.score) }}>
+                {metrics.composite.score}
+              </span>
+            ) : (
+              "—"
+            )
+          }
+          sublabel={
+            metrics
+              ? `${metrics.composite.band} · exposure ${metrics.exposureScore}`
+              : ""
+          }
           icon={<IconGauge size={26} />}
         />
       </div>
