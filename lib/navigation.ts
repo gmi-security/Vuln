@@ -2,6 +2,7 @@ import type * as React from "react";
 import {
   Bug,
   Building2,
+  ClipboardCheck,
   Gauge,
   LayoutDashboard,
   PlugZap,
@@ -23,6 +24,7 @@ export const baseNavItems: VulnNavItem[] = [
   { label: "Coverage", icon: ScanSearch, href: "/coverage" },
   { label: "Findings", icon: Bug, href: "/findings" },
   { label: "Attack Paths", icon: Share2, href: "/attack-paths" },
+  { label: "Compliance", icon: ClipboardCheck, href: "/compliance" },
   { label: "Quantify", icon: Gauge, href: "/quantify" },
   { label: "Connectors", icon: PlugZap, href: "/connectors" },
 ];

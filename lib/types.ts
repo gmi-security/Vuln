@@ -182,6 +182,46 @@ export type Finding = {
   riskPriority: "Critical" | "High" | "Medium" | "Low" | "Info";
 };
 
+export type ComplianceStatus = "Pass" | "Fail" | "At Risk" | "Info";
+
+export type ComplianceRequirement = {
+  id: string; // e.g. "11.3.2"
+  title: string;
+  status: ComplianceStatus;
+  detail: string;
+  failing: number;
+};
+
+export type CompliancePosture = {
+  framework: string; // "PCI DSS 4.0"
+  companyId: string;
+  companyName: string;
+  overall: ComplianceStatus;
+  score: number; // 0-100 compliance score
+  asvPass: boolean;
+  failingFindings: number; // CVSS >= 4.0 on internet-facing assets
+  lastScanDaysAgo: number | null;
+  requirements: ComplianceRequirement[];
+  summary: {
+    externalFailing: number;
+    internalHighCrit: number;
+    slaBreaches: number;
+    openTotal: number;
+  };
+};
+
+export type ComplianceResult = {
+  framework: string;
+  aggregate: {
+    companies: number;
+    passing: number;
+    failing: number;
+    avgScore: number;
+    asvFailingCompanies: number;
+  };
+  companies: CompliancePosture[];
+};
+
 export type AttackHop = {
   asset: string;
   exposure: string;

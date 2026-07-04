@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { tidalConfig } from "@/lib/tidal";
 import { intuneConfig } from "@/lib/intune";
 import { falconConfig } from "@/lib/crowdstrike";
+import { grcConfig } from "@/lib/grc";
 
 export const dynamic = "force-dynamic";
 
@@ -11,6 +12,7 @@ export async function GET() {
   const tidal = tidalConfig();
   const intune = intuneConfig();
   const falcon = falconConfig();
+  const grc = grcConfig();
   return NextResponse.json({
     integrations: [
       {
@@ -67,6 +69,24 @@ export async function GET() {
         configured: Boolean(falcon),
         status: falcon ? "Connected" : "Demo Mode",
         docsUrl: "https://falcon.crowdstrike.com/documentation/page/host-and-host-group-management-apis",
+      },
+      {
+        id: "grc",
+        name: "GMI GRC (OpenGRC)",
+        vendor: "OpenGRC",
+        kind: "Governance, Risk & Compliance",
+        description:
+          "Pushes vulnerability-derived risks and PCI DSS 4.0 compliance posture into your GRC platform as risk records, so audit and compliance evidence lives in one place.",
+        capabilities: [
+          "Push risks",
+          "PCI DSS posture",
+          "Audit evidence",
+          "Per-client mapping",
+        ],
+        envVars: ["GRC_API_URL", "GRC_API_TOKEN"],
+        configured: Boolean(grc),
+        status: grc ? "Connected" : "Demo Mode",
+        docsUrl: "http://64.227.55.62:8080/app/dashboard",
       },
     ],
   });

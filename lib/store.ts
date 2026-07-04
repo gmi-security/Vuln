@@ -14,12 +14,17 @@ import { tidalConfig, tidalListAssets } from "@/lib/tidal";
 import { intuneConfig, intuneListAssets } from "@/lib/intune";
 import { falconConfig, falconListAssets } from "@/lib/crowdstrike";
 import { defenderConfig, defenderListFindings } from "@/lib/defender";
+import { buildRisk, grcConfig, grcCreateRisk } from "@/lib/grc";
 import { loadSnapshot, persistenceEnabled, saveSnapshot } from "@/lib/persist";
 import type {
   AssetSource,
   AttackEntry,
   AttackHop,
   AttackPathResult,
+  CompliancePosture,
+  ComplianceRequirement,
+  ComplianceResult,
+  ComplianceStatus,
   Company,
   ConnectorId,
   Finding,
@@ -1078,6 +1083,207 @@ export async function resyncFromNessus(options?: {
   const result = await importFromNessus();
   await flushNow();
   return result;
+}
+
+// --- compliance (PCI DSS 4.0) ----------------------------------------------
+
+function cvssOf(f: Finding): number {
+  return f.cvssV3 || f.cvssV2 || f.cvss || 0;
+}
+
+// Evaluate PCI DSS 4.0 vulnerability-management posture per company.
+export function computeCompliance(filter?: {
+  companyId?: string;
+}): ComplianceResult {
+  const s = store();
+  tick(s);
+  const now = Date.now();
+  const DAY = 86_400_000;
+
+  const companies = Array.from(s.companies.values()).filter(
+    (c) => !filter?.companyId || c.id === filter.companyId,
+  );
+
+  const postures: CompliancePosture[] = companies.map((company) => {
+    const open = Array.from(s.findings.values()).filter(
+      (f) =>
+        f.companyId === company.id &&
+        (f.status === "Open" || f.status === "In Remediation"),
+    );
+    // External ASV: internet-facing findings with CVSS >= 4.0 fail an ASV scan.
+    const external = open.filter((f) => f.assetExposure === "Internet-facing");
+    const asvFailing = external.filter((f) => cvssOf(f) >= 4.0);
+    const asvPass = asvFailing.length === 0;
+
+    const internalHighCrit = open.filter(
+      (f) => f.severity === "Critical" || f.severity === "High",
+    );
+    // PCI patch window: critical/high remediated within ~1 month.
+    const slaBreaches = internalHighCrit.filter(
+      (f) => (now - new Date(f.firstSeen).getTime()) / DAY > 30,
+    );
+
+    const companyScans = Array.from(s.scans.values()).filter(
+      (sc) => sc.companyId === company.id && sc.completedAt,
+    );
+    const lastScanDaysAgo = companyScans.length
+      ? Math.floor(
+          Math.min(
+            ...companyScans.map(
+              (sc) => (now - new Date(sc.completedAt!).getTime()) / DAY,
+            ),
+          ),
+        )
+      : null;
+    const scanOverdue = lastScanDaysAgo === null || lastScanDaysAgo > 90;
+
+    const requirements: ComplianceRequirement[] = [
+      {
+        id: "6.3.1",
+        title: "Vulnerabilities identified and risk-ranked",
+        status: "Pass",
+        detail:
+          "All findings are risk-ranked via composite real-risk (CVSS × exploitation × environment).",
+        failing: 0,
+      },
+      {
+        id: "6.3.3",
+        title: "Critical/high-risk patches applied within one month",
+        status: slaBreaches.length > 0 ? "Fail" : "Pass",
+        detail:
+          slaBreaches.length > 0
+            ? `${slaBreaches.length} critical/high finding(s) open past the 30-day patch window.`
+            : "No critical/high findings past the 30-day patch window.",
+        failing: slaBreaches.length,
+      },
+      {
+        id: "11.3.1",
+        title: "Internal scans quarterly; high/critical resolved & rescanned",
+        status:
+          internalHighCrit.length > 0 ? "Fail" : scanOverdue ? "At Risk" : "Pass",
+        detail:
+          internalHighCrit.length > 0
+            ? `${internalHighCrit.length} high/critical finding(s) unresolved.`
+            : scanOverdue
+              ? `Last completed scan ${lastScanDaysAgo === null ? "never" : `${lastScanDaysAgo}d ago`} — quarterly cadence at risk.`
+              : "No unresolved high/critical; scan cadence within quarter.",
+        failing: internalHighCrit.length,
+      },
+      {
+        id: "11.3.2",
+        title: "External ASV scan passing (no CVSS ≥ 4.0 on internet-facing)",
+        status: asvPass ? "Pass" : "Fail",
+        detail: asvPass
+          ? "No internet-facing findings at or above CVSS 4.0 — ASV pass."
+          : `${asvFailing.length} internet-facing finding(s) at CVSS ≥ 4.0 — automatic ASV failure.`,
+        failing: asvFailing.length,
+      },
+    ];
+
+    let score = 100;
+    score -= Math.min(45, asvFailing.length * 3);
+    score -= Math.min(30, internalHighCrit.length * 2);
+    score -= Math.min(15, slaBreaches.length * 2);
+    if (scanOverdue) score -= 10;
+    score = Math.max(0, Math.round(score));
+
+    const overall: ComplianceStatus =
+      !asvPass || internalHighCrit.length > 0
+        ? "Fail"
+        : slaBreaches.length > 0 || scanOverdue
+          ? "At Risk"
+          : "Pass";
+
+    return {
+      framework: "PCI DSS 4.0",
+      companyId: company.id,
+      companyName: company.name,
+      overall,
+      score,
+      asvPass,
+      failingFindings: asvFailing.length,
+      lastScanDaysAgo,
+      requirements,
+      summary: {
+        externalFailing: asvFailing.length,
+        internalHighCrit: internalHighCrit.length,
+        slaBreaches: slaBreaches.length,
+        openTotal: open.length,
+      },
+    };
+  });
+
+  postures.sort((a, b) => a.score - b.score);
+  const passing = postures.filter((p) => p.overall === "Pass").length;
+  const failing = postures.filter((p) => p.overall === "Fail").length;
+
+  return {
+    framework: "PCI DSS 4.0",
+    aggregate: {
+      companies: postures.length,
+      passing,
+      failing,
+      avgScore: postures.length
+        ? Math.round(postures.reduce((sum, p) => sum + p.score, 0) / postures.length)
+        : 0,
+      asvFailingCompanies: postures.filter((p) => !p.asvPass).length,
+    },
+    companies: postures,
+  };
+}
+
+export type GrcExportResult = {
+  pushed: number;
+  companies: number;
+  errors: string[];
+};
+
+// Push per-company vulnerability risk into the GRC (OpenGRC) as risk records,
+// for audit and compliance. One consolidated risk per company.
+export async function exportToGrc(filter?: {
+  companyId?: string;
+}): Promise<GrcExportResult | { error: string }> {
+  if (!grcConfig()) {
+    return {
+      error: "GRC is not configured. Set GRC_API_URL and GRC_API_TOKEN.",
+    };
+  }
+  const compliance = computeCompliance(filter);
+  let pushed = 0;
+  const errors: string[] = [];
+
+  for (const posture of compliance.companies) {
+    const metrics = computeMetrics({ companyId: posture.companyId });
+    const top = listFindings({ companyId: posture.companyId })
+      .filter((f) => f.status === "Open" || f.status === "In Remediation")
+      .slice(0, 10)
+      .map((f) => ({
+        cve: f.cve,
+        title: f.title,
+        asset: f.asset,
+        realRisk: f.realRisk,
+      }));
+    const risk = buildRisk({
+      companyName: posture.companyName,
+      compositeScore: metrics.composite.score,
+      openTotal: posture.summary.openTotal,
+      criticalOpen: metrics.severityCounts.Critical,
+      kevOpen: metrics.kevOpen,
+      asvFailing: posture.summary.externalFailing,
+      overall: posture.overall,
+      topFindings: top,
+    });
+    try {
+      await grcCreateRisk(risk);
+      pushed += 1;
+    } catch (err) {
+      errors.push(
+        `${posture.companyName}: ${err instanceof Error ? err.message : "failed"}`,
+      );
+    }
+  }
+
+  return { pushed, companies: compliance.companies.length, errors };
 }
 
 // --- attack paths / blast radius -------------------------------------------

@@ -3,6 +3,7 @@
 import React, { useEffect, useState } from "react";
 import { ExternalLink } from "lucide-react";
 import {
+  IconClipboardCheck,
   IconCloudLock,
   IconDatabaseCog,
   IconDeviceLaptop,
@@ -36,6 +37,7 @@ const cardIcon: Record<string, React.ElementType> = {
   tidal: IconDatabaseCog,
   intune: IconDeviceLaptop,
   "crowdstrike-devices": IconShieldSearch,
+  grc: IconClipboardCheck,
 };
 
 const statusClass: Record<ConnectorStatus, string> = {
