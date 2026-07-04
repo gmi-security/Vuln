@@ -45,30 +45,32 @@ function cvssFor(
   return { value: 0, used: null };
 }
 
+type ScoreView = "v3" | "v2" | "vpr";
+
 function CvssToggle({
   version,
   onChange,
 }: {
-  version: CvssVersion;
-  onChange: (v: CvssVersion) => void;
+  version: ScoreView;
+  onChange: (v: ScoreView) => void;
 }) {
   return (
     <div className="inline-flex items-center gap-1 rounded-2xl border border-zinc-800 bg-[#090909] p-1">
       <span className="px-2 text-[11px] uppercase tracking-[0.18em] text-zinc-500">
-        CVSS
+        Score
       </span>
-      {(["v3", "v2"] as CvssVersion[]).map((v) => (
+      {(["v3", "v2", "vpr"] as ScoreView[]).map((v) => (
         <button
           key={v}
           onClick={() => onChange(v)}
           className={[
-            "rounded-xl px-3 py-1.5 text-sm transition",
+            "rounded-xl px-3 py-1.5 text-sm uppercase transition",
             version === v
               ? "bg-[rgba(179,14,20,0.20)] text-white"
               : "text-zinc-400 hover:text-zinc-200",
           ].join(" ")}
         >
-          {v}
+          {v === "vpr" ? "VPR" : v}
         </button>
       ))}
     </div>
@@ -87,7 +89,7 @@ export default function VulnFindingsPage() {
   );
   const [companies, setCompanies] = useState<{ id: string; name: string }[]>([]);
   const [exploitOnly, setExploitOnly] = useState(false);
-  const [cvssVersion, setCvssVersion] = useState<CvssVersion>("v3");
+  const [cvssVersion, setCvssVersion] = useState<ScoreView>("v3");
   const [focusId, setFocusId] = useState<string | null>(
     searchParams.get("focus"),
   );
@@ -260,7 +262,7 @@ export default function VulnFindingsPage() {
             <div>Finding</div>
             <div>Asset</div>
             <div>Real risk</div>
-            <div>CVSS {cvssVersion}</div>
+            <div>{cvssVersion === "vpr" ? "VPR" : `CVSS ${cvssVersion}`}</div>
             <div>Severity</div>
             <div>Status</div>
             <div>Age</div>
@@ -319,6 +321,9 @@ export default function VulnFindingsPage() {
                 </div>
                 <div className="text-sm text-zinc-300">
                   {(() => {
+                    if (cvssVersion === "vpr") {
+                      return finding.vpr > 0 ? finding.vpr.toFixed(1) : "—";
+                    }
                     const { value, used } = cvssFor(finding, cvssVersion);
                     if (value <= 0) return "—";
                     return (
@@ -475,6 +480,10 @@ export default function VulnFindingsPage() {
               <Detail
                 label="CVSS v2"
                 value={focus.cvssV2 > 0 ? focus.cvssV2.toFixed(1) : "—"}
+              />
+              <Detail
+                label="VPR (Tenable)"
+                value={focus.vpr > 0 ? focus.vpr.toFixed(1) : "—"}
               />
               <Detail
                 label="EPSS"

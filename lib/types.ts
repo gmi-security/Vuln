@@ -151,6 +151,7 @@ export type Finding = {
   cvss: number; // primary score (CVSS v3 when available, else v2)
   cvssV2: number; // 0 when the source has no v2 score
   cvssV3: number; // 0 when the source has no v3 score
+  vpr: number; // Tenable Vulnerability Priority Rating (0-10), 0 when absent
   epss: number;
   asset: string;
   port: string;
@@ -174,6 +175,43 @@ export type Finding = {
   // Composite real-risk score (0-100) and its priority band
   realRisk: number;
   riskPriority: "Critical" | "High" | "Medium" | "Low" | "Info";
+};
+
+export type AttackHop = {
+  asset: string;
+  exposure: string;
+  criticality: string;
+  role: "entry" | "pivot" | "target";
+  cve: string | null;
+  title: string | null;
+  realRisk: number;
+  kev: boolean;
+};
+
+export type AttackEntry = {
+  id: string;
+  asset: string;
+  companyId: string;
+  companyName: string;
+  exposure: string;
+  criticality: string;
+  entryScore: number; // ease of initial compromise, 0-100
+  kev: boolean;
+  exploitable: boolean;
+  reachable: number;
+  crownJewelsReached: number;
+  blastScore: number; // 0-100
+  path: AttackHop[];
+  targetAsset: string | null;
+};
+
+export type AttackPathResult = {
+  summary: {
+    entryPoints: number;
+    crownJewelsAtRisk: number;
+    maxBlast: number;
+  };
+  entries: AttackEntry[];
 };
 
 export type QuantifyMetrics = {

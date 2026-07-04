@@ -16,6 +16,9 @@ import { falconConfig, falconListAssets } from "@/lib/crowdstrike";
 import { loadSnapshot, persistenceEnabled, saveSnapshot } from "@/lib/persist";
 import type {
   AssetSource,
+  AttackEntry,
+  AttackHop,
+  AttackPathResult,
   Company,
   ConnectorId,
   Finding,
@@ -297,6 +300,19 @@ function deriveCvssV2(v3: number, key: string): number {
   return Math.max(0, Math.min(10, Math.round((v3 + delta) * 10) / 10));
 }
 
+// Demo-only stand-in for Tenable VPR (0-10): base CVSS nudged up for real-world
+// threat (KEV / EPSS / public exploit). Real Nessus findings carry the true VPR.
+function deriveVpr(
+  cvss: number,
+  epss: number,
+  kev: boolean,
+  exploit: boolean,
+): number {
+  if (cvss <= 0) return 0;
+  const boost = (kev ? 1.2 : 0) + (exploit ? 0.6 : 0) + epss * 1.5;
+  return Math.max(0, Math.min(10, Math.round((cvss * 0.85 + boost) * 10) / 10));
+}
+
 function emptySeverityCounts(): Record<Severity, number> {
   return { Critical: 0, High: 0, Medium: 0, Low: 0, Info: 0 };
 }
@@ -356,6 +372,7 @@ function generateFindings(s: StoreShape, scan: InternalScan): Finding[] {
       cvss: template.cvss,
       cvssV3: template.cvss,
       cvssV2: deriveCvssV2(template.cvss, template.cve),
+      vpr: deriveVpr(template.cvss, template.epss, isKev(template.cve), template.exploitAvailable),
       epss: template.epss,
       asset,
       port: DEMO_PORTS[Math.floor(rand() * DEMO_PORTS.length)],
@@ -481,6 +498,7 @@ async function importVendorFindings(s: StoreShape, scan: InternalScan): Promise<
         cvss: item.cvss,
         cvssV3: item.cvssV3,
         cvssV2: item.cvssV2,
+        vpr: item.vpr,
         epss: 0,
         asset: item.asset,
         port: item.port,
@@ -1059,6 +1077,240 @@ export async function resyncFromNessus(options?: {
   const result = await importFromNessus();
   await flushNow();
   return result;
+}
+
+// --- attack paths / blast radius -------------------------------------------
+
+const CRIT_WEIGHT: Record<string, number> = {
+  "Crown Jewel": 4,
+  High: 3,
+  Normal: 2,
+  Low: 1,
+};
+
+type AttackNode = {
+  asset: string;
+  companyId: string;
+  companyName: string;
+  exposure: string;
+  criticality: string;
+  worstRisk: number;
+  kev: boolean;
+  exploitable: boolean;
+  open: number;
+  subnet: string | null; // /24 when the asset resolves to an IP
+  topCve: string | null;
+  topTitle: string | null;
+};
+
+function subnetOf(text: string, ips: string[]): string | null {
+  const candidates = [text, ...ips];
+  for (const c of candidates) {
+    const m = c.match(/\b(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}\b/);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+// Model how far an attacker gets after compromising an internet-facing,
+// exploitable asset. Reachability is MODELED, not observed: same-/24 subnet
+// (a real signal from IPs) plus perimeter->high-value-target pivots. Connect
+// firewall/identity data later for true topology.
+export function computeAttackPaths(filter?: {
+  companyId?: string;
+}): AttackPathResult {
+  const s = store();
+  tick(s);
+
+  // Build one node per asset from open findings, enriched with inventory.
+  const nodes = new Map<string, AttackNode>();
+  const keyOf = (companyId: string, asset: string) =>
+    `${companyId}|${asset.trim().toLowerCase()}`;
+
+  for (const f of s.findings.values()) {
+    if (filter?.companyId && f.companyId !== filter.companyId) continue;
+    if (f.status !== "Open" && f.status !== "In Remediation") continue;
+    const key = keyOf(f.companyId, f.asset);
+    const node =
+      nodes.get(key) ??
+      ({
+        asset: f.asset,
+        companyId: f.companyId,
+        companyName: f.companyName,
+        exposure: f.assetExposure,
+        criticality: f.assetCriticality,
+        worstRisk: 0,
+        kev: false,
+        exploitable: false,
+        open: 0,
+        subnet: subnetOf(f.asset, []),
+        topCve: null,
+        topTitle: null,
+      } as AttackNode);
+    if (f.realRisk > node.worstRisk) {
+      node.worstRisk = f.realRisk;
+      node.topCve = f.cve;
+      node.topTitle = f.title;
+    }
+    node.kev = node.kev || f.kev;
+    node.exploitable = node.exploitable || f.exploitAvailable;
+    node.open += 1;
+    nodes.set(key, node);
+  }
+
+  // Inventory assets (incl. those with no findings) enrich context + add
+  // crown-jewel targets that haven't been scanned yet.
+  for (const a of s.assets.values()) {
+    if (filter?.companyId && a.companyId !== filter.companyId) continue;
+    const key = keyOf(a.companyId, a.identifier);
+    const existing = nodes.get(key);
+    if (existing) {
+      existing.exposure = a.exposure;
+      existing.criticality = a.criticality;
+      existing.subnet = existing.subnet ?? subnetOf(a.identifier, a.ipAddresses);
+    } else {
+      nodes.set(key, {
+        asset: a.identifier,
+        companyId: a.companyId,
+        companyName: a.companyName,
+        exposure: a.exposure,
+        criticality: a.criticality,
+        worstRisk: 0,
+        kev: false,
+        exploitable: false,
+        open: 0,
+        subnet: subnetOf(a.identifier, a.ipAddresses),
+        topCve: null,
+        topTitle: null,
+      });
+    }
+  }
+
+  const all = Array.from(nodes.values());
+  const byCompany = new Map<string, AttackNode[]>();
+  for (const n of all) {
+    const list = byCompany.get(n.companyId) ?? [];
+    list.push(n);
+    byCompany.set(n.companyId, list);
+  }
+
+  // Reachable set from an entry: same-subnet peers + high-value internal
+  // targets in the same company (perimeter breach -> crown-jewel pivot).
+  function reachableFrom(entry: AttackNode): AttackNode[] {
+    const peers = byCompany.get(entry.companyId) ?? [];
+    return peers.filter((n) => {
+      if (n === entry) return false;
+      if (n.exposure === "Isolated") return false; // segmented off
+      const sameSubnet =
+        entry.subnet && n.subnet && entry.subnet === n.subnet;
+      const highValue = n.criticality === "Crown Jewel" || n.criticality === "High";
+      return sameSubnet || highValue;
+    });
+  }
+
+  const entries: AttackEntry[] = [];
+  const crownJewelsAtRisk = new Set<string>();
+
+  for (const entry of all) {
+    const isEntry =
+      entry.exposure === "Internet-facing" &&
+      (entry.kev || entry.exploitable || entry.worstRisk >= 50);
+    if (!isEntry) continue;
+
+    const reachable = reachableFrom(entry);
+    const crownJewels = reachable.filter((n) => n.criticality === "Crown Jewel");
+    for (const cj of crownJewels) crownJewelsAtRisk.add(keyOf(cj.companyId, cj.asset));
+    const highs = reachable.filter((n) => n.criticality === "High");
+
+    const blastScore = Math.min(
+      100,
+      Math.round(crownJewels.length * 22 + highs.length * 7 + reachable.length * 1.5),
+    );
+    const entryScore = Math.min(
+      100,
+      Math.round(entry.worstRisk * (entry.kev ? 1.15 : 1)),
+    );
+
+    // Representative path: entry -> best same-subnet pivot -> top target.
+    const target =
+      [...crownJewels, ...reachable].sort(
+        (a, b) =>
+          CRIT_WEIGHT[b.criticality] - CRIT_WEIGHT[a.criticality] ||
+          b.worstRisk - a.worstRisk,
+      )[0] ?? null;
+    const pivot =
+      reachable.find(
+        (n) =>
+          n !== target &&
+          entry.subnet &&
+          n.subnet === entry.subnet &&
+          (n.criticality === "High" || n.criticality === "Crown Jewel"),
+      ) ?? null;
+
+    const path: AttackHop[] = [];
+    path.push({
+      asset: entry.asset,
+      exposure: entry.exposure,
+      criticality: entry.criticality,
+      role: "entry",
+      cve: entry.topCve,
+      title: entry.topTitle,
+      realRisk: entry.worstRisk,
+      kev: entry.kev,
+    });
+    if (pivot && pivot !== target) {
+      path.push({
+        asset: pivot.asset,
+        exposure: pivot.exposure,
+        criticality: pivot.criticality,
+        role: "pivot",
+        cve: pivot.topCve,
+        title: pivot.topTitle,
+        realRisk: pivot.worstRisk,
+        kev: pivot.kev,
+      });
+    }
+    if (target) {
+      path.push({
+        asset: target.asset,
+        exposure: target.exposure,
+        criticality: target.criticality,
+        role: "target",
+        cve: target.topCve,
+        title: target.topTitle,
+        realRisk: target.worstRisk,
+        kev: target.kev,
+      });
+    }
+
+    entries.push({
+      id: keyOf(entry.companyId, entry.asset),
+      asset: entry.asset,
+      companyId: entry.companyId,
+      companyName: entry.companyName,
+      exposure: entry.exposure,
+      criticality: entry.criticality,
+      entryScore,
+      kev: entry.kev,
+      exploitable: entry.exploitable,
+      reachable: reachable.length,
+      crownJewelsReached: crownJewels.length,
+      blastScore,
+      path,
+      targetAsset: target?.asset ?? null,
+    });
+  }
+
+  entries.sort((a, b) => b.blastScore - a.blastScore || b.entryScore - a.entryScore);
+
+  return {
+    summary: {
+      entryPoints: entries.length,
+      crownJewelsAtRisk: crownJewelsAtRisk.size,
+      maxBlast: entries[0]?.blastScore ?? 0,
+    },
+    entries: entries.slice(0, 20),
+  };
 }
 
 // Recompute a finding's environmental context + real risk against the current
