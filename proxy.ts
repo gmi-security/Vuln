@@ -19,7 +19,8 @@ export async function proxy(request: NextRequest) {
     isPublicAsset(pathname) ||
     pathname.startsWith("/api/auth") ||
     pathname === "/api/nessus/health" ||
-    pathname === "/api/nessus/probe"
+    pathname === "/api/nessus/probe" ||
+    pathname === "/api/nessus/import"
   ) {
     return NextResponse.next();
   }
