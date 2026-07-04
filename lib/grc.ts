@@ -84,7 +84,7 @@ export async function grcProbe(): Promise<{
 }
 
 export type GrcRisk = {
-  name: string;
+  title: string;
   description: string;
   // OpenGRC scores risk on 1-5 likelihood × impact; we derive from real risk.
   inherent_likelihood: number;
@@ -138,7 +138,7 @@ export function buildRisk(input: {
     Math.min(100, input.kevOpen * 10 + input.asvFailing * 4 + input.criticalOpen * 3),
   );
   return {
-    name: `Unremediated vulnerabilities — ${input.companyName}`,
+    title: `Unremediated vulnerabilities — ${input.companyName}`,
     description,
     inherent_likelihood: likelihood,
     inherent_impact: impact,
