@@ -20,9 +20,9 @@ export async function proxy(request: NextRequest) {
     pathname.startsWith("/api/auth") ||
     pathname === "/api/nessus/health" ||
     pathname === "/api/health" ||
-    pathname === "/api/admin/resync" ||
-    pathname === "/api/grc/probe" ||
-    pathname === "/api/grc/export"
+    // Independently protected by ADMIN_TOKEN (not a session), so it must stay
+    // reachable without the login redirect.
+    pathname === "/api/admin/resync"
   ) {
     return NextResponse.next();
   }

@@ -83,8 +83,16 @@ export async function grcProbe(): Promise<{
   }
 }
 
+// Matches the OpenGRC `Risk` model's fillable columns (name + description).
+// NOTE: the OpenGRC REST API (LeeMangold/OpenGRC) currently has a controller
+// bug — RiskController::validateStore still requires the legacy `title` column
+// while the model/table use `name`, so BaseApiController::store passes `title`
+// into Risk::create() and MySQL rejects it ("Unknown column 'title'"). No
+// client payload can work around this; the fix is on the OpenGRC side (change
+// the validateStore rule from `title` to `name`). We send the model-correct
+// fields so risk creation succeeds the moment that controller is patched.
 export type GrcRisk = {
-  title: string;
+  name: string;
   description: string;
 };
 
@@ -123,7 +131,7 @@ export function buildRisk(input: {
   ].join("\n");
 
   return {
-    title: `Unremediated vulnerabilities — ${input.companyName}`,
+    name: `Unremediated vulnerabilities — ${input.companyName}`,
     description,
   };
 }
