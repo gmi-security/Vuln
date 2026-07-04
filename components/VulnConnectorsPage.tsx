@@ -2,16 +2,36 @@
 
 import React, { useEffect, useState } from "react";
 import { ExternalLink } from "lucide-react";
-import { IconCloudLock, IconPackage, IconRadar, IconShieldSearch } from "@tabler/icons-react";
+import {
+  IconCloudLock,
+  IconDatabaseCog,
+  IconPackage,
+  IconRadar,
+  IconShieldSearch,
+} from "@tabler/icons-react";
 import VulnShell from "@/components/VulnShell";
 import { PanelCard, Pill } from "@/components/ui";
-import type { Connector, ConnectorId, ConnectorStatus } from "@/lib/types";
+import type { Connector, ConnectorStatus } from "@/lib/types";
 
-const connectorIcon: Record<ConnectorId, React.ElementType> = {
+type CardData = {
+  id: string;
+  name: string;
+  vendor: string;
+  kind: string;
+  description: string;
+  capabilities: string[];
+  envVars: string[];
+  configured: boolean;
+  status: ConnectorStatus;
+  docsUrl: string;
+};
+
+const cardIcon: Record<string, React.ElementType> = {
   nessus: IconRadar,
   vulners: IconPackage,
   crowdstrike: IconShieldSearch,
   qualys: IconCloudLock,
+  tidal: IconDatabaseCog,
 };
 
 const statusClass: Record<ConnectorStatus, string> = {
@@ -21,100 +41,109 @@ const statusClass: Record<ConnectorStatus, string> = {
   Error: "bg-[rgba(179,14,20,0.16)] text-[#ff4d57] border border-[rgba(179,14,20,0.45)]",
 };
 
+function IntegrationCard({ card }: { card: CardData }) {
+  const Icon = cardIcon[card.id] ?? IconRadar;
+  return (
+    <PanelCard
+      eyebrow={card.vendor}
+      actions={<Pill className={statusClass[card.status]}>{card.status}</Pill>}
+    >
+      <div className="flex items-start gap-4">
+        <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full border border-[rgba(179,14,20,0.22)] bg-[rgba(179,14,20,0.08)] text-[#b30e14]">
+          <Icon size={26} />
+        </div>
+        <div className="min-w-0">
+          <h2 className="text-xl font-semibold text-white">{card.name}</h2>
+          <div className="mt-1 text-sm text-zinc-500">{card.kind}</div>
+          <p className="mt-3 text-sm leading-relaxed text-zinc-400">
+            {card.description}
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-5 flex flex-wrap gap-2">
+        {card.capabilities.map((cap) => (
+          <span
+            key={cap}
+            className="rounded-full border border-zinc-800 bg-zinc-950 px-3 py-1 text-xs text-zinc-300"
+          >
+            {cap}
+          </span>
+        ))}
+      </div>
+
+      <div className="mt-5 rounded-2xl border border-zinc-900 bg-[#090909] p-4">
+        <div className="text-xs uppercase tracking-[0.24em] text-zinc-500">
+          Configuration
+        </div>
+        <div className="mt-3 space-y-2">
+          {card.envVars.map((envVar) => (
+            <div key={envVar} className="flex items-center justify-between gap-4">
+              <code className="text-sm text-zinc-300">{envVar}</code>
+              <span
+                className={
+                  card.configured
+                    ? "text-xs text-emerald-300"
+                    : "text-xs text-zinc-500"
+                }
+              >
+                {card.configured ? "set" : "not set"}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <a
+        href={card.docsUrl}
+        target="_blank"
+        rel="noreferrer"
+        className="mt-4 inline-flex items-center gap-2 text-sm text-[#ff4d57] transition hover:text-white"
+      >
+        <ExternalLink size={14} />
+        Documentation
+      </a>
+    </PanelCard>
+  );
+}
+
 export default function VulnConnectorsPage() {
   const [connectors, setConnectors] = useState<Connector[]>([]);
+  const [integrations, setIntegrations] = useState<CardData[]>([]);
 
   useEffect(() => {
     void fetch("/api/connectors", { cache: "no-store" })
       .then((res) => res.json())
       .then((json) => setConnectors(json.connectors ?? []))
       .catch(() => undefined);
+    void fetch("/api/integrations", { cache: "no-store" })
+      .then((res) => res.json())
+      .then((json) => setIntegrations(json.integrations ?? []))
+      .catch(() => undefined);
   }, []);
 
   return (
     <VulnShell
       eyebrow="Connectors"
-      title="Scanner connectors"
-      subtitle="Scan engines and telemetry sources feeding the console. A connector runs in demo mode until its credentials are set in the environment."
+      title="Connectors & integrations"
+      subtitle="Scan engines, telemetry sources, and asset inventory feeding the console. Each integration runs in demo mode until its credentials are set in the environment."
     >
+      <div className="text-[13px] uppercase tracking-[0.3em] text-[#b30e14]">
+        Scanners
+      </div>
       <div className="grid gap-5 xl:grid-cols-2">
-        {connectors.map((connector) => {
-          const Icon = connectorIcon[connector.id];
-          return (
-            <PanelCard
-              key={connector.id}
-              eyebrow={connector.vendor}
-              actions={
-                <Pill className={statusClass[connector.status]}>
-                  {connector.status}
-                </Pill>
-              }
-            >
-              <div className="flex items-start gap-4">
-                <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full border border-[rgba(179,14,20,0.22)] bg-[rgba(179,14,20,0.08)] text-[#b30e14]">
-                  <Icon size={26} />
-                </div>
-                <div className="min-w-0">
-                  <h2 className="text-xl font-semibold text-white">
-                    {connector.name}
-                  </h2>
-                  <div className="mt-1 text-sm text-zinc-500">
-                    {connector.kind}
-                  </div>
-                  <p className="mt-3 text-sm leading-relaxed text-zinc-400">
-                    {connector.description}
-                  </p>
-                </div>
-              </div>
+        {connectors.map((connector) => (
+          <IntegrationCard key={connector.id} card={connector as CardData} />
+        ))}
+      </div>
 
-              <div className="mt-5 flex flex-wrap gap-2">
-                {connector.capabilities.map((cap) => (
-                  <span
-                    key={cap}
-                    className="rounded-full border border-zinc-800 bg-zinc-950 px-3 py-1 text-xs text-zinc-300"
-                  >
-                    {cap}
-                  </span>
-                ))}
-              </div>
-
-              <div className="mt-5 rounded-2xl border border-zinc-900 bg-[#090909] p-4">
-                <div className="text-xs uppercase tracking-[0.24em] text-zinc-500">
-                  Configuration
-                </div>
-                <div className="mt-3 space-y-2">
-                  {connector.envVars.map((envVar) => (
-                    <div
-                      key={envVar}
-                      className="flex items-center justify-between gap-4"
-                    >
-                      <code className="text-sm text-zinc-300">{envVar}</code>
-                      <span
-                        className={
-                          connector.configured
-                            ? "text-xs text-emerald-300"
-                            : "text-xs text-zinc-500"
-                        }
-                      >
-                        {connector.configured ? "set" : "not set"}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <a
-                href={connector.docsUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="mt-4 inline-flex items-center gap-2 text-sm text-[#ff4d57] transition hover:text-white"
-              >
-                <ExternalLink size={14} />
-                API documentation
-              </a>
-            </PanelCard>
-          );
-        })}
+      <div className="mt-2 text-[13px] uppercase tracking-[0.3em] text-[#b30e14]">
+        Asset inventory
+      </div>
+      <div className="grid gap-5 xl:grid-cols-2">
+        {integrations.map((integration) => (
+          <IntegrationCard key={integration.id} card={integration} />
+        ))}
       </div>
     </VulnShell>
   );

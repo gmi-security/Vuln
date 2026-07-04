@@ -10,12 +10,15 @@ import {
   nessusScanStatus,
 } from "@/lib/nessus";
 import { classifyAsset, computeRealRisk, isKev } from "@/lib/threat";
+import { tidalConfig, tidalListAssets } from "@/lib/tidal";
 import type {
+  AssetSource,
   Company,
   ConnectorId,
   Finding,
   FindingStatus,
   Folder,
+  InventoryAsset,
   QuantifyMetrics,
   Scan,
   ScanStatus,
@@ -23,16 +26,28 @@ import type {
 } from "@/lib/types";
 
 // Threat + environment enrichment for a finding: KEV status, the asset's
-// exposure/criticality, and the composite real-risk score.
-function riskFields(input: {
-  cve: string;
-  cvss: number;
-  epss: number;
-  exploitAvailable: boolean;
-  asset: string;
-}) {
+// exposure/criticality (from the asset inventory when known, else inferred
+// from the hostname), and the composite real-risk score.
+function riskFields(
+  s: StoreShape,
+  input: {
+    cve: string;
+    cvss: number;
+    epss: number;
+    exploitAvailable: boolean;
+    asset: string;
+    companyId: string;
+  },
+) {
   const kev = isKev(input.cve);
-  const { exposure, criticality } = classifyAsset(input.asset);
+  // Only inherit inventory context from an asset owned by the SAME customer —
+  // never cross-attribute one client's asset criticality to another's finding.
+  const inventory = lookupAsset(s, input.asset, input.companyId);
+  const exposure = inventory ? inventory.exposure : classifyAsset(input.asset).exposure;
+  const criticality = inventory
+    ? inventory.criticality
+    : classifyAsset(input.asset).criticality;
+  const assetSource: AssetSource = inventory ? inventory.source : "inferred";
   const { score, priority } = computeRealRisk({
     cvss: input.cvss,
     kev,
@@ -45,6 +60,7 @@ function riskFields(input: {
     kev,
     assetExposure: exposure,
     assetCriticality: criticality,
+    assetSource,
     realRisk: score,
     riskPriority: priority,
   };
@@ -72,11 +88,21 @@ type InternalFolder = {
   createdAt: string;
 };
 
+type InternalAsset = Omit<InventoryAsset, "openFindings">;
+
+type Settings = {
+  // When on, discovering a known-but-unscanned asset (via the coverage diff or
+  // a Tidal sync) automatically launches a scan for it.
+  autoScanNewAssets: boolean;
+};
+
 type StoreShape = {
   companies: Map<string, InternalCompany>;
   folders: Map<string, InternalFolder>;
   scans: Map<string, InternalScan>;
   findings: Map<string, Finding>;
+  assets: Map<string, InternalAsset>;
+  settings: Settings;
   seeded: boolean;
   counter: number;
 };
@@ -99,6 +125,8 @@ function store(): StoreShape {
       folders: new Map(),
       scans: new Map(),
       findings: new Map(),
+      assets: new Map(),
+      settings: { autoScanNewAssets: false },
       seeded: false,
       counter: 1000,
     };
@@ -211,12 +239,13 @@ function generateFindings(s: StoreShape, scan: InternalScan): Finding[] {
       lastSeen: completedAt,
       resolvedAt: null,
       exploitAvailable: template.exploitAvailable,
-      ...riskFields({
+      ...riskFields(s, {
         cve: template.cve,
         cvss: template.cvss,
         epss: template.epss,
         exploitAvailable: template.exploitAvailable,
         asset,
+        companyId: scan.companyId,
       }),
     });
   }
@@ -335,12 +364,13 @@ async function importVendorFindings(s: StoreShape, scan: InternalScan): Promise<
         lastSeen: completedAt,
         resolvedAt: null,
         exploitAvailable: item.exploitAvailable,
-        ...riskFields({
+        ...riskFields(s, {
           cve: item.cve,
           cvss: item.cvss,
           epss: 0,
           exploitAvailable: item.exploitAvailable,
           asset: item.asset,
+          companyId: scan.companyId,
         }),
       },
     );
@@ -379,6 +409,12 @@ function companyRollup(s: StoreShape, companyId: string) {
   const scans = Array.from(s.scans.values()).filter((sc) => sc.companyId === companyId);
   const findings = Array.from(s.findings.values()).filter((f) => f.companyId === companyId);
   const open = findings.filter(isOpen);
+  const inventoryAssets = Array.from(s.assets.values()).filter(
+    (a) => a.companyId === companyId,
+  ).length;
+  const withInventory = open.filter(
+    (f) => f.assetSource === "tidal" || f.assetSource === "manual",
+  ).length;
   return {
     folderCount: Array.from(s.folders.values()).filter((f) => f.companyId === companyId)
       .length,
@@ -389,6 +425,10 @@ function companyRollup(s: StoreShape, companyId: string) {
     openFindings: open.length,
     criticalOpen: open.filter((f) => f.severity === "Critical").length,
     exposureScore: exposureOf(open),
+    inventoryAssets,
+    inventoryCoverage: open.length
+      ? Math.round((withInventory / open.length) * 100)
+      : -1,
   };
 }
 
@@ -554,6 +594,337 @@ function ensureUnassigned(s: StoreShape): { company: InternalCompany; folder: In
   }
   const folder = ensureFolder(s, company.id, "General");
   return { company, folder };
+}
+
+// --- asset inventory (Tidal.io) --------------------------------------------
+
+// Match a finding's asset string to an inventory asset by identifier,
+// hostname, or any of its IP addresses (case-insensitive). When companyId is
+// given, only assets owned by that customer are considered — this keeps
+// customer linkage honest (no cross-tenant attribution).
+function lookupAsset(
+  s: StoreShape,
+  assetStr: string,
+  companyId?: string,
+): InternalAsset | undefined {
+  const key = assetStr.trim().toLowerCase();
+  if (!key) return undefined;
+  for (const a of s.assets.values()) {
+    if (companyId && a.companyId !== companyId) continue;
+    if (a.identifier.toLowerCase() === key) return a;
+    if (a.hostname && a.hostname.toLowerCase() === key) return a;
+    if (a.ipAddresses.some((ip) => ip.toLowerCase() === key)) return a;
+  }
+  return undefined;
+}
+
+function toPublicAsset(s: StoreShape, a: InternalAsset): InventoryAsset {
+  const openFindings = Array.from(s.findings.values()).filter(
+    (f) =>
+      (f.status === "Open" || f.status === "In Remediation") &&
+      (f.asset.toLowerCase() === a.identifier.toLowerCase() ||
+        f.asset.toLowerCase() === a.hostname.toLowerCase() ||
+        a.ipAddresses.some((ip) => ip.toLowerCase() === f.asset.toLowerCase())),
+  ).length;
+  return { ...a, openFindings };
+}
+
+export function listAssets(filter?: { companyId?: string }): InventoryAsset[] {
+  const s = store();
+  tick(s);
+  return Array.from(s.assets.values())
+    .filter((a) => !filter?.companyId || a.companyId === filter.companyId)
+    .map((a) => toPublicAsset(s, a))
+    .sort((a, b) => a.identifier.localeCompare(b.identifier));
+}
+
+export type CoverageRow = {
+  identifier: string;
+  companyId: string;
+  companyName: string;
+  exposure: string | null;
+  criticality: string | null;
+  owner: string | null;
+  source: string | null; // inventory source, or null for scanned-only
+  openFindings: number;
+  worstRisk: number;
+};
+
+export type AssetCoverage = {
+  summary: {
+    known: number;
+    scanned: number;
+    matched: number;
+    knownNotScanned: number;
+    scannedNotKnown: number;
+  };
+  matched: CoverageRow[];
+  knownNotScanned: CoverageRow[];
+  scannedNotKnown: CoverageRow[];
+};
+
+// Reconcile the asset inventory (what we KNOW exists, from Tidal/manual)
+// against the assets that actually show up in scan results (what we've
+// SCANNED). Matching is per-customer so linkage stays honest.
+export function assetCoverage(filter?: { companyId?: string }): AssetCoverage {
+  const s = store();
+  tick(s);
+
+  // Assets seen in findings, grouped per company by lowercased identifier.
+  const scanned = new Map<
+    string,
+    Map<string, { identifier: string; open: number; worstRisk: number }>
+  >();
+  for (const f of s.findings.values()) {
+    if (filter?.companyId && f.companyId !== filter.companyId) continue;
+    const perCompany = scanned.get(f.companyId) ?? new Map();
+    const key = f.asset.trim().toLowerCase();
+    const entry = perCompany.get(key) ?? {
+      identifier: f.asset,
+      open: 0,
+      worstRisk: 0,
+    };
+    if (f.status === "Open" || f.status === "In Remediation") entry.open += 1;
+    entry.worstRisk = Math.max(entry.worstRisk, f.realRisk);
+    perCompany.set(key, entry);
+    scanned.set(f.companyId, perCompany);
+  }
+
+  const matched: CoverageRow[] = [];
+  const knownNotScanned: CoverageRow[] = [];
+
+  const knownAssets = Array.from(s.assets.values()).filter(
+    (a) => !filter?.companyId || a.companyId === filter.companyId,
+  );
+  for (const a of knownAssets) {
+    const perCompany = scanned.get(a.companyId);
+    const keys = [a.identifier, a.hostname, ...a.ipAddresses]
+      .map((k) => k.trim().toLowerCase())
+      .filter(Boolean);
+    let hitKey: string | undefined;
+    if (perCompany) hitKey = keys.find((k) => perCompany.has(k));
+    const base: CoverageRow = {
+      identifier: a.identifier,
+      companyId: a.companyId,
+      companyName: a.companyName,
+      exposure: a.exposure,
+      criticality: a.criticality,
+      owner: a.owner,
+      source: a.source,
+      openFindings: 0,
+      worstRisk: 0,
+    };
+    if (hitKey && perCompany) {
+      const entry = perCompany.get(hitKey)!;
+      matched.push({ ...base, openFindings: entry.open, worstRisk: entry.worstRisk });
+      perCompany.delete(hitKey); // consume so it isn't counted as shadow
+    } else {
+      knownNotScanned.push(base);
+    }
+  }
+
+  // Whatever scanned assets remain unconsumed are not in the inventory.
+  const scannedNotKnown: CoverageRow[] = [];
+  for (const [companyId, perCompany] of scanned) {
+    const company = s.companies.get(companyId);
+    for (const entry of perCompany.values()) {
+      scannedNotKnown.push({
+        identifier: entry.identifier,
+        companyId,
+        companyName: company?.name ?? "—",
+        exposure: null,
+        criticality: null,
+        owner: null,
+        source: null,
+        openFindings: entry.open,
+        worstRisk: entry.worstRisk,
+      });
+    }
+  }
+
+  matched.sort((a, b) => b.worstRisk - a.worstRisk);
+  knownNotScanned.sort((a, b) => a.companyName.localeCompare(b.companyName));
+  scannedNotKnown.sort((a, b) => b.worstRisk - a.worstRisk);
+
+  return {
+    summary: {
+      known: knownAssets.length,
+      scanned: matched.length + scannedNotKnown.length,
+      matched: matched.length,
+      knownNotScanned: knownNotScanned.length,
+      scannedNotKnown: scannedNotKnown.length,
+    },
+    matched,
+    knownNotScanned,
+    scannedNotKnown,
+  };
+}
+
+export function getSettings(): Settings {
+  return { ...store().settings };
+}
+
+export function updateSettings(patch: Partial<Settings>): Settings {
+  const s = store();
+  s.settings = { ...s.settings, ...patch };
+  return { ...s.settings };
+}
+
+export type AutoScanResult = {
+  scansLaunched: number;
+  assetsQueued: number;
+  companies: number;
+};
+
+// Launch scans for every known-but-unscanned asset, one scan per customer
+// into an "Auto-Scan" folder, targeting that customer's gap assets. Naturally
+// idempotent: once an asset has findings it leaves the gap and won't re-scan.
+export async function autoScanGaps(): Promise<AutoScanResult> {
+  const s = store();
+  const coverage = assetCoverage();
+  const byCompany = new Map<string, string[]>();
+  for (const row of coverage.knownNotScanned) {
+    const list = byCompany.get(row.companyId) ?? [];
+    list.push(row.identifier);
+    byCompany.set(row.companyId, list);
+  }
+
+  let scansLaunched = 0;
+  let assetsQueued = 0;
+  for (const [companyId, targets] of byCompany) {
+    if (!targets.length) continue;
+    const folder = ensureFolder(s, companyId, "Auto-Scan");
+    const result = await startScan({
+      name: "Auto-scan: newly discovered assets",
+      connector: "nessus",
+      profile: "discovery",
+      targets,
+      companyId,
+      folderId: folder.id,
+      requestedBy: "auto-scan",
+    });
+    if (!("error" in result)) {
+      scansLaunched += 1;
+      assetsQueued += targets.length;
+    }
+  }
+  return { scansLaunched, assetsQueued, companies: byCompany.size };
+}
+
+// Recompute a finding's environmental context + real risk against the current
+// inventory. Used after an inventory sync so existing findings reprice.
+function rescoreFinding(s: StoreShape, f: Finding): void {
+  Object.assign(
+    f,
+    riskFields(s, {
+      cve: f.cve,
+      cvss: f.cvss,
+      epss: f.epss,
+      exploitAvailable: f.exploitAvailable,
+      asset: f.asset,
+      companyId: f.companyId,
+    }),
+  );
+}
+
+function upsertAsset(
+  s: StoreShape,
+  input: Omit<InternalAsset, "id" | "lastSynced"> & { id?: string },
+): InternalAsset {
+  const nowIso = new Date().toISOString();
+  // Match an existing asset by external id or identifier within the company.
+  const existing = Array.from(s.assets.values()).find(
+    (a) =>
+      (input.externalId && a.externalId === input.externalId) ||
+      (a.companyId === input.companyId &&
+        a.identifier.toLowerCase() === input.identifier.toLowerCase()),
+  );
+  if (existing) {
+    Object.assign(existing, input, { lastSynced: nowIso });
+    return existing;
+  }
+  const id = input.id ?? nextId(s, "AST");
+  const asset: InternalAsset = { ...input, id, lastSynced: nowIso };
+  s.assets.set(id, asset);
+  return asset;
+}
+
+export type TidalImportResult = {
+  companiesCreated: number;
+  assetsUpserted: number;
+  findingsRescored: number;
+  autoScan?: AutoScanResult;
+};
+
+// Pull the Tidal asset inventory, map each asset's customer to a company
+// (match by name, create if missing), upsert the asset, then reprice every
+// finding so real risk reflects the authoritative environment.
+export async function importFromTidal(): Promise<
+  TidalImportResult | { error: string }
+> {
+  if (!tidalConfig()) {
+    return {
+      error:
+        "Tidal is not configured. Set TIDAL_API_URL and TIDAL_API_KEY to sync the asset inventory.",
+    };
+  }
+  const s = store();
+  let assets;
+  try {
+    assets = await tidalListAssets();
+  } catch (err) {
+    return {
+      error: err instanceof Error ? err.message : "Failed to reach the Tidal API.",
+    };
+  }
+
+  let companiesCreated = 0;
+  let assetsUpserted = 0;
+  for (const t of assets) {
+    const customer = t.customer.trim() || "Unassigned";
+    let company = Array.from(s.companies.values()).find(
+      (c) => c.name.toLowerCase() === customer.toLowerCase(),
+    );
+    if (!company) {
+      const created = createCompany({ name: customer });
+      if ("error" in created) continue;
+      company = s.companies.get(created.id)!;
+      companiesCreated += 1;
+    }
+    const identifier = t.hostname || t.ipAddresses[0] || t.externalId;
+    if (!identifier) continue;
+    upsertAsset(s, {
+      identifier,
+      hostname: t.hostname,
+      ipAddresses: t.ipAddresses,
+      companyId: company.id,
+      companyName: company.name,
+      exposure: t.exposure,
+      criticality: t.criticality,
+      os: t.os,
+      owner: t.owner,
+      tags: t.tags,
+      source: "tidal",
+      externalId: t.externalId,
+    });
+    assetsUpserted += 1;
+  }
+
+  let findingsRescored = 0;
+  for (const f of s.findings.values()) {
+    const before = f.realRisk;
+    rescoreFinding(s, f);
+    if (f.realRisk !== before || f.assetSource === "tidal") findingsRescored += 1;
+  }
+
+  // If auto-scan is enabled, scan any newly-known assets that have no
+  // coverage yet.
+  let autoScan: AutoScanResult | undefined;
+  if (s.settings.autoScanNewAssets) {
+    autoScan = await autoScanGaps();
+  }
+
+  return { companiesCreated, assetsUpserted, findingsRescored, autoScan };
 }
 
 export type NessusImportResult = {
@@ -1152,6 +1523,47 @@ function seed(s: StoreShape): void {
     const company = s.companies.get(created.id)!;
     companyByName.set(c.name, company);
     for (const folderName of c.folders) ensureFolder(s, company.id, folderName);
+  }
+
+  // Sample manually-known asset inventory. Marked source "manual" — this is
+  // NOT a Tidal sync; connecting Tidal.io replaces/extends it with the real
+  // per-customer inventory. Coverage is deliberately partial, so some
+  // findings resolve to inventory context and the rest fall back to inferred.
+  const seedAssets: Array<{
+    company: string;
+    identifier: string;
+    ips: string[];
+    exposure: InternalAsset["exposure"];
+    criticality: InternalAsset["criticality"];
+    os: string;
+    owner: string;
+  }> = [
+    { company: "Northwind Retail", identifier: "web-prod-01.gmi.com", ips: ["203.0.113.11"], exposure: "Internet-facing", criticality: "Crown Jewel", os: "Ubuntu 22.04", owner: "Platform" },
+    { company: "Northwind Retail", identifier: "web-prod-02.gmi.com", ips: ["203.0.113.12"], exposure: "Internet-facing", criticality: "High", os: "Ubuntu 22.04", owner: "Platform" },
+    { company: "Northwind Retail", identifier: "sql-prod-01.gmi.local", ips: ["10.10.0.21"], exposure: "Internal", criticality: "Crown Jewel", os: "Windows Server 2022", owner: "DBA" },
+    { company: "Cascade Health", identifier: "mail.gmi.com", ips: ["203.0.113.25"], exposure: "Internet-facing", criticality: "High", os: "Exchange 2019", owner: "IT Ops" },
+    { company: "Cascade Health", identifier: "esxi-01.gmi.local", ips: ["10.20.0.5"], exposure: "Internal", criticality: "Crown Jewel", os: "VMware ESXi 8", owner: "Infra" },
+    { company: "Cascade Health", identifier: "ws-fin-114.gmi.local", ips: ["10.20.5.114"], exposure: "Internal", criticality: "Low", os: "Windows 11", owner: "Finance" },
+    { company: "Meridian Financial", identifier: "vpn.gmi.com", ips: ["198.51.100.9"], exposure: "Internet-facing", criticality: "Crown Jewel", os: "FortiOS 7.4", owner: "NetSec" },
+    { company: "Meridian Financial", identifier: "dc02.gmi.local", ips: ["10.30.0.10"], exposure: "Internal", criticality: "Crown Jewel", os: "Windows Server 2022", owner: "Directory" },
+  ];
+  for (const a of seedAssets) {
+    const company = companyByName.get(a.company);
+    if (!company) continue;
+    upsertAsset(s, {
+      identifier: a.identifier,
+      hostname: a.identifier,
+      ipAddresses: a.ips,
+      companyId: company.id,
+      companyName: company.name,
+      exposure: a.exposure,
+      criticality: a.criticality,
+      os: a.os,
+      owner: a.owner,
+      tags: [],
+      source: "manual",
+      externalId: "",
+    });
   }
 
   const historical: Array<{

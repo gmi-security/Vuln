@@ -6,6 +6,7 @@ import {
   LayoutDashboard,
   PlugZap,
   Radar,
+  ScanSearch,
 } from "lucide-react";
 
 export type VulnNavItem = {
@@ -18,6 +19,7 @@ export const baseNavItems: VulnNavItem[] = [
   { label: "Dashboard", icon: LayoutDashboard, href: "/dashboard" },
   { label: "Companies", icon: Building2, href: "/companies" },
   { label: "Scans", icon: Radar, href: "/scans" },
+  { label: "Coverage", icon: ScanSearch, href: "/coverage" },
   { label: "Findings", icon: Bug, href: "/findings" },
   { label: "Quantify", icon: Gauge, href: "/quantify" },
   { label: "Connectors", icon: PlugZap, href: "/connectors" },

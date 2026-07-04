@@ -447,7 +447,16 @@ export default function VulnFindingsPage() {
               <p className="mt-4 text-xs leading-relaxed text-zinc-500">
                 Base CVSS adjusted for real-world exploitation (KEV, EPSS,
                 public exploit) and the affected asset&apos;s exposure and
-                business criticality.
+                business criticality.{" "}
+                <span className="text-zinc-400">
+                  Environment context:{" "}
+                  {focus.assetSource === "tidal"
+                    ? "Tidal.io inventory"
+                    : focus.assetSource === "manual"
+                      ? "manual inventory"
+                      : "inferred from hostname"}
+                  .
+                </span>
               </p>
             </div>
 

@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { Building2, DownloadCloud, FolderKanban, Plus, Radar, X } from "lucide-react";
+import { Building2, Database, DownloadCloud, FolderKanban, Plus, Radar, X } from "lucide-react";
 import { IconAlertTriangle, IconBug } from "@tabler/icons-react";
 import VulnShell from "@/components/VulnShell";
 import {
@@ -73,6 +73,32 @@ export default function VulnCompaniesPage() {
     }
   }
 
+  async function syncTidal() {
+    setImporting(true);
+    setImportMsg(null);
+    try {
+      const res = await fetch("/api/tidal/import", { method: "POST" });
+      const json = await res.json();
+      if (!res.ok) {
+        setImportMsg({ ok: false, text: json.error ?? "Tidal sync failed." });
+        return;
+      }
+      const r = json.result;
+      const auto = r.autoScan?.assetsQueued
+        ? ` Auto-scan launched ${r.autoScan.scansLaunched} scan${r.autoScan.scansLaunched === 1 ? "" : "s"} for ${r.autoScan.assetsQueued} new asset${r.autoScan.assetsQueued === 1 ? "" : "s"}.`
+        : "";
+      setImportMsg({
+        ok: true,
+        text: `Synced ${r.assetsUpserted} assets from Tidal (${r.companiesCreated} new customer${r.companiesCreated === 1 ? "" : "s"}); repriced ${r.findingsRescored} findings.${auto}`,
+      });
+      await load();
+    } catch {
+      setImportMsg({ ok: false, text: "Failed to reach the Tidal API." });
+    } finally {
+      setImporting(false);
+    }
+  }
+
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setSubmitting(true);
@@ -108,6 +134,14 @@ export default function VulnCompaniesPage() {
       subtitle="The organizations we run scans for. Each company groups its scans into folders and rolls up its own open findings and exposure."
       actions={
         <>
+          <button
+            onClick={() => void syncTidal()}
+            disabled={importing}
+            className={`${ghostButtonClass} disabled:opacity-50`}
+          >
+            <Database size={16} className="text-zinc-400" />
+            Sync from Tidal
+          </button>
           <button
             onClick={() => void importNessus()}
             disabled={importing}
@@ -189,13 +223,28 @@ export default function VulnCompaniesPage() {
                   />
                 </div>
 
-                {company.activeScans > 0 ? (
-                  <div className="mt-4 inline-flex items-center gap-2 rounded-full border border-[rgba(179,14,20,0.40)] bg-[rgba(179,14,20,0.10)] px-3 py-1 text-xs text-[#ff4d57]">
-                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#ff4d57]" />
-                    {company.activeScans} active scan
-                    {company.activeScans === 1 ? "" : "s"}
-                  </div>
-                ) : null}
+                <div className="mt-4 flex flex-wrap items-center gap-2">
+                  {company.activeScans > 0 ? (
+                    <div className="inline-flex items-center gap-2 rounded-full border border-[rgba(179,14,20,0.40)] bg-[rgba(179,14,20,0.10)] px-3 py-1 text-xs text-[#ff4d57]">
+                      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#ff4d57]" />
+                      {company.activeScans} active scan
+                      {company.activeScans === 1 ? "" : "s"}
+                    </div>
+                  ) : null}
+                  {company.inventoryAssets > 0 ? (
+                    <div className="inline-flex items-center gap-2 rounded-full border border-sky-900/60 bg-[rgba(74,163,255,0.10)] px-3 py-1 text-xs text-sky-300">
+                      Inventory: {company.inventoryAssets} asset
+                      {company.inventoryAssets === 1 ? "" : "s"}
+                      {company.inventoryCoverage >= 0
+                        ? ` · ${company.inventoryCoverage}% coverage`
+                        : ""}
+                    </div>
+                  ) : (
+                    <div className="inline-flex items-center gap-2 rounded-full border border-zinc-800 bg-zinc-900 px-3 py-1 text-xs text-zinc-500">
+                      Not in Tidal · context inferred
+                    </div>
+                  )}
+                </div>
               </section>
             </Link>
           ))}

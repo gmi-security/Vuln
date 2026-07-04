@@ -25,10 +25,23 @@ import type {
   Company,
   Connector,
   Folder,
+  InventoryAsset,
   QuantifyMetrics,
   Scan,
   ScanProfile,
 } from "@/lib/types";
+import { exposureClass } from "@/lib/format";
+
+const assetSourceLabel: Record<string, string> = {
+  tidal: "Tidal",
+  manual: "Manual",
+  inferred: "Inferred",
+};
+const assetSourceClass: Record<string, string> = {
+  tidal: "bg-[rgba(74,163,255,0.10)] text-sky-300 border border-sky-900/60",
+  manual: "bg-zinc-900 text-zinc-300 border border-zinc-800",
+  inferred: "bg-zinc-900 text-zinc-500 border border-zinc-800",
+};
 
 export default function VulnCompanyDetailPage({
   companyId,
@@ -40,6 +53,7 @@ export default function VulnCompanyDetailPage({
   const [company, setCompany] = useState<Company | null>(null);
   const [folders, setFolders] = useState<Folder[]>([]);
   const [scans, setScans] = useState<Scan[]>([]);
+  const [assets, setAssets] = useState<InventoryAsset[]>([]);
   const [metrics, setMetrics] = useState<QuantifyMetrics | null>(null);
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [showNew, setShowNew] = useState(false);
@@ -49,12 +63,14 @@ export default function VulnCompanyDetailPage({
 
   const load = useCallback(async () => {
     try {
-      const [companyRes, foldersRes, scansRes, metricsRes] = await Promise.all([
-        fetch(`/api/companies/${companyId}`, { cache: "no-store" }),
-        fetch(`/api/folders?companyId=${companyId}`, { cache: "no-store" }),
-        fetch(`/api/scans?companyId=${companyId}`, { cache: "no-store" }),
-        fetch(`/api/metrics?companyId=${companyId}`, { cache: "no-store" }),
-      ]);
+      const [companyRes, foldersRes, scansRes, metricsRes, assetsRes] =
+        await Promise.all([
+          fetch(`/api/companies/${companyId}`, { cache: "no-store" }),
+          fetch(`/api/folders?companyId=${companyId}`, { cache: "no-store" }),
+          fetch(`/api/scans?companyId=${companyId}`, { cache: "no-store" }),
+          fetch(`/api/metrics?companyId=${companyId}`, { cache: "no-store" }),
+          fetch(`/api/assets?companyId=${companyId}`, { cache: "no-store" }),
+        ]);
       if (companyRes.status === 404) {
         setNotFound(true);
         return;
@@ -63,6 +79,7 @@ export default function VulnCompanyDetailPage({
       setFolders((await foldersRes.json()).folders ?? []);
       setScans((await scansRes.json()).scans ?? []);
       setMetrics((await metricsRes.json()).metrics ?? null);
+      setAssets((await assetsRes.json()).assets ?? []);
     } catch {
       // keep last snapshot
     }
@@ -228,6 +245,81 @@ export default function VulnCompanyDetailPage({
           </button>
         )}
       </div>
+
+      <PanelCard
+        eyebrow="Asset inventory"
+        description="Environmental context for real-risk scoring — synced from Tidal.io or entered manually"
+        actions={
+          <span className="text-sm text-zinc-500">
+            {assets.length} asset{assets.length === 1 ? "" : "s"}
+            {company && company.inventoryCoverage >= 0
+              ? ` · ${company.inventoryCoverage}% of open findings covered`
+              : ""}
+          </span>
+        }
+      >
+        {company && company.openFindings > 0 && company.inventoryCoverage < 100 ? (
+          <div className="mb-4 rounded-2xl border border-zinc-800 bg-[#080808] px-4 py-3 text-xs leading-relaxed text-zinc-500">
+            {assets.length === 0
+              ? "This customer has no inventory in Tidal — real risk uses asset context inferred from hostnames. "
+              : `${company.inventoryCoverage}% of this customer's open findings use authoritative inventory context; the rest are inferred from hostnames. `}
+            Not every customer is in Tidal, so coverage is partial by design —
+            inferred context is clearly marked on each finding.
+          </div>
+        ) : null}
+        {assets.length === 0 ? (
+          <div className="rounded-2xl border border-dashed border-zinc-800 bg-[#080808] px-5 py-8 text-center text-sm text-zinc-500">
+            No inventory yet. Sync from Tidal on the Companies page to populate
+            asset exposure and criticality.
+          </div>
+        ) : (
+          <div className="overflow-hidden rounded-[24px] border border-[rgba(179,14,20,0.12)] bg-[#040404]">
+            <div className="grid grid-cols-[1.6fr_150px_140px_1fr_110px_90px] gap-4 border-b border-zinc-900 px-5 py-3 text-xs uppercase tracking-[0.2em] text-zinc-500">
+              <div>Asset</div>
+              <div>Exposure</div>
+              <div>Criticality</div>
+              <div>Owner / OS</div>
+              <div>Source</div>
+              <div>Open</div>
+            </div>
+            {assets.map((asset) => (
+              <div
+                key={asset.id}
+                className="grid grid-cols-[1.6fr_150px_140px_1fr_110px_90px] items-center gap-4 border-b border-zinc-900/70 px-5 py-3 last:border-b-0"
+              >
+                <div className="min-w-0">
+                  <div className="truncate font-medium text-white">
+                    {asset.identifier}
+                  </div>
+                  {asset.ipAddresses.length ? (
+                    <div className="mt-1 truncate text-xs text-zinc-500">
+                      {asset.ipAddresses.join(", ")}
+                    </div>
+                  ) : null}
+                </div>
+                <div
+                  className={`text-sm ${exposureClass[asset.exposure] ?? "text-zinc-300"}`}
+                >
+                  {asset.exposure}
+                </div>
+                <div className="text-sm text-zinc-300">{asset.criticality}</div>
+                <div className="min-w-0 text-sm text-zinc-400">
+                  <div className="truncate">{asset.owner || "—"}</div>
+                  <div className="truncate text-xs text-zinc-600">
+                    {asset.os || ""}
+                  </div>
+                </div>
+                <div>
+                  <Pill className={assetSourceClass[asset.source]}>
+                    {assetSourceLabel[asset.source]}
+                  </Pill>
+                </div>
+                <div className="text-sm text-zinc-300">{asset.openFindings}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </PanelCard>
 
       {folders.map((folder) => {
         const folderScans = byFolder.get(folder.id) ?? [];

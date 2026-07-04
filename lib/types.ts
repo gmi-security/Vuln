@@ -31,6 +31,12 @@ export type Company = {
   openFindings: number;
   criticalOpen: number;
   exposureScore: number;
+  // Asset-inventory coverage. inventoryAssets is how many inventory assets
+  // this customer has (0 = not in Tidal / no inventory). inventoryCoverage is
+  // the % of open findings whose environment context comes from the inventory
+  // rather than being inferred from the hostname (-1 when there are none).
+  inventoryAssets: number;
+  inventoryCoverage: number;
 };
 
 export type Folder = {
@@ -39,6 +45,30 @@ export type Folder = {
   name: string;
   createdAt: string;
   scanCount: number;
+};
+
+export type AssetExposure = "Internet-facing" | "Internal" | "Isolated";
+export type AssetCriticality = "Crown Jewel" | "High" | "Normal" | "Low";
+export type AssetSource = "tidal" | "manual" | "inferred";
+
+// An asset in the inventory (sourced from Tidal.io, or entered manually).
+// This is the authoritative environmental context for real-risk scoring.
+export type InventoryAsset = {
+  id: string;
+  identifier: string; // primary hostname/ip that findings reference
+  hostname: string;
+  ipAddresses: string[];
+  companyId: string;
+  companyName: string;
+  exposure: AssetExposure;
+  criticality: AssetCriticality;
+  os: string;
+  owner: string;
+  tags: string[];
+  source: AssetSource;
+  externalId: string; // Tidal asset id, when sourced from Tidal
+  lastSynced: string;
+  openFindings: number; // derived
 };
 
 export type ConnectorId = "nessus" | "vulners" | "crowdstrike" | "qualys";
@@ -115,6 +145,9 @@ export type Finding = {
   // Environmental context (from the affected asset)
   assetExposure: "Internet-facing" | "Internal" | "Isolated";
   assetCriticality: "Crown Jewel" | "High" | "Normal" | "Low";
+  // Where the environmental context came from: the asset inventory (Tidal /
+  // manual) or hostname-inferred heuristics.
+  assetSource: AssetSource;
   // Composite real-risk score (0-100) and its priority band
   realRisk: number;
   riskPriority: "Critical" | "High" | "Medium" | "Low" | "Info";
