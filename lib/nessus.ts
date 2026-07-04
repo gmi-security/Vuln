@@ -129,6 +129,49 @@ export async function nessusLaunchScan(
   return { nessusScanId: scanId };
 }
 
+export type NessusFolder = {
+  id: number;
+  name: string;
+  type: string; // "main" | "custom" | "trash"
+};
+
+// List the folders configured on the scanner. In an MSSP setup each folder
+// typically represents a client, so these map onto Vuln companies.
+export async function nessusListFolders(): Promise<NessusFolder[]> {
+  const config = nessusConfig();
+  if (!config) throw new Error("Nessus is not configured.");
+  const data = await api(config, "GET", "/folders");
+  const folders: any[] = data?.folders ?? [];
+  return folders.map((f) => ({
+    id: Number(f.id),
+    name: String(f.name),
+    type: String(f.type ?? "custom"),
+  }));
+}
+
+export type NessusScanSummary = {
+  id: number;
+  name: string;
+  folderId: number;
+  status: string;
+  lastModified: number | null;
+};
+
+// List all scans on the scanner with their folder assignment and status.
+export async function nessusListScans(): Promise<NessusScanSummary[]> {
+  const config = nessusConfig();
+  if (!config) throw new Error("Nessus is not configured.");
+  const data = await api(config, "GET", "/scans");
+  const scans: any[] = data?.scans ?? [];
+  return scans.map((sc) => ({
+    id: Number(sc.id),
+    name: String(sc.name ?? `Nessus scan ${sc.id}`),
+    folderId: Number(sc.folder_id),
+    status: String(sc.status ?? "completed"),
+    lastModified: sc.last_modification_date ? Number(sc.last_modification_date) : null,
+  }));
+}
+
 export async function nessusScanStatus(
   nessusScanId: number,
 ): Promise<{ status: string; progress: number }> {

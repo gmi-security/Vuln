@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { Building2, FolderKanban, Plus, Radar, X } from "lucide-react";
+import { Building2, DownloadCloud, FolderKanban, Plus, Radar, X } from "lucide-react";
 import { IconAlertTriangle, IconBug } from "@tabler/icons-react";
 import VulnShell from "@/components/VulnShell";
 import {
@@ -29,6 +29,10 @@ export default function VulnCompaniesPage() {
   const [contactEmail, setContactEmail] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importMsg, setImportMsg] = useState<
+    { ok: boolean; text: string } | null
+  >(null);
 
   const load = useCallback(async () => {
     try {
@@ -45,6 +49,29 @@ export default function VulnCompaniesPage() {
     const timer = setInterval(() => void load(), 5000);
     return () => clearInterval(timer);
   }, [load]);
+
+  async function importNessus() {
+    setImporting(true);
+    setImportMsg(null);
+    try {
+      const res = await fetch("/api/nessus/import", { method: "POST" });
+      const json = await res.json();
+      if (!res.ok) {
+        setImportMsg({ ok: false, text: json.error ?? "Import failed." });
+        return;
+      }
+      const r = json.result;
+      setImportMsg({
+        ok: true,
+        text: `Imported ${r.companiesCreated} new compan${r.companiesCreated === 1 ? "y" : "ies"} (${r.companiesMatched} matched), ${r.scansImported} scans, ${r.findingsImported} findings.`,
+      });
+      await load();
+    } catch {
+      setImportMsg({ ok: false, text: "Failed to reach the import API." });
+    } finally {
+      setImporting(false);
+    }
+  }
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -80,16 +107,39 @@ export default function VulnCompaniesPage() {
       title="Client companies"
       subtitle="The organizations we run scans for. Each company groups its scans into folders and rolls up its own open findings and exposure."
       actions={
-        <button onClick={() => setShowNew(true)} className={primaryButtonClass}>
-          <Plus size={16} />
-          Add company
-        </button>
+        <>
+          <button
+            onClick={() => void importNessus()}
+            disabled={importing}
+            className={`${ghostButtonClass} disabled:opacity-50`}
+          >
+            <DownloadCloud size={16} className="text-zinc-400" />
+            {importing ? "Importing..." : "Import from Nessus"}
+          </button>
+          <button onClick={() => setShowNew(true)} className={primaryButtonClass}>
+            <Plus size={16} />
+            Add company
+          </button>
+        </>
       }
     >
+      {importMsg ? (
+        <div
+          className={[
+            "rounded-2xl border px-5 py-4 text-sm",
+            importMsg.ok
+              ? "border-emerald-900/60 bg-emerald-950/40 text-emerald-300"
+              : "border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.10)] text-[#ff4d57]",
+          ].join(" ")}
+        >
+          {importMsg.text}
+        </div>
+      ) : null}
+
       {companies.length === 0 ? (
         <PanelCard eyebrow="Companies">
           <div className="px-5 py-12 text-center text-sm text-zinc-500">
-            No companies yet — add one to start organizing scans.
+            No companies yet — add one, or import your Nessus folders.
           </div>
         </PanelCard>
       ) : (

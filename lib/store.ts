@@ -4,6 +4,8 @@ import {
   nessusConfig,
   nessusImportFindings,
   nessusLaunchScan,
+  nessusListFolders,
+  nessusListScans,
   nessusScanControl,
   nessusScanStatus,
 } from "@/lib/nessus";
@@ -496,6 +498,146 @@ function ensureUnassigned(s: StoreShape): { company: InternalCompany; folder: In
   }
   const folder = ensureFolder(s, company.id, "General");
   return { company, folder };
+}
+
+export type NessusImportResult = {
+  companiesCreated: number;
+  companiesMatched: number;
+  scansImported: number;
+  findingsImported: number;
+  skipped: number;
+};
+
+// Import the scanner's folder structure as companies: each Nessus folder
+// becomes (or matches, by name) a Vuln company, and the scans inside it are
+// imported into that company's "Nessus" folder. Completed scans also pull
+// their findings. Idempotent — re-running only adds what's new.
+export async function importFromNessus(): Promise<
+  NessusImportResult | { error: string }
+> {
+  if (!nessusConfig()) {
+    return {
+      error:
+        "Nessus is not configured. Set NESSUS_URL, NESSUS_ACCESS_KEY, and NESSUS_SECRET_KEY to import.",
+    };
+  }
+  const s = store();
+
+  let folders;
+  try {
+    folders = await nessusListFolders();
+  } catch (err) {
+    return {
+      error: err instanceof Error ? err.message : "Failed to list Nessus folders.",
+    };
+  }
+
+  // Map each importable Nessus folder to a Vuln company (match by name,
+  // create if missing). Skip Nessus's built-in folders — Trash, the default
+  // "My Scans" (type "main"), and the virtual "All Scans" view — since those
+  // aren't clients.
+  const BUILTIN_FOLDERS = new Set(["my scans", "all scans", "trash"]);
+  const folderToCompany = new Map<number, string>();
+  let companiesCreated = 0;
+  let companiesMatched = 0;
+  for (const folder of folders) {
+    if (folder.type === "trash" || folder.type === "main") continue;
+    if (BUILTIN_FOLDERS.has(folder.name.trim().toLowerCase())) continue;
+    const existing = Array.from(s.companies.values()).find(
+      (c) => c.name.toLowerCase() === folder.name.toLowerCase(),
+    );
+    let companyId: string;
+    if (existing) {
+      companyId = existing.id;
+      companiesMatched += 1;
+    } else {
+      const created = createCompany({ name: folder.name });
+      if ("error" in created) continue;
+      companyId = created.id;
+      companiesCreated += 1;
+    }
+    folderToCompany.set(folder.id, companyId);
+    ensureFolder(s, companyId, "Nessus");
+  }
+
+  let scans: Awaited<ReturnType<typeof nessusListScans>>;
+  try {
+    scans = await nessusListScans();
+  } catch {
+    scans = [];
+  }
+
+  let scansImported = 0;
+  let findingsImported = 0;
+  let skipped = 0;
+  for (const summary of scans) {
+    const companyId = folderToCompany.get(summary.folderId);
+    if (!companyId) {
+      skipped += 1;
+      continue;
+    }
+    // Skip scans already linked to a Vuln scan record.
+    const already = Array.from(s.scans.values()).some(
+      (sc) => sc.vendor?.nessusScanId === summary.id,
+    );
+    if (already) {
+      skipped += 1;
+      continue;
+    }
+    const company = s.companies.get(companyId)!;
+    const folder = ensureFolder(s, companyId, "Nessus");
+    const status = NESSUS_STATUS_MAP[summary.status] ?? "Completed";
+    const nowIso = new Date().toISOString();
+    const completedAt =
+      status === "Completed" || status === "Stopped"
+        ? summary.lastModified
+          ? new Date(summary.lastModified * 1000).toISOString()
+          : nowIso
+        : null;
+    const id = nextId(s, "SCAN");
+    const scan: InternalScan = {
+      id,
+      name: summary.name,
+      companyId: company.id,
+      companyName: company.name,
+      folderId: folder.id,
+      folderName: folder.name,
+      connector: "nessus",
+      profile: "imported",
+      targets: [],
+      status,
+      createdAt: nowIso,
+      startedAt: completedAt ?? nowIso,
+      completedAt,
+      findingsCount: 0,
+      severityCounts: emptySeverityCounts(),
+      hostsScanned: 0,
+      requestedBy: "imported@nessus",
+      durationMs: 1,
+      progressFrozenAt: status === "Completed" ? 100 : 0,
+      seed: hashSeed(id + summary.name),
+      vendor: { nessusScanId: summary.id, lastPoll: Date.now(), imported: false },
+    };
+    s.scans.set(id, scan);
+    scansImported += 1;
+    if (status === "Completed") {
+      try {
+        await importVendorFindings(s, scan);
+        scan.vendor!.imported = true;
+        findingsImported += scan.findingsCount;
+      } catch {
+        // leave imported=false so a later poll retries the findings import
+      }
+    }
+  }
+
+  return {
+    companiesCreated,
+    companiesMatched,
+    scansImported,
+    findingsImported,
+    skipped,
+  };
 }
 
 // Resolve the company + folder a new scan belongs to from loose input.
