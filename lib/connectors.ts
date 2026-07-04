@@ -1,0 +1,176 @@
+import type { Connector, ConnectorId, ScanProfile } from "@/lib/types";
+
+// Scanner connector registry. Each connector runs in Demo Mode until its
+// environment variables are set, at which point the adapter in this file is
+// the single integration point for wiring the real vendor API.
+
+type ConnectorDef = Omit<Connector, "status" | "configured"> & {
+  planned?: boolean;
+  // Demo simulation profile: how long a simulated scan runs and how noisy it is.
+  demo: {
+    minDurationMs: number;
+    maxDurationMs: number;
+    minFindings: number;
+    maxFindings: number;
+    categories?: string[];
+  };
+};
+
+const CONNECTOR_DEFS: Record<ConnectorId, ConnectorDef> = {
+  nessus: {
+    id: "nessus",
+    name: "Nessus",
+    vendor: "Tenable",
+    kind: "Network Vulnerability Scanner",
+    description:
+      "Authenticated and unauthenticated network scanning via the Nessus REST API. Launch scans by policy, track scan status, and import plugin results as findings.",
+    capabilities: ["Launch scans", "Scan status", "Import findings", "Scan policies"],
+    envVars: ["NESSUS_URL", "NESSUS_ACCESS_KEY", "NESSUS_SECRET_KEY"],
+    docsUrl: "https://developer.tenable.com/reference/navigate",
+    demo: { minDurationMs: 90_000, maxDurationMs: 180_000, minFindings: 18, maxFindings: 34 },
+  },
+  vulners: {
+    id: "vulners",
+    name: "Vulners",
+    vendor: "Vulners",
+    kind: "Vulnerability Intelligence & Audit",
+    description:
+      "Package-level audit and CVE enrichment via the Vulners API. Sends installed package inventories for assessment and enriches findings with exploit and EPSS intelligence.",
+    capabilities: ["Package audit", "CVE enrichment", "Exploit intel", "EPSS scores"],
+    envVars: ["VULNERS_API_KEY"],
+    docsUrl: "https://vulners.com/docs",
+    demo: {
+      minDurationMs: 30_000,
+      maxDurationMs: 75_000,
+      minFindings: 10,
+      maxFindings: 22,
+      categories: ["Application Library", "Operating System", "Web Server", "Cryptography", "CI/CD"],
+    },
+  },
+  crowdstrike: {
+    id: "crowdstrike",
+    name: "CrowdStrike Spotlight",
+    vendor: "CrowdStrike",
+    kind: "Endpoint Vulnerability Management",
+    description:
+      "Agent-based vulnerability visibility from Falcon Spotlight. Pulls open vulnerabilities per host from the Falcon API — no active scanning required, results reflect live sensor telemetry.",
+    capabilities: ["Sensor telemetry sync", "Host vulnerabilities", "ExPRT ratings", "Remediation info"],
+    envVars: ["FALCON_CLIENT_ID", "FALCON_CLIENT_SECRET", "FALCON_CLOUD"],
+    docsUrl: "https://falcon.crowdstrike.com/documentation/page/spotlight-apis",
+    demo: {
+      minDurationMs: 20_000,
+      maxDurationMs: 45_000,
+      minFindings: 12,
+      maxFindings: 26,
+      categories: ["Endpoint", "Operating System", "Application Library"],
+    },
+  },
+  qualys: {
+    id: "qualys",
+    name: "Qualys VMDR",
+    vendor: "Qualys",
+    kind: "Cloud Vulnerability Management",
+    description:
+      "Planned integration. Qualys VMDR scan orchestration and detection import via the Qualys API — on the roadmap once licensing lands.",
+    capabilities: ["Launch scans", "Detection import", "Asset tags"],
+    envVars: ["QUALYS_API_URL", "QUALYS_USERNAME", "QUALYS_PASSWORD"],
+    docsUrl: "https://docs.qualys.com/en/vm/api/",
+    planned: true,
+    demo: { minDurationMs: 60_000, maxDurationMs: 120_000, minFindings: 15, maxFindings: 30 },
+  },
+};
+
+export const SCAN_PROFILES: ScanProfile[] = [
+  {
+    id: "discovery",
+    label: "Discovery",
+    description: "Host and service discovery only — fast, low impact.",
+  },
+  {
+    id: "standard",
+    label: "Standard Vulnerability Scan",
+    description: "Full unauthenticated vulnerability assessment of exposed services.",
+  },
+  {
+    id: "credentialed",
+    label: "Credentialed Deep Scan",
+    description: "Authenticated scan with local checks, patch audit, and configuration review.",
+  },
+  {
+    id: "pci",
+    label: "PCI External",
+    description: "External scan aligned to PCI DSS quarterly scanning requirements.",
+  },
+  {
+    id: "agent-sync",
+    label: "Agent Telemetry Sync",
+    description: "Pull latest vulnerability state from deployed agents (no active probing).",
+  },
+];
+
+function isConfigured(def: ConnectorDef): boolean {
+  return def.envVars.every((v) => Boolean(process.env[v]));
+}
+
+export function getConnectors(): Connector[] {
+  return (Object.values(CONNECTOR_DEFS) as ConnectorDef[]).map((def) => {
+    const configured = isConfigured(def);
+    return {
+      id: def.id,
+      name: def.name,
+      vendor: def.vendor,
+      kind: def.kind,
+      description: def.description,
+      capabilities: def.capabilities,
+      envVars: def.envVars,
+      docsUrl: def.docsUrl,
+      configured,
+      status: def.planned ? "Planned" : configured ? "Connected" : "Demo Mode",
+    };
+  });
+}
+
+export function getConnector(id: ConnectorId): Connector | undefined {
+  return getConnectors().find((c) => c.id === id);
+}
+
+export function getDemoProfile(id: ConnectorId) {
+  return CONNECTOR_DEFS[id].demo;
+}
+
+export function isPlanned(id: ConnectorId): boolean {
+  return Boolean(CONNECTOR_DEFS[id].planned);
+}
+
+// ---------------------------------------------------------------------------
+// Real API integration points.
+//
+// When credentials are present these functions are where the vendor calls go.
+// They intentionally share one signature so the scan engine (lib/store.ts)
+// does not care which backend runs the scan.
+//
+//   nessus:      POST {NESSUS_URL}/scans (create from policy) then
+//                POST /scans/{id}/launch; poll GET /scans/{id};
+//                export results via /scans/{id}/export.
+//   vulners:     POST https://vulners.com/api/v3/audit/audit with package
+//                inventory per host; map returned CVE list to findings.
+//   crowdstrike: OAuth2 token from https://api.{FALCON_CLOUD}/oauth2/token,
+//                then GET /spotlight/queries/vulnerabilities/v2 + entities
+//                lookup; map to findings.
+//   qualys:      planned — VM scan launch via /api/2.0/fo/scan/.
+// ---------------------------------------------------------------------------
+
+export async function launchVendorScan(
+  connector: ConnectorId,
+  _targets: string[],
+  _profile: string,
+): Promise<{ vendorScanRef: string | null }> {
+  const def = CONNECTOR_DEFS[connector];
+  if (!isConfigured(def) || def.planned) {
+    // Demo mode: the in-process scan engine simulates progress and results.
+    return { vendorScanRef: null };
+  }
+  // TODO(integration): dispatch to the vendor API described above and return
+  // the vendor's scan reference so status polling can resume across restarts.
+  return { vendorScanRef: null };
+}
