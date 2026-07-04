@@ -129,6 +129,56 @@ export async function nessusLaunchScan(
   return { nessusScanId: scanId };
 }
 
+// Lightweight connectivity/activation probe for the scanner. Returns whether
+// the app can reach the Nessus API and whether it's ready (activated + plugins
+// compiled) vs still loading or unlicensed ("API is not available").
+export async function nessusServerStatus(): Promise<{
+  configured: boolean;
+  reachable: boolean;
+  ready: boolean;
+  status: string;
+  message: string;
+}> {
+  const config = nessusConfig();
+  if (!config) {
+    return {
+      configured: false,
+      reachable: false,
+      ready: false,
+      status: "not-configured",
+      message: "NESSUS_URL / API keys not set",
+    };
+  }
+  try {
+    const res = await request(config, "GET", "/server/status");
+    if (res.status >= 200 && res.status < 300) {
+      const status = String(res.json?.status ?? "unknown");
+      return {
+        configured: true,
+        reachable: true,
+        ready: status === "ready",
+        status,
+        message: status === "ready" ? "Scanner ready" : `Scanner status: ${status}`,
+      };
+    }
+    return {
+      configured: true,
+      reachable: true,
+      ready: false,
+      status: `http-${res.status}`,
+      message: res.json?.error ?? `HTTP ${res.status} — likely not activated`,
+    };
+  } catch (err) {
+    return {
+      configured: true,
+      reachable: false,
+      ready: false,
+      status: "unreachable",
+      message: err instanceof Error ? err.message : "unreachable",
+    };
+  }
+}
+
 export type NessusFolder = {
   id: number;
   name: string;

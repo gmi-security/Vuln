@@ -15,7 +15,11 @@ function isPublicAsset(pathname: string) {
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  if (isPublicAsset(pathname) || pathname.startsWith("/api/auth")) {
+  if (
+    isPublicAsset(pathname) ||
+    pathname.startsWith("/api/auth") ||
+    pathname === "/api/nessus/health"
+  ) {
     return NextResponse.next();
   }
 
