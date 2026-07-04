@@ -36,6 +36,10 @@ export default function VulnFindingsPage() {
   const [severityFilter, setSeverityFilter] = useState("All");
   const [statusFilter, setStatusFilter] = useState("All");
   const [connectorFilter, setConnectorFilter] = useState("All");
+  const [companyFilter, setCompanyFilter] = useState(
+    searchParams.get("company") ?? "All",
+  );
+  const [companies, setCompanies] = useState<{ id: string; name: string }[]>([]);
   const [exploitOnly, setExploitOnly] = useState(false);
   const [focusId, setFocusId] = useState<string | null>(
     searchParams.get("focus"),
@@ -54,6 +58,17 @@ export default function VulnFindingsPage() {
 
   useEffect(() => {
     void load();
+    void fetch("/api/companies", { cache: "no-store" })
+      .then((res) => res.json())
+      .then((json) =>
+        setCompanies(
+          (json.companies ?? []).map((c: { id: string; name: string }) => ({
+            id: c.id,
+            name: c.name,
+          })),
+        ),
+      )
+      .catch(() => undefined);
   }, [load]);
 
   const focus = useMemo(
@@ -72,15 +87,24 @@ export default function VulnFindingsPage() {
       if (statusFilter !== "All" && f.status !== statusFilter) return false;
       if (connectorFilter !== "All" && f.connector !== connectorFilter)
         return false;
+      if (companyFilter !== "All" && f.companyId !== companyFilter) return false;
       if (exploitOnly && !f.exploitAvailable) return false;
       if (search) {
         const haystack =
-          `${f.cve} ${f.title} ${f.asset} ${f.category}`.toLowerCase();
+          `${f.cve} ${f.title} ${f.asset} ${f.category} ${f.companyName}`.toLowerCase();
         if (!haystack.includes(search.toLowerCase())) return false;
       }
       return true;
     });
-  }, [findings, search, severityFilter, statusFilter, connectorFilter, exploitOnly]);
+  }, [
+    findings,
+    search,
+    severityFilter,
+    statusFilter,
+    connectorFilter,
+    companyFilter,
+    exploitOnly,
+  ]);
 
   async function patchFinding(
     id: string,
@@ -106,7 +130,7 @@ export default function VulnFindingsPage() {
       subtitle="Every vulnerability surfaced by scans, deduplicated per asset. Filter, assign, and track findings through remediation."
     >
       <PanelCard eyebrow="Filters">
-        <div className="grid gap-3 xl:grid-cols-[minmax(0,1.4fr)_160px_190px_180px_170px_140px]">
+        <div className="grid gap-3 xl:grid-cols-[minmax(0,1.3fr)_180px_150px_180px_170px_150px_130px]">
           <div className="relative">
             <Search
               className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-zinc-500"
@@ -115,10 +139,22 @@ export default function VulnFindingsPage() {
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search CVEs, findings, assets..."
+              placeholder="Search CVEs, findings, assets, clients..."
               className={`${inputClass} pl-11`}
             />
           </div>
+          <select
+            value={companyFilter}
+            onChange={(e) => setCompanyFilter(e.target.value)}
+            className={selectClass}
+          >
+            <option value="All">All companies</option>
+            {companies.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+              </option>
+            ))}
+          </select>
           <select
             value={severityFilter}
             onChange={(e) => setSeverityFilter(e.target.value)}
@@ -279,6 +315,7 @@ export default function VulnFindingsPage() {
 
           <div className={`flex-1 space-y-6 px-6 py-6 ${scrollAreaClass}`}>
             <dl className="grid grid-cols-2 gap-x-6 gap-y-4 text-sm">
+              <Detail label="Company" value={focus.companyName} />
               <Detail label="Asset" value={focus.asset} />
               <Detail label="Port" value={focus.port} />
               <Detail

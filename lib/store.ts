@@ -8,9 +8,11 @@ import {
   nessusScanStatus,
 } from "@/lib/nessus";
 import type {
+  Company,
   ConnectorId,
   Finding,
   FindingStatus,
+  Folder,
   QuantifyMetrics,
   Scan,
   ScanStatus,
@@ -23,7 +25,25 @@ import type {
 // Postgres/Prisma when persistence is needed — the API routes only talk to
 // the functions exported here.
 
+type InternalCompany = {
+  id: string;
+  name: string;
+  industry: string;
+  contactName: string;
+  contactEmail: string;
+  createdAt: string;
+};
+
+type InternalFolder = {
+  id: string;
+  companyId: string;
+  name: string;
+  createdAt: string;
+};
+
 type StoreShape = {
+  companies: Map<string, InternalCompany>;
+  folders: Map<string, InternalFolder>;
   scans: Map<string, InternalScan>;
   findings: Map<string, Finding>;
   seeded: boolean;
@@ -44,6 +64,8 @@ const globalStore = globalThis as unknown as { __vulnStore?: StoreShape };
 function store(): StoreShape {
   if (!globalStore.__vulnStore) {
     globalStore.__vulnStore = {
+      companies: new Map(),
+      folders: new Map(),
       scans: new Map(),
       findings: new Map(),
       seeded: false,
@@ -128,6 +150,8 @@ function generateFindings(s: StoreShape, scan: InternalScan): Finding[] {
     created.push({
       id: nextId(s, "VLN"),
       scanId: scan.id,
+      companyId: scan.companyId,
+      companyName: scan.companyName,
       connector: scan.connector,
       cve: template.cve,
       title: template.title,
@@ -241,6 +265,8 @@ async function importVendorFindings(s: StoreShape, scan: InternalScan): Promise<
       {
         id: `VLN-${s.counter}`,
         scanId: scan.id,
+        companyId: scan.companyId,
+        companyName: scan.companyName,
         connector: scan.connector,
         cve: item.cve,
         title: item.title,
@@ -269,14 +295,239 @@ async function importVendorFindings(s: StoreShape, scan: InternalScan): Promise<
   scan.hostsScanned = new Set(all.map((f) => f.asset)).size || scan.targets.length;
 }
 
+// --- companies & folders ---------------------------------------------------
+
+const EXPOSURE_WEIGHT: Record<Severity, number> = {
+  Critical: 40,
+  High: 20,
+  Medium: 8,
+  Low: 2,
+  Info: 0,
+};
+
+// Exposure score (0-100): severity-weighted open findings boosted by
+// exploit availability and EPSS, squashed with a decay curve so it reads
+// like a gauge. Shared by global metrics and per-company rollups.
+function exposureOf(open: Finding[]): number {
+  const raw = open.reduce((sum, f) => {
+    const exploitBoost = f.exploitAvailable ? 1.5 : 1;
+    const epssBoost = 1 + f.epss;
+    return sum + EXPOSURE_WEIGHT[f.severity] * exploitBoost * epssBoost;
+  }, 0);
+  return Math.round(100 * (1 - Math.exp(-raw / 900)));
+}
+
+function companyRollup(s: StoreShape, companyId: string) {
+  const scans = Array.from(s.scans.values()).filter((sc) => sc.companyId === companyId);
+  const findings = Array.from(s.findings.values()).filter((f) => f.companyId === companyId);
+  const open = findings.filter(isOpen);
+  return {
+    folderCount: Array.from(s.folders.values()).filter((f) => f.companyId === companyId)
+      .length,
+    scanCount: scans.length,
+    activeScans: scans.filter(
+      (sc) => sc.status === "Running" || sc.status === "Paused" || sc.status === "Queued",
+    ).length,
+    openFindings: open.length,
+    criticalOpen: open.filter((f) => f.severity === "Critical").length,
+    exposureScore: exposureOf(open),
+  };
+}
+
+function toPublicCompany(s: StoreShape, c: InternalCompany): Company {
+  return { ...c, ...companyRollup(s, c.id) };
+}
+
+function toPublicFolder(s: StoreShape, f: InternalFolder): Folder {
+  return {
+    ...f,
+    scanCount: Array.from(s.scans.values()).filter((sc) => sc.folderId === f.id).length,
+  };
+}
+
+export function listCompanies(): Company[] {
+  const s = store();
+  tick(s);
+  return Array.from(s.companies.values())
+    .map((c) => toPublicCompany(s, c))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export function getCompany(id: string): Company | undefined {
+  const s = store();
+  tick(s);
+  const c = s.companies.get(id);
+  return c ? toPublicCompany(s, c) : undefined;
+}
+
+export function createCompany(input: {
+  name: string;
+  industry?: string;
+  contactName?: string;
+  contactEmail?: string;
+}): Company | { error: string } {
+  const s = store();
+  const name = input.name.trim();
+  if (!name) return { error: "Company name is required." };
+  if (
+    Array.from(s.companies.values()).some(
+      (c) => c.name.toLowerCase() === name.toLowerCase(),
+    )
+  ) {
+    return { error: "A company with that name already exists." };
+  }
+  const id = nextId(s, "CO");
+  const company: InternalCompany = {
+    id,
+    name,
+    industry: (input.industry ?? "").trim(),
+    contactName: (input.contactName ?? "").trim(),
+    contactEmail: (input.contactEmail ?? "").trim(),
+    createdAt: new Date().toISOString(),
+  };
+  s.companies.set(id, company);
+  // Every company starts with a default folder so scans always have a home.
+  ensureFolder(s, id, "General");
+  return toPublicCompany(s, company);
+}
+
+export function updateCompany(
+  id: string,
+  patch: {
+    name?: string;
+    industry?: string;
+    contactName?: string;
+    contactEmail?: string;
+  },
+): Company | { error: string } {
+  const s = store();
+  const company = s.companies.get(id);
+  if (!company) return { error: "Company not found." };
+  if (patch.name !== undefined) {
+    const name = patch.name.trim();
+    if (!name) return { error: "Company name cannot be empty." };
+    if (
+      Array.from(s.companies.values()).some(
+        (c) => c.id !== id && c.name.toLowerCase() === name.toLowerCase(),
+      )
+    ) {
+      return { error: "A company with that name already exists." };
+    }
+    company.name = name;
+    // Keep denormalized names on scans and findings in sync.
+    for (const sc of s.scans.values()) if (sc.companyId === id) sc.companyName = name;
+    for (const f of s.findings.values()) if (f.companyId === id) f.companyName = name;
+  }
+  if (patch.industry !== undefined) company.industry = patch.industry.trim();
+  if (patch.contactName !== undefined) company.contactName = patch.contactName.trim();
+  if (patch.contactEmail !== undefined) company.contactEmail = patch.contactEmail.trim();
+  return toPublicCompany(s, company);
+}
+
+export function deleteCompany(id: string): { deleted: true } | { error: string } {
+  const s = store();
+  const company = s.companies.get(id);
+  if (!company) return { error: "Company not found." };
+  const hasScans = Array.from(s.scans.values()).some((sc) => sc.companyId === id);
+  if (hasScans) {
+    return { error: "Delete or move this company's scans before removing it." };
+  }
+  for (const f of Array.from(s.folders.values())) {
+    if (f.companyId === id) s.folders.delete(f.id);
+  }
+  s.companies.delete(id);
+  return { deleted: true };
+}
+
+export function listFolders(companyId?: string): Folder[] {
+  const s = store();
+  tick(s);
+  return Array.from(s.folders.values())
+    .filter((f) => !companyId || f.companyId === companyId)
+    .map((f) => toPublicFolder(s, f))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function ensureFolder(s: StoreShape, companyId: string, name: string): InternalFolder {
+  const trimmed = name.trim() || "General";
+  const existing = Array.from(s.folders.values()).find(
+    (f) => f.companyId === companyId && f.name.toLowerCase() === trimmed.toLowerCase(),
+  );
+  if (existing) return existing;
+  const id = nextId(s, "FLD");
+  const folder: InternalFolder = {
+    id,
+    companyId,
+    name: trimmed,
+    createdAt: new Date().toISOString(),
+  };
+  s.folders.set(id, folder);
+  return folder;
+}
+
+export function createFolder(
+  companyId: string,
+  name: string,
+): Folder | { error: string } {
+  const s = store();
+  if (!s.companies.get(companyId)) return { error: "Company not found." };
+  if (!name.trim()) return { error: "Folder name is required." };
+  return toPublicFolder(s, ensureFolder(s, companyId, name));
+}
+
+export function deleteFolder(id: string): { deleted: true } | { error: string } {
+  const s = store();
+  const folder = s.folders.get(id);
+  if (!folder) return { error: "Folder not found." };
+  const hasScans = Array.from(s.scans.values()).some((sc) => sc.folderId === id);
+  if (hasScans) return { error: "Move this folder's scans before deleting it." };
+  s.folders.delete(id);
+  return { deleted: true };
+}
+
+// Ensures a fallback company + folder exists for scans launched without an
+// explicit company selection.
+function ensureUnassigned(s: StoreShape): { company: InternalCompany; folder: InternalFolder } {
+  let company = Array.from(s.companies.values()).find((c) => c.name === "Unassigned");
+  if (!company) {
+    const result = createCompany({ name: "Unassigned" });
+    if ("error" in result) throw new Error(result.error);
+    company = s.companies.get(result.id)!;
+  }
+  const folder = ensureFolder(s, company.id, "General");
+  return { company, folder };
+}
+
+// Resolve the company + folder a new scan belongs to from loose input.
+function resolveScanLocation(
+  s: StoreShape,
+  input: { companyId?: string; folderId?: string; folderName?: string },
+): { company: InternalCompany; folder: InternalFolder } {
+  const company = input.companyId ? s.companies.get(input.companyId) : undefined;
+  if (!company) return ensureUnassigned(s);
+  if (input.folderId) {
+    const folder = s.folders.get(input.folderId);
+    if (folder && folder.companyId === company.id) return { company, folder };
+  }
+  if (input.folderName && input.folderName.trim()) {
+    return { company, folder: ensureFolder(s, company.id, input.folderName) };
+  }
+  return { company, folder: ensureFolder(s, company.id, "General") };
+}
+
 // --- public API -----------------------------------------------------------
 
-export async function listScans(): Promise<Scan[]> {
+export async function listScans(filter?: {
+  companyId?: string;
+  folderId?: string;
+}): Promise<Scan[]> {
   const s = store();
   tick(s);
   await refreshVendorScans(s);
   const now = Date.now();
   return Array.from(s.scans.values())
+    .filter((scan) => !filter?.companyId || scan.companyId === filter.companyId)
+    .filter((scan) => !filter?.folderId || scan.folderId === filter.folderId)
     .map((scan) => toPublic(scan, now))
     .sort((a, b) => (b.createdAt > a.createdAt ? 1 : -1));
 }
@@ -294,6 +545,9 @@ export async function startScan(input: {
   connector: ConnectorId;
   profile: string;
   targets: string[];
+  companyId?: string;
+  folderId?: string;
+  folderName?: string;
   requestedBy?: string;
 }): Promise<Scan | { error: string }> {
   const s = store();
@@ -303,6 +557,7 @@ export async function startScan(input: {
   if (!input.targets.length) {
     return { error: "At least one target is required." };
   }
+  const { company, folder } = resolveScanLocation(s, input);
 
   const name = input.name || `${input.connector} scan`;
   let vendor: InternalScan["vendor"] = null;
@@ -325,6 +580,10 @@ export async function startScan(input: {
   const scan: InternalScan = {
     id,
     name,
+    companyId: company.id,
+    companyName: company.name,
+    folderId: folder.id,
+    folderName: folder.name,
     connector: input.connector,
     profile: input.profile,
     targets: input.targets,
@@ -434,11 +693,12 @@ export async function scanAction(
   return toPublic(scan, now);
 }
 
-export function listFindings(filter?: { scanId?: string }): Finding[] {
+export function listFindings(filter?: { scanId?: string; companyId?: string }): Finding[] {
   const s = store();
   tick(s);
   let all = Array.from(s.findings.values());
   if (filter?.scanId) all = all.filter((f) => f.scanId === filter.scanId);
+  if (filter?.companyId) all = all.filter((f) => f.companyId === filter.companyId);
   const sevRank: Record<Severity, number> = { Critical: 0, High: 1, Medium: 2, Low: 3, Info: 4 };
   return all.sort(
     (a, b) => sevRank[a.severity] - sevRank[b.severity] || b.cvss - a.cvss,
@@ -485,10 +745,12 @@ function isOpen(f: Finding): boolean {
   return f.status === "Open" || f.status === "In Remediation";
 }
 
-export function computeMetrics(): QuantifyMetrics {
+export function computeMetrics(filter?: { companyId?: string }): QuantifyMetrics {
   const s = store();
   tick(s);
-  const all = Array.from(s.findings.values());
+  const all = Array.from(s.findings.values()).filter(
+    (f) => !filter?.companyId || f.companyId === filter.companyId,
+  );
   const open = all.filter(isOpen);
   const now = Date.now();
 
@@ -585,6 +847,22 @@ export function computeMetrics(): QuantifyMetrics {
       ) / 10
     : null;
 
+  const byCompany = new Map<string, { name: string; open: Finding[] }>();
+  for (const f of open) {
+    const entry = byCompany.get(f.companyId) ?? { name: f.companyName, open: [] };
+    entry.open.push(f);
+    byCompany.set(f.companyId, entry);
+  }
+  const companyBreakdown = Array.from(byCompany.entries())
+    .map(([companyId, v]) => ({
+      companyId,
+      companyName: v.name,
+      open: v.open.length,
+      critical: v.open.filter((f) => f.severity === "Critical").length,
+      exposureScore: exposureOf(v.open),
+    }))
+    .sort((a, b) => b.exposureScore - a.exposureScore || b.open - a.open);
+
   return {
     totalOpen: open.length,
     severityCounts,
@@ -597,6 +875,7 @@ export function computeMetrics(): QuantifyMetrics {
     statusCounts,
     trend,
     meanTimeToRemediateDays,
+    companyBreakdown,
   };
 }
 
@@ -607,8 +886,55 @@ function seed(s: StoreShape): void {
   s.seeded = true;
   const now = Date.now();
 
+  // Client companies we run scans for, each with Nessus-style folders.
+  const seedCompanies: Array<{
+    name: string;
+    industry: string;
+    contactName: string;
+    contactEmail: string;
+    folders: string[];
+  }> = [
+    {
+      name: "Northwind Retail",
+      industry: "Retail / eCommerce",
+      contactName: "Dana Ruiz",
+      contactEmail: "dana.ruiz@northwind.example",
+      folders: ["External", "Internal", "PCI"],
+    },
+    {
+      name: "Cascade Health",
+      industry: "Healthcare",
+      contactName: "Dr. Omar Feld",
+      contactEmail: "ofeld@cascadehealth.example",
+      folders: ["External", "Endpoints", "Servers"],
+    },
+    {
+      name: "Meridian Financial",
+      industry: "Financial Services",
+      contactName: "Priya Anand",
+      contactEmail: "panand@meridianfin.example",
+      folders: ["External", "Internal"],
+    },
+  ];
+
+  const companyByName = new Map<string, InternalCompany>();
+  for (const c of seedCompanies) {
+    const created = createCompany({
+      name: c.name,
+      industry: c.industry,
+      contactName: c.contactName,
+      contactEmail: c.contactEmail,
+    });
+    if ("error" in created) continue;
+    const company = s.companies.get(created.id)!;
+    companyByName.set(c.name, company);
+    for (const folderName of c.folders) ensureFolder(s, company.id, folderName);
+  }
+
   const historical: Array<{
     name: string;
+    company: string;
+    folder: string;
     connector: ConnectorId;
     profile: string;
     targets: string[];
@@ -616,13 +942,26 @@ function seed(s: StoreShape): void {
   }> = [
     {
       name: "Weekly External Vulnerability Scan",
+      company: "Northwind Retail",
+      folder: "External",
       connector: "nessus",
       profile: "standard",
       targets: ["203.0.113.0/28"],
       daysAgo: 12,
     },
     {
+      name: "PCI External Scan",
+      company: "Northwind Retail",
+      folder: "PCI",
+      connector: "nessus",
+      profile: "pci",
+      targets: ["203.0.113.16/28"],
+      daysAgo: 6,
+    },
+    {
       name: "Server Estate Credentialed Audit",
+      company: "Cascade Health",
+      folder: "Servers",
       connector: "nessus",
       profile: "credentialed",
       targets: ["10.10.0.0/24"],
@@ -630,6 +969,8 @@ function seed(s: StoreShape): void {
     },
     {
       name: "Falcon Spotlight Endpoint Sync",
+      company: "Cascade Health",
+      folder: "Endpoints",
       connector: "crowdstrike",
       profile: "agent-sync",
       targets: ["ws-fin-114.gmi.local", "ws-eng-207.gmi.local", "ws-ops-052.gmi.local"],
@@ -637,6 +978,8 @@ function seed(s: StoreShape): void {
     },
     {
       name: "Package Audit — Production Web Tier",
+      company: "Meridian Financial",
+      folder: "Internal",
       connector: "vulners",
       profile: "credentialed",
       targets: ["web-prod-01.gmi.com", "web-prod-02.gmi.com", "app-erp-01.gmi.local"],
@@ -644,14 +987,18 @@ function seed(s: StoreShape): void {
     },
     {
       name: "Weekly External Vulnerability Scan",
+      company: "Meridian Financial",
+      folder: "External",
       connector: "nessus",
       profile: "standard",
-      targets: ["203.0.113.0/28"],
+      targets: ["198.51.100.0/28"],
       daysAgo: 1,
     },
   ];
 
   for (const h of historical) {
+    const company = companyByName.get(h.company)!;
+    const folder = ensureFolder(s, company.id, h.folder);
     const id = nextId(s, "SCAN");
     const startedAtMs = now - h.daysAgo * 86_400_000;
     const seedVal = hashSeed(id + h.connector + h.name);
@@ -662,6 +1009,10 @@ function seed(s: StoreShape): void {
     const scan: InternalScan = {
       id,
       name: h.name,
+      companyId: company.id,
+      companyName: company.name,
+      folderId: folder.id,
+      folderName: folder.name,
       connector: h.connector,
       profile: h.profile,
       targets: h.targets,

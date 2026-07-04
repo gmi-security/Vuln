@@ -15,6 +15,30 @@ export type FindingStatus =
   | "False Positive"
   | "Resolved";
 
+export type Company = {
+  id: string;
+  name: string;
+  industry: string;
+  contactName: string;
+  contactEmail: string;
+  createdAt: string;
+  // derived rollups
+  folderCount: number;
+  scanCount: number;
+  activeScans: number;
+  openFindings: number;
+  criticalOpen: number;
+  exposureScore: number;
+};
+
+export type Folder = {
+  id: string;
+  companyId: string;
+  name: string;
+  createdAt: string;
+  scanCount: number;
+};
+
 export type ConnectorId = "nessus" | "vulners" | "crowdstrike" | "qualys";
 
 export type ConnectorStatus = "Connected" | "Demo Mode" | "Planned" | "Error";
@@ -41,6 +65,10 @@ export type ScanProfile = {
 export type Scan = {
   id: string;
   name: string;
+  companyId: string;
+  companyName: string;
+  folderId: string;
+  folderName: string;
   connector: ConnectorId;
   profile: string;
   targets: string[];
@@ -59,6 +87,8 @@ export type Scan = {
 export type Finding = {
   id: string;
   scanId: string;
+  companyId: string;
+  companyName: string;
   connector: ConnectorId;
   cve: string;
   title: string;
@@ -90,4 +120,11 @@ export type QuantifyMetrics = {
   statusCounts: Record<FindingStatus, number>;
   trend: { date: string; open: number; resolved: number }[];
   meanTimeToRemediateDays: number | null;
+  companyBreakdown: {
+    companyId: string;
+    companyName: string;
+    open: number;
+    critical: number;
+    exposureScore: number;
+  }[];
 };

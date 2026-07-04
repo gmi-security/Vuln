@@ -4,8 +4,11 @@ import type { ConnectorId } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
-  return NextResponse.json({ scans: await listScans() });
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const companyId = searchParams.get("companyId") ?? undefined;
+  const folderId = searchParams.get("folderId") ?? undefined;
+  return NextResponse.json({ scans: await listScans({ companyId, folderId }) });
 }
 
 export async function POST(request: Request) {
@@ -14,6 +17,9 @@ export async function POST(request: Request) {
     connector?: ConnectorId;
     profile?: string;
     targets?: string[] | string;
+    companyId?: string;
+    folderId?: string;
+    folderName?: string;
   };
   try {
     body = await request.json();
@@ -37,6 +43,9 @@ export async function POST(request: Request) {
     connector: body.connector,
     profile: body.profile || "standard",
     targets,
+    companyId: body.companyId,
+    folderId: body.folderId,
+    folderName: body.folderName,
   });
 
   if ("error" in result) {

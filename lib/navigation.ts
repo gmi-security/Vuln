@@ -1,6 +1,7 @@
 import type * as React from "react";
 import {
   Bug,
+  Building2,
   Gauge,
   LayoutDashboard,
   PlugZap,
@@ -15,6 +16,7 @@ export type VulnNavItem = {
 
 export const baseNavItems: VulnNavItem[] = [
   { label: "Dashboard", icon: LayoutDashboard, href: "/dashboard" },
+  { label: "Companies", icon: Building2, href: "/companies" },
   { label: "Scans", icon: Radar, href: "/scans" },
   { label: "Findings", icon: Bug, href: "/findings" },
   { label: "Quantify", icon: Gauge, href: "/quantify" },

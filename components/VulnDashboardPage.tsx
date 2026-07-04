@@ -220,6 +220,55 @@ export default function VulnDashboardPage() {
           </PanelCard>
         </div>
       </div>
+
+      <PanelCard
+        eyebrow="By client"
+        description="Open exposure per company"
+        actions={
+          <Link
+            href="/companies"
+            className="text-sm text-[#ff4d57] transition hover:text-white"
+          >
+            All companies →
+          </Link>
+        }
+      >
+        <div className="overflow-hidden rounded-[24px] border border-[rgba(179,14,20,0.12)] bg-[#040404]">
+          <div className="grid grid-cols-[1.6fr_110px_110px_150px] gap-4 border-b border-zinc-900 px-5 py-4 text-xs uppercase tracking-[0.2em] text-zinc-500">
+            <div>Company</div>
+            <div>Open</div>
+            <div>Critical</div>
+            <div>Exposure</div>
+          </div>
+          {(metrics?.companyBreakdown ?? []).map((c) => (
+            <Link
+              key={c.companyId}
+              href={`/companies/${c.companyId}`}
+              className="grid grid-cols-[1.6fr_110px_110px_150px] items-center gap-4 border-b border-zinc-900/70 px-5 py-4 transition last:border-b-0 hover:bg-[#0a0a0a]"
+            >
+              <div className="font-medium text-white">{c.companyName}</div>
+              <div className="text-sm text-zinc-300">{c.open}</div>
+              <div className="text-sm text-[#ff4d57]">{c.critical}</div>
+              <div className="flex items-center gap-3">
+                <div className="h-2.5 flex-1 overflow-hidden rounded-full bg-[#101010]">
+                  <div
+                    className="h-full rounded-full bg-[linear-gradient(90deg,#b30e14,#ff4d57)]"
+                    style={{ width: `${c.exposureScore}%` }}
+                  />
+                </div>
+                <span className="w-8 text-right text-sm font-semibold text-white">
+                  {c.exposureScore}
+                </span>
+              </div>
+            </Link>
+          ))}
+          {(metrics?.companyBreakdown ?? []).length === 0 ? (
+            <div className="px-5 py-10 text-center text-sm text-zinc-500">
+              No client findings yet.
+            </div>
+          ) : null}
+        </div>
+      </PanelCard>
     </VulnShell>
   );
 }

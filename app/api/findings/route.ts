@@ -6,5 +6,6 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const scanId = searchParams.get("scanId") ?? undefined;
-  return NextResponse.json({ findings: listFindings(scanId ? { scanId } : undefined) });
+  const companyId = searchParams.get("companyId") ?? undefined;
+  return NextResponse.json({ findings: listFindings({ scanId, companyId }) });
 }
