@@ -14,7 +14,7 @@ import { tidalConfig, tidalListAssets } from "@/lib/tidal";
 import { intuneConfig, intuneListAssets } from "@/lib/intune";
 import { falconConfig, falconListAssets } from "@/lib/crowdstrike";
 import { defenderConfig, defenderListFindings } from "@/lib/defender";
-import { buildRisk, grcConfig, grcUpsertRisk } from "@/lib/grc";
+import { buildRisk, grcConfig, grcUpsertRisk, riskCode } from "@/lib/grc";
 import {
   spiderfootConfig,
   spiderfootImportFindings,
@@ -1291,6 +1291,76 @@ export async function exportToGrc(filter?: {
   }
 
   return { pushed, created, updated, companies: compliance.companies.length, errors };
+}
+
+// Maps our framework ids to the OpenGRC standard NAMES that actually have their
+// controls loaded (verified via the probe). Only these get a structured push;
+// the control ids our engine evaluates match these standards' control codes 1:1.
+const GRC_STANDARD_BY_FRAMEWORK: Record<string, string> = {
+  "nist-800-53": "NIST SP 800-53 Security Baseline (Low)",
+  cmmc: "CMMC Level 2",
+};
+
+const GRC_EFFECTIVENESS: Record<string, string> = {
+  Pass: "Effective",
+  Info: "Effective",
+  "At Risk": "Partially Effective",
+  Fail: "Not Effective",
+};
+const GRC_IMPL_STATUS: Record<string, string> = {
+  Pass: "Implemented",
+  Info: "Implemented",
+  "At Risk": "Partially Implemented",
+  Fail: "Not Implemented",
+};
+
+export type GrcAssessment = {
+  generatedAt: string;
+  companies: {
+    company: string;
+    riskCode: string;
+    controls: {
+      standard: string;
+      code: string;
+      title: string;
+      effectiveness: string;
+      status: string;
+      evidence: string;
+    }[];
+  }[];
+};
+
+// Emit the per-company, per-control compliance assessment mapped onto OpenGRC's
+// control codes + Effectiveness / ImplementationStatus enums. Consumed by the
+// server-side OpenGRC sync (which owns the pivot writes). No timestamps stamped
+// here — the route stamps generatedAt.
+export function grcAssessment(): GrcAssessment {
+  const s = store();
+  const clients = Array.from(s.companies.values()).filter(
+    (c) => c.kind === "client",
+  );
+  const companies = clients.map((company) => {
+    const controls: GrcAssessment["companies"][number]["controls"] = [];
+    for (const [fwId, standard] of Object.entries(GRC_STANDARD_BY_FRAMEWORK)) {
+      const posture = computeCompliance({
+        companyId: company.id,
+        framework: fwId,
+      }).companies[0];
+      if (!posture) continue;
+      for (const r of posture.requirements) {
+        controls.push({
+          standard,
+          code: r.id,
+          title: r.title,
+          effectiveness: GRC_EFFECTIVENESS[r.status] ?? "Not Assessed",
+          status: GRC_IMPL_STATUS[r.status] ?? "Unknown",
+          evidence: `${r.id} ${r.title} — ${r.status}: ${r.detail}`,
+        });
+      }
+    }
+    return { company: company.name, riskCode: riskCode(company.name), controls };
+  });
+  return { generatedAt: "", companies };
 }
 
 // --- attack paths / blast radius -------------------------------------------
