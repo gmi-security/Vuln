@@ -1881,6 +1881,57 @@ export function osintTargetsForCompany(s: StoreShape, companyId: string): string
   return Array.from(domains).sort();
 }
 
+export type SyncAllEntry = {
+  connector: string;
+  configured: boolean;
+  ok: boolean;
+  result?: unknown;
+  error?: string;
+};
+
+// One-shot: pull results from every *configured* connector, so an analyst can
+// bring the whole console up to date with a single click. Unconfigured
+// connectors are reported (configured:false) rather than errored.
+export async function syncAllConnectors(): Promise<SyncAllEntry[]> {
+  const jobs: {
+    connector: string;
+    ready: boolean;
+    run: () => Promise<any>;
+  }[] = [
+    { connector: "Nessus", ready: Boolean(nessusConfig()), run: importFromNessus },
+    { connector: "CrowdStrike", ready: Boolean(falconConfig()), run: importFromCrowdstrike },
+    { connector: "Defender", ready: Boolean(defenderConfig()), run: importFromDefender },
+    { connector: "Tidal", ready: Boolean(tidalConfig()), run: importFromTidal },
+    { connector: "Intune", ready: Boolean(intuneConfig()), run: importFromIntune },
+    { connector: "SpiderFoot", ready: Boolean(spiderfootConfig()), run: importFromSpiderfoot },
+    { connector: "Artemis", ready: Boolean(artemisConfig()), run: importFromArtemis },
+  ];
+
+  const out: SyncAllEntry[] = [];
+  for (const job of jobs) {
+    if (!job.ready) {
+      out.push({ connector: job.connector, configured: false, ok: false });
+      continue;
+    }
+    try {
+      const r = await job.run();
+      if (r && typeof r === "object" && "error" in r) {
+        out.push({ connector: job.connector, configured: true, ok: false, error: (r as any).error });
+      } else {
+        out.push({ connector: job.connector, configured: true, ok: true, result: r });
+      }
+    } catch (err) {
+      out.push({
+        connector: job.connector,
+        configured: true,
+        ok: false,
+        error: err instanceof Error ? err.message : "sync failed",
+      });
+    }
+  }
+  return out;
+}
+
 export type OsintPreview = {
   companies: number;
   domainsTotal: number;

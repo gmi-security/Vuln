@@ -202,6 +202,60 @@ function OsintLaunchBanner() {
   );
 }
 
+// One-click "Sync all" — pull results from every configured connector.
+function SyncAllButton() {
+  const [busy, setBusy] = useState(false);
+  const [rows, setRows] = useState<
+    { connector: string; configured: boolean; ok: boolean; result?: any; error?: string }[] | null
+  >(null);
+
+  async function run() {
+    if (busy) return;
+    setBusy(true);
+    setRows(null);
+    try {
+      const res = await fetch("/api/connectors/sync-all", { method: "POST" });
+      const json = await res.json().catch(() => ({}));
+      setRows(json.results ?? []);
+    } catch {
+      setRows([{ connector: "Sync", configured: true, ok: false, error: "Request failed." }]);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const active = rows?.filter((r) => r.configured) ?? [];
+
+  return (
+    <div className="flex flex-col items-end gap-2">
+      <button
+        type="button"
+        onClick={run}
+        disabled={busy}
+        className="inline-flex items-center gap-2 rounded-lg border border-emerald-900/60 bg-emerald-950/40 px-3.5 py-1.5 text-sm font-medium text-emerald-300 transition hover:bg-emerald-900/40 disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        <RefreshCw size={14} className={busy ? "animate-spin" : ""} />
+        {busy ? "Syncing all…" : "Sync all engines"}
+      </button>
+      {active.length ? (
+        <div className="w-full max-w-md rounded-lg border border-zinc-900 bg-[#080808] p-2 text-xs">
+          {active.map((r) => (
+            <div key={r.connector} className="flex items-center justify-between gap-3 px-1 py-0.5">
+              <span className="flex items-center gap-1.5 text-zinc-300">
+                <span className={`h-1.5 w-1.5 rounded-full ${r.ok ? "bg-emerald-400" : "bg-[#ff4d57]"}`} />
+                {r.connector}
+              </span>
+              <span className={r.ok ? "text-zinc-500" : "text-[#ff8a8a]"}>
+                {r.ok ? summarizeSync(r.result?.result ?? r.result) : r.error ?? "failed"}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 const statusClass: Record<ConnectorStatus, string> = {
   Connected: "bg-emerald-950/60 text-emerald-300 border border-emerald-900/60",
   "Demo Mode": "bg-[rgba(245,166,35,0.10)] text-amber-300 border border-amber-900/60",
@@ -406,8 +460,11 @@ export default function VulnConnectorsPage() {
     >
       <OsintLaunchBanner />
 
-      <div className="text-[13px] uppercase tracking-[0.3em] text-[#b30e14]">
-        Scanners
+      <div className="flex items-start justify-between gap-4">
+        <div className="text-[13px] uppercase tracking-[0.3em] text-[#b30e14]">
+          Scanners
+        </div>
+        <SyncAllButton />
       </div>
       <div className="grid gap-5 xl:grid-cols-2">
         {connectors.map((connector) => (
