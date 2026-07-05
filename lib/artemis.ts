@@ -203,16 +203,66 @@ const HIGH_HINTS = [
   "takeover",
 ];
 
-function inferSeverity(explicit: string, headline: string): Severity {
+// Raw Artemis task results carry no severity field — it lives in the reporter
+// layer. Derive a baseline from the module (`receiver`) that produced the
+// result, then let explicit text or hint keywords raise (never lower) it.
+const MODULE_SEVERITY: Record<string, Severity> = {
+  sql_injection_detector: "Critical",
+  lfi_detector: "High",
+  nuclei: "High",
+  shodan_vulns: "High",
+  ftp_bruter: "High",
+  mysql_bruter: "High",
+  ssh_bruter: "High",
+  postgresql_bruter: "High",
+  wordpress_bruter: "High",
+  bruter: "High",
+  admin_panel_login_bruter: "High",
+  ssh_bad_keys: "High",
+  dangling_dns_detector: "High",
+  "dangling-dns-detector": "High",
+  wp_scanner: "High",
+  wordpress_plugins: "Medium",
+  joomla_scanner: "Medium",
+  joomla_extensions: "Medium",
+  drupal_scanner: "Medium",
+  api_scanner: "Medium",
+  removed_domain_existing_vhost: "Medium",
+  directory_index: "Low",
+  robots: "Info",
+  port_scanner: "Low",
+  domain_expiration_scanner: "Low",
+  dns_scanner: "Info",
+  mail_dns_scanner: "Low",
+  device_identifier: "Info",
+  ip_lookup: "Info",
+  classifier: "Info",
+};
+
+const SEV_RANK: Record<Severity, number> = {
+  Critical: 4,
+  High: 3,
+  Medium: 2,
+  Low: 1,
+  Info: 0,
+};
+
+function maxSeverity(a: Severity, b: Severity): Severity {
+  return SEV_RANK[a] >= SEV_RANK[b] ? a : b;
+}
+
+function inferSeverity(explicit: string, headline: string, receiver: string): Severity {
   const e = explicit.toLowerCase();
   if (e.includes("critical")) return "Critical";
   if (e.includes("high")) return "High";
   if (e.includes("medium")) return "Medium";
   if (e.includes("low")) return "Low";
+  const base = MODULE_SEVERITY[receiver.toLowerCase()] ?? "Medium";
   const h = headline.toLowerCase();
-  if (CRITICAL_HINTS.some((k) => h.includes(k))) return "Critical";
-  if (HIGH_HINTS.some((k) => h.includes(k))) return "High";
-  return "Medium"; // Artemis only surfaces "interesting" results here
+  let textSev: Severity = "Info";
+  if (CRITICAL_HINTS.some((k) => h.includes(k))) textSev = "Critical";
+  else if (HIGH_HINTS.some((k) => h.includes(k))) textSev = "High";
+  return maxSeverity(base, textSev);
 }
 
 const SEV_CVSS: Record<Severity, number> = {
@@ -249,18 +299,19 @@ export function mapArtemisResult(r: any): ArtemisFinding {
     pick(r, "headline", "status_reason", "task.headline", "message", "name") ||
     "Artemis finding";
   const explicit = pick(r, "severity", "result.severity", "task.severity");
-  const tag = pick(r, "tag", "task.payload_persistent.tag", "task.payload.tag");
-  const kind = pick(r, "task.type", "task.headers.receiver", "result.type") || "artemis";
-  const severity = inferSeverity(explicit, headline);
+  const tag = pick(r, "tag", "task.payload_persistent.tag", "task.payload.tag").trim();
+  const receiver =
+    pick(r, "receiver", "task.headers.receiver", "task.type", "result.type") || "artemis";
+  const severity = inferSeverity(explicit, headline, receiver);
   const cveMatch = headline.match(CVE_RE);
   return {
-    cve: cveMatch ? cveMatch[0].toUpperCase() : `ARTEMIS-${kind}`.toUpperCase(),
+    cve: cveMatch ? cveMatch[0].toUpperCase() : `ARTEMIS-${receiver}`.toUpperCase(),
     title: headline.slice(0, 200),
     severity,
     cvss: SEV_CVSS[severity],
     asset: target,
     tag,
-    category: `Artemis: ${kind}`,
+    category: `Artemis: ${receiver}`,
     description:
       pick(r, "status_reason", "message") ||
       JSON.stringify(r?.result ?? {}).slice(0, 600),
