@@ -96,6 +96,42 @@ const CONNECTOR_DEFS: Record<ConnectorId, ConnectorDef> = {
     planned: true,
     demo: { minDurationMs: 60_000, maxDurationMs: 120_000, minFindings: 15, maxFindings: 30 },
   },
+  spiderfoot: {
+    id: "spiderfoot",
+    name: "SpiderFoot",
+    vendor: "SpiderFoot",
+    kind: "OSINT & Attack Surface Recon",
+    description:
+      "Automated OSINT and attack-surface reconnaissance across 200+ modules. Kicks off scans against a target's domains and IPs, then correlates exposed hosts, open ports, leaked credentials, and threat-intel associations into findings.",
+    capabilities: ["OSINT collection", "Attack surface mapping", "Exposure discovery", "Threat intel correlation"],
+    envVars: ["SPIDERFOOT_URL"],
+    docsUrl: "https://www.spiderfoot.net/documentation/",
+    demo: {
+      minDurationMs: 60_000,
+      maxDurationMs: 150_000,
+      minFindings: 8,
+      maxFindings: 20,
+      categories: ["Attack Surface", "OSINT", "Exposed Service", "Threat Intel"],
+    },
+  },
+  artemis: {
+    id: "artemis",
+    name: "Artemis",
+    vendor: "CERT Polska",
+    kind: "Attack Surface Vulnerability Scanner",
+    description:
+      "Modular attack-surface scanner from CERT.pl. Enumerates subdomains and services for a target, then runs checks for misconfigurations, exposed admin panels, weak credentials, and known CVEs across many hosts, importing per-target results as findings.",
+    capabilities: ["Subdomain enumeration", "Misconfiguration checks", "Known-CVE detection", "Bulk host scanning"],
+    envVars: ["ARTEMIS_API_URL", "ARTEMIS_API_TOKEN"],
+    docsUrl: "https://artemis-scanner.readthedocs.io/",
+    demo: {
+      minDurationMs: 120_000,
+      maxDurationMs: 300_000,
+      minFindings: 10,
+      maxFindings: 28,
+      categories: ["Attack Surface", "Web Server", "Misconfiguration", "Exposed Service"],
+    },
+  },
 };
 
 export const SCAN_PROFILES: ScanProfile[] = [
@@ -171,6 +207,12 @@ export function isPlanned(id: ConnectorId): boolean {
 //                then GET /spotlight/queries/vulnerabilities/v2 + entities
 //                lookup; map to findings.
 //   qualys:      planned — VM scan launch via /api/2.0/fo/scan/.
+//   spiderfoot:  POST {SPIDERFOOT_URL}/startscan (scanname, scantarget,
+//                typelist/modulelist), poll /scanstatus, pull results via
+//                /scaneventresults?id=…; map correlations to findings.
+//   artemis:     POST {ARTEMIS_API_URL}/api/add (targets) with Bearer
+//                {ARTEMIS_API_TOKEN}, poll /api/analyses, then
+//                /api/task-results/… ; map reports to findings.
 //
 // Connectors without a real adapter run in demo mode: the in-process scan
 // engine (lib/store.ts) simulates progress and materializes findings.

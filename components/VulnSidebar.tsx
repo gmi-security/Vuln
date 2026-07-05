@@ -138,6 +138,14 @@ export default function VulnSidebar({
                 CrowdStrike
               </div>
               <div className="flex items-center gap-2">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                SpiderFoot
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                Artemis
+              </div>
+              <div className="flex items-center gap-2">
                 <span className="h-1.5 w-1.5 rounded-full bg-zinc-600" />
                 Qualys (planned)
               </div>

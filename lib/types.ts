@@ -99,7 +99,9 @@ export type ConnectorId =
   | "vulners"
   | "crowdstrike"
   | "defender"
-  | "qualys";
+  | "qualys"
+  | "spiderfoot"
+  | "artemis";
 
 export type ConnectorStatus = "Connected" | "Demo Mode" | "Planned" | "Error";
 

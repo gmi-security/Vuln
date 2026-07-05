@@ -26,6 +26,8 @@ export const connectorLabels: Record<ConnectorId, string> = {
   crowdstrike: "CrowdStrike",
   defender: "Defender",
   qualys: "Qualys",
+  spiderfoot: "SpiderFoot",
+  artemis: "Artemis",
 };
 
 export const severityClass: Record<Severity, string> = {

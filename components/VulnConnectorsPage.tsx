@@ -10,6 +10,8 @@ import {
   IconPackage,
   IconRadar,
   IconShieldSearch,
+  IconSpider,
+  IconTopologyStar3,
 } from "@tabler/icons-react";
 import VulnShell from "@/components/VulnShell";
 import { PanelCard, Pill } from "@/components/ui";
@@ -34,6 +36,8 @@ const cardIcon: Record<string, React.ElementType> = {
   crowdstrike: IconShieldSearch,
   defender: IconShieldSearch,
   qualys: IconCloudLock,
+  spiderfoot: IconSpider,
+  artemis: IconTopologyStar3,
   tidal: IconDatabaseCog,
   intune: IconDeviceLaptop,
   "crowdstrike-devices": IconShieldSearch,
