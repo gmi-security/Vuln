@@ -80,7 +80,13 @@ export async function grcProbe(): Promise<{
   if (!config) return { ...base, configured: false };
 
   const count = (res: any, list: any[]): number =>
-    Number(res?.meta?.total ?? (Array.isArray(list) ? list.length : 0));
+    Number(
+      res?.meta?.total ??
+        res?.total ??
+        res?.meta?.pagination?.total ??
+        res?.pagination?.total ??
+        (Array.isArray(list) ? list.length : 0),
+    );
   const listOf = (res: any): any[] =>
     res?.data ?? (Array.isArray(res) ? res : []) ?? [];
 
