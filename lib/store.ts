@@ -1623,6 +1623,26 @@ function matchCompanyForScan(
   return best?.id ?? null;
 }
 
+// Resolve a company by name (case-insensitive exact, then substring either way).
+function resolveCompanyByName(s: StoreShape, name: string): string | null {
+  const n = name.trim().toLowerCase();
+  if (!n) return null;
+  const exact = Array.from(s.companies.values()).find(
+    (c) => c.name.toLowerCase() === n,
+  );
+  if (exact) return exact.id;
+  const partial = Array.from(s.companies.values()).find(
+    (c) => c.name.toLowerCase().includes(n) || n.includes(c.name.toLowerCase()),
+  );
+  return partial?.id ?? null;
+}
+
+// Explicit Artemis-tag -> company routing for tags whose label doesn't overlap
+// the company name (e.g. the SONAR product scans of internal infrastructure).
+const ARTEMIS_TAG_COMPANY: { pattern: RegExp; company: string }[] = [
+  { pattern: /^sonar/i, company: "GMI Scans" },
+];
+
 // Pull finished SpiderFoot scans in as findings, grouped under the matching
 // company. Pull-based (SpiderFoot runs scans in its own UI); no live polling.
 export async function importFromSpiderfoot(): Promise<
@@ -1823,8 +1843,11 @@ export async function importFromArtemis(): Promise<
   const nowIso = new Date().toISOString();
 
   for (const [tag, items] of byTag) {
-    // Match tag (and, failing that, the first asset) to an existing company.
+    // Resolution order: explicit tag->company alias, then token overlap on the
+    // tag, then on the first asset.
+    const alias = ARTEMIS_TAG_COMPANY.find((a) => a.pattern.test(tag));
     const companyId =
+      (alias ? resolveCompanyByName(s, alias.company) : null) ??
       matchCompanyForScan(s, tag, "") ??
       matchCompanyForScan(s, "", items[0]?.asset ?? "");
     if (!companyId) {
