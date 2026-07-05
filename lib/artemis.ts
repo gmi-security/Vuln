@@ -129,6 +129,30 @@ export async function artemisStatus(): Promise<{
   }
 }
 
+// Queue new scanning tasks for a set of targets under a tag (POST /api/add).
+export async function artemisAddTargets(
+  targets: string[],
+  tag: string,
+): Promise<{ ok: boolean; ids: unknown[] }> {
+  const config = artemisConfig();
+  if (!config) throw new Error("Artemis is not configured.");
+  if (targets.length === 0) return { ok: true, ids: [] };
+  const res = await request(config, "POST", "/api/add", { targets, tag });
+  if (res.status === 401) {
+    throw new Error("Artemis rejected the API token (401). Check ARTEMIS_API_TOKEN.");
+  }
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`Artemis POST /api/add failed: HTTP ${res.status}`);
+  }
+  let json: any = {};
+  try {
+    json = JSON.parse(res.text);
+  } catch {
+    json = {};
+  }
+  return { ok: json?.ok !== false, ids: json?.ids ?? [] };
+}
+
 export type ArtemisAnalysis = {
   id: string;
   target: string;

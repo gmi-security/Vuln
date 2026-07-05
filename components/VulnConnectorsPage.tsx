@@ -71,6 +71,83 @@ function summarizeSync(result: any): string {
   return parts.length ? `Synced — ${parts.join(", ")}.` : "Sync complete.";
 }
 
+function summarizeOsint(result: any): string {
+  if (!result || typeof result !== "object") return "OSINT scans launched.";
+  const c = result.companies ?? 0;
+  const d = result.domainsTotal ?? 0;
+  const a = result.artemis?.launched ?? 0;
+  const sf = result.spiderfoot?.launched ?? 0;
+  let msg = `Launched for ${c} customer${c === 1 ? "" : "s"} (${d} domain${d === 1 ? "" : "s"}) — Artemis: ${a}, SpiderFoot: ${sf}.`;
+  const errs = Array.isArray(result.errors) ? result.errors.length : 0;
+  if (errs) msg += ` ${errs} error${errs === 1 ? "" : "s"}.`;
+  return msg;
+}
+
+// Banner action: fan out Artemis + SpiderFoot OSINT scans across all customers.
+function OsintLaunchBanner() {
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  async function run() {
+    if (busy) return;
+    setBusy(true);
+    setMsg(null);
+    try {
+      const res = await fetch("/api/osint/launch", { method: "POST" });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || json.error) {
+        setMsg({ ok: false, text: json.error ?? `Failed (HTTP ${res.status})` });
+      } else {
+        const r = json.result;
+        const total = (r?.artemis?.launched ?? 0) + (r?.spiderfoot?.launched ?? 0);
+        setMsg({ ok: total > 0, text: summarizeOsint(r) });
+      }
+    } catch (err) {
+      setMsg({ ok: false, text: err instanceof Error ? err.message : "Failed." });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="rounded-2xl border border-[rgba(179,14,20,0.22)] bg-[#0b0b0b] p-5">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <h2 className="text-lg font-semibold text-white">
+            Quarterly OSINT sweep
+          </h2>
+          <p className="mt-1 text-sm text-zinc-400">
+            Launch Artemis + SpiderFoot against every customer&apos;s root domains
+            for supplemental attack-surface &amp; OSINT context. Runs automatically
+            each quarter; use this to run on demand.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={run}
+          disabled={busy}
+          className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.14)] px-4 py-2 text-sm font-medium text-[#ff4d57] transition hover:bg-[rgba(179,14,20,0.24)] disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <RefreshCw size={15} className={busy ? "animate-spin" : ""} />
+          {busy ? "Launching…" : "Run OSINT scans (all customers)"}
+        </button>
+      </div>
+      {msg ? (
+        <div
+          className={`mt-4 rounded-lg border px-3 py-2 text-xs ${
+            msg.ok
+              ? "border-emerald-900/60 bg-emerald-950/40 text-emerald-300"
+              : "border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.12)] text-[#ff8a8a]"
+          }`}
+        >
+          {msg.text} Scans run in the background — use each engine&apos;s{" "}
+          <strong>Sync now</strong> button to pull results once they finish.
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 const statusClass: Record<ConnectorStatus, string> = {
   Connected: "bg-emerald-950/60 text-emerald-300 border border-emerald-900/60",
   "Demo Mode": "bg-[rgba(245,166,35,0.10)] text-amber-300 border border-amber-900/60",
@@ -224,6 +301,8 @@ export default function VulnConnectorsPage() {
       title="Connectors & integrations"
       subtitle="Scan engines, telemetry sources, and asset inventory feeding the console. Each integration runs in demo mode until its credentials are set in the environment."
     >
+      <OsintLaunchBanner />
+
       <div className="text-[13px] uppercase tracking-[0.3em] text-[#b30e14]">
         Scanners
       </div>

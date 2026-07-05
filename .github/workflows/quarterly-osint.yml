@@ -1,0 +1,33 @@
+name: Quarterly OSINT scans
+
+# Fan out Artemis + SpiderFoot OSINT scans across all customers once a quarter
+# (1st of Jan/Apr/Jul/Oct, 06:00 UTC), aligned to PCI DSS 11.3 cadence.
+# Also runnable on demand from the Actions tab (workflow_dispatch).
+on:
+  schedule:
+    - cron: "0 6 1 1,4,7,10 *"
+  workflow_dispatch: {}
+
+jobs:
+  launch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger the OSINT sweep
+        env:
+          APP_URL: ${{ secrets.VULN_APP_URL }}
+          ADMIN_TOKEN: ${{ secrets.VULN_ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          BASE="${APP_URL:-https://gmi-vuln-opmy8.ondigitalocean.app}"
+          if [ -z "${ADMIN_TOKEN:-}" ]; then
+            echo "VULN_ADMIN_TOKEN secret is not set — add it in repo Settings > Secrets." >&2
+            exit 1
+          fi
+          echo "Launching quarterly OSINT scans at $BASE ..."
+          code=$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X POST \
+            -H "x-admin-token: ${ADMIN_TOKEN}" \
+            "$BASE/api/admin/quarterly-scan" || true)
+          echo "HTTP $code"
+          cat /tmp/resp.json || true
+          echo
+          test "$code" = "200"

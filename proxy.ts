@@ -22,9 +22,10 @@ export async function proxy(request: NextRequest) {
     pathname === "/api/spiderfoot/health" ||
     pathname === "/api/artemis/health" ||
     pathname === "/api/health" ||
-    // Independently protected by ADMIN_TOKEN (not a session), so it must stay
+    // Independently protected by ADMIN_TOKEN (not a session), so they must stay
     // reachable without the login redirect.
-    pathname === "/api/admin/resync"
+    pathname === "/api/admin/resync" ||
+    pathname === "/api/admin/quarterly-scan"
   ) {
     return NextResponse.next();
   }

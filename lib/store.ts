@@ -19,8 +19,10 @@ import {
   spiderfootConfig,
   spiderfootImportFindings,
   spiderfootListScans,
+  spiderfootStartScan,
 } from "@/lib/spiderfoot";
 import {
+  artemisAddTargets,
   artemisConfig,
   artemisImportFindings,
   type ArtemisFinding,
@@ -1804,6 +1806,155 @@ export type ArtemisImportResult = {
   companiesMatched: number;
   skipped: { tag: string; reason: string }[];
 };
+
+// Shared hosting / cloud domains that aren't a customer's own attack surface —
+// deriving OSINT scan targets from these would scan the provider, not the
+// client, so they're excluded.
+const SHARED_HOST_SUFFIXES = [
+  "amazonaws.com",
+  "cloudfront.net",
+  "elasticbeanstalk.com",
+  "azurewebsites.net",
+  "azure.com",
+  "windows.net",
+  "cloudapp.net",
+  "googleusercontent.com",
+  "appspot.com",
+  "run.app",
+  "herokuapp.com",
+  "herokudns.com",
+  "sucuri.net",
+  "akamaiedge.net",
+  "akamai.net",
+  "fastly.net",
+  "cloudflare.net",
+  "cloudflare.com",
+  "digitaloceanspaces.com",
+  "netlify.app",
+  "vercel.app",
+  "github.io",
+  "wpengine.com",
+];
+
+// Multi-label public suffixes we must keep two labels of (foo.co.uk not co.uk).
+const MULTI_LABEL_TLDS = new Set([
+  "co.uk", "org.uk", "gov.uk", "ac.uk", "com.au", "net.au", "org.au",
+  "co.nz", "co.za", "com.br", "com.mx", "co.in", "co.jp", "com.sg",
+]);
+
+const IP_RE = /^\d{1,3}(\.\d{1,3}){3}$/;
+
+// Reduce a hostname to its registrable (eTLD+1) domain, or null if it's an IP
+// or a shared-hosting domain we shouldn't scan as the customer's surface.
+export function registrableDomain(host: string): string | null {
+  const h = host.trim().toLowerCase().replace(/^\*\./, "").replace(/\.$/, "");
+  if (!h || IP_RE.test(h) || !h.includes(".")) return null;
+  if (SHARED_HOST_SUFFIXES.some((suf) => h === suf || h.endsWith(`.${suf}`))) {
+    return null;
+  }
+  const labels = h.split(".");
+  const last2 = labels.slice(-2).join(".");
+  const domain =
+    labels.length >= 3 && MULTI_LABEL_TLDS.has(last2)
+      ? labels.slice(-3).join(".")
+      : last2;
+  if (SHARED_HOST_SUFFIXES.some((suf) => domain === suf || domain.endsWith(`.${suf}`))) {
+    return null;
+  }
+  return domain;
+}
+
+// Derive the set of root domains to run OSINT scans against for a company,
+// from its findings' assets and any inventory assets.
+export function osintTargetsForCompany(s: StoreShape, companyId: string): string[] {
+  const domains = new Set<string>();
+  for (const f of s.findings.values()) {
+    if (f.companyId !== companyId) continue;
+    const d = registrableDomain(f.asset);
+    if (d) domains.add(d);
+  }
+  for (const a of s.assets.values()) {
+    if (a.companyId !== companyId) continue;
+    const d = registrableDomain(a.hostname || a.identifier || "");
+    if (d) domains.add(d);
+  }
+  return Array.from(domains).sort();
+}
+
+export type OsintLaunchResult = {
+  companies: number;
+  domainsTotal: number;
+  artemis: { configured: boolean; launched: number; failed: number };
+  spiderfoot: { configured: boolean; launched: number; failed: number };
+  perCompany: { company: string; domains: string[] }[];
+  errors: string[];
+};
+
+// Launch supplemental OSINT / attack-surface scans (Artemis + SpiderFoot only —
+// not Nessus) for every client company, against that company's derived root
+// domains. Tagged/named by company so the results route back on import.
+export async function launchOsintScans(): Promise<OsintLaunchResult> {
+  const s = store();
+  const artemisReady = Boolean(artemisConfig());
+  const sfReady = Boolean(spiderfootConfig());
+  const sfUsecase = process.env.SPIDERFOOT_USECASE || "Footprint";
+
+  const result: OsintLaunchResult = {
+    companies: 0,
+    domainsTotal: 0,
+    artemis: { configured: artemisReady, launched: 0, failed: 0 },
+    spiderfoot: { configured: sfReady, launched: 0, failed: 0 },
+    perCompany: [],
+    errors: [],
+  };
+  if (!artemisReady && !sfReady) {
+    result.errors.push(
+      "Neither Artemis nor SpiderFoot is configured — set their env vars first.",
+    );
+    return result;
+  }
+
+  const clients = Array.from(s.companies.values()).filter(
+    (c) => c.kind === "client",
+  );
+  for (const company of clients) {
+    const domains = osintTargetsForCompany(s, company.id);
+    if (domains.length === 0) continue;
+    result.companies += 1;
+    result.domainsTotal += domains.length;
+    result.perCompany.push({ company: company.name, domains });
+
+    // Artemis: one batch add for all of the company's domains, tagged by name.
+    if (artemisReady) {
+      try {
+        await artemisAddTargets(domains, company.name);
+        result.artemis.launched += 1;
+      } catch (err) {
+        result.artemis.failed += 1;
+        result.errors.push(
+          `Artemis (${company.name}): ${err instanceof Error ? err.message : "add failed"}`,
+        );
+      }
+    }
+
+    // SpiderFoot: one scan per domain, named by company so import maps back.
+    if (sfReady) {
+      for (const domain of domains) {
+        try {
+          await spiderfootStartScan(`${company.name} — ${domain}`, domain, sfUsecase);
+          result.spiderfoot.launched += 1;
+        } catch (err) {
+          result.spiderfoot.failed += 1;
+          result.errors.push(
+            `SpiderFoot (${company.name}/${domain}): ${err instanceof Error ? err.message : "start failed"}`,
+          );
+        }
+      }
+    }
+  }
+  await flushNow();
+  return result;
+}
 
 // Pull Artemis "interesting" task results in as findings, grouped by tag ->
 // company. Reuses one scan record per tag (idempotent via externalRef) so
