@@ -19,6 +19,7 @@ export async function proxy(request: NextRequest) {
     isPublicAsset(pathname) ||
     pathname.startsWith("/api/auth") ||
     pathname === "/api/nessus/health" ||
+    pathname === "/api/spiderfoot/health" ||
     pathname === "/api/health" ||
     // Independently protected by ADMIN_TOKEN (not a session), so it must stay
     // reachable without the login redirect.

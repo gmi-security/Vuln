@@ -15,6 +15,11 @@ import { intuneConfig, intuneListAssets } from "@/lib/intune";
 import { falconConfig, falconListAssets } from "@/lib/crowdstrike";
 import { defenderConfig, defenderListFindings } from "@/lib/defender";
 import { buildRisk, grcConfig, grcCreateRisk } from "@/lib/grc";
+import {
+  spiderfootConfig,
+  spiderfootImportFindings,
+  spiderfootListScans,
+} from "@/lib/spiderfoot";
 import { loadSnapshot, persistenceEnabled, saveSnapshot } from "@/lib/persist";
 import type {
   AssetSource,
@@ -132,6 +137,9 @@ type InternalScan = Omit<Scan, "progress" | "status"> & {
   seed: number;
   // Present when the scan runs on a real scanner instead of the demo engine.
   vendor: { nessusScanId: number; lastPoll: number; imported: boolean } | null;
+  // Stable reference to an external source scan (e.g. "spiderfoot:<id>") so
+  // pull-based imports stay idempotent. Absent for native/demo scans.
+  externalRef?: string;
 };
 
 const globalStore = globalThis as unknown as { __vulnStore?: StoreShape };
@@ -1568,6 +1576,203 @@ export type TidalImportResult = {
 // Pull the Tidal asset inventory, map each asset's customer to a company
 // (match by name, create if missing), upsert the asset, then reprice every
 // finding so real risk reflects the authoritative environment.
+export type SpiderfootImportResult = {
+  scansImported: number;
+  findingsImported: number;
+  companiesMatched: number;
+  skipped: { scan: string; reason: string }[];
+};
+
+// Normalize a string to lowercase alphanumeric tokens (length >= 3) for fuzzy
+// company matching.
+function nameTokens(text: string): Set<string> {
+  return new Set(
+    text
+      .toLowerCase()
+      .replace(/https?:\/\//g, "")
+      .split(/[^a-z0-9]+/)
+      .filter((t) => t.length >= 3 && t !== "com" && t !== "www" && t !== "net"),
+  );
+}
+
+// Resolve a SpiderFoot scan to an existing company by token overlap between the
+// scan name/target and the company name. Returns null if nothing matches — we
+// never auto-create companies from OSINT scans to avoid polluting the roster.
+function matchCompanyForScan(
+  s: StoreShape,
+  scanName: string,
+  scanTarget: string,
+): string | null {
+  const scanToks = nameTokens(`${scanName} ${scanTarget}`);
+  if (scanToks.size === 0) return null;
+  let best: { id: string; score: number } | null = null;
+  for (const company of s.companies.values()) {
+    const compToks = nameTokens(company.name);
+    let score = 0;
+    for (const t of compToks) {
+      if (scanToks.has(t)) score += 1;
+      else if ([...scanToks].some((x) => x.includes(t) || t.includes(x))) score += 1;
+    }
+    if (score > 0 && (!best || score > best.score)) best = { id: company.id, score };
+  }
+  return best?.id ?? null;
+}
+
+// Pull finished SpiderFoot scans in as findings, grouped under the matching
+// company. Pull-based (SpiderFoot runs scans in its own UI); no live polling.
+export async function importFromSpiderfoot(): Promise<
+  SpiderfootImportResult | { error: string }
+> {
+  if (!spiderfootConfig()) {
+    return {
+      error:
+        "SpiderFoot is not configured. Set SPIDERFOOT_URL (and SPIDERFOOT_USER / SPIDERFOOT_PASS if it requires auth) to import.",
+    };
+  }
+  const s = store();
+
+  let scans: Awaited<ReturnType<typeof spiderfootListScans>>;
+  try {
+    scans = await spiderfootListScans();
+  } catch (err) {
+    return {
+      error: err instanceof Error ? err.message : "Failed to reach SpiderFoot.",
+    };
+  }
+
+  const skipped: { scan: string; reason: string }[] = [];
+  const matchedCompanies = new Set<string>();
+  let scansImported = 0;
+  let findingsImported = 0;
+
+  for (const sf of scans) {
+    const label = sf.name || sf.target || sf.id;
+    if (!/finish|done|complete/i.test(sf.status)) {
+      skipped.push({ scan: label, reason: `status ${sf.status}` });
+      continue;
+    }
+    // Skip scans already imported (scan record tagged with the SpiderFoot id).
+    const already = Array.from(s.scans.values()).some(
+      (sc) => sc.externalRef === `spiderfoot:${sf.id}`,
+    );
+    if (already) {
+      skipped.push({ scan: label, reason: "already imported" });
+      continue;
+    }
+    const companyId = matchCompanyForScan(s, sf.name, sf.target);
+    if (!companyId) {
+      skipped.push({ scan: label, reason: "no matching company" });
+      continue;
+    }
+
+    let imported: Awaited<ReturnType<typeof spiderfootImportFindings>>;
+    try {
+      imported = await spiderfootImportFindings(sf.id);
+    } catch (err) {
+      skipped.push({
+        scan: label,
+        reason: err instanceof Error ? err.message : "results fetch failed",
+      });
+      continue;
+    }
+
+    const company = s.companies.get(companyId)!;
+    const folder = ensureFolder(s, companyId, "SpiderFoot");
+    const nowIso = new Date().toISOString();
+    const scanId = nextId(s, "SCAN");
+    const scan: InternalScan = {
+      id: scanId,
+      name: sf.name || `SpiderFoot ${sf.id}`,
+      companyId: company.id,
+      companyName: company.name,
+      folderId: folder.id,
+      folderName: folder.name,
+      connector: "spiderfoot",
+      profile: "imported",
+      targets: sf.target ? [sf.target] : [],
+      status: "Completed",
+      createdAt: nowIso,
+      startedAt: nowIso,
+      completedAt: nowIso,
+      findingsCount: 0,
+      severityCounts: emptySeverityCounts(),
+      hostsScanned: 0,
+      requestedBy: "imported@spiderfoot",
+      durationMs: 1,
+      progressFrozenAt: 100,
+      seed: hashSeed(scanId + sf.id),
+      vendor: null,
+      externalRef: `spiderfoot:${sf.id}`,
+    };
+    s.scans.set(scanId, scan);
+    scansImported += 1;
+    matchedCompanies.add(companyId);
+
+    for (const item of imported) {
+      const dedupeKey = `${item.cve}::${item.asset}::${item.title}`;
+      const existing = Array.from(s.findings.values()).find(
+        (f) =>
+          `${f.cve}::${f.asset}::${f.title}` === dedupeKey && f.status !== "Resolved",
+      );
+      if (existing) {
+        existing.lastSeen = nowIso;
+        continue;
+      }
+      s.findings.set(`VLN-${(s.counter += 1)}`, {
+        id: `VLN-${s.counter}`,
+        scanId: scan.id,
+        companyId: scan.companyId,
+        companyName: scan.companyName,
+        connector: "spiderfoot",
+        cve: item.cve,
+        title: item.title,
+        severity: item.severity,
+        cvss: item.cvss,
+        cvssV3: item.cvss,
+        cvssV2: 0,
+        vpr: 0,
+        epss: 0,
+        asset: item.asset,
+        port: "N/A",
+        category: item.category,
+        description: item.description,
+        remediation:
+          "Review the SpiderFoot event detail and remediate the exposed asset or disclosed vulnerability.",
+        status: "Open",
+        assignee: null,
+        firstSeen: nowIso,
+        lastSeen: nowIso,
+        resolvedAt: null,
+        exploitAvailable: false,
+        ...riskFields(s, {
+          cve: item.cve,
+          cvss: item.cvss,
+          epss: 0,
+          exploitAvailable: false,
+          asset: item.asset,
+          companyId: scan.companyId,
+        }),
+      });
+    }
+
+    const all = Array.from(s.findings.values()).filter((f) => f.scanId === scan.id);
+    scan.findingsCount = all.length;
+    const counts = emptySeverityCounts();
+    for (const f of all) counts[f.severity] += 1;
+    scan.severityCounts = counts;
+    scan.hostsScanned = new Set(all.map((f) => f.asset)).size || scan.targets.length;
+    findingsImported += all.length;
+  }
+
+  await flushNow();
+  return {
+    scansImported,
+    findingsImported,
+    companiesMatched: matchedCompanies.size,
+    skipped,
+  };
+}
+
 export async function importFromTidal(): Promise<
   TidalImportResult | { error: string }
 > {
