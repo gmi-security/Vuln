@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useState } from "react";
-import { RefreshCcw, Upload } from "lucide-react";
+import { FileText, RefreshCcw, Upload } from "lucide-react";
 import {
   IconBuildingBank,
   IconCircleCheck,
@@ -191,6 +191,15 @@ function ComplianceCard({
             {posture.score}
           </div>
           <Pill className={statusClass[posture.overall]}>{posture.overall}</Pill>
+          <a
+            href={`/report/${posture.companyId}`}
+            target="_blank"
+            rel="noreferrer"
+            className={`${ghostButtonClass} h-9 px-3 text-xs`}
+          >
+            <FileText size={14} className="text-zinc-400" />
+            Board PDF
+          </a>
           <button
             onClick={onPush}
             disabled={pushing}
