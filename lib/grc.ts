@@ -117,6 +117,13 @@ export async function grcCreateRisk(risk: GrcRisk): Promise<{ id: unknown }> {
   return { id: data?.data?.id ?? data?.id ?? null };
 }
 
+export type GrcFrameworkEvidence = {
+  name: string;
+  score: number;
+  overall: string;
+  failing: { id: string; title: string; detail: string }[];
+};
+
 export function buildRisk(input: {
   companyName: string;
   compositeScore: number;
@@ -126,6 +133,7 @@ export function buildRisk(input: {
   asvFailing: number;
   overall: string;
   topFindings: { cve: string; title: string; asset: string; realRisk: number }[];
+  frameworks?: GrcFrameworkEvidence[];
 }): GrcRisk {
   const lines = input.topFindings
     .slice(0, 10)
@@ -134,11 +142,30 @@ export function buildRisk(input: {
         `- [${f.realRisk}] ${f.cve} — ${f.title} on ${f.asset}`,
     )
     .join("\n");
+
+  // Control-level compliance evidence across every mapped framework, so the GRC
+  // record carries pass/fail per control — not just an aggregate risk number.
+  const complianceBlock =
+    input.frameworks && input.frameworks.length
+      ? [
+          ``,
+          `Compliance posture (control-level evidence):`,
+          ...input.frameworks.flatMap((fw) => {
+            const head = `- ${fw.name}: ${fw.overall} (${fw.score}/100)`;
+            const controls = fw.failing.length
+              ? fw.failing.map((c) => `    · ${c.id} ${c.title} — FAIL: ${c.detail}`)
+              : [`    · all mapped controls passing`];
+            return [head, ...controls];
+          }),
+        ]
+      : [];
+
   const description = [
     `Aggregated vulnerability risk for ${input.companyName} (source: GMI Vuln console).`,
     ``,
-    `Composite risk: ${input.compositeScore}/100 · PCI DSS 4.0: ${input.overall}`,
+    `Composite risk: ${input.compositeScore}/100 · Overall: ${input.overall}`,
     `Open findings: ${input.openTotal} · Critical: ${input.criticalOpen} · Actively exploited (KEV): ${input.kevOpen} · ASV-failing (CVSS ≥ 4.0, internet-facing): ${input.asvFailing}`,
+    ...complianceBlock,
     ``,
     `Top findings:`,
     lines || "- none",

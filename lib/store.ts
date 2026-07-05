@@ -27,6 +27,11 @@ import {
   artemisImportFindings,
   type ArtemisFinding,
 } from "@/lib/artemis";
+import {
+  evaluateFramework,
+  FRAMEWORKS,
+  type ComplianceSignals,
+} from "@/lib/compliance";
 import { loadSnapshot, persistenceEnabled, saveSnapshot } from "@/lib/persist";
 import type {
   AssetSource,
@@ -1109,6 +1114,7 @@ function cvssOf(f: Finding): number {
 // Evaluate PCI DSS 4.0 vulnerability-management posture per company.
 export function computeCompliance(filter?: {
   companyId?: string;
+  framework?: string;
 }): ComplianceResult {
   const s = store();
   tick(s);
@@ -1152,73 +1158,35 @@ export function computeCompliance(filter?: {
       : null;
     const scanOverdue = lastScanDaysAgo === null || lastScanDaysAgo > 90;
 
-    const requirements: ComplianceRequirement[] = [
-      {
-        id: "6.3.1",
-        title: "Vulnerabilities identified and risk-ranked",
-        status: "Pass",
-        detail:
-          "All findings are risk-ranked via composite real-risk (CVSS × exploitation × environment).",
-        failing: 0,
-      },
-      {
-        id: "6.3.3",
-        title: "Critical/high-risk patches applied within one month",
-        status: slaBreaches.length > 0 ? "Fail" : "Pass",
-        detail:
-          slaBreaches.length > 0
-            ? `${slaBreaches.length} critical/high finding(s) open past the 30-day patch window.`
-            : "No critical/high findings past the 30-day patch window.",
-        failing: slaBreaches.length,
-      },
-      {
-        id: "11.3.1",
-        title: "Internal scans quarterly; high/critical resolved & rescanned",
-        status:
-          internalHighCrit.length > 0 ? "Fail" : scanOverdue ? "At Risk" : "Pass",
-        detail:
-          internalHighCrit.length > 0
-            ? `${internalHighCrit.length} high/critical finding(s) unresolved.`
-            : scanOverdue
-              ? `Last completed scan ${lastScanDaysAgo === null ? "never" : `${lastScanDaysAgo}d ago`} — quarterly cadence at risk.`
-              : "No unresolved high/critical; scan cadence within quarter.",
-        failing: internalHighCrit.length,
-      },
-      {
-        id: "11.3.2",
-        title: "External ASV scan passing (no CVSS ≥ 4.0 on internet-facing)",
-        status: asvPass ? "Pass" : "Fail",
-        detail: asvPass
-          ? "No internet-facing findings at or above CVSS 4.0 — ASV pass."
-          : `${asvFailing.length} internet-facing finding(s) at CVSS ≥ 4.0 — automatic ASV failure.`,
-        failing: asvFailing.length,
-      },
-    ];
+    const signals: ComplianceSignals = {
+      openTotal: open.length,
+      criticalOpen: open.filter((f) => f.severity === "Critical").length,
+      highCritOpen: internalHighCrit.length,
+      externalFailing: asvFailing.length,
+      slaBreaches30: slaBreaches.length,
+      slaBreachesMed90: open.filter(
+        (f) =>
+          f.severity === "Medium" &&
+          (now - new Date(f.firstSeen).getTime()) / DAY > 90,
+      ).length,
+      kevOpen: open.filter((f) => isKev(f.cve)).length,
+      lastScanDaysAgo,
+      scanOverdue30: lastScanDaysAgo === null || lastScanDaysAgo > 30,
+      scanOverdue90: scanOverdue,
+    };
 
-    let score = 100;
-    score -= Math.min(45, asvFailing.length * 3);
-    score -= Math.min(30, internalHighCrit.length * 2);
-    score -= Math.min(15, slaBreaches.length * 2);
-    if (scanOverdue) score -= 10;
-    score = Math.max(0, Math.round(score));
-
-    const overall: ComplianceStatus =
-      !asvPass || internalHighCrit.length > 0
-        ? "Fail"
-        : slaBreaches.length > 0 || scanOverdue
-          ? "At Risk"
-          : "Pass";
+    const evald = evaluateFramework(signals, filter?.framework ?? "pci");
 
     return {
-      framework: "PCI DSS 4.0",
+      framework: evald.framework.name,
       companyId: company.id,
       companyName: company.name,
-      overall,
-      score,
+      overall: evald.overall,
+      score: evald.score,
       asvPass,
       failingFindings: asvFailing.length,
       lastScanDaysAgo,
-      requirements,
+      requirements: evald.requirements,
       summary: {
         externalFailing: asvFailing.length,
         internalHighCrit: internalHighCrit.length,
@@ -1233,7 +1201,8 @@ export function computeCompliance(filter?: {
   const failing = postures.filter((p) => p.overall === "Fail").length;
 
   return {
-    framework: "PCI DSS 4.0",
+    framework:
+      (FRAMEWORKS.find((f) => f.id === (filter?.framework ?? "pci")) ?? FRAMEWORKS[0]).name,
     aggregate: {
       companies: postures.length,
       passing,
@@ -1269,6 +1238,22 @@ export async function exportToGrc(filter?: {
 
   for (const posture of compliance.companies) {
     const metrics = computeMetrics({ companyId: posture.companyId });
+    // Evaluate every framework for this company so the GRC record carries
+    // control-level compliance evidence, not just an aggregate risk number.
+    const frameworks = FRAMEWORKS.map((fw) => {
+      const p = computeCompliance({
+        companyId: posture.companyId,
+        framework: fw.id,
+      }).companies[0];
+      return {
+        name: fw.name,
+        score: p?.score ?? 0,
+        overall: p?.overall ?? "Pass",
+        failing: (p?.requirements ?? [])
+          .filter((r) => r.status === "Fail" || r.status === "At Risk")
+          .map((r) => ({ id: r.id, title: r.title, detail: r.detail })),
+      };
+    });
     const top = listFindings({ companyId: posture.companyId })
       .filter((f) => f.status === "Open" || f.status === "In Remediation")
       .slice(0, 10)
@@ -1287,6 +1272,7 @@ export async function exportToGrc(filter?: {
       asvFailing: posture.summary.externalFailing,
       overall: posture.overall,
       topFindings: top,
+      frameworks,
     });
     try {
       await grcCreateRisk(risk);

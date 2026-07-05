@@ -22,21 +22,29 @@ const statusClass: Record<string, string> = {
 
 export default function VulnCompliancePage() {
   const [data, setData] = useState<ComplianceResult | null>(null);
+  const [frameworks, setFrameworks] = useState<
+    { id: string; name: string; short: string }[]
+  >([]);
+  const [selected, setSelected] = useState("pci");
   const [pushing, setPushing] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (framework: string) => {
     try {
-      const res = await fetch("/api/compliance", { cache: "no-store" });
-      setData((await res.json()).compliance ?? null);
+      const res = await fetch(`/api/compliance?framework=${framework}`, {
+        cache: "no-store",
+      });
+      const json = await res.json();
+      setData(json.compliance ?? null);
+      if (json.frameworks) setFrameworks(json.frameworks);
     } catch {
       // keep last snapshot
     }
   }, []);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    void load(selected);
+  }, [load, selected]);
 
   async function pushToGrc(companyId?: string) {
     setPushing(true);
@@ -69,8 +77,8 @@ export default function VulnCompliancePage() {
   return (
     <VulnShell
       eyebrow="Compliance"
-      title="PCI DSS 4.0"
-      subtitle="Vulnerability-management compliance per client — ASV pass/fail, patch-SLA, and internal-scan requirements — pushable to your GRC for audit evidence."
+      title={data?.framework ?? "Compliance"}
+      subtitle="Vulnerability-management compliance per client, mapped to controls across PCI DSS, NIST, CMMC, HIPAA & FedRAMP — findings → controls, pass/fail with evidence, pushable to your GRC."
       actions={
         <>
           <button
@@ -81,13 +89,31 @@ export default function VulnCompliancePage() {
             <Upload size={16} />
             {pushing ? "Pushing..." : "Push all to GRC"}
           </button>
-          <button onClick={() => void load()} className={ghostButtonClass}>
+          <button onClick={() => void load(selected)} className={ghostButtonClass}>
             <RefreshCcw size={16} className="text-zinc-400" />
             Refresh
           </button>
         </>
       }
     >
+      {frameworks.length ? (
+        <div className="flex flex-wrap gap-2">
+          {frameworks.map((fw) => (
+            <button
+              key={fw.id}
+              onClick={() => setSelected(fw.id)}
+              title={fw.name}
+              className={`rounded-lg border px-3 py-1.5 text-sm font-medium transition ${
+                selected === fw.id
+                  ? "border-[rgba(179,14,20,0.5)] bg-[rgba(179,14,20,0.14)] text-[#ff8f96]"
+                  : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:text-white"
+              }`}
+            >
+              {fw.short}
+            </button>
+          ))}
+        </div>
+      ) : null}
       {msg ? (
         <div
           className={[
@@ -117,7 +143,7 @@ export default function VulnCompliancePage() {
         <StatCard
           label="Failing"
           value={agg ? agg.failing : "—"}
-          sublabel="PCI DSS non-compliant"
+          sublabel="Non-compliant clients"
           icon={<IconCircleX size={26} />}
         />
         <StatCard
@@ -186,18 +212,18 @@ function ComplianceCard({
       </div>
 
       <div className="overflow-hidden rounded-[24px] border border-[rgba(179,14,20,0.12)] bg-[#040404]">
-        <div className="grid grid-cols-[90px_1.8fr_120px_90px] gap-4 border-b border-zinc-900 px-5 py-3 text-xs uppercase tracking-[0.2em] text-zinc-500">
-          <div>Req</div>
-          <div>Requirement</div>
+        <div className="grid grid-cols-[160px_1.5fr_110px_70px] gap-4 border-b border-zinc-900 px-5 py-3 text-xs uppercase tracking-[0.2em] text-zinc-500">
+          <div>Control</div>
+          <div>Objective</div>
           <div>Status</div>
           <div>Failing</div>
         </div>
         {posture.requirements.map((r) => (
           <div
             key={r.id}
-            className="grid grid-cols-[90px_1.8fr_120px_90px] items-center gap-4 border-b border-zinc-900/70 px-5 py-4 last:border-b-0"
+            className="grid grid-cols-[160px_1.5fr_110px_70px] items-center gap-4 border-b border-zinc-900/70 px-5 py-4 last:border-b-0"
           >
-            <div className="font-medium text-[#ff8f96]">{r.id}</div>
+            <div className="break-words text-xs font-medium text-[#ff8f96]">{r.id}</div>
             <div className="min-w-0">
               <div className="font-medium text-white">{r.title}</div>
               <div className="mt-1 text-xs text-zinc-500">{r.detail}</div>
