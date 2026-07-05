@@ -1106,6 +1106,168 @@ export async function resyncFromNessus(options?: {
   return result;
 }
 
+// --- attack surface (external OSINT posture: Artemis + SpiderFoot) ----------
+
+export type SurfaceCategory =
+  | "Exposed Services"
+  | "Subdomains & DNS"
+  | "Leaked Credentials"
+  | "Web Vulnerabilities"
+  | "Threat Intel"
+  | "Info Disclosure";
+
+export const SURFACE_CATEGORIES: SurfaceCategory[] = [
+  "Exposed Services",
+  "Subdomains & DNS",
+  "Leaked Credentials",
+  "Web Vulnerabilities",
+  "Threat Intel",
+  "Info Disclosure",
+];
+
+function emptySurfaceCounts(): Record<SurfaceCategory, number> {
+  return {
+    "Exposed Services": 0,
+    "Subdomains & DNS": 0,
+    "Leaked Credentials": 0,
+    "Web Vulnerabilities": 0,
+    "Threat Intel": 0,
+    "Info Disclosure": 0,
+  };
+}
+
+// Bucket an OSINT finding into an attack-surface category from its module/event
+// (the part after "Artemis: " / "SpiderFoot: ") and CVE marker.
+function surfaceCategoryOf(f: Finding): SurfaceCategory {
+  const raw = (f.category.split(":").pop() || "").trim().toLowerCase();
+  const cve = f.cve.toLowerCase();
+  const has = (...keys: string[]) =>
+    keys.some((k) => raw.includes(k) || cve.includes(k));
+  if (has("leaksite", "compromise", "password", "hash", "bruter", "account_external", "breach"))
+    return "Leaked Credentials";
+  if (has("nuclei", "sql_injection", "lfi", "wp_scanner", "wordpress", "joomla", "drupal", "api_scanner", "directory_index", "admin_panel", "vulnerability"))
+    return "Web Vulnerabilities";
+  if (has("malicious", "blacklist", "shodan", "darknet", "defaced"))
+    return "Threat Intel";
+  if (has("port")) return "Exposed Services";
+  if (has("subdomain", "dns", "dangling", "internet_name", "vhost", "domain_expiration"))
+    return "Subdomains & DNS";
+  return "Info Disclosure";
+}
+
+export type SurfaceItem = {
+  id: string;
+  companyId: string;
+  companyName: string;
+  asset: string;
+  category: SurfaceCategory;
+  rawCategory: string;
+  severity: Severity;
+  source: "artemis" | "spiderfoot";
+  title: string;
+  description: string;
+  lastSeen: string;
+};
+
+export type CompanySurface = {
+  companyId: string;
+  companyName: string;
+  total: number;
+  exposedAssets: number;
+  byCategory: Record<SurfaceCategory, number>;
+  items: SurfaceItem[];
+};
+
+export type AttackSurfaceResult = {
+  summary: {
+    total: number;
+    companies: number;
+    exposedAssets: number;
+    byCategory: Record<SurfaceCategory, number>;
+    bySource: { artemis: number; spiderfoot: number };
+  };
+  companies: CompanySurface[];
+};
+
+// External attack-surface posture from the OSINT engines (Artemis + SpiderFoot),
+// grouped per client and by category — deliberately separate from the CVE
+// findings, because exposure is a different question than "which CVE".
+export function computeAttackSurface(filter?: {
+  companyId?: string;
+}): AttackSurfaceResult {
+  const s = store();
+  tick(s);
+  const osint = Array.from(s.findings.values()).filter(
+    (f) =>
+      (f.connector === "artemis" || f.connector === "spiderfoot") &&
+      f.status !== "Resolved" &&
+      (!filter?.companyId || f.companyId === filter.companyId),
+  );
+
+  const byCompanyId = new Map<string, SurfaceItem[]>();
+  const summaryCounts = emptySurfaceCounts();
+  const bySource = { artemis: 0, spiderfoot: 0 };
+
+  for (const f of osint) {
+    const category = surfaceCategoryOf(f);
+    const item: SurfaceItem = {
+      id: f.id,
+      companyId: f.companyId,
+      companyName: f.companyName,
+      asset: f.asset,
+      category,
+      rawCategory: (f.category.split(":").pop() || f.category).trim(),
+      severity: f.severity,
+      source: f.connector === "spiderfoot" ? "spiderfoot" : "artemis",
+      title: f.title,
+      description: f.description,
+      lastSeen: f.lastSeen,
+    };
+    if (!byCompanyId.has(f.companyId)) byCompanyId.set(f.companyId, []);
+    byCompanyId.get(f.companyId)!.push(item);
+    summaryCounts[category] += 1;
+    bySource[item.source] += 1;
+  }
+
+  const SEV_RANK: Record<Severity, number> = {
+    Critical: 4,
+    High: 3,
+    Medium: 2,
+    Low: 1,
+    Info: 0,
+  };
+  const companies: CompanySurface[] = Array.from(byCompanyId.entries())
+    .map(([companyId, items]) => {
+      const byCategory = emptySurfaceCounts();
+      for (const it of items) byCategory[it.category] += 1;
+      items.sort(
+        (a, b) =>
+          SEV_RANK[b.severity] - SEV_RANK[a.severity] ||
+          a.category.localeCompare(b.category),
+      );
+      return {
+        companyId,
+        companyName: items[0]?.companyName ?? companyId,
+        total: items.length,
+        exposedAssets: new Set(items.map((i) => i.asset)).size,
+        byCategory,
+        items,
+      };
+    })
+    .sort((a, b) => b.total - a.total);
+
+  return {
+    summary: {
+      total: osint.length,
+      companies: companies.length,
+      exposedAssets: new Set(osint.map((f) => f.asset)).size,
+      byCategory: summaryCounts,
+      bySource,
+    },
+    companies,
+  };
+}
+
 // --- analyst priority queue (SSVC + KEV remediation SLAs) -------------------
 
 export type PriorityItem = {
