@@ -11,6 +11,7 @@ import {
   Radar,
   ScanSearch,
   Share2,
+  Timer,
 } from "lucide-react";
 
 export type VulnNavItem = {
@@ -29,6 +30,7 @@ export const baseNavItems: VulnNavItem[] = [
   { label: "Attack Surface", icon: Globe, href: "/attack-surface" },
   { label: "Attack Paths", icon: Share2, href: "/attack-paths" },
   { label: "Compliance", icon: ClipboardCheck, href: "/compliance" },
+  { label: "Remediation SLA", icon: Timer, href: "/sla" },
   { label: "Quantify", icon: Gauge, href: "/quantify" },
   { label: "Connectors", icon: PlugZap, href: "/connectors" },
 ];

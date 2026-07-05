@@ -1541,6 +1541,151 @@ export function computePriorities(filter?: {
   return { summary, items: items.slice(0, filter?.limit ?? 100) };
 }
 
+// --- remediation SLA dashboard (burndown + MTTR per client) ----------------
+
+export type SlaClientRow = {
+  companyId: string;
+  companyName: string;
+  open: number;
+  withinSla: number;
+  dueSoon: number;
+  breached: number;
+  slaCompliance: number; // % of open findings still within their SLA window
+  mttrDays: number | null;
+  resolved30: number;
+  worstBreachSeverity: Severity | null;
+};
+
+export type RemediationSlaResult = {
+  overall: {
+    open: number;
+    withinSla: number;
+    dueSoon: number;
+    breached: number;
+    slaCompliance: number;
+    mttrDays: number | null;
+    resolved30: number;
+  };
+  burndown: { date: string; open: number; resolved: number }[];
+  slaPolicy: { severity: Severity; days: number }[];
+  clients: SlaClientRow[];
+};
+
+export function computeRemediationSla(): RemediationSlaResult {
+  const s = store();
+  tick(s);
+  const now = Date.now();
+  const DAY = 86_400_000;
+  const all = Array.from(s.findings.values());
+
+  // 30-day burndown: open backlog vs resolved-per-day.
+  const burndown: { date: string; open: number; resolved: number }[] = [];
+  for (let d = 29; d >= 0; d--) {
+    const dayEnd = now - d * DAY;
+    const date = new Date(dayEnd).toISOString().slice(0, 10);
+    const open = all.filter(
+      (f) =>
+        new Date(f.firstSeen).getTime() <= dayEnd &&
+        !(f.resolvedAt && new Date(f.resolvedAt).getTime() <= dayEnd),
+    ).length;
+    const resolved = all.filter(
+      (f) =>
+        f.resolvedAt &&
+        new Date(f.resolvedAt).getTime() > dayEnd - DAY &&
+        new Date(f.resolvedAt).getTime() <= dayEnd,
+    ).length;
+    burndown.push({ date, open, resolved });
+  }
+
+  const SEV_RANK: Record<Severity, number> = {
+    Critical: 4,
+    High: 3,
+    Medium: 2,
+    Low: 1,
+    Info: 0,
+  };
+
+  const byCompany = new Map<string, Finding[]>();
+  for (const f of all) {
+    if (!byCompany.has(f.companyId)) byCompany.set(f.companyId, []);
+    byCompany.get(f.companyId)!.push(f);
+  }
+
+  let oOpen = 0, oWithin = 0, oDue = 0, oBreach = 0, oResolved30 = 0;
+  const oMttr: number[] = [];
+  const clients: SlaClientRow[] = [];
+
+  for (const [companyId, list] of byCompany) {
+    const company = s.companies.get(companyId);
+    if (!company) continue;
+    let within = 0, due = 0, breach = 0;
+    let worst: Severity | null = null;
+    for (const f of list.filter(isOpen)) {
+      const age = (now - new Date(f.firstSeen).getTime()) / DAY;
+      const sla = SLA_DAYS[f.severity];
+      if (age > sla) {
+        breach += 1;
+        if (!worst || SEV_RANK[f.severity] > SEV_RANK[worst]) worst = f.severity;
+      } else if (age > sla - 7) due += 1;
+      else within += 1;
+    }
+    const open = within + due + breach;
+    const remediated = list.filter((f) => f.status === "Resolved" && f.resolvedAt);
+    const times = remediated.map(
+      (f) => (new Date(f.resolvedAt!).getTime() - new Date(f.firstSeen).getTime()) / DAY,
+    );
+    const mttrDays = times.length
+      ? Math.round(times.reduce((a, b) => a + b, 0) / times.length)
+      : null;
+    const resolved30 = remediated.filter(
+      (f) => (now - new Date(f.resolvedAt!).getTime()) / DAY <= 30,
+    ).length;
+    const slaCompliance = open ? Math.round((100 * (open - breach)) / open) : 100;
+
+    clients.push({
+      companyId,
+      companyName: company.name,
+      open,
+      withinSla: within,
+      dueSoon: due,
+      breached: breach,
+      slaCompliance,
+      mttrDays,
+      resolved30,
+      worstBreachSeverity: worst,
+    });
+
+    oOpen += open;
+    oWithin += within;
+    oDue += due;
+    oBreach += breach;
+    oResolved30 += resolved30;
+    for (const t of times) oMttr.push(t);
+  }
+
+  clients.sort((a, b) => b.breached - a.breached || b.open - a.open);
+
+  return {
+    overall: {
+      open: oOpen,
+      withinSla: oWithin,
+      dueSoon: oDue,
+      breached: oBreach,
+      slaCompliance: oOpen ? Math.round((100 * (oOpen - oBreach)) / oOpen) : 100,
+      mttrDays: oMttr.length
+        ? Math.round(oMttr.reduce((a, b) => a + b, 0) / oMttr.length)
+        : null,
+      resolved30: oResolved30,
+    },
+    burndown,
+    slaPolicy: (Object.keys(SLA_DAYS) as Severity[]).map((severity) => ({
+      severity,
+      days: SLA_DAYS[severity],
+    })),
+    clients,
+  };
+}
+
 // --- compliance (PCI DSS 4.0) ----------------------------------------------
 
 function cvssOf(f: Finding): number {
