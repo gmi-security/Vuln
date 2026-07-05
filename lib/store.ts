@@ -20,6 +20,11 @@ import {
   spiderfootImportFindings,
   spiderfootListScans,
 } from "@/lib/spiderfoot";
+import {
+  artemisConfig,
+  artemisImportFindings,
+  type ArtemisFinding,
+} from "@/lib/artemis";
 import { loadSnapshot, persistenceEnabled, saveSnapshot } from "@/lib/persist";
 import type {
   AssetSource,
@@ -1768,6 +1773,162 @@ export async function importFromSpiderfoot(): Promise<
   return {
     scansImported,
     findingsImported,
+    companiesMatched: matchedCompanies.size,
+    skipped,
+  };
+}
+
+export type ArtemisImportResult = {
+  findingsImported: number;
+  tagsProcessed: number;
+  companiesMatched: number;
+  skipped: { tag: string; reason: string }[];
+};
+
+// Pull Artemis "interesting" task results in as findings, grouped by tag ->
+// company. Reuses one scan record per tag (idempotent via externalRef) so
+// re-importing refreshes rather than duplicates.
+export async function importFromArtemis(): Promise<
+  ArtemisImportResult | { error: string }
+> {
+  if (!artemisConfig()) {
+    return {
+      error:
+        "Artemis is not configured. Set ARTEMIS_API_URL and ARTEMIS_API_TOKEN to import.",
+    };
+  }
+  const s = store();
+
+  let mapped: ArtemisFinding[];
+  try {
+    mapped = await artemisImportFindings();
+  } catch (err) {
+    return {
+      error: err instanceof Error ? err.message : "Failed to reach Artemis.",
+    };
+  }
+
+  // Group findings by Artemis tag (their per-client label).
+  const byTag = new Map<string, ArtemisFinding[]>();
+  for (const f of mapped) {
+    const tag = f.tag || "untagged";
+    if (!byTag.has(tag)) byTag.set(tag, []);
+    byTag.get(tag)!.push(f);
+  }
+
+  const skipped: { tag: string; reason: string }[] = [];
+  const matchedCompanies = new Set<string>();
+  let findingsImported = 0;
+  let tagsProcessed = 0;
+  const nowIso = new Date().toISOString();
+
+  for (const [tag, items] of byTag) {
+    // Match tag (and, failing that, the first asset) to an existing company.
+    const companyId =
+      matchCompanyForScan(s, tag, "") ??
+      matchCompanyForScan(s, "", items[0]?.asset ?? "");
+    if (!companyId) {
+      skipped.push({ tag, reason: "no matching company" });
+      continue;
+    }
+    const company = s.companies.get(companyId)!;
+    const folder = ensureFolder(s, companyId, "Artemis");
+    const externalRef = `artemis:${tag}`;
+
+    let scan = Array.from(s.scans.values()).find((sc) => sc.externalRef === externalRef);
+    if (!scan) {
+      const scanId = nextId(s, "SCAN");
+      scan = {
+        id: scanId,
+        name: `Artemis — ${tag}`,
+        companyId: company.id,
+        companyName: company.name,
+        folderId: folder.id,
+        folderName: folder.name,
+        connector: "artemis",
+        profile: "imported",
+        targets: [],
+        status: "Completed",
+        createdAt: nowIso,
+        startedAt: nowIso,
+        completedAt: nowIso,
+        findingsCount: 0,
+        severityCounts: emptySeverityCounts(),
+        hostsScanned: 0,
+        requestedBy: "imported@artemis",
+        durationMs: 1,
+        progressFrozenAt: 100,
+        seed: hashSeed(scanId + tag),
+        vendor: null,
+        externalRef,
+      };
+      s.scans.set(scanId, scan);
+    } else {
+      scan.completedAt = nowIso;
+    }
+    tagsProcessed += 1;
+    matchedCompanies.add(companyId);
+
+    for (const item of items) {
+      const dedupeKey = `${item.cve}::${item.asset}::${item.title}`;
+      const existing = Array.from(s.findings.values()).find(
+        (f) =>
+          `${f.cve}::${f.asset}::${f.title}` === dedupeKey && f.status !== "Resolved",
+      );
+      if (existing) {
+        existing.lastSeen = nowIso;
+        continue;
+      }
+      s.findings.set(`VLN-${(s.counter += 1)}`, {
+        id: `VLN-${s.counter}`,
+        scanId: scan.id,
+        companyId: scan.companyId,
+        companyName: scan.companyName,
+        connector: "artemis",
+        cve: item.cve,
+        title: item.title,
+        severity: item.severity,
+        cvss: item.cvss,
+        cvssV3: item.cvss,
+        cvssV2: 0,
+        vpr: 0,
+        epss: 0,
+        asset: item.asset,
+        port: "N/A",
+        category: item.category,
+        description: item.description,
+        remediation:
+          "Review the Artemis task result for this target and remediate the reported exposure.",
+        status: "Open",
+        assignee: null,
+        firstSeen: nowIso,
+        lastSeen: nowIso,
+        resolvedAt: null,
+        exploitAvailable: false,
+        ...riskFields(s, {
+          cve: item.cve,
+          cvss: item.cvss,
+          epss: 0,
+          exploitAvailable: false,
+          asset: item.asset,
+          companyId: scan.companyId,
+        }),
+      });
+    }
+
+    const all = Array.from(s.findings.values()).filter((f) => f.scanId === scan.id);
+    scan.findingsCount = all.length;
+    const counts = emptySeverityCounts();
+    for (const f of all) counts[f.severity] += 1;
+    scan.severityCounts = counts;
+    scan.hostsScanned = new Set(all.map((f) => f.asset)).size || 0;
+    findingsImported += all.length;
+  }
+
+  await flushNow();
+  return {
+    findingsImported,
+    tagsProcessed,
     companiesMatched: matchedCompanies.size,
     skipped,
   };

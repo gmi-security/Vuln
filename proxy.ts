@@ -20,6 +20,7 @@ export async function proxy(request: NextRequest) {
     pathname.startsWith("/api/auth") ||
     pathname === "/api/nessus/health" ||
     pathname === "/api/spiderfoot/health" ||
+    pathname === "/api/artemis/health" ||
     pathname === "/api/health" ||
     // Independently protected by ADMIN_TOKEN (not a session), so it must stay
     // reachable without the login redirect.
