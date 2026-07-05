@@ -44,43 +44,84 @@ async function grcRequest(
   return res.json().catch(() => ({}));
 }
 
-// Read-only probe to learn the live OpenGRC schema (standards + risk fields)
-// before pushing, so the payload matches this instance.
+// End-to-end connection test for every read path: verifies reachability, token
+// validity, and the live schema of each OpenGRC resource we integrate with
+// (risks, standards, controls, implementations). Never throws.
 export async function grcProbe(): Promise<{
   configured: boolean;
-  standards: unknown[];
+  reachable: boolean;
+  authOk: boolean;
+  risksCount: number;
+  standardsCount: number;
+  controlsCount: number;
+  implementationsCount: number;
+  standards: { id: unknown; name: unknown }[];
   riskFields: string[];
   riskSample: unknown;
   error?: string;
 }> {
+  const base = {
+    configured: true,
+    reachable: false,
+    authOk: false,
+    risksCount: 0,
+    standardsCount: 0,
+    controlsCount: 0,
+    implementationsCount: 0,
+    standards: [] as { id: unknown; name: unknown }[],
+    riskFields: [] as string[],
+    riskSample: null as unknown,
+  };
   const config = grcConfig();
-  if (!config) return { configured: false, standards: [], riskFields: [], riskSample: null };
+  if (!config) return { ...base, configured: false };
+
+  const count = (res: any, list: any[]): number =>
+    Number(res?.meta?.total ?? (Array.isArray(list) ? list.length : 0));
+  const listOf = (res: any): any[] =>
+    res?.data ?? (Array.isArray(res) ? res : []) ?? [];
+
+  // Anchor call on /api/risks: success => reachable + authOk; a 401 => reachable
+  // but bad token; a network error => not reachable.
+  let risksRes: any;
   try {
-    const [standards, risks] = await Promise.all([
-      grcRequest(config, "GET", "/api/standards?per_page=50").catch(() => null),
-      grcRequest(config, "GET", "/api/risks?per_page=1").catch(() => null),
-    ]);
-    const stdList = standards?.data ?? standards ?? [];
-    const riskList = risks?.data ?? risks ?? [];
-    const sample = Array.isArray(riskList) ? riskList[0] : null;
-    return {
-      configured: true,
-      standards: (Array.isArray(stdList) ? stdList : []).map((s: any) => ({
-        id: s?.id,
-        name: s?.name ?? s?.code ?? s?.title,
-      })),
-      riskFields: sample ? Object.keys(sample) : [],
-      riskSample: sample,
-    };
+    risksRes = await grcRequest(config, "GET", "/api/risks?per_page=1");
   } catch (err) {
+    const msg = err instanceof Error ? err.message : "probe failed";
+    const is401 = / 401\b/.test(msg);
     return {
-      configured: true,
-      standards: [],
-      riskFields: [],
-      riskSample: null,
-      error: err instanceof Error ? err.message : "probe failed",
+      ...base,
+      reachable: is401 || / 4\d\d| 5\d\d/.test(msg),
+      authOk: false,
+      error: msg,
     };
   }
+
+  const riskList = listOf(risksRes);
+  const sample = Array.isArray(riskList) ? riskList[0] : null;
+  const out = {
+    ...base,
+    reachable: true,
+    authOk: true,
+    risksCount: count(risksRes, riskList),
+    riskFields: sample ? Object.keys(sample) : [],
+    riskSample: sample,
+  };
+
+  // Best-effort reads of the other resources (don't fail the whole probe).
+  const [std, ctl, impl] = await Promise.all([
+    grcRequest(config, "GET", "/api/standards?per_page=50").catch(() => null),
+    grcRequest(config, "GET", "/api/controls?per_page=1").catch(() => null),
+    grcRequest(config, "GET", "/api/implementations?per_page=1").catch(() => null),
+  ]);
+  const stdList = listOf(std);
+  out.standardsCount = count(std, stdList);
+  out.controlsCount = count(ctl, listOf(ctl));
+  out.implementationsCount = count(impl, listOf(impl));
+  out.standards = (Array.isArray(stdList) ? stdList : []).map((s: any) => ({
+    id: s?.id,
+    name: s?.name ?? s?.code ?? s?.title,
+  }));
+  return out;
 }
 
 // Matches the OpenGRC `Risk` table's NOT-NULL-without-default columns: `name`,
@@ -99,15 +140,16 @@ export type GrcRisk = {
   description: string;
 };
 
-// Build a unique, human-legible risk code (OpenGRC requires `code` to be unique
-// and non-null). Company slug + base36 timestamp keeps re-pushes collision-free.
-function riskCode(companyName: string): string {
+// Stable, deterministic per-company risk code (OpenGRC requires `code` unique +
+// non-null). STABLE — no timestamp — so re-pushes resolve to the SAME record
+// and update it instead of creating duplicate governance entries.
+export function riskCode(companyName: string): string {
   const slug = companyName
     .toUpperCase()
     .replace(/[^A-Z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
-    .slice(0, 24);
-  return `VULN-${slug || "RISK"}-${Date.now().toString(36).toUpperCase()}`;
+    .slice(0, 32);
+  return `VULN-${slug || "RISK"}`;
 }
 
 export async function grcCreateRisk(risk: GrcRisk): Promise<{ id: unknown }> {
@@ -115,6 +157,47 @@ export async function grcCreateRisk(risk: GrcRisk): Promise<{ id: unknown }> {
   if (!config) throw new Error("GRC is not configured.");
   const data = await grcRequest(config, "POST", "/api/risks", risk);
   return { id: data?.data?.id ?? data?.id ?? null };
+}
+
+// Find an existing risk id by our stable code (preferred) or exact name.
+// Paginates defensively so it works whether or not the index honors ?search.
+async function grcFindRiskId(
+  config: GrcConfig,
+  code: string,
+  name: string,
+): Promise<unknown | null> {
+  for (let page = 1; page <= 20; page += 1) {
+    const res = await grcRequest(
+      config,
+      "GET",
+      `/api/risks?page=${page}&per_page=100`,
+    ).catch(() => null);
+    const list: any[] = res?.data ?? (Array.isArray(res) ? res : []) ?? [];
+    if (!Array.isArray(list) || list.length === 0) break;
+    const hit =
+      list.find((r) => r?.code === code) ?? list.find((r) => r?.name === name);
+    if (hit) return hit.id;
+    const meta = res?.meta;
+    if (meta && Number(meta.current_page) >= Number(meta.last_page)) break;
+    if (list.length < 100) break;
+  }
+  return null;
+}
+
+// Idempotent push: update the company's canonical risk if it exists, else
+// create it. Guarantees one governance record per company, always current.
+export async function grcUpsertRisk(
+  risk: GrcRisk,
+): Promise<{ id: unknown; created: boolean }> {
+  const config = grcConfig();
+  if (!config) throw new Error("GRC is not configured.");
+  const existingId = await grcFindRiskId(config, risk.code, risk.name);
+  if (existingId != null) {
+    const data = await grcRequest(config, "PUT", `/api/risks/${existingId}`, risk);
+    return { id: data?.data?.id ?? data?.id ?? existingId, created: false };
+  }
+  const data = await grcRequest(config, "POST", "/api/risks", risk);
+  return { id: data?.data?.id ?? data?.id ?? null, created: true };
 }
 
 export type GrcFrameworkEvidence = {

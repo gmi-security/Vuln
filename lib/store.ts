@@ -14,7 +14,7 @@ import { tidalConfig, tidalListAssets } from "@/lib/tidal";
 import { intuneConfig, intuneListAssets } from "@/lib/intune";
 import { falconConfig, falconListAssets } from "@/lib/crowdstrike";
 import { defenderConfig, defenderListFindings } from "@/lib/defender";
-import { buildRisk, grcConfig, grcCreateRisk } from "@/lib/grc";
+import { buildRisk, grcConfig, grcUpsertRisk } from "@/lib/grc";
 import {
   spiderfootConfig,
   spiderfootImportFindings,
@@ -1218,6 +1218,8 @@ export function computeCompliance(filter?: {
 
 export type GrcExportResult = {
   pushed: number;
+  created: number;
+  updated: number;
   companies: number;
   errors: string[];
 };
@@ -1234,6 +1236,8 @@ export async function exportToGrc(filter?: {
   }
   const compliance = computeCompliance(filter);
   let pushed = 0;
+  let created = 0;
+  let updated = 0;
   const errors: string[] = [];
 
   for (const posture of compliance.companies) {
@@ -1275,8 +1279,10 @@ export async function exportToGrc(filter?: {
       frameworks,
     });
     try {
-      await grcCreateRisk(risk);
+      const res = await grcUpsertRisk(risk);
       pushed += 1;
+      if (res.created) created += 1;
+      else updated += 1;
     } catch (err) {
       errors.push(
         `${posture.companyName}: ${err instanceof Error ? err.message : "failed"}`,
@@ -1284,7 +1290,7 @@ export async function exportToGrc(filter?: {
     }
   }
 
-  return { pushed, companies: compliance.companies.length, errors };
+  return { pushed, created, updated, companies: compliance.companies.length, errors };
 }
 
 // --- attack paths / blast radius -------------------------------------------

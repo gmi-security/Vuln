@@ -61,9 +61,13 @@ export default function VulnCompliancePage() {
         return;
       }
       const r = json.result;
+      const breakdown =
+        r.created != null && r.updated != null
+          ? ` (${r.created} created, ${r.updated} updated)`
+          : "";
       setMsg({
         ok: r.errors.length === 0,
-        text: `Pushed ${r.pushed}/${r.companies} risk record(s) to GRC.${r.errors.length ? ` Errors: ${r.errors.join("; ")}` : ""}`,
+        text: `Pushed ${r.pushed}/${r.companies} risk record(s) to GRC${breakdown}.${r.errors.length ? ` Errors: ${r.errors.join("; ")}` : ""}`,
       });
     } catch {
       setMsg({ ok: false, text: "Failed to reach the GRC API." });
