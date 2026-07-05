@@ -44,6 +44,13 @@ const cardIcon: Record<string, React.ElementType> = {
   grc: IconClipboardCheck,
 };
 
+// Connectors with a reachability probe get a live health dot.
+const HEALTH_ENDPOINTS: Record<string, string> = {
+  nessus: "/api/nessus/health",
+  artemis: "/api/artemis/health",
+  spiderfoot: "/api/spiderfoot/health",
+};
+
 // Connectors with a pull/import endpoint get a "Sync now" button.
 const SYNC_ENDPOINTS: Record<string, string> = {
   nessus: "/api/nessus/import",
@@ -83,10 +90,25 @@ function summarizeOsint(result: any): string {
   return msg;
 }
 
+type OsintPreview = {
+  companies: number;
+  domainsTotal: number;
+  perCompany: { company: string; domains: string[] }[];
+};
+
 // Banner action: fan out Artemis + SpiderFoot OSINT scans across all customers.
 function OsintLaunchBanner() {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [preview, setPreview] = useState<OsintPreview | null>(null);
+  const [showTargets, setShowTargets] = useState(false);
+
+  useEffect(() => {
+    void fetch("/api/osint/preview", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((j) => setPreview(j.preview ?? null))
+      .catch(() => undefined);
+  }, []);
 
   async function run() {
     if (busy) return;
@@ -125,13 +147,45 @@ function OsintLaunchBanner() {
         <button
           type="button"
           onClick={run}
-          disabled={busy}
+          disabled={busy || (preview != null && preview.companies === 0)}
           className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.14)] px-4 py-2 text-sm font-medium text-[#ff4d57] transition hover:bg-[rgba(179,14,20,0.24)] disabled:cursor-not-allowed disabled:opacity-40"
         >
           <RefreshCw size={15} className={busy ? "animate-spin" : ""} />
           {busy ? "Launching…" : "Run OSINT scans (all customers)"}
         </button>
       </div>
+
+      {preview ? (
+        <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-zinc-400">
+          <span>
+            <span className="font-semibold text-zinc-200">{preview.companies}</span>{" "}
+            customer{preview.companies === 1 ? "" : "s"} ·{" "}
+            <span className="font-semibold text-zinc-200">{preview.domainsTotal}</span>{" "}
+            root domain{preview.domainsTotal === 1 ? "" : "s"} ready to scan
+          </span>
+          {preview.perCompany.length ? (
+            <button
+              type="button"
+              onClick={() => setShowTargets((v) => !v)}
+              className="text-[#ff4d57] transition hover:text-white"
+            >
+              {showTargets ? "Hide targets" : "Preview targets"}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
+      {preview && showTargets ? (
+        <div className="mt-3 max-h-56 space-y-2 overflow-y-auto rounded-lg border border-zinc-900 bg-[#080808] p-3">
+          {preview.perCompany.map((row) => (
+            <div key={row.company} className="text-xs">
+              <span className="font-medium text-zinc-200">{row.company}</span>
+              <span className="ml-2 text-zinc-500">{row.domains.join(", ")}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
       {msg ? (
         <div
           className={`mt-4 rounded-lg border px-3 py-2 text-xs ${
@@ -158,8 +212,28 @@ const statusClass: Record<ConnectorStatus, string> = {
 function IntegrationCard({ card }: { card: CardData }) {
   const Icon = cardIcon[card.id] ?? IconRadar;
   const syncUrl = SYNC_ENDPOINTS[card.id];
+  const healthUrl = HEALTH_ENDPOINTS[card.id];
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [health, setHealth] = useState<
+    { reachable: boolean; message: string } | null | undefined
+  >(healthUrl && card.configured ? undefined : null);
+
+  useEffect(() => {
+    if (!healthUrl || !card.configured) return;
+    let alive = true;
+    void fetch(healthUrl, { cache: "no-store" })
+      .then((r) => r.json())
+      .then((j) => {
+        if (alive) setHealth({ reachable: Boolean(j.reachable), message: j.message ?? "" });
+      })
+      .catch(() => {
+        if (alive) setHealth({ reachable: false, message: "unreachable" });
+      });
+    return () => {
+      alive = false;
+    };
+  }, [healthUrl, card.configured]);
 
   async function runSync() {
     if (!syncUrl || syncing) return;
@@ -216,8 +290,37 @@ function IntegrationCard({ card }: { card: CardData }) {
       </div>
 
       <div className="mt-5 rounded-2xl border border-zinc-900 bg-[#090909] p-4">
-        <div className="text-xs uppercase tracking-[0.24em] text-zinc-500">
-          Configuration
+        <div className="flex items-center justify-between gap-3">
+          <div className="text-xs uppercase tracking-[0.24em] text-zinc-500">
+            Configuration
+          </div>
+          {healthUrl && card.configured ? (
+            <span
+              title={health?.message ?? "Checking reachability…"}
+              className={`inline-flex items-center gap-1.5 text-xs ${
+                health === undefined
+                  ? "text-zinc-500"
+                  : health?.reachable
+                    ? "text-emerald-300"
+                    : "text-[#ff8a8a]"
+              }`}
+            >
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${
+                  health === undefined
+                    ? "animate-pulse bg-zinc-600"
+                    : health?.reachable
+                      ? "bg-emerald-400"
+                      : "bg-[#ff4d57]"
+                }`}
+              />
+              {health === undefined
+                ? "Checking…"
+                : health?.reachable
+                  ? "Live"
+                  : "Unreachable"}
+            </span>
+          ) : null}
         </div>
         <div className="mt-3 space-y-2">
           {card.envVars.map((envVar) => (

@@ -1881,6 +1881,29 @@ export function osintTargetsForCompany(s: StoreShape, companyId: string): string
   return Array.from(domains).sort();
 }
 
+export type OsintPreview = {
+  companies: number;
+  domainsTotal: number;
+  perCompany: { company: string; domains: string[] }[];
+};
+
+// Show exactly which customers and root domains a quarterly OSINT sweep would
+// target — without launching anything.
+export function previewOsintTargets(): OsintPreview {
+  const s = store();
+  const perCompany: { company: string; domains: string[] }[] = [];
+  let domainsTotal = 0;
+  for (const company of s.companies.values()) {
+    if (company.kind !== "client") continue;
+    const domains = osintTargetsForCompany(s, company.id);
+    if (domains.length === 0) continue;
+    perCompany.push({ company: company.name, domains });
+    domainsTotal += domains.length;
+  }
+  perCompany.sort((a, b) => a.company.localeCompare(b.company));
+  return { companies: perCompany.length, domainsTotal, perCompany };
+}
+
 export type OsintLaunchResult = {
   companies: number;
   domainsTotal: number;
