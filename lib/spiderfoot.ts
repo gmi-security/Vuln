@@ -26,7 +26,7 @@ import type { Severity } from "@/lib/types";
 // SpiderFoot) the endpoint paths may differ; getJson() throws cleanly on a
 // non-JSON / non-2xx response rather than importing garbage.
 
-export type SpiderfootConfig = { url: string; auth: string | null };
+export type SpiderfootConfig = { url: string; auth: string | null; insecure: boolean };
 
 export function spiderfootConfig(): SpiderfootConfig | null {
   const url = process.env.SPIDERFOOT_URL;
@@ -34,7 +34,13 @@ export function spiderfootConfig(): SpiderfootConfig | null {
   const user = process.env.SPIDERFOOT_USER;
   const pass = process.env.SPIDERFOOT_PASS;
   const auth = user && pass ? Buffer.from(`${user}:${pass}`).toString("base64") : null;
-  return { url: url.replace(/\/+$/, ""), auth };
+  return {
+    url: url.replace(/\/+$/, ""),
+    auth,
+    // T-Pot (and many self-hosted SpiderFoot deployments) front the UI with a
+    // self-signed cert; set SPIDERFOOT_TLS_INSECURE=1 to skip verification.
+    insecure: process.env.SPIDERFOOT_TLS_INSECURE === "1",
+  };
 }
 
 function request(
@@ -54,6 +60,7 @@ function request(
         port: target.port || (target.protocol === "http:" ? 80 : 443),
         path: target.pathname + target.search,
         timeout: 20_000,
+        ...(target.protocol === "https:" ? { rejectUnauthorized: !config.insecure } : {}),
         headers: {
           Accept: "application/json",
           ...(config.auth ? { Authorization: `Basic ${config.auth}` } : {}),
