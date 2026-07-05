@@ -1,9 +1,9 @@
 "use client";
 
 import React, { useCallback, useEffect, useState } from "react";
-import { RefreshCcw, Globe, Server, KeyRound, Bug } from "lucide-react";
+import { RefreshCcw, Globe, Server, KeyRound, Bug, Radar } from "lucide-react";
 import VulnShell from "@/components/VulnShell";
-import { StatCard, ghostButtonClass } from "@/components/ui";
+import { StatCard, ghostButtonClass, primaryButtonClass } from "@/components/ui";
 
 type SurfaceCategory =
   | "Exposed Services"
@@ -72,6 +72,8 @@ const sevDot: Record<string, string> = {
 
 export default function VulnAttackSurfacePage() {
   const [data, setData] = useState<SurfaceResult | null>(null);
+  const [pivoting, setPivoting] = useState(false);
+  const [pivotMsg, setPivotMsg] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -86,6 +88,25 @@ export default function VulnAttackSurfacePage() {
     void load();
   }, [load]);
 
+  async function pivot() {
+    if (pivoting) return;
+    setPivoting(true);
+    setPivotMsg(null);
+    try {
+      const res = await fetch("/api/attack-surface/pivot", { method: "POST" });
+      const r = (await res.json()).result;
+      setPivotMsg(
+        r
+          ? `Queued ${r.scansLaunched} Nessus scan(s) across ${r.companies} client(s) — ${r.assetsQueued} exposed asset(s), ${r.skipped} already covered.`
+          : "Pivot failed.",
+      );
+    } catch {
+      setPivotMsg("Pivot failed.");
+    } finally {
+      setPivoting(false);
+    }
+  }
+
   const sum = data?.summary;
 
   return (
@@ -94,12 +115,29 @@ export default function VulnAttackSurfacePage() {
       title="External attack surface"
       subtitle="What an attacker sees from the outside — OSINT & attack-surface exposure per client from Artemis + SpiderFoot: exposed services, subdomains, leaked credentials, and web weaknesses. Deliberately separate from CVE findings."
       actions={
-        <button onClick={() => void load()} className={ghostButtonClass}>
-          <RefreshCcw size={16} className="text-zinc-400" />
-          Refresh
-        </button>
+        <>
+          <button
+            onClick={() => void pivot()}
+            disabled={pivoting}
+            className={`${primaryButtonClass} disabled:opacity-50`}
+            title="Queue targeted Nessus scans of the assets OSINT flagged as exposed"
+          >
+            <Radar size={16} />
+            {pivoting ? "Queuing…" : "Confirm with Nessus"}
+          </button>
+          <button onClick={() => void load()} className={ghostButtonClass}>
+            <RefreshCcw size={16} className="text-zinc-400" />
+            Refresh
+          </button>
+        </>
       }
     >
+      {pivotMsg ? (
+        <div className="rounded-2xl border border-emerald-900/60 bg-emerald-950/40 px-5 py-3 text-sm text-emerald-300">
+          {pivotMsg}
+        </div>
+      ) : null}
+
       <div className="grid gap-5 md:grid-cols-2 2xl:grid-cols-4">
         <StatCard
           label="Total exposures"

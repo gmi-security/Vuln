@@ -1376,6 +1376,73 @@ export function computeAttackSurface(filter?: {
   };
 }
 
+// When OSINT (Artemis/SpiderFoot) surfaces an exposed service or web weakness,
+// auto-queue a targeted Nessus scan of that asset — turning an external signal
+// into confirmed, authenticated CVE findings. Idempotent: skips assets a Nessus
+// scan already targets, so re-runs don't pile up scans.
+export type OsintPivotResult = {
+  scansLaunched: number;
+  assetsQueued: number;
+  companies: number;
+  skipped: number;
+};
+
+const PIVOT_CATEGORIES = new Set<SurfaceCategory>([
+  "Exposed Services",
+  "Web Vulnerabilities",
+]);
+
+export async function pivotOsintToNessus(filter?: {
+  companyId?: string;
+}): Promise<OsintPivotResult> {
+  const s = store();
+  const byCompany = new Map<string, Set<string>>();
+  for (const f of s.findings.values()) {
+    if (f.connector !== "artemis" && f.connector !== "spiderfoot") continue;
+    if (f.status === "Resolved") continue;
+    if (filter?.companyId && f.companyId !== filter.companyId) continue;
+    if (!PIVOT_CATEGORIES.has(surfaceCategoryOf(f))) continue;
+    const asset = (f.asset || "").trim().replace(/^https?:\/\//, "").split("/")[0];
+    if (!asset || asset === "unknown" || !/^[a-z0-9.:_-]+$/i.test(asset)) continue;
+    if (!byCompany.has(f.companyId)) byCompany.set(f.companyId, new Set());
+    byCompany.get(f.companyId)!.add(asset);
+  }
+
+  let scansLaunched = 0;
+  let assetsQueued = 0;
+  let skipped = 0;
+  for (const [companyId, assetSet] of byCompany) {
+    if (!s.companies.get(companyId)) continue;
+    const alreadyTargeted = new Set<string>();
+    for (const sc of s.scans.values()) {
+      if (sc.companyId === companyId && sc.connector === "nessus") {
+        for (const t of sc.targets) alreadyTargeted.add(t.toLowerCase());
+      }
+    }
+    const targets = Array.from(assetSet).filter(
+      (a) => !alreadyTargeted.has(a.toLowerCase()),
+    );
+    skipped += assetSet.size - targets.length;
+    if (targets.length === 0) continue;
+    const folder = ensureFolder(s, companyId, "Exposure Confirm");
+    const res = await startScan({
+      name: "Confirm OSINT exposures (auto-pivot)",
+      connector: "nessus",
+      profile: "standard",
+      targets,
+      companyId,
+      folderId: folder.id,
+      requestedBy: "auto-pivot",
+    });
+    if (!("error" in res)) {
+      scansLaunched += 1;
+      assetsQueued += targets.length;
+    }
+  }
+  await flushNow();
+  return { scansLaunched, assetsQueued, companies: byCompany.size, skipped };
+}
+
 // --- analyst priority queue (SSVC + KEV remediation SLAs) -------------------
 
 export type PriorityItem = {
@@ -2223,6 +2290,13 @@ export async function importFromSpiderfoot(): Promise<
   }
 
   await flushNow();
+  if (s.settings.autoScanNewAssets) {
+    try {
+      await pivotOsintToNessus();
+    } catch {
+      // best-effort
+    }
+  }
   return {
     scansImported,
     findingsImported,
@@ -2605,6 +2679,13 @@ export async function importFromArtemis(): Promise<
   }
 
   await flushNow();
+  if (s.settings.autoScanNewAssets) {
+    try {
+      await pivotOsintToNessus();
+    } catch {
+      // best-effort: never fail the import because the pivot scan failed
+    }
+  }
   return {
     findingsImported,
     tagsProcessed,
