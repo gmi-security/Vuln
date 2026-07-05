@@ -3,6 +3,7 @@ import {
   Bug,
   Building2,
   ClipboardCheck,
+  Flame,
   Gauge,
   LayoutDashboard,
   PlugZap,
@@ -19,6 +20,7 @@ export type VulnNavItem = {
 
 export const baseNavItems: VulnNavItem[] = [
   { label: "Dashboard", icon: LayoutDashboard, href: "/dashboard" },
+  { label: "Prioritize", icon: Flame, href: "/priorities" },
   { label: "Companies", icon: Building2, href: "/companies" },
   { label: "Scans", icon: Radar, href: "/scans" },
   { label: "Coverage", icon: ScanSearch, href: "/coverage" },

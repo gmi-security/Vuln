@@ -32,6 +32,7 @@ import {
   FRAMEWORKS,
   type ComplianceSignals,
 } from "@/lib/compliance";
+import { dueInfo, ssvc, type SsvcDecision } from "@/lib/ssvc";
 import { loadSnapshot, persistenceEnabled, saveSnapshot } from "@/lib/persist";
 import type {
   AssetSource,
@@ -1103,6 +1104,104 @@ export async function resyncFromNessus(options?: {
   const result = await importFromNessus();
   await flushNow();
   return result;
+}
+
+// --- analyst priority queue (SSVC + KEV remediation SLAs) -------------------
+
+export type PriorityItem = {
+  id: string;
+  companyId: string;
+  companyName: string;
+  cve: string;
+  title: string;
+  asset: string;
+  severity: Severity;
+  realRisk: number;
+  decision: SsvcDecision;
+  slaDays: number;
+  dueDate: string;
+  overdue: boolean;
+  daysLeft: number;
+  reasons: string[];
+  remediation: string;
+  kev: boolean;
+};
+
+export type PrioritiesResult = {
+  summary: {
+    totalOpen: number;
+    act: number;
+    attend: number;
+    overdue: number;
+    kevOverdue: number;
+    dueThisWeek: number;
+  };
+  items: PriorityItem[];
+};
+
+const SSVC_ORDER: Record<SsvcDecision, number> = {
+  Act: 0,
+  Attend: 1,
+  "Track*": 2,
+  Track: 3,
+};
+
+// Rank every open finding by SSVC decision, then overdue, then real-risk — the
+// single "work this top-down" queue. Analyst-simple surface; SSVC rigor beneath.
+export function computePriorities(filter?: {
+  companyId?: string;
+  limit?: number;
+}): PrioritiesResult {
+  const s = store();
+  tick(s);
+  const now = Date.now();
+  const open = Array.from(s.findings.values()).filter(
+    (f) =>
+      (f.status === "Open" || f.status === "In Remediation") &&
+      (!filter?.companyId || f.companyId === filter.companyId),
+  );
+
+  const items: PriorityItem[] = open.map((f) => {
+    const r = ssvc(f);
+    const d = dueInfo(f, r.slaDays, now);
+    return {
+      id: f.id,
+      companyId: f.companyId,
+      companyName: f.companyName,
+      cve: f.cve,
+      title: f.title,
+      asset: f.asset,
+      severity: f.severity,
+      realRisk: f.realRisk,
+      decision: r.decision,
+      slaDays: r.slaDays,
+      dueDate: d.dueDate,
+      overdue: d.overdue,
+      daysLeft: d.daysLeft,
+      reasons: r.reasons,
+      remediation: f.remediation,
+      kev: f.kev,
+    };
+  });
+
+  items.sort(
+    (a, b) =>
+      SSVC_ORDER[a.decision] - SSVC_ORDER[b.decision] ||
+      Number(b.overdue) - Number(a.overdue) ||
+      b.realRisk - a.realRisk ||
+      a.daysLeft - b.daysLeft,
+  );
+
+  const summary = {
+    totalOpen: items.length,
+    act: items.filter((i) => i.decision === "Act").length,
+    attend: items.filter((i) => i.decision === "Attend").length,
+    overdue: items.filter((i) => i.overdue).length,
+    kevOverdue: items.filter((i) => i.kev && i.overdue).length,
+    dueThisWeek: items.filter((i) => !i.overdue && i.daysLeft <= 7).length,
+  };
+
+  return { summary, items: items.slice(0, filter?.limit ?? 100) };
 }
 
 // --- compliance (PCI DSS 4.0) ----------------------------------------------
