@@ -58,6 +58,8 @@ export async function grcProbe(): Promise<{
   standards: { id: unknown; name: unknown }[];
   riskFields: string[];
   riskSample: unknown;
+  controlFields: string[];
+  controlSample: unknown;
   error?: string;
 }> {
   const base = {
@@ -71,6 +73,8 @@ export async function grcProbe(): Promise<{
     standards: [] as { id: unknown; name: unknown }[],
     riskFields: [] as string[],
     riskSample: null as unknown,
+    controlFields: [] as string[],
+    controlSample: null as unknown,
   };
   const config = grcConfig();
   if (!config) return { ...base, configured: false };
@@ -114,13 +118,17 @@ export async function grcProbe(): Promise<{
     grcRequest(config, "GET", "/api/implementations?per_page=1").catch(() => null),
   ]);
   const stdList = listOf(std);
+  const ctlList = listOf(ctl);
+  const ctlSample = Array.isArray(ctlList) ? ctlList[0] : null;
   out.standardsCount = count(std, stdList);
-  out.controlsCount = count(ctl, listOf(ctl));
+  out.controlsCount = count(ctl, ctlList);
   out.implementationsCount = count(impl, listOf(impl));
   out.standards = (Array.isArray(stdList) ? stdList : []).map((s: any) => ({
     id: s?.id,
     name: s?.name ?? s?.code ?? s?.title,
   }));
+  out.controlFields = ctlSample ? Object.keys(ctlSample) : [];
+  out.controlSample = ctlSample;
   return out;
 }
 
