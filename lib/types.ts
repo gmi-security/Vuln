@@ -103,7 +103,12 @@ export type ConnectorId =
   | "spiderfoot"
   | "artemis";
 
-export type ConnectorStatus = "Connected" | "Demo Mode" | "Planned" | "Error";
+export type ConnectorStatus =
+  | "Connected"
+  | "Demo Mode"
+  | "Not Configured"
+  | "Planned"
+  | "Error";
 
 export type Connector = {
   id: ConnectorId;

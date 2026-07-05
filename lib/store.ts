@@ -346,6 +346,13 @@ function emptySeverityCounts(): Record<Severity, number> {
 
 // --- scan lifecycle ------------------------------------------------------
 
+// Production posture: the demo scan simulator is OPT-IN. With DEMO_SCANS unset
+// (the production default) an unconfigured connector can never fabricate
+// findings — scans only run against real, configured scanners.
+function demoScansEnabled(): boolean {
+  return process.env.DEMO_SCANS === "true";
+}
+
 function nextId(s: StoreShape, prefix: string): string {
   s.counter += 1;
   return `${prefix}-${s.counter}`;
@@ -428,6 +435,7 @@ function generateFindings(s: StoreShape, scan: InternalScan): Finding[] {
 
 function settleScan(s: StoreShape, scan: InternalScan, now: number): void {
   if (scan.vendor) return; // vendor scans settle via refreshVendorScans()
+  if (!demoScansEnabled()) return; // production: never fabricate demo findings
   if (scan.status !== "Running") return;
   const progress = computeProgress(scan, now);
   if (progress < 100) return;
@@ -1212,6 +1220,35 @@ export function computeExecReport(companyId: string): ExecReport | null {
       kev: i.kev,
     })),
   };
+}
+
+// Purge every demo/simulated scan and its findings. A real scan always has a
+// `vendor` (Nessus-backed) or an `externalRef` (Artemis/SpiderFoot import);
+// anything else was fabricated by the demo engine. Real connector data and
+// companies are left untouched.
+export async function purgeDemoData(): Promise<{
+  scansRemoved: number;
+  findingsRemoved: number;
+}> {
+  const s = store();
+  const demoScanIds = new Set<string>();
+  for (const [id, sc] of s.scans) {
+    if (!sc.vendor && !sc.externalRef) demoScanIds.add(id);
+  }
+  let findingsRemoved = 0;
+  for (const [fid, f] of s.findings) {
+    if (demoScanIds.has(f.scanId)) {
+      s.findings.delete(fid);
+      findingsRemoved += 1;
+    }
+  }
+  let scansRemoved = 0;
+  for (const id of demoScanIds) {
+    s.scans.delete(id);
+    scansRemoved += 1;
+  }
+  await flushNow();
+  return { scansRemoved, findingsRemoved };
 }
 
 // --- attack surface (external OSINT posture: Artemis + SpiderFoot) ----------
@@ -3385,6 +3422,12 @@ export async function startScan(input: {
         error: err instanceof Error ? err.message : "Failed to launch Nessus scan.",
       };
     }
+  }
+
+  if (!vendor && !demoScansEnabled()) {
+    return {
+      error: `${input.connector} is not connected to a live scanner. Configure its credentials to run real scans — demo scans are disabled in production.`,
+    };
   }
 
   const demo = getDemoProfile(input.connector);

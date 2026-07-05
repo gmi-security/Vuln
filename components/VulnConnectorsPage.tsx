@@ -259,6 +259,7 @@ function SyncAllButton() {
 const statusClass: Record<ConnectorStatus, string> = {
   Connected: "bg-emerald-950/60 text-emerald-300 border border-emerald-900/60",
   "Demo Mode": "bg-[rgba(245,166,35,0.10)] text-amber-300 border border-amber-900/60",
+  "Not Configured": "bg-zinc-900 text-zinc-500 border border-zinc-800",
   Planned: "bg-zinc-900 text-zinc-400 border border-zinc-800",
   Error: "bg-[rgba(179,14,20,0.16)] text-[#ff4d57] border border-[rgba(179,14,20,0.45)]",
 };

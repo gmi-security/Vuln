@@ -179,7 +179,13 @@ export function getConnectors(): Connector[] {
       envVars: def.envVars,
       docsUrl: def.docsUrl,
       configured,
-      status: def.planned ? "Planned" : configured ? "Connected" : "Demo Mode",
+      status: def.planned
+        ? "Planned"
+        : configured
+          ? "Connected"
+          : process.env.DEMO_SCANS === "true"
+            ? "Demo Mode"
+            : "Not Configured",
     };
   });
 }
