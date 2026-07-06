@@ -186,21 +186,19 @@ function joinNonEmpty(parts: unknown[], sep = " "): string {
 // Each asset also carries provenance tags (src:*, tenant:*/domain:*/path:*) so
 // the customer attribution is auditable.
 
-// Context resolved once per sync (e.g. Auvik tenant_id -> display_name).
-type NormCtx = { auvikTenants: Map<string, string> };
+// CUSTOMER SEGMENTATION (governance-critical — authoritative, no bleed):
+// Tidal is a multi-company MSP portal (GMI + ~49 client companies) and its
+// integrations (Intune/Auvik/SOTI) are connected PER CLIENT COMPANY. So the
+// customer is the Tidal client company itself: we enumerate companies, switch
+// the session into each one, and pull whatever devices that company exposes —
+// attributing every device to that company. A device can therefore never be
+// credited to the wrong customer. Location signals (Auvik tenant, SOTI path)
+// are kept only as `site:` tags, not as the customer.
 
-// Derive a customer company from an email address by its domain's main label.
-// Short labels stay upper-case acronyms (gmi -> GMI); longer ones title-case.
-function companyFromEmailDomain(email: string): string {
-  const at = email.indexOf("@");
-  if (at < 0) return "";
-  const domain = email.slice(at + 1).toLowerCase().trim();
-  const label = domain.split(".").filter(Boolean).slice(-2, -1)[0] ?? "";
-  if (!label) return "";
-  return label.length <= 4
-    ? label.toUpperCase()
-    : label.charAt(0).toUpperCase() + label.slice(1);
-}
+// Per-company context for the normalizers: the owning company name (the
+// customer) plus that company's Auvik tenant_id -> display_name map (for site
+// tags).
+type NormCtx = { companyName: string; auvikTenants: Map<string, string> };
 
 // Top-level segment of a SOTI device path ("Bothell/Staging" -> "Bothell").
 function firstPathSegment(path: string): string {
@@ -208,11 +206,9 @@ function firstPathSegment(path: string): string {
 }
 
 // Intune (Microsoft Endpoint Manager): managed endpoints, no IP (agent-based).
-// Segmented by the enrolled user's email domain.
-function normIntune(raw: any, _ctx: NormCtx): TidalAsset {
+function normIntune(raw: any, ctx: NormCtx): TidalAsset {
   const email = s(raw?.user_principal_name) || s(raw?.email_address);
   const domain = email.includes("@") ? email.split("@").pop() ?? "" : "";
-  const customer = companyFromEmailDomain(email) || "Tidal Unmapped (Intune)";
   return {
     externalId: `intune:${s(raw?.device_id) || s(raw?.serial_number) || s(raw?.azure_ad_device_id)}`,
     hostname: s(raw?.device_name) || s(raw?.managed_device_name),
@@ -220,7 +216,7 @@ function normIntune(raw: any, _ctx: NormCtx): TidalAsset {
     os: joinNonEmpty([raw?.operating_system, raw?.os_version]),
     owner:
       s(raw?.user_display_name) || s(raw?.user_principal_name) || s(raw?.email_address),
-    customer,
+    customer: ctx.companyName,
     tags: ["tidal", "src:intune", domain ? `domain:${domain}` : "", s(raw?.compliance_state)].filter(
       (t) => t && t !== "Unknown",
     ),
@@ -230,7 +226,6 @@ function normIntune(raw: any, _ctx: NormCtx): TidalAsset {
 }
 
 // Auvik: network devices (switches, APs, AV, firewalls) — carry real IPs.
-// Segmented by the Auvik tenant (each tenant is a distinct customer).
 function normAuvik(raw: any, ctx: NormCtx): TidalAsset {
   const ips = ([] as unknown[])
     .concat(raw?.ip_addresses ?? [])
@@ -238,21 +233,18 @@ function normAuvik(raw: any, ctx: NormCtx): TidalAsset {
     .map((x) => s(x))
     .filter(Boolean);
   const tenantId = s(raw?.tenant_id);
-  const tenantName = ctx.auvikTenants.get(tenantId) || "";
-  const prefix = s(raw?.tenant_domain_prefix);
-  const customer =
-    tenantName || (prefix ? `Auvik: ${prefix}` : "Tidal Unmapped (Auvik)");
+  const site = ctx.auvikTenants.get(tenantId) || s(raw?.tenant_domain_prefix);
   return {
     externalId: `auvik:${s(raw?.device_id) || s(raw?.serial_number)}`,
     hostname: s(raw?.device_name) || ips[0] || "",
     ipAddresses: ips,
     os: joinNonEmpty([raw?.make_model, raw?.firmware_version]) || s(raw?.device_type),
     owner: "",
-    customer,
+    customer: ctx.companyName,
     tags: [
       "tidal",
       "src:auvik",
-      tenantName ? `tenant:${tenantName}` : tenantId ? `tenant:${tenantId}` : "",
+      site ? `site:${site}` : "",
       s(raw?.device_type),
       s(raw?.vendor_name),
     ].filter(Boolean),
@@ -262,19 +254,18 @@ function normAuvik(raw: any, ctx: NormCtx): TidalAsset {
 }
 
 // SOTI: rugged / mobile devices, nested identity/hardware/os/network blocks.
-// Segmented by the top-level device-tree path.
 function normSoti(raw: any, _ctx: NormCtx): TidalAsset {
   const ip = s(raw?.network?.ip_address);
   const path = s(raw?.identity?.path);
-  const customer = firstPathSegment(path) || "Tidal Unmapped (SOTI)";
+  const site = firstPathSegment(path);
   return {
     externalId: `soti:${s(raw?.identity?.device_id) || s(raw?.hardware?.serial_number)}`,
     hostname: s(raw?.identity?.device_name) || ip,
     ipAddresses: ip ? [ip] : [],
     os: joinNonEmpty([raw?.identity?.platform, raw?.os?.version]),
     owner: "",
-    customer,
-    tags: ["tidal", "src:soti", path ? `path:${path}` : "", s(raw?.hardware?.model)].filter(
+    customer: _ctx.companyName,
+    tags: ["tidal", "src:soti", site ? `site:${site}` : "", s(raw?.hardware?.model)].filter(
       Boolean,
     ),
     criticality: "Normal",
@@ -290,19 +281,79 @@ const DEVICE_SOURCES: DeviceSource[] = [
   { path: "/api/v1/integrations/soti/devices", norm: normSoti },
 ];
 
-// Resolve Auvik tenant_id -> display_name so devices attribute to the customer
-// name, not an opaque id. Best-effort: a failure just leaves the map empty and
-// devices fall back to their tenant prefix (still a distinct, non-bleeding key).
-async function fetchAuvikTenants(
-  config: TidalConfig,
-  headers: Record<string, string>,
-): Promise<Map<string, string>> {
+type TidalCompany = { id: string; name: string; type: string };
+
+// Tidal's pagination `next` links come back as http:// (not https), which drops
+// the secure session cookie and breaks the follow-up request. Rebuild every
+// next URL against the configured https base so the scheme/host are correct.
+function rehost(config: TidalConfig, raw: string): string {
+  try {
+    const u = new URL(raw);
+    return `${config.url}${u.pathname}${u.search}`;
+  } catch {
+    return raw.startsWith("/") ? `${config.url}${raw}` : raw;
+  }
+}
+
+// Build request headers carrying the jar's current cookies (which rotate as the
+// session switches companies).
+function jarHeaders(config: TidalConfig, jar: Jar): Record<string, string> {
+  return {
+    Accept: "application/json",
+    Origin: config.origin,
+    Referer: `${config.origin}/`,
+    Cookie: cookieHeader(jar),
+  };
+}
+
+// The full client roster (GMI + affiliates + clients). Each is a customer.
+async function listCompanies(config: TidalConfig, jar: Jar): Promise<TidalCompany[]> {
+  const companies: TidalCompany[] = [];
+  let url: string | null = `${config.url}/api/v1/admin/companies?per_page=100`;
+  let guard = 0;
+  while (url && guard < 50) {
+    guard += 1;
+    const res: Response = await fetch(url, { headers: jarHeaders(config, jar), cache: "no-store" });
+    absorb(jar, res);
+    if (!res.ok) break;
+    const data: any = await res.json();
+    const rows: any[] = Array.isArray(data) ? data : data?.data ?? [];
+    for (const r of rows) {
+      const id = s(r?.id);
+      const name = s(r?.name);
+      if (id && name) companies.push({ id, name, type: s(r?.type) });
+    }
+    const pg = data?.pagination;
+    url = pg?.has_next && pg?.links?.next ? rehost(config, String(pg.links.next)) : null;
+  }
+  return companies;
+}
+
+// Point the session at a given company. State-changing, so it carries the XSRF
+// header; the response cookies are absorbed so the jar stays valid.
+async function switchCompany(config: TidalConfig, jar: Jar, companyId: string): Promise<void> {
+  const res = await fetch(`${config.url}/api/v1/admin/companies/switch-company`, {
+    method: "POST",
+    headers: {
+      ...jarHeaders(config, jar),
+      "Content-Type": "application/json",
+      "X-XSRF-TOKEN": xsrf(jar),
+    },
+    body: JSON.stringify({ company_id: companyId }),
+    cache: "no-store",
+  });
+  absorb(jar, res);
+}
+
+// Best-effort Auvik tenant_id -> display_name for the CURRENT company context.
+async function fetchAuvikTenants(config: TidalConfig, jar: Jar): Promise<Map<string, string>> {
   const map = new Map<string, string>();
   try {
     const res = await fetch(`${config.url}/api/v1/integrations/auvik/tenants`, {
-      headers,
+      headers: jarHeaders(config, jar),
       cache: "no-store",
     });
+    absorb(jar, res);
     if (!res.ok) return map;
     const data: any = await res.json();
     const rows: any[] = Array.isArray(data) ? data : data?.data ?? [];
@@ -317,12 +368,13 @@ async function fetchAuvikTenants(
   return map;
 }
 
-// Pull one paginated device source. Tidal returns { data, pagination:{ total,
-// has_next, links:{ next } } } and uses cursor URLs for `next`. A source that
-// isn't enabled (403/404) yields nothing rather than failing the whole sync.
+// Pull one paginated device source in the CURRENT company context. Tidal
+// returns { data, pagination:{ has_next, links:{ next } } } with cursor URLs.
+// A company without that integration answers 400/403/404 — treated as "no
+// devices here", not an error.
 async function pullDevices(
   config: TidalConfig,
-  headers: Record<string, string>,
+  jar: Jar,
   source: DeviceSource,
   ctx: NormCtx,
 ): Promise<TidalAsset[]> {
@@ -331,8 +383,9 @@ async function pullDevices(
   let guard = 0;
   while (url && guard < 200) {
     guard += 1;
-    const res: Response = await fetch(url, { headers, cache: "no-store" });
-    if (res.status === 403 || res.status === 404) return out;
+    const res: Response = await fetch(url, { headers: jarHeaders(config, jar), cache: "no-store" });
+    absorb(jar, res);
+    if (res.status === 400 || res.status === 403 || res.status === 404) return out;
     if (!res.ok) {
       throw new Error(
         `Tidal ${source.path} ${res.status}: ${await res.text().catch(() => res.statusText)}`,
@@ -342,37 +395,56 @@ async function pullDevices(
     const rows: any[] = Array.isArray(data) ? data : data?.data ?? [];
     for (const r of rows) out.push(source.norm(r, ctx));
 
+    // Two pagination shapes: Intune is cursor-based (has_next + links.next);
+    // Auvik/SOTI are page-based (current_page/last_page, no has_next). Follow
+    // links.next unless we're explicitly at the end of either scheme.
     const pg = data?.pagination;
     const next = pg?.links?.next;
-    url = pg?.has_next && next ? String(next) : null;
+    let more = false;
+    if (next) {
+      if (pg.has_next === true) more = true; // cursor
+      else if (pg.has_next === undefined) {
+        // page-based: continue while there are pages left
+        more = pg.last_page == null || Number(pg.current_page) < Number(pg.last_page);
+      }
+    }
+    url = more ? rehost(config, String(next)) : null;
   }
   return out;
 }
 
-// Log in, then pull every device source and merge into one asset list. Keeps
-// only records that have something scannable (a hostname or an IP). Each asset
-// is attributed to its own customer tenant so there is no cross-customer bleed.
+// Log in, enumerate every client company, and pull each one's devices in its
+// own session context. Every asset is attributed to the company it was pulled
+// under — the authoritative customer boundary, so there is no cross-customer
+// bleed. Keeps only records with something scannable (a hostname or an IP).
 export async function tidalListAssets(): Promise<TidalAsset[]> {
   const config = tidalConfig();
   if (!config) throw new Error("Tidal is not configured. Set TIDAL_EMAIL and TIDAL_PASSWORD.");
 
   const jar = await tidalLogin(config);
-  const headers = {
-    Accept: "application/json",
-    Origin: config.origin,
-    Referer: `${config.origin}/`,
-    Cookie: cookieHeader(jar),
-  };
-
-  const ctx: NormCtx = { auvikTenants: await fetchAuvikTenants(config, headers) };
+  const companies = await listCompanies(config, jar);
+  if (companies.length === 0) {
+    throw new Error("Tidal returned no companies for this account.");
+  }
 
   const assets: TidalAsset[] = [];
   const errors: string[] = [];
-  for (const source of DEVICE_SOURCES) {
+  for (const company of companies) {
     try {
-      assets.push(...(await pullDevices(config, headers, source, ctx)));
+      await switchCompany(config, jar, company.id);
+      const ctx: NormCtx = {
+        companyName: company.name,
+        auvikTenants: await fetchAuvikTenants(config, jar),
+      };
+      for (const source of DEVICE_SOURCES) {
+        try {
+          assets.push(...(await pullDevices(config, jar, source, ctx)));
+        } catch (err) {
+          errors.push(`${company.name}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
     } catch (err) {
-      errors.push(err instanceof Error ? err.message : String(err));
+      errors.push(`${company.name}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
