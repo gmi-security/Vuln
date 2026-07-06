@@ -30,6 +30,19 @@ type CardData = {
   docsUrl: string;
 };
 
+type TidalSyncStatus = {
+  running: boolean;
+  phase: string;
+  companiesTotal: number;
+  companiesDone: number;
+  currentCompany: string;
+  assetsFound: number;
+  startedAt: number;
+  finishedAt: number | null;
+  result: unknown;
+  error: string | null;
+};
+
 const cardIcon: Record<string, React.ElementType> = {
   nessus: IconRadar,
   vulners: IconPackage,
@@ -273,9 +286,11 @@ function IntegrationCard({ card }: { card: CardData }) {
   const healthUrl = HEALTH_ENDPOINTS[card.id];
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [progress, setProgress] = useState<TidalSyncStatus | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
   const supportsCsv = card.id === "tidal";
+  const isTidal = card.id === "tidal";
   const [health, setHealth] = useState<
     { reachable: boolean; message: string } | null | undefined
   >(healthUrl && card.configured ? undefined : null);
@@ -300,25 +315,49 @@ function IntegrationCard({ card }: { card: CardData }) {
     if (!syncUrl || syncing) return;
     setSyncing(true);
     setSyncMsg(null);
+    setProgress(null);
     try {
       const res = await fetch(syncUrl, { method: "POST" });
       const json = await res.json().catch(() => ({}));
       if (!res.ok || json.error) {
-        setSyncMsg({
-          ok: false,
-          text: json.error ?? `Sync failed (HTTP ${res.status})`,
-        });
+        setSyncMsg({ ok: false, text: json.error ?? `Sync failed (HTTP ${res.status})` });
+        setSyncing(false);
+        return;
+      }
+      if (isTidal) {
+        // Background job — poll for progress until it finishes.
+        setProgress(json.status ?? null);
+        await pollTidal();
       } else {
         setSyncMsg({ ok: true, text: summarizeSync(json.result ?? json) });
+        setSyncing(false);
       }
     } catch (err) {
-      setSyncMsg({
-        ok: false,
-        text: err instanceof Error ? err.message : "Sync failed.",
-      });
-    } finally {
+      setSyncMsg({ ok: false, text: err instanceof Error ? err.message : "Sync failed." });
       setSyncing(false);
     }
+  }
+
+  async function pollTidal() {
+    for (let i = 0; i < 3000; i += 1) {
+      await new Promise((r) => setTimeout(r, 1200));
+      let st: TidalSyncStatus | null = null;
+      try {
+        const r = await fetch(syncUrl, { method: "GET", cache: "no-store" });
+        const j = await r.json().catch(() => ({}));
+        st = j.status ?? null;
+      } catch {
+        continue; // transient — keep polling
+      }
+      if (!st) break;
+      setProgress(st);
+      if (!st.running) {
+        if (st.error) setSyncMsg({ ok: false, text: st.error });
+        else if (st.result) setSyncMsg({ ok: true, text: summarizeSync(st.result) });
+        break;
+      }
+    }
+    setSyncing(false);
   }
 
   async function uploadCsv(file: File) {
@@ -496,6 +535,36 @@ function IntegrationCard({ card }: { card: CardData }) {
           </button>
         ) : null}
       </div>
+
+      {isTidal && syncing && progress ? (
+        <div className="mt-3 rounded-lg border border-zinc-800 bg-[#090909] px-3 py-3">
+          <div className="flex items-center justify-between text-xs text-zinc-300">
+            <span className="truncate">
+              {progress.phase}
+              {progress.currentCompany ? "" : "…"}
+            </span>
+            <span className="tabular-nums text-zinc-500">
+              {progress.companiesTotal
+                ? `${progress.companiesDone}/${progress.companiesTotal}`
+                : ""}
+            </span>
+          </div>
+          <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-zinc-800">
+            <div
+              className="h-full rounded-full bg-[#ff4d57] transition-all duration-500"
+              style={{
+                width: progress.companiesTotal
+                  ? `${Math.round((progress.companiesDone / progress.companiesTotal) * 100)}%`
+                  : "8%",
+              }}
+            />
+          </div>
+          <div className="mt-2 flex items-center justify-between text-[11px] text-zinc-500">
+            <span className="truncate">{progress.currentCompany || " "}</span>
+            <span className="tabular-nums">{progress.assetsFound} assets</span>
+          </div>
+        </div>
+      ) : null}
 
       {syncMsg ? (
         <div

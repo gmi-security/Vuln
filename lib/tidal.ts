@@ -413,23 +413,44 @@ async function pullDevices(
   return out;
 }
 
+// Progress updates emitted during a sync so a long run can drive a UI.
+export type TidalProgress = {
+  phase?: string;
+  companiesTotal?: number;
+  companiesDone?: number;
+  currentCompany?: string;
+  assetsFound?: number;
+};
+
 // Log in, enumerate every client company, and pull each one's devices in its
 // own session context. Every asset is attributed to the company it was pulled
 // under — the authoritative customer boundary, so there is no cross-customer
 // bleed. Keeps only records with something scannable (a hostname or an IP).
-export async function tidalListAssets(): Promise<TidalAsset[]> {
+// onProgress (optional) is invoked as each company is processed.
+export async function tidalListAssets(
+  onProgress?: (p: TidalProgress) => void,
+): Promise<TidalAsset[]> {
   const config = tidalConfig();
   if (!config) throw new Error("Tidal is not configured. Set TIDAL_EMAIL and TIDAL_PASSWORD.");
 
+  onProgress?.({ phase: "Signing in" });
   const jar = await tidalLogin(config);
+  onProgress?.({ phase: "Enumerating companies" });
   const companies = await listCompanies(config, jar);
   if (companies.length === 0) {
     throw new Error("Tidal returned no companies for this account.");
   }
+  onProgress?.({ companiesTotal: companies.length, companiesDone: 0 });
 
   const assets: TidalAsset[] = [];
   const errors: string[] = [];
+  let done = 0;
   for (const company of companies) {
+    onProgress?.({
+      phase: `Pulling ${company.name}`,
+      currentCompany: company.name,
+      companiesDone: done,
+    });
     try {
       await switchCompany(config, jar, company.id);
       const ctx: NormCtx = {
@@ -446,6 +467,8 @@ export async function tidalListAssets(): Promise<TidalAsset[]> {
     } catch (err) {
       errors.push(`${company.name}: ${err instanceof Error ? err.message : String(err)}`);
     }
+    done += 1;
+    onProgress?.({ companiesDone: done, assetsFound: assets.length });
   }
 
   const scannable = assets.filter((a) => a.hostname || a.ipAddresses.length);

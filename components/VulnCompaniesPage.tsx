@@ -145,20 +145,45 @@ export default function VulnCompaniesPage() {
     setImportMsg(null);
     try {
       const res = await fetch("/api/tidal/import", { method: "POST" });
-      const json = await res.json();
-      if (!res.ok) {
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || json.error) {
         setImportMsg({ ok: false, text: json.error ?? "Tidal sync failed." });
+        setImporting(false);
         return;
       }
-      const r = json.result;
-      const auto = r.autoScan?.assetsQueued
-        ? ` Auto-scan launched ${r.autoScan.scansLaunched} scan${r.autoScan.scansLaunched === 1 ? "" : "s"} for ${r.autoScan.assetsQueued} new asset${r.autoScan.assetsQueued === 1 ? "" : "s"}.`
-        : "";
-      setImportMsg({
-        ok: true,
-        text: `Synced ${r.assetsUpserted} assets from Tidal (${r.companiesCreated} new customer${r.companiesCreated === 1 ? "" : "s"}); repriced ${r.findingsRescored} findings.${auto}`,
-      });
-      await load();
+      // Background job — poll until it finishes (spans ~49 client companies).
+      for (let i = 0; i < 3000; i += 1) {
+        await new Promise((r) => setTimeout(r, 1200));
+        let st: any = null;
+        try {
+          const pr = await fetch("/api/tidal/import", { cache: "no-store" });
+          st = (await pr.json().catch(() => ({}))).status;
+        } catch {
+          continue;
+        }
+        if (!st) break;
+        if (st.running) {
+          setImportMsg({
+            ok: true,
+            text: `Syncing Tidal… ${st.companiesDone}/${st.companiesTotal || "?"} customers, ${st.assetsFound} assets${st.currentCompany ? ` (${st.currentCompany})` : ""}`,
+          });
+          continue;
+        }
+        if (st.error) {
+          setImportMsg({ ok: false, text: st.error });
+        } else if (st.result) {
+          const r = st.result;
+          const auto = r.autoScan?.assetsQueued
+            ? ` Auto-scan launched ${r.autoScan.scansLaunched} scan${r.autoScan.scansLaunched === 1 ? "" : "s"} for ${r.autoScan.assetsQueued} new asset${r.autoScan.assetsQueued === 1 ? "" : "s"}.`
+            : "";
+          setImportMsg({
+            ok: true,
+            text: `Synced ${r.assetsUpserted} assets from Tidal (${r.companiesCreated} new customer${r.companiesCreated === 1 ? "" : "s"}); repriced ${r.findingsRescored} findings.${auto}`,
+          });
+          await load();
+        }
+        break;
+      }
     } catch {
       setImportMsg({ ok: false, text: "Failed to reach the Tidal API." });
     } finally {

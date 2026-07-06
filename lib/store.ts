@@ -16,7 +16,12 @@ import {
   isKev,
   refreshKevFromCisa,
 } from "@/lib/threat";
-import { tidalConfig, tidalListAssets, type TidalAsset } from "@/lib/tidal";
+import {
+  tidalConfig,
+  tidalListAssets,
+  type TidalAsset,
+  type TidalProgress,
+} from "@/lib/tidal";
 import { intuneConfig, intuneListAssets } from "@/lib/intune";
 import { falconConfig, falconListAssets } from "@/lib/crowdstrike";
 import { defenderConfig, defenderListFindings } from "@/lib/defender";
@@ -2983,9 +2988,9 @@ export async function importTidalInventory(
 
 // Live sync: sign in to Tidal with email + password and pull the inventory
 // straight from the portal API. CSV upload remains as an offline fallback.
-export async function importFromTidal(): Promise<
-  TidalImportResult | { error: string }
-> {
+export async function importFromTidal(
+  onProgress?: (p: TidalProgress) => void,
+): Promise<TidalImportResult | { error: string }> {
   if (!tidalConfig()) {
     return {
       error:
@@ -2994,13 +2999,104 @@ export async function importFromTidal(): Promise<
   }
   let assets;
   try {
-    assets = await tidalListAssets();
+    assets = await tidalListAssets(onProgress);
   } catch (err) {
     return {
       error: err instanceof Error ? err.message : "Failed to reach the Tidal API.",
     };
   }
   return importTidalInventory(assets);
+}
+
+// --- Background Tidal sync with pollable progress ---------------------------
+// The live sync spans ~49 client companies and can pull thousands of devices,
+// so it runs as a background job. The UI starts it (POST) and polls its status
+// (GET). Progress lives in module scope — one sync at a time.
+export type TidalSyncStatus = {
+  running: boolean;
+  phase: string;
+  companiesTotal: number;
+  companiesDone: number;
+  currentCompany: string;
+  assetsFound: number;
+  startedAt: number;
+  finishedAt: number | null;
+  result: TidalImportResult | null;
+  error: string | null;
+};
+
+let tidalSync: TidalSyncStatus = {
+  running: false,
+  phase: "idle",
+  companiesTotal: 0,
+  companiesDone: 0,
+  currentCompany: "",
+  assetsFound: 0,
+  startedAt: 0,
+  finishedAt: null,
+  result: null,
+  error: null,
+};
+
+export function getTidalSyncStatus(): TidalSyncStatus {
+  return tidalSync;
+}
+
+// Kick off the background sync. Returns immediately; poll getTidalSyncStatus().
+export function startTidalSync(): { started: boolean; error?: string } {
+  if (!tidalConfig()) {
+    return {
+      started: false,
+      error:
+        "Tidal is not configured. Set TIDAL_EMAIL and TIDAL_PASSWORD to sign in and pull the live inventory (or upload a CSV export).",
+    };
+  }
+  if (tidalSync.running) return { started: false, error: "A Tidal sync is already running." };
+
+  tidalSync = {
+    running: true,
+    phase: "Starting",
+    companiesTotal: 0,
+    companiesDone: 0,
+    currentCompany: "",
+    assetsFound: 0,
+    startedAt: Date.now(),
+    finishedAt: null,
+    result: null,
+    error: null,
+  };
+
+  // Fire-and-forget: the DO app is a persistent Node server, so the async
+  // continues running after the POST response returns.
+  void (async () => {
+    try {
+      const result = await importFromTidal((p) => {
+        tidalSync = { ...tidalSync, ...p };
+      });
+      if ("error" in result) {
+        tidalSync = { ...tidalSync, running: false, phase: "Error", error: result.error, finishedAt: Date.now() };
+      } else {
+        tidalSync = {
+          ...tidalSync,
+          running: false,
+          phase: "Done",
+          currentCompany: "",
+          result,
+          finishedAt: Date.now(),
+        };
+      }
+    } catch (err) {
+      tidalSync = {
+        ...tidalSync,
+        running: false,
+        phase: "Error",
+        error: err instanceof Error ? err.message : "Tidal sync failed.",
+        finishedAt: Date.now(),
+      };
+    }
+  })();
+
+  return { started: true };
 }
 
 export type IntuneImportResult = {
