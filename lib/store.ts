@@ -264,7 +264,41 @@ const persistGlobal = globalThis as unknown as {
   __vulnHydrated?: boolean;
   __vulnHydrating?: Promise<void>;
   __vulnFlusher?: ReturnType<typeof setInterval>;
+  __vulnFlushing?: Promise<void> | null;
+  __vulnDrainHooked?: boolean;
 };
+
+// Serialize all snapshot writes through a single in-flight promise so an
+// interval tick and a flushNow() (or two mutations) can never commit out of
+// order and let a stale snapshot clobber a newer one.
+function persistSnapshot(): Promise<void> {
+  if (!persistenceEnabled() || !globalStore.__vulnStore) return Promise.resolve();
+  const run = (persistGlobal.__vulnFlushing ?? Promise.resolve()).then(async () => {
+    if (!globalStore.__vulnStore) return;
+    try {
+      await saveSnapshot(serializeStore(globalStore.__vulnStore));
+    } catch (err) {
+      console.error("[persist] snapshot save failed:", err);
+    }
+  });
+  persistGlobal.__vulnFlushing = run.finally(() => {
+    if (persistGlobal.__vulnFlushing === run) persistGlobal.__vulnFlushing = null;
+  });
+  return run;
+}
+
+// On graceful shutdown (DO sends SIGTERM before a redeploy/restart) drain any
+// pending in-memory writes so mutations in the last few seconds aren't lost.
+function hookDrainOnce(): void {
+  if (persistGlobal.__vulnDrainHooked || !persistenceEnabled()) return;
+  persistGlobal.__vulnDrainHooked = true;
+  const drain = () => {
+    void persistSnapshot();
+  };
+  process.once("SIGTERM", drain);
+  process.once("SIGINT", drain);
+  process.once("beforeExit", drain);
+}
 
 // Hydrate the store from the DB snapshot once per process (or seed if empty),
 // then start the background flusher. Every store-touching route awaits this
@@ -301,12 +335,12 @@ async function doHydrate(): Promise<void> {
 
 function startFlusher(): void {
   if (!persistenceEnabled() || persistGlobal.__vulnFlusher) return;
+  hookDrainOnce();
   persistGlobal.__vulnFlusher = setInterval(() => {
-    const s = globalStore.__vulnStore;
-    if (!s) return;
-    saveSnapshot(serializeStore(s)).catch((err) =>
-      console.error("[persist] flush failed:", err),
-    );
+    // Skip this tick if a save is already in flight — persistSnapshot chains
+    // writes so nothing overlaps or commits out of order.
+    if (persistGlobal.__vulnFlushing) return;
+    void persistSnapshot();
   }, 6000);
 }
 
@@ -337,12 +371,7 @@ export async function storeStatus(): Promise<{
 
 // Force an immediate snapshot write (used right after large imports).
 export async function flushNow(): Promise<void> {
-  if (!persistenceEnabled() || !globalStore.__vulnStore) return;
-  try {
-    await saveSnapshot(serializeStore(globalStore.__vulnStore));
-  } catch (err) {
-    console.error("[persist] flushNow failed:", err);
-  }
+  await persistSnapshot();
 }
 
 // --- deterministic RNG so demo data is stable per scan -----------------

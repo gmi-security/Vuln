@@ -86,7 +86,7 @@ export async function GET() {
         envVars: ["GRC_API_URL", "GRC_API_TOKEN"],
         configured: Boolean(grc),
         status: grc ? "Connected" : "Demo Mode",
-        docsUrl: "http://64.227.55.62:8080/app/dashboard",
+        docsUrl: `${(process.env.GRC_API_URL ?? "").replace(/\/+$/, "") || "https://www.opengrc.com"}/app/dashboard`,
       },
     ],
   });

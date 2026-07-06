@@ -40,7 +40,15 @@ export async function POST(request: Request) {
     );
   }
 
-  const assets = parseTidalCsv(csv);
+  let assets;
+  try {
+    assets = parseTidalCsv(csv);
+  } catch {
+    return NextResponse.json(
+      { error: "Could not parse the CSV. Check that it's a valid comma-separated export." },
+      { status: 400 },
+    );
+  }
   if (assets.length === 0) {
     return NextResponse.json(
       {
