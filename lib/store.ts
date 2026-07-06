@@ -128,6 +128,46 @@ function inferCompanyKind(name: string): "internal" | "client" {
   return /\bgmi\b/i.test(name) ? "internal" : "client";
 }
 
+// Demo/test companies (e.g. "SplashWorks Services, Inc. (Testing)") exist so the
+// tool can be shown without real customer data. They stay fully usable in the
+// console but are EXCLUDED from production reporting and GRC push so they never
+// pollute real metrics or compliance posture. A company is demo when its name
+// carries a test/demo/sandbox marker, or it's listed in the DEMO_COMPANIES env
+// var (comma-separated names or ids).
+function isDemoName(name: string): boolean {
+  return /\(test(?:ing)?\)|\b(?:demo|sandbox)\b/i.test(name);
+}
+
+function demoCompanyIds(s: StoreShape): Set<string> {
+  const allow = new Set(
+    (process.env.DEMO_COMPANIES ?? "")
+      .split(",")
+      .map((x) => x.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  const ids = new Set<string>();
+  for (const c of s.companies.values()) {
+    if (isDemoName(c.name) || allow.has(c.name.toLowerCase()) || allow.has(c.id.toLowerCase())) {
+      ids.add(c.id);
+    }
+  }
+  return ids;
+}
+
+export function isDemoCompany(company: { id: string; name: string }): boolean {
+  const allow = new Set(
+    (process.env.DEMO_COMPANIES ?? "")
+      .split(",")
+      .map((x) => x.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  return (
+    isDemoName(company.name) ||
+    allow.has(company.name.toLowerCase()) ||
+    allow.has(company.id.toLowerCase())
+  );
+}
+
 type InternalFolder = {
   id: string;
   companyId: string;
@@ -722,7 +762,7 @@ function companyRollup(s: StoreShape, companyId: string) {
 }
 
 function toPublicCompany(s: StoreShape, c: InternalCompany): Company {
-  return { ...c, ...companyRollup(s, c.id) };
+  return { ...c, ...companyRollup(s, c.id), isDemo: isDemoCompany(c) };
 }
 
 function toPublicFolder(s: StoreShape, f: InternalFolder): Folder {
@@ -1664,7 +1704,9 @@ export function computeRemediationSla(): RemediationSlaResult {
   tick(s);
   const now = Date.now();
   const DAY = 86_400_000;
-  const all = Array.from(s.findings.values());
+  // Exclude demo/test companies from production SLA reporting.
+  const demo = demoCompanyIds(s);
+  const all = Array.from(s.findings.values()).filter((f) => !demo.has(f.companyId));
 
   // 30-day burndown: open backlog vs resolved-per-day.
   const burndown: { date: string; open: number; resolved: number }[] = [];
@@ -1790,8 +1832,11 @@ export function computeCompliance(filter?: {
   const now = Date.now();
   const DAY = 86_400_000;
 
-  const companies = Array.from(s.companies.values()).filter(
-    (c) => !filter?.companyId || c.id === filter.companyId,
+  // Exclude demo/test companies from the all-company rollup; still allow an
+  // explicit single-company lookup (e.g. showing the demo customer itself).
+  const demo = demoCompanyIds(s);
+  const companies = Array.from(s.companies.values()).filter((c) =>
+    filter?.companyId ? c.id === filter.companyId : !demo.has(c.id),
   );
 
   const postures: CompliancePosture[] = companies.map((company) => {
@@ -1904,12 +1949,15 @@ export async function exportToGrc(filter?: {
     };
   }
   const compliance = computeCompliance(filter);
+  const demo = demoCompanyIds(store());
   let pushed = 0;
   let created = 0;
   let updated = 0;
   const errors: string[] = [];
 
   for (const posture of compliance.companies) {
+    // Never push demo/test companies to GRC.
+    if (demo.has(posture.companyId)) continue;
     const metrics = computeMetrics({ companyId: posture.companyId });
     // Evaluate every framework for this company so the GRC record carries
     // control-level compliance evidence, not just an aggregate risk number.
@@ -2005,8 +2053,9 @@ export type GrcAssessment = {
 // here — the route stamps generatedAt.
 export function grcAssessment(): GrcAssessment {
   const s = store();
+  const demo = demoCompanyIds(s);
   const clients = Array.from(s.companies.values()).filter(
-    (c) => c.kind === "client",
+    (c) => c.kind === "client" && !demo.has(c.id),
   );
   const companies = clients.map((company) => {
     const controls: GrcAssessment["companies"][number]["controls"] = [];
@@ -3758,8 +3807,11 @@ function isOpen(f: Finding): boolean {
 export function computeMetrics(filter?: { companyId?: string }): QuantifyMetrics {
   const s = store();
   tick(s);
-  const all = Array.from(s.findings.values()).filter(
-    (f) => !filter?.companyId || f.companyId === filter.companyId,
+  // For a specific company, honor the filter; for the all-company rollup,
+  // exclude demo/test companies so they don't inflate production metrics.
+  const demo = demoCompanyIds(s);
+  const all = Array.from(s.findings.values()).filter((f) =>
+    filter?.companyId ? f.companyId === filter.companyId : !demo.has(f.companyId),
   );
   const open = all.filter(isOpen);
   const now = Date.now();

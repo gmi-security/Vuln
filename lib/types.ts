@@ -43,6 +43,9 @@ export type Company = {
   // Composite security-posture score (0-100, higher = worse) and its band.
   compositeScore: number;
   compositeBand: "Low" | "Guarded" | "Elevated" | "High" | "Critical";
+  // True for demo/test companies — shown in the console but excluded from
+  // production reporting and GRC push.
+  isDemo: boolean;
 };
 
 export type CompositeScore = {

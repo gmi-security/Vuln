@@ -312,6 +312,14 @@ export default function VulnCompaniesPage() {
                             Our org
                           </span>
                         ) : null}
+                        {company.isDemo ? (
+                          <span
+                            title="Demo/test data — excluded from reporting and GRC"
+                            className="rounded-full border border-sky-900/60 bg-[rgba(59,130,246,0.12)] px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-sky-300"
+                          >
+                            Demo
+                          </span>
+                        ) : null}
                       </div>
                       <div className="mt-1 text-sm text-zinc-500">
                         {company.industry || "—"}
