@@ -16,21 +16,83 @@ import type { AssetCriticality, AssetExposure } from "@/lib/types";
 
 export type TidalConfig = {
   url: string;
-  apiKey: string;
-  profileId: string;
+  username: string;
+  password: string;
+  apiKey: string; // optional static token (skips the credential sign-in)
   assetsPath: string;
 };
 
 export function tidalConfig(): TidalConfig | null {
   const url = process.env.TIDAL_API_URL;
-  const apiKey = process.env.TIDAL_API_KEY;
-  if (!url || !apiKey) return null;
+  const username = process.env.TIDAL_USERNAME ?? process.env.TIDAL_EMAIL ?? "";
+  const password = process.env.TIDAL_PASSWORD ?? "";
+  const apiKey = process.env.TIDAL_API_KEY ?? "";
+  // Configured when we can authenticate: a static token, OR username + password
+  // (Tidal signs in with credentials and mints an 8h bearer token).
+  if (!url || (!apiKey && !(username && password))) return null;
   return {
     url: url.replace(/\/+$/, ""),
+    username,
+    password,
     apiKey,
-    profileId: process.env.TIDAL_PROFILE_ID ?? "",
-    assetsPath: process.env.TIDAL_ASSETS_PATH ?? "/v1/assets",
+    assetsPath: process.env.TIDAL_ASSETS_PATH ?? "/api/v1/servers",
   };
+}
+
+// Cached bearer token (Tidal tokens live 8h). Refreshed before expiry; falls
+// back to a full credential login when there's no valid refresh token.
+let tidalToken: { access: string; refresh: string; exp: number } | null = null;
+
+async function tidalBearer(config: TidalConfig): Promise<string> {
+  if (config.apiKey) return config.apiKey;
+  const now = Date.now();
+  if (tidalToken && tidalToken.exp > now + 60_000) return tidalToken.access;
+
+  const jsonHeaders = { "Content-Type": "application/json", Accept: "application/json" };
+
+  if (tidalToken?.refresh) {
+    try {
+      const r = await fetch(`${config.url}/api/v1/refresh`, {
+        method: "POST",
+        headers: jsonHeaders,
+        body: JSON.stringify({ refresh_token: tidalToken.refresh }),
+        cache: "no-store",
+      });
+      if (r.ok) {
+        const j: any = await r.json();
+        if (j?.access_token) {
+          tidalToken = {
+            access: j.access_token,
+            refresh: tidalToken.refresh,
+            exp: now + Number(j.expires_in ?? 28800) * 1000,
+          };
+          return tidalToken.access;
+        }
+      }
+    } catch {
+      // fall through to a full sign-in
+    }
+  }
+
+  const res = await fetch(`${config.url}/api/v1/authenticate`, {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({ username: config.username, password: config.password }),
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    throw new Error(
+      `Tidal sign-in failed: HTTP ${res.status} — check TIDAL_API_URL (your workspace subdomain), TIDAL_USERNAME, and TIDAL_PASSWORD.`,
+    );
+  }
+  const j: any = await res.json();
+  if (!j?.access_token) throw new Error("Tidal sign-in returned no access token.");
+  tidalToken = {
+    access: j.access_token,
+    refresh: j.refresh_token ?? "",
+    exp: now + Number(j.expires_in ?? 28800) * 1000,
+  };
+  return tidalToken.access;
 }
 
 // Normalized asset shape the store consumes, independent of Tidal's exact
@@ -99,10 +161,11 @@ export async function tidalListAssets(): Promise<TidalAsset[]> {
   const config = tidalConfig();
   if (!config) throw new Error("Tidal is not configured.");
 
+  const token = await tidalBearer(config);
   const headers = {
-    Authorization: `Bearer ${config.apiKey}`,
+    Authorization: `Bearer ${token}`,
     Accept: "application/json",
-    ...(config.profileId ? { "X-Tidal-Profile": config.profileId } : {}),
+    "Content-Type": "application/json",
   };
 
   const assets: TidalAsset[] = [];

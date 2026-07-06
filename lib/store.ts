@@ -2928,7 +2928,7 @@ export async function importFromTidal(): Promise<
   if (!tidalConfig()) {
     return {
       error:
-        "Tidal is not configured. Set TIDAL_API_URL and TIDAL_API_KEY to sync the asset inventory.",
+        "Tidal is not configured. Set TIDAL_API_URL (your workspace subdomain), TIDAL_USERNAME, and TIDAL_PASSWORD to sync the asset inventory.",
     };
   }
   const s = store();

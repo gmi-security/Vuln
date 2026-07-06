@@ -28,10 +28,14 @@ export async function GET() {
           "Environment / exposure",
           "Customer mapping",
         ],
-        envVars: ["TIDAL_API_URL", "TIDAL_API_KEY", "TIDAL_PROFILE_ID"],
+        envVars: ["TIDAL_API_URL", "TIDAL_USERNAME", "TIDAL_PASSWORD"],
         configured: Boolean(tidal),
-        status: tidal ? "Connected" : "Demo Mode",
-        docsUrl: "https://tidal.io/services",
+        status: tidal
+          ? "Connected"
+          : process.env.DEMO_SCANS === "true"
+            ? "Demo Mode"
+            : "Not Configured",
+        docsUrl: "https://guides.tidal.cloud/authenticate.html",
       },
       {
         id: "intune",
