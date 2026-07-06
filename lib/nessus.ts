@@ -279,12 +279,17 @@ export type NessusFinding = {
   exploitAvailable: boolean;
 };
 
-// Pull per-host vulnerabilities, enriching the most severe plugins with
-// full detail (description, solution, CVE, CVSS). Detail lookups are capped
-// so importing a large scan stays fast.
+// Persistent plugin_id -> CVE cache across imports (warm instance). Lets repeat
+// imports resolve real CVEs cumulatively without re-hitting the plugin API — so
+// KEV/EPSS/SSVC enrichment has real CVEs to work with, not PLUGIN-ids.
+const PLUGIN_CVE_CACHE = new Map<number, string>();
+
+// Pull per-host vulnerabilities, enriching plugins with full detail
+// (description, solution, CVE, CVSS). Detail lookups are budget-capped per
+// import but cached across imports so coverage grows over time.
 export async function nessusImportFindings(
   nessusScanId: number,
-  detailBudget = 40,
+  detailBudget = 300,
 ): Promise<NessusFinding[]> {
   const config = nessusConfig();
   if (!config) throw new Error("Nessus is not configured.");
@@ -309,7 +314,12 @@ export async function nessusImportFindings(
     for (const vuln of vulns) {
       const severity = NESSUS_SEVERITY[Number(vuln.severity ?? 0)] ?? "Info";
       let plugin = pluginCache.get(vuln.plugin_id);
-      if (!plugin && detailCalls < detailBudget && Number(vuln.severity ?? 0) >= 1) {
+      if (
+        !plugin &&
+        !PLUGIN_CVE_CACHE.has(vuln.plugin_id) &&
+        detailCalls < detailBudget &&
+        Number(vuln.severity ?? 0) >= 1
+      ) {
         try {
           plugin = await api(
             config,
@@ -328,6 +338,8 @@ export async function nessusImportFindings(
         : [];
       const attrs = attributes[0] ?? {};
       const cve: string = Array.isArray(attrs?.cve) ? attrs.cve[0] : attrs?.cve ?? "";
+      if (plugin) PLUGIN_CVE_CACHE.set(vuln.plugin_id, cve || "");
+      const finalCve = cve || PLUGIN_CVE_CACHE.get(vuln.plugin_id) || `PLUGIN-${vuln.plugin_id}`;
       const outputs: any[] = plugin?.outputs ?? [];
       const port =
         outputs[0]?.ports && Object.keys(outputs[0].ports)[0]
@@ -340,7 +352,7 @@ export async function nessusImportFindings(
         attrs?.risk_information?.vpr_score ?? attrs?.vpr_score ?? vuln?.vpr_score ?? 0,
       );
       findings.push({
-        cve: cve || `PLUGIN-${vuln.plugin_id}`,
+        cve: finalCve,
         title: String(vuln.plugin_name ?? `Nessus plugin ${vuln.plugin_id}`),
         severity,
         cvss: cvssV3 || cvssV2,

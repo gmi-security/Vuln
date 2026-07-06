@@ -53,6 +53,37 @@ export function isKev(cve: string): boolean {
   return KEV_CVES.has(cve) || kevRuntime.has(cve);
 }
 
+// Live EPSS (Exploit Prediction Scoring System) from FIRST.org — probability a
+// CVE is exploited in the next 30 days. Batched; best-effort per batch so a
+// single failure never blocks enrichment.
+export async function fetchEpss(cves: string[]): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  const uniq = Array.from(new Set(cves.map((c) => c.toUpperCase()))).filter((c) =>
+    /^CVE-\d{4}-\d{4,}$/.test(c),
+  );
+  const BATCH = 80;
+  for (let i = 0; i < uniq.length && i < 12_000; i += BATCH) {
+    const batch = uniq.slice(i, i + BATCH);
+    try {
+      const res = await fetch(
+        `https://api.first.org/data/v1/epss?cve=${batch.join(",")}`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) continue;
+      const json = (await res.json()) as {
+        data?: { cve?: string; epss?: string }[];
+      };
+      for (const d of json.data ?? []) {
+        const v = Number(d.epss);
+        if (d.cve && !Number.isNaN(v)) out.set(d.cve.toUpperCase(), v);
+      }
+    } catch {
+      // best-effort per batch
+    }
+  }
+  return out;
+}
+
 // Best-effort refresh from the public CISA KEV catalog. Safe to call on a
 // timer from the server; failures are swallowed so scoring still works
 // offline from the bundled set.

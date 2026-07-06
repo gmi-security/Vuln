@@ -9,7 +9,13 @@ import {
   nessusScanControl,
   nessusScanStatus,
 } from "@/lib/nessus";
-import { classifyAsset, computeRealRisk, isKev } from "@/lib/threat";
+import {
+  classifyAsset,
+  computeRealRisk,
+  fetchEpss,
+  isKev,
+  refreshKevFromCisa,
+} from "@/lib/threat";
 import { tidalConfig, tidalListAssets } from "@/lib/tidal";
 import { intuneConfig, intuneListAssets } from "@/lib/intune";
 import { falconConfig, falconListAssets } from "@/lib/crowdstrike";
@@ -1249,6 +1255,46 @@ export async function purgeDemoData(): Promise<{
   }
   await flushNow();
   return { scansRemoved, findingsRemoved };
+}
+
+// Refresh live threat intelligence and re-score every finding: pull the full
+// CISA KEV catalog + live EPSS for all real CVEs, then recompute kev / epss /
+// real-risk / SSVC inputs. This is the engine that makes prioritization real
+// instead of running on the bundled baseline. Best-effort, never throws.
+export async function enrichThreatIntel(): Promise<{
+  kevAdded: number;
+  cvesWithEpss: number;
+  findingsUpdated: number;
+  findingsScanned: number;
+}> {
+  const s = store();
+  const kevAdded = await refreshKevFromCisa();
+
+  const cveRe = /^CVE-\d{4}-\d{4,}$/i;
+  const cves: string[] = [];
+  for (const f of s.findings.values()) {
+    if (cveRe.test(f.cve)) cves.push(f.cve.toUpperCase());
+  }
+  const epss = await fetchEpss(cves);
+
+  let findingsUpdated = 0;
+  let findingsScanned = 0;
+  for (const f of s.findings.values()) {
+    findingsScanned += 1;
+    const beforeKev = f.kev;
+    const beforeEpss = f.epss;
+    const beforeRisk = f.realRisk;
+    if (cveRe.test(f.cve)) {
+      const e = epss.get(f.cve.toUpperCase());
+      if (e !== undefined) f.epss = e;
+    }
+    rescoreFinding(s, f); // recomputes kev + real-risk from refreshed KEV/EPSS
+    if (f.kev !== beforeKev || f.epss !== beforeEpss || f.realRisk !== beforeRisk) {
+      findingsUpdated += 1;
+    }
+  }
+  await flushNow();
+  return { kevAdded, cvesWithEpss: epss.size, findingsUpdated, findingsScanned };
 }
 
 // --- attack surface (external OSINT posture: Artemis + SpiderFoot) ----------
