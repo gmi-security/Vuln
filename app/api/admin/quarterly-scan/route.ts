@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { ensureHydrated, launchOsintScans } from "@/lib/store";
+import { adminTokenOk } from "@/lib/admin-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -8,11 +9,7 @@ export const dynamic = "force-dynamic";
 // (GitHub Action / DO scheduled job). Requires ?token= or an x-admin-token
 // header matching ADMIN_TOKEN.
 export async function POST(request: Request) {
-  const token =
-    new URL(request.url).searchParams.get("token") ??
-    request.headers.get("x-admin-token") ??
-    "";
-  if (!process.env.ADMIN_TOKEN || token !== process.env.ADMIN_TOKEN) {
+  if (!adminTokenOk(request)) {
     return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
   }
   await ensureHydrated();
