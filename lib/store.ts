@@ -16,7 +16,7 @@ import {
   isKev,
   refreshKevFromCisa,
 } from "@/lib/threat";
-import { tidalConfig, tidalListAssets } from "@/lib/tidal";
+import { tidalConfig, tidalListAssets, type TidalAsset } from "@/lib/tidal";
 import { intuneConfig, intuneListAssets } from "@/lib/intune";
 import { falconConfig, falconListAssets } from "@/lib/crowdstrike";
 import { defenderConfig, defenderListFindings } from "@/lib/defender";
@@ -2922,24 +2922,14 @@ export async function importFromArtemis(): Promise<
   };
 }
 
-export async function importFromTidal(): Promise<
-  TidalImportResult | { error: string }
-> {
-  if (!tidalConfig()) {
-    return {
-      error:
-        "Tidal is not configured. Set TIDAL_API_URL (your workspace subdomain), TIDAL_USERNAME, and TIDAL_PASSWORD to sync the asset inventory.",
-    };
-  }
+// Core inventory loader shared by the CSV import and the (legacy) API sync.
+// Maps each asset's customer to a company (match by name, create if missing),
+// upserts the asset, then reprices every finding so real risk reflects the
+// authoritative environment. Assets come from a Tidal CSV export or the API.
+export async function importTidalInventory(
+  assets: TidalAsset[],
+): Promise<TidalImportResult> {
   const s = store();
-  let assets;
-  try {
-    assets = await tidalListAssets();
-  } catch (err) {
-    return {
-      error: err instanceof Error ? err.message : "Failed to reach the Tidal API.",
-    };
-  }
 
   let companiesCreated = 0;
   let assetsUpserted = 0;
@@ -2989,6 +2979,29 @@ export async function importFromTidal(): Promise<
 
   await flushNow();
   return { companiesCreated, assetsUpserted, findingsRescored, autoScan };
+}
+
+// Legacy API-based sync. Tidal.io has no customer-facing API, so this path is
+// only exercised if TIDAL_API_URL/credentials are set; the CSV upload is the
+// supported route.
+export async function importFromTidal(): Promise<
+  TidalImportResult | { error: string }
+> {
+  if (!tidalConfig()) {
+    return {
+      error:
+        "Tidal has no customer API — export your inventory to CSV from the Tidal portal and upload it here instead.",
+    };
+  }
+  let assets;
+  try {
+    assets = await tidalListAssets();
+  } catch (err) {
+    return {
+      error: err instanceof Error ? err.message : "Failed to reach the Tidal API.",
+    };
+  }
+  return importTidalInventory(assets);
 }
 
 export type IntuneImportResult = {

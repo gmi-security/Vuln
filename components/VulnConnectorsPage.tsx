@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { ExternalLink, RefreshCw } from "lucide-react";
+import { ExternalLink, RefreshCw, Upload } from "lucide-react";
 import {
   IconClipboardCheck,
   IconCloudLock,
@@ -70,8 +70,10 @@ function summarizeSync(result: any): string {
   const n = (v: unknown) => (typeof v === "number" ? v : null);
   if (n(result.findingsImported) != null) parts.push(`${result.findingsImported} findings`);
   if (n(result.scansImported) != null) parts.push(`${result.scansImported} scans`);
+  if (n(result.rowsParsed) != null) parts.push(`${result.rowsParsed} rows`);
   if (n(result.assetsUpserted) != null) parts.push(`${result.assetsUpserted} assets`);
   if (n(result.companiesCreated)) parts.push(`${result.companiesCreated} new companies`);
+  if (n(result.findingsRescored)) parts.push(`${result.findingsRescored} findings repriced`);
   if (n(result.companiesMatched) != null) parts.push(`${result.companiesMatched} companies`);
   const skipped = Array.isArray(result.skipped) ? result.skipped.length : 0;
   if (skipped) parts.push(`${skipped} skipped`);
@@ -260,6 +262,7 @@ const statusClass: Record<ConnectorStatus, string> = {
   Connected: "bg-emerald-950/60 text-emerald-300 border border-emerald-900/60",
   "Demo Mode": "bg-[rgba(245,166,35,0.10)] text-amber-300 border border-amber-900/60",
   "Not Configured": "bg-zinc-900 text-zinc-500 border border-zinc-800",
+  "CSV Upload": "bg-[rgba(59,130,246,0.10)] text-sky-300 border border-sky-900/60",
   Planned: "bg-zinc-900 text-zinc-400 border border-zinc-800",
   Error: "bg-[rgba(179,14,20,0.16)] text-[#ff4d57] border border-[rgba(179,14,20,0.45)]",
 };
@@ -270,6 +273,9 @@ function IntegrationCard({ card }: { card: CardData }) {
   const healthUrl = HEALTH_ENDPOINTS[card.id];
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
+  const supportsCsv = card.id === "tidal";
   const [health, setHealth] = useState<
     { reachable: boolean; message: string } | null | undefined
   >(healthUrl && card.configured ? undefined : null);
@@ -312,6 +318,33 @@ function IntegrationCard({ card }: { card: CardData }) {
       });
     } finally {
       setSyncing(false);
+    }
+  }
+
+  async function uploadCsv(file: File) {
+    if (uploading) return;
+    setUploading(true);
+    setSyncMsg(null);
+    try {
+      const csv = await file.text();
+      const res = await fetch("/api/tidal/import-file", {
+        method: "POST",
+        headers: { "Content-Type": "text/csv" },
+        body: csv,
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || json.error) {
+        setSyncMsg({ ok: false, text: json.error ?? `Import failed (HTTP ${res.status})` });
+      } else {
+        setSyncMsg({ ok: true, text: summarizeSync(json.result ?? json) });
+      }
+    } catch (err) {
+      setSyncMsg({
+        ok: false,
+        text: err instanceof Error ? err.message : "Import failed.",
+      });
+    } finally {
+      setUploading(false);
     }
   }
 
@@ -395,6 +428,47 @@ function IntegrationCard({ card }: { card: CardData }) {
         </div>
       </div>
 
+      {supportsCsv ? (
+        <div
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={(e) => {
+            e.preventDefault();
+            const file = e.dataTransfer.files?.[0];
+            if (file) void uploadCsv(file);
+          }}
+          className="mt-4 rounded-2xl border border-dashed border-zinc-800 bg-[#090909] p-4 text-center"
+        >
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".csv,text/csv"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) void uploadCsv(file);
+              e.target.value = "";
+            }}
+          />
+          <div className="text-xs uppercase tracking-[0.24em] text-zinc-500">
+            Upload inventory
+          </div>
+          <p className="mt-2 text-sm text-zinc-400">
+            Tidal has no customer API — export your inventory to CSV from the Tidal
+            portal, then drop the file here (or browse) to load assets, owners, and
+            business criticality.
+          </p>
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading}
+            className="mt-3 inline-flex items-center gap-2 rounded-lg border border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.12)] px-3 py-1.5 text-sm font-medium text-[#ff4d57] transition hover:bg-[rgba(179,14,20,0.2)] disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <Upload size={14} className={uploading ? "animate-pulse" : ""} />
+            {uploading ? "Importing…" : "Choose CSV file"}
+          </button>
+        </div>
+      ) : null}
+
       <div className="mt-4 flex items-center justify-between gap-3">
         <a
           href={card.docsUrl}
@@ -405,7 +479,7 @@ function IntegrationCard({ card }: { card: CardData }) {
           <ExternalLink size={14} />
           Documentation
         </a>
-        {syncUrl ? (
+        {syncUrl && !supportsCsv ? (
           <button
             type="button"
             onClick={runSync}

@@ -107,6 +107,7 @@ export type ConnectorStatus =
   | "Connected"
   | "Demo Mode"
   | "Not Configured"
+  | "CSV Upload"
   | "Planned"
   | "Error";
 

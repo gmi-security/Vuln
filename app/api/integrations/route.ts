@@ -21,21 +21,17 @@ export async function GET() {
         vendor: "Tidal",
         kind: "Asset Inventory (environment context)",
         description:
-          "Per-customer asset inventory — hostname, addresses, owner, business criticality, and environment. Feeds the environmental layer of real-risk scoring so exposure and criticality come from your authoritative inventory instead of hostname heuristics.",
+          "Per-customer asset inventory — hostname, addresses, owner, business criticality, and environment. Tidal has no customer API, so upload your CSV export from the portal; it feeds the environmental layer of real-risk scoring so exposure and criticality come from your authoritative inventory instead of hostname heuristics.",
         capabilities: [
-          "Asset inventory sync",
+          "CSV inventory upload",
           "Owner & criticality",
           "Environment / exposure",
           "Customer mapping",
         ],
-        envVars: ["TIDAL_API_URL", "TIDAL_USERNAME", "TIDAL_PASSWORD"],
+        envVars: [],
         configured: Boolean(tidal),
-        status: tidal
-          ? "Connected"
-          : process.env.DEMO_SCANS === "true"
-            ? "Demo Mode"
-            : "Not Configured",
-        docsUrl: "https://guides.tidal.cloud/authenticate.html",
+        status: "CSV Upload",
+        docsUrl: "https://app.portal.tidal.io/dashboard",
       },
       {
         id: "intune",

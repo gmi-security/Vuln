@@ -1,5 +1,83 @@
 import type { AssetCriticality, AssetExposure } from "@/lib/types";
 
+// --- CSV import (Tidal export -> inventory) ---------------------------------
+// Tidal's portal has no customer API, but it exports the inventory to CSV. This
+// parses that export (RFC-4180-ish, quoted fields) with fuzzy header matching,
+// so column names like "Business Criticality" / "Host Name" / "Customer" map
+// regardless of exact casing/spacing.
+
+function normKey(k: string): string {
+  return k.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function parseCsvRows(text: string): Record<string, string>[] {
+  const rows: string[][] = [];
+  let cur: string[] = [];
+  let field = "";
+  let q = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (q) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') {
+          field += '"';
+          i += 1;
+        } else q = false;
+      } else field += ch;
+    } else if (ch === '"') q = true;
+    else if (ch === ",") {
+      cur.push(field);
+      field = "";
+    } else if (ch === "\n") {
+      cur.push(field);
+      rows.push(cur);
+      cur = [];
+      field = "";
+    } else if (ch !== "\r") field += ch;
+  }
+  if (field !== "" || cur.length) {
+    cur.push(field);
+    rows.push(cur);
+  }
+  if (rows.length === 0) return [];
+  const headers = rows[0].map(normKey);
+  return rows
+    .slice(1)
+    .filter((r) => r.some((c) => c.trim() !== ""))
+    .map((r) => {
+      const o: Record<string, string> = {};
+      headers.forEach((h, i) => {
+        if (h) o[h] = (r[i] ?? "").trim();
+      });
+      return o;
+    });
+}
+
+function pick(row: Record<string, string>, ...keys: string[]): string {
+  for (const k of keys) {
+    const v = row[k];
+    if (v) return v;
+  }
+  return "";
+}
+
+export function parseTidalCsv(text: string): TidalAsset[] {
+  return parseCsvRows(text).map((row) => {
+    const ipRaw = pick(row, "ipaddress", "ipaddresses", "ip", "ips", "address", "ipv4");
+    return {
+      externalId: pick(row, "id", "assetid", "uuid", "instanceid"),
+      hostname: pick(row, "hostname", "host", "fqdn", "servername", "devicename", "name", "server"),
+      ipAddresses: ipRaw.split(/[;,\s]+/).map((x) => x.trim()).filter(Boolean),
+      os: pick(row, "os", "operatingsystem", "platform"),
+      owner: pick(row, "owner", "ownername", "assignedto", "contact", "custodian"),
+      customer: pick(row, "customer", "customername", "account", "organization", "org", "client", "company", "tenant"),
+      tags: pick(row, "tags", "labels").split(/[;,]+/).map((x) => x.trim()).filter(Boolean),
+      criticality: mapCriticality(pick(row, "criticality", "businesscriticality", "importance", "tier", "priority")),
+      exposure: mapExposure(pick(row, "environment", "exposure", "networkzone", "zone", "facing", "location")),
+    };
+  });
+}
+
 // Tidal.io asset-inventory adapter.
 //
 // Tidal.io is an IT lifecycle / asset-management platform: it holds the
