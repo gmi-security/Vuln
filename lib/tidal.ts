@@ -26,7 +26,6 @@ export type TidalConfig = {
   origin: string;
   email: string;
   password: string;
-  inventoryPath: string;
 };
 
 export function tidalConfig(): TidalConfig | null {
@@ -38,7 +37,6 @@ export function tidalConfig(): TidalConfig | null {
     origin: (process.env.TIDAL_ORIGIN ?? DEFAULT_ORIGIN).replace(/\/+$/, ""),
     email,
     password,
-    inventoryPath: process.env.TIDAL_INVENTORY_PATH ?? "/api/v1/warehouses/inventory",
   };
 }
 
@@ -166,76 +164,114 @@ function nameOf(v: unknown): string {
   return String(v);
 }
 
-// Best-effort normalizer over a Tidal warehouse-inventory record. Warehouse
-// items nest company/site/category as objects and carry device fields (name,
-// serial, model, assigned user), so we read both flat and nested shapes.
-export function normalizeTidalAsset(raw: any): TidalAsset {
-  const ips: string[] = ([] as unknown[])
-    .concat(
-      raw?.ip_addresses ??
-        raw?.ipAddresses ??
-        raw?.ips ??
-        raw?.ip_address ??
-        raw?.ip ??
-        [],
-    )
-    .flat()
-    .map((x) => nameOf(x))
-    .filter(Boolean);
+const s = (v: unknown): string => nameOf(v).trim();
 
+function joinNonEmpty(parts: unknown[], sep = " "): string {
+  return parts.map((p) => s(p)).filter(Boolean).join(sep);
+}
+
+// The scannable inventory lives under the MDM/network integrations (Intune,
+// Auvik, SOTI), each with its own device schema. These map every source onto
+// the shared TidalAsset shape. Devices are GMI-managed, so they attach to the
+// internal "GMI" company unless a source carries a clearer site/tenant.
+
+// Intune (Microsoft Endpoint Manager): managed endpoints, no IP (agent-based).
+function normIntune(raw: any): TidalAsset {
   return {
-    externalId: String(raw?.id ?? raw?.asset_id ?? raw?.uuid ?? raw?.serial_number ?? ""),
-    hostname: String(
-      raw?.hostname ??
-        raw?.name ??
-        raw?.fqdn ??
-        raw?.host ??
-        raw?.device_name ??
-        raw?.asset_tag ??
-        "",
+    externalId: s(raw?.device_id) || s(raw?.serial_number) || s(raw?.azure_ad_device_id),
+    hostname: s(raw?.device_name) || s(raw?.managed_device_name),
+    ipAddresses: [],
+    os: joinNonEmpty([raw?.operating_system, raw?.os_version]),
+    owner:
+      s(raw?.user_display_name) || s(raw?.user_principal_name) || s(raw?.email_address),
+    customer: "GMI",
+    tags: [s(raw?.management_agent), s(raw?.compliance_state), s(raw?.device_category_display_name)].filter(
+      (t) => t && t !== "Unknown",
     ),
-    ipAddresses: ips,
-    os: String(
-      nameOf(raw?.os) ||
-        nameOf(raw?.operating_system) ||
-        nameOf(raw?.platform) ||
-        nameOf(raw?.model) ||
-        "",
-    ),
-    owner: String(
-      nameOf(raw?.owner) ||
-        nameOf(raw?.owner_name) ||
-        nameOf(raw?.assigned_to) ||
-        nameOf(raw?.assigned_user) ||
-        nameOf(raw?.user) ||
-        "",
-    ),
-    customer: String(
-      nameOf(raw?.customer) ||
-        nameOf(raw?.customer_name) ||
-        nameOf(raw?.company) ||
-        nameOf(raw?.account) ||
-        nameOf(raw?.organization) ||
-        nameOf(raw?.org) ||
-        nameOf(raw?.site) ||
-        "",
-    ),
-    tags: ([] as unknown[])
-      .concat(raw?.tags ?? raw?.labels ?? [])
-      .flat()
-      .map((x) => nameOf(x))
-      .filter(Boolean),
-    criticality: mapCriticality(
-      raw?.criticality ?? raw?.business_criticality ?? raw?.importance ?? raw?.tier,
-    ),
-    exposure: mapExposure(
-      raw?.exposure ?? raw?.environment ?? raw?.network_zone ?? raw?.zone ?? raw?.facing,
-    ),
+    criticality: mapCriticality(raw?.device_category_display_name),
+    exposure: "Internal",
   };
 }
 
-// Log in and pull the full asset inventory. Paginates on Laravel-style
-// meta/links or offset when present; returns normalized assets.
+// Auvik: network devices (switches, APs, AV, firewalls) — carry real IPs.
+function normAuvik(raw: any): TidalAsset {
+  const ips = ([] as unknown[])
+    .concat(raw?.ip_addresses ?? [])
+    .flat()
+    .map((x) => s(x))
+    .filter(Boolean);
+  return {
+    externalId: s(raw?.device_id) || s(raw?.serial_number),
+    hostname: s(raw?.device_name) || ips[0] || "",
+    ipAddresses: ips,
+    os: joinNonEmpty([raw?.make_model, raw?.firmware_version]) || s(raw?.device_type),
+    owner: "",
+    customer: "GMI",
+    tags: [s(raw?.device_type), s(raw?.vendor_name), s(raw?.online_status)].filter(Boolean),
+    criticality: mapCriticality(raw?.device_type),
+    exposure: mapExposure(raw?.device_type),
+  };
+}
+
+// SOTI: rugged / mobile devices, nested identity/hardware/os/network blocks.
+function normSoti(raw: any): TidalAsset {
+  const ip = s(raw?.network?.ip_address);
+  return {
+    externalId: s(raw?.identity?.device_id) || s(raw?.hardware?.serial_number),
+    hostname: s(raw?.identity?.device_name) || ip,
+    ipAddresses: ip ? [ip] : [],
+    os: joinNonEmpty([raw?.identity?.platform, raw?.os?.version]),
+    owner: "",
+    customer: s(raw?.identity?.path) || "GMI",
+    tags: [s(raw?.identity?.platform), s(raw?.hardware?.model), s(raw?.identity?.mode)].filter(
+      Boolean,
+    ),
+    criticality: "Normal",
+    exposure: "Internal",
+  };
+}
+
+type DeviceSource = { path: string; norm: (raw: any) => TidalAsset };
+
+const DEVICE_SOURCES: DeviceSource[] = [
+  { path: "/api/v1/integrations/intune/devices", norm: normIntune },
+  { path: "/api/v1/integrations/auvik/devices", norm: normAuvik },
+  { path: "/api/v1/integrations/soti/devices", norm: normSoti },
+];
+
+// Pull one paginated device source. Tidal returns { data, pagination:{ total,
+// has_next, links:{ next } } } and uses cursor URLs for `next`. A source that
+// isn't enabled (403/404) yields nothing rather than failing the whole sync.
+async function pullDevices(
+  config: TidalConfig,
+  headers: Record<string, string>,
+  source: DeviceSource,
+): Promise<TidalAsset[]> {
+  const out: TidalAsset[] = [];
+  let url: string | null = `${config.url}${source.path}?per_page=100`;
+  let guard = 0;
+  while (url && guard < 200) {
+    guard += 1;
+    const res: Response = await fetch(url, { headers, cache: "no-store" });
+    if (res.status === 403 || res.status === 404) return out;
+    if (!res.ok) {
+      throw new Error(
+        `Tidal ${source.path} ${res.status}: ${await res.text().catch(() => res.statusText)}`,
+      );
+    }
+    const data: any = await res.json();
+    const rows: any[] = Array.isArray(data) ? data : data?.data ?? [];
+    for (const r of rows) out.push(source.norm(r));
+
+    const pg = data?.pagination;
+    const next = pg?.links?.next;
+    url = pg?.has_next && next ? String(next) : null;
+  }
+  return out;
+}
+
+// Log in, then pull every device source and merge into one asset list. Keeps
+// only records that have something scannable (a hostname or an IP).
 export async function tidalListAssets(): Promise<TidalAsset[]> {
   const config = tidalConfig();
   if (!config) throw new Error("Tidal is not configured. Set TIDAL_EMAIL and TIDAL_PASSWORD.");
@@ -249,26 +285,19 @@ export async function tidalListAssets(): Promise<TidalAsset[]> {
   };
 
   const assets: TidalAsset[] = [];
-  const sep = config.inventoryPath.includes("?") ? "&" : "?";
-  let url: string | null = `${config.url}${config.inventoryPath}${sep}per_page=200`;
-  let guard = 0;
-  while (url && guard < 100) {
-    guard += 1;
-    const res: Response = await fetch(url, { headers, cache: "no-store" });
-    if (!res.ok) {
-      throw new Error(`Tidal ${res.status}: ${await res.text().catch(() => res.statusText)}`);
+  const errors: string[] = [];
+  for (const source of DEVICE_SOURCES) {
+    try {
+      assets.push(...(await pullDevices(config, headers, source)));
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : String(err));
     }
-    const data: any = await res.json();
-    const records: any[] = Array.isArray(data)
-      ? data
-      : data?.data ?? data?.assets ?? data?.results ?? data?.items ?? data?.inventory ?? [];
-    for (const r of records) assets.push(normalizeTidalAsset(r));
-
-    const next =
-      data?.links?.next ?? data?.next_page_url ?? data?.next ?? data?.meta?.next ?? null;
-    url = next ? (String(next).startsWith("http") ? String(next) : `${config.url}${next}`) : null;
   }
-  return assets;
+
+  const scannable = assets.filter((a) => a.hostname || a.ipAddresses.length);
+  // Only surface an error if we got nothing at all and something went wrong.
+  if (scannable.length === 0 && errors.length) throw new Error(errors[0]);
+  return scannable;
 }
 
 // --- CSV import (offline fallback) -----------------------------------------
