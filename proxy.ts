@@ -25,9 +25,7 @@ export async function proxy(request: NextRequest) {
     // Independently protected by ADMIN_TOKEN (not a session), so they must stay
     // reachable without the login redirect.
     pathname === "/api/admin/resync" ||
-    pathname === "/api/admin/quarterly-scan" ||
     pathname === "/api/admin/purge-demo" ||
-    pathname === "/api/admin/enrich" ||
     pathname === "/api/grc/assessment"
   ) {
     return NextResponse.next();

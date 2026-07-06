@@ -117,6 +117,31 @@ function OsintLaunchBanner() {
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [preview, setPreview] = useState<OsintPreview | null>(null);
   const [showTargets, setShowTargets] = useState(false);
+  const [enriching, setEnriching] = useState(false);
+  const [enrichMsg, setEnrichMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  async function runEnrich() {
+    if (enriching) return;
+    setEnriching(true);
+    setEnrichMsg(null);
+    try {
+      const res = await fetch("/api/enrich", { method: "POST" });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || json.error) {
+        setEnrichMsg({ ok: false, text: json.error ?? `Failed (HTTP ${res.status})` });
+      } else {
+        const r = json.result ?? {};
+        setEnrichMsg({
+          ok: true,
+          text: `Threat intel refreshed — ${r.kevAdded ?? 0} KEV, ${r.cvesWithEpss ?? 0} CVEs with EPSS, ${r.findingsUpdated ?? 0} findings re-scored.`,
+        });
+      }
+    } catch (err) {
+      setEnrichMsg({ ok: false, text: err instanceof Error ? err.message : "Failed." });
+    } finally {
+      setEnriching(false);
+    }
+  }
 
   useEffect(() => {
     void fetch("/api/osint/preview", { cache: "no-store" })
@@ -151,24 +176,48 @@ function OsintLaunchBanner() {
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
           <h2 className="text-lg font-semibold text-white">
-            Quarterly OSINT sweep
+            OSINT sweep &amp; threat intel
           </h2>
           <p className="mt-1 text-sm text-zinc-400">
             Launch Artemis + SpiderFoot against every customer&apos;s root domains
-            for supplemental attack-surface &amp; OSINT context. Runs automatically
-            each quarter; use this to run on demand.
+            for supplemental attack-surface context, and refresh CISA KEV + EPSS to
+            re-score every finding. Run either on demand.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={run}
-          disabled={busy || (preview != null && preview.companies === 0)}
-          className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.14)] px-4 py-2 text-sm font-medium text-[#ff4d57] transition hover:bg-[rgba(179,14,20,0.24)] disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          <RefreshCw size={15} className={busy ? "animate-spin" : ""} />
-          {busy ? "Launching…" : "Run OSINT scans (all customers)"}
-        </button>
+        <div className="flex shrink-0 flex-col gap-2 sm:flex-row">
+          <button
+            type="button"
+            onClick={runEnrich}
+            disabled={enriching}
+            title="Refresh CISA KEV + EPSS and re-score findings"
+            className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-medium text-zinc-200 transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <RefreshCw size={15} className={enriching ? "animate-spin" : ""} />
+            {enriching ? "Refreshing…" : "Refresh threat intel"}
+          </button>
+          <button
+            type="button"
+            onClick={run}
+            disabled={busy || (preview != null && preview.companies === 0)}
+            className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.14)] px-4 py-2 text-sm font-medium text-[#ff4d57] transition hover:bg-[rgba(179,14,20,0.24)] disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <RefreshCw size={15} className={busy ? "animate-spin" : ""} />
+            {busy ? "Launching…" : "Run OSINT scans (all customers)"}
+          </button>
+        </div>
       </div>
+
+      {enrichMsg ? (
+        <div
+          className={`mt-3 rounded-lg border px-3 py-2 text-xs ${
+            enrichMsg.ok
+              ? "border-emerald-900/60 bg-emerald-950/40 text-emerald-300"
+              : "border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.12)] text-[#ff8a8a]"
+          }`}
+        >
+          {enrichMsg.text}
+        </div>
+      ) : null}
 
       {preview ? (
         <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-zinc-400">
