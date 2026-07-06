@@ -7,7 +7,14 @@ export const dynamic = "force-dynamic";
 // (Artemis + SpiderFoot) for all client companies. Triggered by the
 // "Run OSINT scans" button.
 export async function POST() {
-  await ensureHydrated();
-  const result = await launchOsintScans();
-  return NextResponse.json({ result });
+  try {
+    await ensureHydrated();
+    const result = await launchOsintScans();
+    return NextResponse.json({ result });
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "OSINT launch failed." },
+      { status: 502 },
+    );
+  }
 }

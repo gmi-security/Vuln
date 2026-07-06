@@ -5,7 +5,14 @@ export const dynamic = "force-dynamic";
 
 // Session-gated: pull results from every configured connector in one shot.
 export async function POST() {
-  await ensureHydrated();
-  const results = await syncAllConnectors();
-  return NextResponse.json({ results });
+  try {
+    await ensureHydrated();
+    const results = await syncAllConnectors();
+    return NextResponse.json({ results });
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Sync-all failed." },
+      { status: 502 },
+    );
+  }
 }

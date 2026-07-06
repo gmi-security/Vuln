@@ -5,7 +5,14 @@ export const dynamic = "force-dynamic";
 
 // Launch scans for all known-but-unscanned assets (the coverage gap).
 export async function POST() {
-  await ensureHydrated();
-  const result = await autoScanGaps();
-  return NextResponse.json({ result });
+  try {
+    await ensureHydrated();
+    const result = await autoScanGaps();
+    return NextResponse.json({ result });
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Auto-scan failed." },
+      { status: 502 },
+    );
+  }
 }
