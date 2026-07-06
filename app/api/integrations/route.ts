@@ -21,16 +21,16 @@ export async function GET() {
         vendor: "Tidal",
         kind: "Asset Inventory (environment context)",
         description:
-          "Per-customer asset inventory — hostname, addresses, owner, business criticality, and environment. Tidal has no customer API, so upload your CSV export from the portal; it feeds the environmental layer of real-risk scoring so exposure and criticality come from your authoritative inventory instead of hostname heuristics.",
+          "Per-customer asset inventory — hostname, addresses, owner, business criticality, and environment. Signs in to the Tidal portal with your email + password and pulls the live inventory (CSV export upload is available as a fallback). Feeds the environmental layer of real-risk scoring so exposure and criticality come from your authoritative inventory instead of hostname heuristics.",
         capabilities: [
-          "CSV inventory upload",
+          "Live inventory sync",
           "Owner & criticality",
           "Environment / exposure",
           "Customer mapping",
         ],
-        envVars: [],
+        envVars: ["TIDAL_EMAIL", "TIDAL_PASSWORD"],
         configured: Boolean(tidal),
-        status: "CSV Upload",
+        status: tidal ? "Connected" : "Not Configured",
         docsUrl: "https://app.portal.tidal.io/dashboard",
       },
       {

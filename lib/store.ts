@@ -2981,16 +2981,15 @@ export async function importTidalInventory(
   return { companiesCreated, assetsUpserted, findingsRescored, autoScan };
 }
 
-// Legacy API-based sync. Tidal.io has no customer-facing API, so this path is
-// only exercised if TIDAL_API_URL/credentials are set; the CSV upload is the
-// supported route.
+// Live sync: sign in to Tidal with email + password and pull the inventory
+// straight from the portal API. CSV upload remains as an offline fallback.
 export async function importFromTidal(): Promise<
   TidalImportResult | { error: string }
 > {
   if (!tidalConfig()) {
     return {
       error:
-        "Tidal has no customer API — export your inventory to CSV from the Tidal portal and upload it here instead.",
+        "Tidal is not configured. Set TIDAL_EMAIL and TIDAL_PASSWORD to sign in and pull the live inventory (or upload a CSV export).",
     };
   }
   let assets;

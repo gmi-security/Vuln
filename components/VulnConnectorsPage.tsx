@@ -450,12 +450,12 @@ function IntegrationCard({ card }: { card: CardData }) {
             }}
           />
           <div className="text-xs uppercase tracking-[0.24em] text-zinc-500">
-            Upload inventory
+            Offline import (fallback)
           </div>
           <p className="mt-2 text-sm text-zinc-400">
-            Tidal has no customer API — export your inventory to CSV from the Tidal
-            portal, then drop the file here (or browse) to load assets, owners, and
-            business criticality.
+            Prefer live sync above (set TIDAL_EMAIL / TIDAL_PASSWORD). Or export your
+            inventory to CSV from the Tidal portal and drop the file here to load
+            assets, owners, and business criticality.
           </p>
           <button
             type="button"
@@ -479,7 +479,7 @@ function IntegrationCard({ card }: { card: CardData }) {
           <ExternalLink size={14} />
           Documentation
         </a>
-        {syncUrl && !supportsCsv ? (
+        {syncUrl ? (
           <button
             type="button"
             onClick={runSync}
