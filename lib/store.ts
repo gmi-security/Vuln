@@ -1707,6 +1707,7 @@ export function computePriorities(filter?: {
   const open = Array.from(s.findings.values()).filter(
     (f) =>
       (f.status === "Open" || f.status === "In Remediation") &&
+      !isOsintFinding(f) && // SSVC is a CVE-vuln model; OSINT lives in Attack Surface
       (!filter?.companyId || f.companyId === filter.companyId),
   );
 
@@ -1789,9 +1790,12 @@ export function computeRemediationSla(): RemediationSlaResult {
   tick(s);
   const now = Date.now();
   const DAY = 86_400_000;
-  // Exclude demo/test companies from production SLA reporting.
+  // Exclude demo/test companies and OSINT findings — the SLA clock is a
+  // vulnerability-remediation metric; attack-surface exposures live elsewhere.
   const demo = demoCompanyIds(s);
-  const all = Array.from(s.findings.values()).filter((f) => !demo.has(f.companyId));
+  const all = Array.from(s.findings.values()).filter(
+    (f) => !demo.has(f.companyId) && !isOsintFinding(f),
+  );
 
   // 30-day burndown: open backlog vs resolved-per-day.
   const burndown: { date: string; open: number; resolved: number }[] = [];
@@ -3912,12 +3916,28 @@ export async function scanAction(
   return toPublic(scan, now);
 }
 
-export function listFindings(filter?: { scanId?: string; companyId?: string }): Finding[] {
+// OSINT / attack-surface connectors produce exposure findings (no CVE), which
+// are a different class from CVE-based vulnerability-scan findings. Keeping the
+// two apart stops OSINT from polluting the vuln workflow (Findings, SSVC, SLA);
+// OSINT has its own home on the Attack Surface page.
+const OSINT_CONNECTORS = ["artemis", "spiderfoot"];
+export function isOsintFinding(f: Finding): boolean {
+  return OSINT_CONNECTORS.includes(f.connector);
+}
+
+export function listFindings(filter?: {
+  scanId?: string;
+  companyId?: string;
+  kind?: "vuln" | "osint" | "all";
+}): Finding[] {
   const s = store();
   tick(s);
   let all = Array.from(s.findings.values());
   if (filter?.scanId) all = all.filter((f) => f.scanId === filter.scanId);
   if (filter?.companyId) all = all.filter((f) => f.companyId === filter.companyId);
+  const kind = filter?.kind ?? "all";
+  if (kind === "vuln") all = all.filter((f) => !isOsintFinding(f));
+  else if (kind === "osint") all = all.filter((f) => isOsintFinding(f));
   // Default to real-risk order so the most dangerous findings surface first.
   return all.sort((a, b) => b.realRisk - a.realRisk || b.cvss - a.cvss);
 }

@@ -8,5 +8,8 @@ export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const scanId = searchParams.get("scanId") ?? undefined;
   const companyId = searchParams.get("companyId") ?? undefined;
-  return NextResponse.json({ findings: listFindings({ scanId, companyId }) });
+  const kindParam = searchParams.get("kind");
+  const kind =
+    kindParam === "osint" || kindParam === "all" ? kindParam : "vuln";
+  return NextResponse.json({ findings: listFindings({ scanId, companyId, kind }) });
 }

@@ -80,6 +80,7 @@ function CvssToggle({
 export default function VulnFindingsPage() {
   const searchParams = useSearchParams();
   const [findings, setFindings] = useState<Finding[]>([]);
+  const [kind, setKind] = useState<"vuln" | "osint" | "all">("vuln");
   const [search, setSearch] = useState("");
   const [severityFilter, setSeverityFilter] = useState("All");
   const [statusFilter, setStatusFilter] = useState("All");
@@ -97,13 +98,13 @@ export default function VulnFindingsPage() {
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch("/api/findings", { cache: "no-store" });
+      const res = await fetch(`/api/findings?kind=${kind}`, { cache: "no-store" });
       const json = await res.json();
       setFindings(json.findings ?? []);
     } catch {
       // keep last snapshot
     }
-  }, []);
+  }, [kind]);
 
   useEffect(() => {
     void load();
@@ -176,8 +177,31 @@ export default function VulnFindingsPage() {
     <VulnShell
       eyebrow="Findings"
       title="Finding triage"
-      subtitle="Every vulnerability surfaced by scans, deduplicated per asset. Filter, assign, and track findings through remediation."
+      subtitle="Vulnerability-scan findings (CVE-based) are kept separate from OSINT / attack-surface findings. Filter, assign, and track through remediation."
     >
+      <div className="mb-4 inline-flex rounded-xl border border-zinc-800 bg-[#0b0b0b] p-1">
+        {(
+          [
+            { id: "vuln", label: "Vulnerabilities" },
+            { id: "osint", label: "Attack Surface (OSINT)" },
+            { id: "all", label: "All" },
+          ] as const
+        ).map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => setKind(t.id)}
+            className={`rounded-lg px-4 py-1.5 text-sm font-medium transition ${
+              kind === t.id
+                ? "bg-[rgba(179,14,20,0.16)] text-[#ff4d57]"
+                : "text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
       <PanelCard eyebrow="Filters">
         <div className="grid gap-3 xl:grid-cols-[minmax(0,1.3fr)_180px_150px_180px_170px_150px_130px]">
           <div className="relative">
