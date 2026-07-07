@@ -181,6 +181,9 @@ export type Finding = {
   resolvedAt: string | null;
   exploitAvailable: boolean;
   // Threat intel
+  // Every CVE the source maps to (a scanner plugin often covers several). The
+  // primary `cve` above is KEV-preferred; enrichment re-checks the full set.
+  cves?: string[];
   kev: boolean; // CISA Known Exploited Vulnerability (exploited in the wild)
   ransomware: boolean; // KEV flagged as used in ransomware campaigns
 

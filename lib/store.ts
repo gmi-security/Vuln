@@ -613,6 +613,7 @@ async function importVendorFindings(s: StoreShape, scan: InternalScan): Promise<
         companyName: scan.companyName,
         connector: scan.connector,
         cve: item.cve,
+        cves: item.cves,
         title: item.title,
         severity: item.severity,
         cvss: item.cvss,
@@ -1353,19 +1354,28 @@ export async function enrichThreatIntel(): Promise<{
   const kevAdded = await refreshKevFromCisa();
 
   const cveRe = /^CVE-\d{4}-\d{4,}$/i;
-  const cves: string[] = [];
+  // Every CVE a finding covers (a scanner plugin often maps to several).
+  const effectiveCves = (f: Finding): string[] => {
+    const list = f.cves && f.cves.length ? f.cves : [f.cve];
+    return Array.from(
+      new Set(list.map((c) => c.toUpperCase()).filter((c) => cveRe.test(c))),
+    );
+  };
+
+  const allCves = new Set<string>();
   const missingCvss: string[] = [];
+  let realCveFindings = 0;
   for (const f of s.findings.values()) {
-    if (!cveRe.test(f.cve)) continue;
-    const cve = f.cve.toUpperCase();
-    cves.push(cve);
-    if (!f.cvss || f.cvss <= 0) missingCvss.push(cve);
+    const ec = effectiveCves(f);
+    if (!ec.length) continue;
+    realCveFindings += 1;
+    for (const c of ec) allCves.add(c);
+    if (!f.cvss || f.cvss <= 0) missingCvss.push(ec[0]);
   }
-  const realCveFindings = cves.length;
 
   // Open-source enrichment: EPSS (exploit probability) for every real CVE, and
   // NVD to fill in a CVSS base score where a finding arrived without one.
-  const epss = await fetchEpss(cves);
+  const epss = await fetchEpss([...allCves]);
   const nvd = await fetchNvd(missingCvss);
 
   let findingsUpdated = 0;
@@ -1377,11 +1387,20 @@ export async function enrichThreatIntel(): Promise<{
     const beforeKev = f.kev;
     const beforeEpss = f.epss;
     const beforeRisk = f.realRisk;
-    if (cveRe.test(f.cve)) {
-      const cve = f.cve.toUpperCase();
-      const e = epss.get(cve);
-      if (e !== undefined) f.epss = e;
-      const n = nvd.get(cve);
+    const ec = effectiveCves(f);
+    if (ec.length) {
+      // Promote the displayed primary to a KEV (ransomware-preferred) CVE so
+      // the KEV/ransomware signal isn't hidden behind CVE ordering.
+      const promoted = ec.find(isKevRansomware) ?? ec.find(isKev) ?? ec[0];
+      if (promoted && promoted !== f.cve.toUpperCase()) f.cve = promoted;
+      // Worst-case EPSS across every CVE the finding covers.
+      let bestEpss = 0;
+      for (const c of ec) {
+        const e = epss.get(c);
+        if (e !== undefined && e > bestEpss) bestEpss = e;
+      }
+      f.epss = bestEpss;
+      const n = nvd.get(f.cve.toUpperCase());
       if (n && n.cvss > 0 && (!f.cvss || f.cvss <= 0)) {
         f.cvss = n.cvss;
         if (!f.cvssV3) f.cvssV3 = n.cvss;

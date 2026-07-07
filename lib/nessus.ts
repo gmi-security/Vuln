@@ -1,6 +1,7 @@
 import https from "node:https";
 import http from "node:http";
 import type { Severity } from "@/lib/types";
+import { isKev } from "@/lib/threat";
 
 // Tenable Nessus REST adapter. Authenticated requests send the
 // "X-ApiKeys: accessKey=...; secretKey=..." header per the Nessus API docs.
@@ -264,7 +265,8 @@ const NESSUS_SEVERITY: Record<number, Severity> = {
 };
 
 export type NessusFinding = {
-  cve: string;
+  cve: string; // primary CVE (KEV-preferred), or PLUGIN-<id> when unresolved
+  cves: string[]; // every CVE the plugin maps to
   title: string;
   severity: Severity;
   cvss: number;
@@ -279,17 +281,26 @@ export type NessusFinding = {
   exploitAvailable: boolean;
 };
 
-// Persistent plugin_id -> CVE cache across imports (warm instance). Lets repeat
-// imports resolve real CVEs cumulatively without re-hitting the plugin API — so
-// KEV/EPSS/SSVC enrichment has real CVEs to work with, not PLUGIN-ids.
-const PLUGIN_CVE_CACHE = new Map<number, string>();
+// Persistent plugin_id -> CVE-list cache across imports (warm instance). Lets
+// repeat imports resolve real CVEs cumulatively without re-hitting the plugin
+// API — so KEV/EPSS/SSVC enrichment has real CVEs to work with, not PLUGIN-ids.
+const PLUGIN_CVE_CACHE = new Map<number, string[]>();
+
+const CVE_RE = /^CVE-\d{4}-\d{4,}$/i;
+
+// A plugin can map to many CVEs; pick the primary one preferring a CVE that is
+// on CISA KEV (so the KEV/ransomware signal isn't lost to CVE ordering).
+function primaryCve(cves: string[], pluginId: number): string {
+  if (cves.length === 0) return `PLUGIN-${pluginId}`;
+  return cves.find((c) => isKev(c.toUpperCase())) ?? cves[0];
+}
 
 // Pull per-host vulnerabilities, enriching plugins with full detail
 // (description, solution, CVE, CVSS). Detail lookups are budget-capped per
 // import but cached across imports so coverage grows over time.
 export async function nessusImportFindings(
   nessusScanId: number,
-  detailBudget = 300,
+  detailBudget = 500,
 ): Promise<NessusFinding[]> {
   const config = nessusConfig();
   if (!config) throw new Error("Nessus is not configured.");
@@ -337,9 +348,18 @@ export async function nessusImportFindings(
         ? [plugin.info.plugindescription.pluginattributes]
         : [];
       const attrs = attributes[0] ?? {};
-      const cve: string = Array.isArray(attrs?.cve) ? attrs.cve[0] : attrs?.cve ?? "";
-      if (plugin) PLUGIN_CVE_CACHE.set(vuln.plugin_id, cve || "");
-      const finalCve = cve || PLUGIN_CVE_CACHE.get(vuln.plugin_id) || `PLUGIN-${vuln.plugin_id}`;
+      // Capture EVERY CVE the plugin lists (attrs.cve is an array or a single).
+      const rawCves: string[] = Array.isArray(attrs?.cve)
+        ? attrs.cve.map((c: unknown) => String(c))
+        : attrs?.cve
+          ? [String(attrs.cve)]
+          : [];
+      const cveList = Array.from(
+        new Set(rawCves.map((c) => c.toUpperCase()).filter((c) => CVE_RE.test(c))),
+      );
+      if (plugin) PLUGIN_CVE_CACHE.set(vuln.plugin_id, cveList);
+      const cves = cveList.length ? cveList : PLUGIN_CVE_CACHE.get(vuln.plugin_id) ?? [];
+      const finalCve = primaryCve(cves, vuln.plugin_id);
       const outputs: any[] = plugin?.outputs ?? [];
       const port =
         outputs[0]?.ports && Object.keys(outputs[0].ports)[0]
@@ -353,6 +373,7 @@ export async function nessusImportFindings(
       );
       findings.push({
         cve: finalCve,
+        cves,
         title: String(vuln.plugin_name ?? `Nessus plugin ${vuln.plugin_id}`),
         severity,
         cvss: cvssV3 || cvssV2,
