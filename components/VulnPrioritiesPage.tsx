@@ -26,6 +26,7 @@ type PriorityItem = {
   reasons: string[];
   remediation: string;
   kev: boolean;
+  ransomware: boolean;
 };
 
 type PrioritiesResult = {
@@ -131,6 +132,11 @@ export default function VulnPrioritiesPage() {
                       {item.kev ? (
                         <Pill className="bg-[rgba(179,14,20,0.14)] text-[#ff8f96] border border-[rgba(179,14,20,0.4)]">
                           KEV
+                        </Pill>
+                      ) : null}
+                      {item.ransomware ? (
+                        <Pill className="bg-[rgba(217,70,239,0.14)] text-fuchsia-300 border border-fuchsia-800/70">
+                          Ransomware
                         </Pill>
                       ) : null}
                       <span className="text-sm font-medium text-zinc-400">

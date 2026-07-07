@@ -182,6 +182,8 @@ export type Finding = {
   exploitAvailable: boolean;
   // Threat intel
   kev: boolean; // CISA Known Exploited Vulnerability (exploited in the wild)
+  ransomware: boolean; // KEV flagged as used in ransomware campaigns
+
   // Environmental context (from the affected asset)
   assetExposure: "Internet-facing" | "Internal" | "Isolated";
   assetCriticality: "Crown Jewel" | "High" | "Normal" | "Low";

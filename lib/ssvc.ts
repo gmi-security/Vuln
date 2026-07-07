@@ -63,7 +63,8 @@ export function ssvc(f: Finding): SsvcResult {
   const slaDays = f.kev ? 14 : SLA_BY_DECISION[decision];
 
   const reasons: string[] = [];
-  if (f.kev) reasons.push("On CISA KEV — actively exploited");
+  if (f.ransomware) reasons.push("CISA KEV — used in ransomware campaigns");
+  else if (f.kev) reasons.push("On CISA KEV — actively exploited");
   else if (f.exploitAvailable) reasons.push("Public exploit available");
   if (f.epss >= 0.3) reasons.push(`EPSS ${Math.round(f.epss * 100)}% — likely exploitation`);
   if (f.assetExposure === "Internet-facing") reasons.push("Internet-facing asset");

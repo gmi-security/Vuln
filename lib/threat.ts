@@ -48,9 +48,16 @@ export const KEV_CVES = new Set<string>([
 
 // Runtime-mutable overlay so the live CISA feed can extend the baseline set.
 const kevRuntime = new Set<string>();
+// CVEs the CISA KEV catalog flags as used in ransomware campaigns — the
+// highest-confidence "fix this now" signal (open-source threat-actor context).
+const kevRansomware = new Set<string>();
 
 export function isKev(cve: string): boolean {
   return KEV_CVES.has(cve) || kevRuntime.has(cve);
+}
+
+export function isKevRansomware(cve: string): boolean {
+  return kevRansomware.has(cve.toUpperCase());
 }
 
 // Live EPSS (Exploit Prediction Scoring System) from FIRST.org — probability a
@@ -95,19 +102,80 @@ export async function refreshKevFromCisa(): Promise<number> {
     );
     if (!res.ok) return 0;
     const data = (await res.json()) as {
-      vulnerabilities?: { cveID?: string }[];
+      vulnerabilities?: { cveID?: string; knownRansomwareCampaignUse?: string }[];
     };
     let added = 0;
     for (const v of data.vulnerabilities ?? []) {
-      if (v.cveID && !kevRuntime.has(v.cveID)) {
-        kevRuntime.add(v.cveID);
+      if (!v.cveID) continue;
+      const id = v.cveID.toUpperCase();
+      if (!kevRuntime.has(id)) {
+        kevRuntime.add(id);
         added += 1;
+      }
+      if ((v.knownRansomwareCampaignUse ?? "").toLowerCase() === "known") {
+        kevRansomware.add(id);
       }
     }
     return added;
   } catch {
     return 0;
   }
+}
+
+// --- NVD open-source CVE enrichment ----------------------------------------
+// Fill in the CVSS base score (and CWE) for CVEs that came in without one —
+// common when a CVE is detected by OSINT/text-match rather than a scanner.
+// Uses the public NVD 2.0 API (keyless works; NVD_API_KEY raises the rate
+// limit). Best-effort, cached, and capped so it never hammers the API or
+// blocks enrichment.
+const nvdCache = new Map<string, { cvss: number; cwe: string | null }>();
+
+export async function fetchNvd(
+  cves: string[],
+  max = 25,
+): Promise<Map<string, { cvss: number; cwe: string | null }>> {
+  const out = new Map<string, { cvss: number; cwe: string | null }>();
+  const key = process.env.NVD_API_KEY?.trim();
+  const uniq = Array.from(new Set(cves.map((c) => c.toUpperCase()))).filter((c) =>
+    /^CVE-\d{4}-\d{4,}$/.test(c),
+  );
+  let fetched = 0;
+  for (const cve of uniq) {
+    if (nvdCache.has(cve)) {
+      out.set(cve, nvdCache.get(cve)!);
+      continue;
+    }
+    if (fetched >= max) break;
+    fetched += 1;
+    try {
+      const res = await fetch(
+        `https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=${cve}`,
+        { headers: key ? { apiKey: key } : {}, cache: "no-store" },
+      );
+      if (res.status === 403 || res.status === 429) break; // rate-limited; stop
+      if (!res.ok) continue;
+      const json: any = await res.json();
+      const c = json?.vulnerabilities?.[0]?.cve;
+      if (!c) continue;
+      const metrics = c.metrics ?? {};
+      const m =
+        (metrics.cvssMetricV31 ?? metrics.cvssMetricV30 ?? metrics.cvssMetricV2 ?? [])[0]
+          ?.cvssData ?? {};
+      const cwe =
+        c.weaknesses
+          ?.flatMap((w: any) => w.description ?? [])
+          .map((d: any) => d.value)
+          .find((v: string) => typeof v === "string" && v.startsWith("CWE-")) ?? null;
+      const entry = { cvss: Number(m.baseScore ?? 0) || 0, cwe };
+      nvdCache.set(cve, entry);
+      out.set(cve, entry);
+    } catch {
+      // best-effort per CVE
+    }
+    // Gentle pacing to respect NVD rate limits (looser with a key).
+    await new Promise((r) => setTimeout(r, key ? 120 : 700));
+  }
+  return out;
 }
 
 export type AssetExposure = "Internet-facing" | "Internal" | "Isolated";
@@ -193,17 +261,20 @@ export function computeRealRisk(input: {
   exploitAvailable: boolean;
   exposure: AssetExposure;
   criticality: AssetCriticality;
+  ransomware?: boolean;
 }): { score: number; priority: RiskPriority } {
   const epss = Math.max(0, Math.min(1, input.epss));
 
   // Impact: normalized CVSS base score.
   const impact = Math.max(0, Math.min(1, input.cvss / 10));
 
-  // Threat: likelihood/evidence of real-world exploitation.
+  // Threat: likelihood/evidence of real-world exploitation. A KEV used in
+  // ransomware campaigns is the strongest signal, so it saturates the layer.
   const threat = Math.min(
     1,
     0.2 +
       (input.kev ? 0.5 : 0) +
+      (input.ransomware ? 0.25 : 0) +
       (input.exploitAvailable ? 0.2 : 0) +
       0.3 * epss,
   );

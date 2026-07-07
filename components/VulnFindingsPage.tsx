@@ -291,6 +291,14 @@ export default function VulnFindingsPage() {
                         KEV
                       </span>
                     ) : null}
+                    {finding.ransomware ? (
+                      <span
+                        title="CISA KEV: used in ransomware campaigns"
+                        className="rounded-full border border-fuchsia-800/70 bg-[rgba(217,70,239,0.14)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-fuchsia-300"
+                      >
+                        Ransomware
+                      </span>
+                    ) : null}
                     {finding.exploitAvailable ? (
                       <span className="rounded-full border border-orange-900/60 bg-[rgba(245,110,35,0.12)] px-2 py-0.5 text-[10px] uppercase tracking-[0.14em] text-orange-300">
                         Exploit

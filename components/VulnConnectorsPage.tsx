@@ -131,10 +131,12 @@ function OsintLaunchBanner() {
         setEnrichMsg({ ok: false, text: json.error ?? `Failed (HTTP ${res.status})` });
       } else {
         const r = json.result ?? {};
-        setEnrichMsg({
-          ok: true,
-          text: `Threat intel refreshed — ${r.kevAdded ?? 0} KEV, ${r.cvesWithEpss ?? 0} CVEs with EPSS, ${r.findingsUpdated ?? 0} findings re-scored.`,
-        });
+        const base = `Threat intel refreshed — ${r.realCveFindings ?? 0} CVE-based findings · ${r.cvesWithEpss ?? 0} with EPSS · ${r.ransomwareLinked ?? 0} ransomware-linked · ${r.cvssFilled ?? 0} CVSS filled from NVD · ${r.findingsUpdated ?? 0} re-scored.`;
+        const hint =
+          (r.realCveFindings ?? 0) === 0
+            ? " No CVE-based findings yet — KEV/EPSS apply to scanner findings (Nessus/Defender). OSINT findings are scored on exposure."
+            : "";
+        setEnrichMsg({ ok: true, text: base + hint });
       }
     } catch (err) {
       setEnrichMsg({ ok: false, text: err instanceof Error ? err.message : "Failed." });

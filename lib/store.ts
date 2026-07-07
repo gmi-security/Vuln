@@ -13,7 +13,9 @@ import {
   classifyAsset,
   computeRealRisk,
   fetchEpss,
+  fetchNvd,
   isKev,
+  isKevRansomware,
   refreshKevFromCisa,
 } from "@/lib/threat";
 import {
@@ -81,6 +83,7 @@ function riskFields(
   },
 ) {
   const kev = isKev(input.cve);
+  const ransomware = kev && isKevRansomware(input.cve);
   // Only inherit inventory context from an asset owned by the SAME customer —
   // never cross-attribute one client's asset criticality to another's finding.
   const inventory = lookupAsset(s, input.asset, input.companyId);
@@ -96,9 +99,11 @@ function riskFields(
     exploitAvailable: input.exploitAvailable,
     exposure,
     criticality,
+    ransomware,
   });
   return {
     kev,
+    ransomware,
     assetExposure: exposure,
     assetCriticality: criticality,
     assetSource,
@@ -1338,37 +1343,67 @@ export async function purgeDemoData(): Promise<{
 export async function enrichThreatIntel(): Promise<{
   kevAdded: number;
   cvesWithEpss: number;
+  cvssFilled: number;
+  ransomwareLinked: number;
   findingsUpdated: number;
   findingsScanned: number;
+  realCveFindings: number;
 }> {
   const s = store();
   const kevAdded = await refreshKevFromCisa();
 
   const cveRe = /^CVE-\d{4}-\d{4,}$/i;
   const cves: string[] = [];
+  const missingCvss: string[] = [];
   for (const f of s.findings.values()) {
-    if (cveRe.test(f.cve)) cves.push(f.cve.toUpperCase());
+    if (!cveRe.test(f.cve)) continue;
+    const cve = f.cve.toUpperCase();
+    cves.push(cve);
+    if (!f.cvss || f.cvss <= 0) missingCvss.push(cve);
   }
+  const realCveFindings = cves.length;
+
+  // Open-source enrichment: EPSS (exploit probability) for every real CVE, and
+  // NVD to fill in a CVSS base score where a finding arrived without one.
   const epss = await fetchEpss(cves);
+  const nvd = await fetchNvd(missingCvss);
 
   let findingsUpdated = 0;
   let findingsScanned = 0;
+  let cvssFilled = 0;
+  let ransomwareLinked = 0;
   for (const f of s.findings.values()) {
     findingsScanned += 1;
     const beforeKev = f.kev;
     const beforeEpss = f.epss;
     const beforeRisk = f.realRisk;
     if (cveRe.test(f.cve)) {
-      const e = epss.get(f.cve.toUpperCase());
+      const cve = f.cve.toUpperCase();
+      const e = epss.get(cve);
       if (e !== undefined) f.epss = e;
+      const n = nvd.get(cve);
+      if (n && n.cvss > 0 && (!f.cvss || f.cvss <= 0)) {
+        f.cvss = n.cvss;
+        if (!f.cvssV3) f.cvssV3 = n.cvss;
+        cvssFilled += 1;
+      }
     }
-    rescoreFinding(s, f); // recomputes kev + real-risk from refreshed KEV/EPSS
+    rescoreFinding(s, f); // recomputes kev/ransomware + real-risk from refreshed intel
+    if (f.ransomware) ransomwareLinked += 1;
     if (f.kev !== beforeKev || f.epss !== beforeEpss || f.realRisk !== beforeRisk) {
       findingsUpdated += 1;
     }
   }
   await flushNow();
-  return { kevAdded, cvesWithEpss: epss.size, findingsUpdated, findingsScanned };
+  return {
+    kevAdded,
+    cvesWithEpss: epss.size,
+    cvssFilled,
+    ransomwareLinked,
+    findingsUpdated,
+    findingsScanned,
+    realCveFindings,
+  };
 }
 
 // --- attack surface (external OSINT posture: Artemis + SpiderFoot) ----------
@@ -1619,6 +1654,7 @@ export type PriorityItem = {
   reasons: string[];
   remediation: string;
   kev: boolean;
+  ransomware: boolean;
 };
 
 export type PrioritiesResult = {
@@ -1675,6 +1711,7 @@ export function computePriorities(filter?: {
       reasons: r.reasons,
       remediation: f.remediation,
       kev: f.kev,
+      ransomware: f.ransomware,
     };
   });
 
