@@ -2229,23 +2229,33 @@ export function computeAttackPaths(filter?: {
   // Edges model lateral movement and perimeter pivots WITHOUT observed
   // topology (connect firewall/identity data later for the real thing):
   //   - Lateral: hosts in the same /24 subnet can reach each other.
-  //   - Perimeter pivot: an internet-facing host can reach the high-value
-  //     internal hosts (Crown Jewel / High) — the DMZ box talking inward.
+  //   - Perimeter breach: an internet-facing host lands on a BEACHHEAD in each
+  //     internal subnet (the highest-risk non-crown host — attackers land on a
+  //     foothold, not straight on the crown jewel), then move laterally to the
+  //     crown from there. This yields realistic multi-hop chains.
   // Isolated assets are unreachable (segmented off).
   const MAX_HOPS = 6;
   const subnetGroups = new Map<string, AttackNode[]>();
-  const highValueByCompany = new Map<string, AttackNode[]>();
+  const internalBySubnet = new Map<string, AttackNode[]>();
   for (const n of all) {
     if (n.subnet) {
       const k = `${n.companyId}|${n.subnet}`;
       (subnetGroups.get(k) ?? subnetGroups.set(k, []).get(k)!).push(n);
+      if (n.exposure === "Internal") {
+        (internalBySubnet.get(k) ?? internalBySubnet.set(k, []).get(k)!).push(n);
+      }
     }
-    if (
-      n.exposure !== "Isolated" &&
-      (n.criticality === "Crown Jewel" || n.criticality === "High")
-    ) {
-      (highValueByCompany.get(n.companyId) ?? highValueByCompany.set(n.companyId, []).get(n.companyId)!).push(n);
-    }
+  }
+  // One beachhead per internal subnet: prefer a non-crown foothold, highest
+  // risk; fall back to the sole host if the subnet is crown-only.
+  const beachheadsByCompany = new Map<string, AttackNode[]>();
+  for (const [k, list] of internalBySubnet) {
+    const nonCrown = list.filter((n) => n.criticality !== "Crown Jewel");
+    const pool = nonCrown.length ? nonCrown : list;
+    const bh = pool.slice().sort((a, b) => b.worstRisk - a.worstRisk)[0];
+    if (!bh) continue;
+    const cid = k.split("|")[0];
+    (beachheadsByCompany.get(cid) ?? beachheadsByCompany.set(cid, []).get(cid)!).push(bh);
   }
 
   function neighborsOf(node: AttackNode): { node: AttackNode; via: string }[] {
@@ -2258,9 +2268,9 @@ export function computeAttackPaths(filter?: {
       }
     }
     if (node.exposure === "Internet-facing") {
-      for (const hv of highValueByCompany.get(node.companyId) ?? []) {
-        if (hv !== node && hv.subnet !== node.subnet) {
-          out.push({ node: hv, via: "perimeter breach → internal" });
+      for (const bh of beachheadsByCompany.get(node.companyId) ?? []) {
+        if (bh !== node && bh.subnet !== node.subnet) {
+          out.push({ node: bh, via: "perimeter breach → internal" });
         }
       }
     }
