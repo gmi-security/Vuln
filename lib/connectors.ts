@@ -132,6 +132,24 @@ const CONNECTOR_DEFS: Record<ConnectorId, ConnectorDef> = {
       categories: ["Attack Surface", "Web Server", "Misconfiguration", "Exposed Service"],
     },
   },
+  burp: {
+    id: "burp",
+    name: "Burp Suite",
+    vendor: "PortSwigger",
+    kind: "Web App Pentest & DAST",
+    description:
+      "Human-validated web-application testing from Burp Suite. Pulls scan issues from Burp Suite Enterprise (GraphQL API) or imports a Burp Professional XML export — web vulnerabilities confirmed by a tester, the strongest remediation signal.",
+    capabilities: ["Validated web vulns", "DAST issues", "XML import", "Per-host issues"],
+    envVars: ["BURP_API_URL", "BURP_API_KEY"],
+    docsUrl: "https://portswigger.net/burp/documentation/enterprise/api-documentation",
+    demo: {
+      minDurationMs: 90_000,
+      maxDurationMs: 240_000,
+      minFindings: 6,
+      maxFindings: 20,
+      categories: ["Web Vulnerability", "Injection", "Authentication", "Misconfiguration"],
+    },
+  },
 };
 
 export const SCAN_PROFILES: ScanProfile[] = [

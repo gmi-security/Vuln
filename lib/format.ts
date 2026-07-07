@@ -28,6 +28,7 @@ export const connectorLabels: Record<ConnectorId, string> = {
   qualys: "Qualys",
   spiderfoot: "SpiderFoot",
   artemis: "Artemis",
+  burp: "Burp Suite",
 };
 
 export const severityClass: Record<Severity, string> = {

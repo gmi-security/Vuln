@@ -51,6 +51,7 @@ const cardIcon: Record<string, React.ElementType> = {
   qualys: IconCloudLock,
   spiderfoot: IconSpider,
   artemis: IconTopologyStar3,
+  burp: IconShieldSearch,
   tidal: IconDatabaseCog,
   intune: IconDeviceLaptop,
   "crowdstrike-devices": IconShieldSearch,
@@ -62,6 +63,7 @@ const HEALTH_ENDPOINTS: Record<string, string> = {
   nessus: "/api/nessus/health",
   artemis: "/api/artemis/health",
   spiderfoot: "/api/spiderfoot/health",
+  burp: "/api/burp/health",
 };
 
 // Connectors with a pull/import endpoint get a "Sync now" button.
@@ -74,6 +76,7 @@ const SYNC_ENDPOINTS: Record<string, string> = {
   artemis: "/api/artemis/import",
   tidal: "/api/tidal/import",
   intune: "/api/intune/import",
+  burp: "/api/burp/import",
 };
 
 // Render a human summary from the various import result shapes.
@@ -84,6 +87,7 @@ function summarizeSync(result: any): string {
   if (n(result.findingsImported) != null) parts.push(`${result.findingsImported} findings`);
   if (n(result.scansImported) != null) parts.push(`${result.scansImported} scans`);
   if (n(result.rowsParsed) != null) parts.push(`${result.rowsParsed} rows`);
+  if (n(result.issuesParsed) != null) parts.push(`${result.issuesParsed} issues`);
   if (n(result.assetsUpserted) != null) parts.push(`${result.assetsUpserted} assets`);
   if (n(result.companiesCreated)) parts.push(`${result.companiesCreated} new companies`);
   if (n(result.findingsRescored)) parts.push(`${result.findingsRescored} findings repriced`);
@@ -340,8 +344,32 @@ function IntegrationCard({ card }: { card: CardData }) {
   const [progress, setProgress] = useState<TidalSyncStatus | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
-  const supportsCsv = card.id === "tidal";
   const isTidal = card.id === "tidal";
+  // Offline upload fallback: Tidal takes a CSV inventory export, Burp takes an
+  // XML issue export. Same flow, different endpoint/format.
+  const uploadSpec =
+    card.id === "tidal"
+      ? {
+          endpoint: "/api/tidal/import-file",
+          accept: ".csv,text/csv",
+          contentType: "text/csv",
+          label: "CSV",
+          eyebrow: "Offline import (fallback)",
+          blurb:
+            "Prefer live sync above (set TIDAL_EMAIL / TIDAL_PASSWORD). Or export your inventory to CSV from the Tidal portal and drop the file here to load assets, owners, and business criticality.",
+        }
+      : card.id === "burp"
+        ? {
+            endpoint: "/api/burp/import-file",
+            accept: ".xml,text/xml,application/xml",
+            contentType: "application/xml",
+            label: "XML",
+            eyebrow: "Offline import (Burp Professional)",
+            blurb:
+              "Prefer live sync above (set BURP_API_URL / BURP_API_KEY for Burp Suite Enterprise). Or export issues as XML from Burp Suite Professional and drop the file here to load validated web findings.",
+          }
+        : null;
+  const supportsCsv = uploadSpec !== null;
   const [health, setHealth] = useState<
     { reachable: boolean; message: string } | null | undefined
   >(healthUrl && card.configured ? undefined : null);
@@ -412,15 +440,15 @@ function IntegrationCard({ card }: { card: CardData }) {
   }
 
   async function uploadCsv(file: File) {
-    if (uploading) return;
+    if (uploading || !uploadSpec) return;
     setUploading(true);
     setSyncMsg(null);
     try {
-      const csv = await file.text();
-      const res = await fetch("/api/tidal/import-file", {
+      const text = await file.text();
+      const res = await fetch(uploadSpec.endpoint, {
         method: "POST",
-        headers: { "Content-Type": "text/csv" },
-        body: csv,
+        headers: { "Content-Type": uploadSpec.contentType },
+        body: text,
       });
       const json = await res.json().catch(() => ({}));
       if (!res.ok || json.error) {
@@ -531,7 +559,7 @@ function IntegrationCard({ card }: { card: CardData }) {
           <input
             ref={fileInputRef}
             type="file"
-            accept=".csv,text/csv"
+            accept={uploadSpec?.accept}
             className="hidden"
             onChange={(e) => {
               const file = e.target.files?.[0];
@@ -540,13 +568,9 @@ function IntegrationCard({ card }: { card: CardData }) {
             }}
           />
           <div className="text-xs uppercase tracking-[0.24em] text-zinc-500">
-            Offline import (fallback)
+            {uploadSpec?.eyebrow}
           </div>
-          <p className="mt-2 text-sm text-zinc-400">
-            Prefer live sync above (set TIDAL_EMAIL / TIDAL_PASSWORD). Or export your
-            inventory to CSV from the Tidal portal and drop the file here to load
-            assets, owners, and business criticality.
-          </p>
+          <p className="mt-2 text-sm text-zinc-400">{uploadSpec?.blurb}</p>
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
@@ -554,7 +578,7 @@ function IntegrationCard({ card }: { card: CardData }) {
             className="mt-3 inline-flex items-center gap-2 rounded-lg border border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.12)] px-3 py-1.5 text-sm font-medium text-[#ff4d57] transition hover:bg-[rgba(179,14,20,0.2)] disabled:cursor-not-allowed disabled:opacity-40"
           >
             <Upload size={14} className={uploading ? "animate-pulse" : ""} />
-            {uploading ? "Importing…" : "Choose CSV file"}
+            {uploading ? "Importing…" : `Choose ${uploadSpec?.label} file`}
           </button>
         </div>
       ) : null}

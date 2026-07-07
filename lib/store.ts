@@ -27,6 +27,7 @@ import {
 import { intuneConfig, intuneListAssets } from "@/lib/intune";
 import { falconConfig, falconListAssets } from "@/lib/crowdstrike";
 import { defenderConfig, defenderListFindings } from "@/lib/defender";
+import { burpConfig, burpListIssues, type BurpFinding } from "@/lib/burp";
 import { buildRisk, grcConfig, grcUpsertRisk, riskCode } from "@/lib/grc";
 import {
   spiderfootConfig,
@@ -2752,6 +2753,141 @@ export async function importFromSpiderfoot(): Promise<
     companiesMatched: matchedCompanies.size,
     skipped,
   };
+}
+
+export type BurpImportResult = {
+  findingsImported: number;
+  companiesMatched: number;
+  skipped: number;
+};
+
+// Core Burp inserter shared by the API pull and the XML upload. Each issue's
+// host is matched to a customer; matched issues become pentest-class findings
+// under a per-company "Burp" scan. Unmatched hosts are skipped (counted).
+export function importBurpFindings(items: BurpFinding[]): BurpImportResult {
+  const s = store();
+  const nowIso = new Date().toISOString();
+  const matched = new Set<string>();
+  let findingsImported = 0;
+  let skipped = 0;
+  const scanByCompany = new Map<string, InternalScan>();
+
+  for (const item of items) {
+    const companyId = matchCompanyForScan(s, item.asset, item.path);
+    if (!companyId) {
+      skipped += 1;
+      continue;
+    }
+    let scan = scanByCompany.get(companyId);
+    if (!scan) {
+      const company = s.companies.get(companyId)!;
+      const folder = ensureFolder(s, companyId, "Burp");
+      const scanId = nextId(s, "SCAN");
+      scan = {
+        id: scanId,
+        name: `Burp Pentest — ${company.name}`,
+        companyId: company.id,
+        companyName: company.name,
+        folderId: folder.id,
+        folderName: folder.name,
+        connector: "burp",
+        profile: "imported",
+        targets: [item.asset],
+        status: "Completed",
+        createdAt: nowIso,
+        startedAt: nowIso,
+        completedAt: nowIso,
+        findingsCount: 0,
+        severityCounts: emptySeverityCounts(),
+        hostsScanned: 0,
+        requestedBy: "imported@burp",
+        durationMs: 1,
+        progressFrozenAt: 100,
+        seed: hashSeed(scanId),
+        vendor: null,
+        externalRef: `burp:${company.id}`,
+      };
+      s.scans.set(scanId, scan);
+      scanByCompany.set(companyId, scan);
+    }
+    matched.add(companyId);
+
+    const dedupeKey = `${item.cve}::${item.asset}::${item.path}::${item.title}`;
+    const existing = Array.from(s.findings.values()).find(
+      (f) =>
+        `${f.cve}::${f.asset}::${f.port}::${f.title}` === dedupeKey && f.status !== "Resolved",
+    );
+    if (existing) {
+      existing.lastSeen = nowIso;
+      continue;
+    }
+    s.findings.set(`VLN-${(s.counter += 1)}`, {
+      id: `VLN-${s.counter}`,
+      scanId: scan.id,
+      companyId: scan.companyId,
+      companyName: scan.companyName,
+      connector: "burp",
+      cve: item.cve,
+      title: item.title,
+      severity: item.severity,
+      cvss: item.cvss,
+      cvssV3: item.cvss,
+      cvssV2: 0,
+      vpr: 0,
+      epss: 0,
+      asset: item.asset,
+      port: item.port,
+      category: item.category,
+      description: `${item.description}\n\nPath: ${item.path} · Confidence: ${item.confidence}`,
+      remediation: item.remediation,
+      status: "Open",
+      assignee: null,
+      firstSeen: nowIso,
+      lastSeen: nowIso,
+      resolvedAt: null,
+      exploitAvailable: true, // a Burp-validated issue is a demonstrated exploit
+      ...riskFields(s, {
+        cve: item.cve,
+        cvss: item.cvss,
+        epss: 0,
+        exploitAvailable: true,
+        asset: item.asset,
+        companyId: scan.companyId,
+      }),
+    });
+    findingsImported += 1;
+  }
+
+  for (const scan of scanByCompany.values()) {
+    const all = Array.from(s.findings.values()).filter((f) => f.scanId === scan.id);
+    scan.findingsCount = all.length;
+    const counts = emptySeverityCounts();
+    for (const f of all) counts[f.severity] += 1;
+    scan.severityCounts = counts;
+    scan.hostsScanned = new Set(all.map((f) => f.asset)).size;
+  }
+
+  return { findingsImported, companiesMatched: matched.size, skipped };
+}
+
+// Live pull from Burp Suite Enterprise (GraphQL). CSV/XML upload uses
+// importBurpFindings(parseBurpXml(...)) directly from the upload route.
+export async function importFromBurp(): Promise<BurpImportResult | { error: string }> {
+  if (!burpConfig()) {
+    return {
+      error:
+        "Burp is not configured. Set BURP_API_URL and BURP_API_KEY (Burp Suite Enterprise) to pull issues, or upload a Burp Professional XML export.",
+    };
+  }
+  let items: BurpFinding[];
+  try {
+    items = await burpListIssues();
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : "Failed to reach Burp." };
+  }
+  const result = importBurpFindings(items);
+  await flushNow();
+  return result;
 }
 
 export type ArtemisImportResult = {

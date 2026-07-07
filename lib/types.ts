@@ -105,7 +105,8 @@ export type ConnectorId =
   | "defender"
   | "qualys"
   | "spiderfoot"
-  | "artemis";
+  | "artemis"
+  | "burp";
 
 export type ConnectorStatus =
   | "Connected"
