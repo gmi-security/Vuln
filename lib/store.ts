@@ -766,7 +766,11 @@ function companyCoverage(
 function companyRollup(s: StoreShape, companyId: string) {
   const scans = Array.from(s.scans.values()).filter((sc) => sc.companyId === companyId);
   const findings = Array.from(s.findings.values()).filter((f) => f.companyId === companyId);
-  const open = findings.filter(isOpen);
+  // Two stories per customer: vulnerability posture (CVE-based scan findings)
+  // and attack-surface exposure (OSINT). The security-posture rollup is
+  // vuln-based; exposure is counted alongside it, not blended in.
+  const open = findings.filter((f) => isOpen(f) && isRemediationFinding(f));
+  const openExposure = findings.filter((f) => isOpen(f) && isOsintFinding(f)).length;
   const inventoryAssets = Array.from(s.assets.values()).filter(
     (a) => a.companyId === companyId,
   ).length;
@@ -785,6 +789,7 @@ function companyRollup(s: StoreShape, companyId: string) {
       (sc) => sc.status === "Running" || sc.status === "Paused" || sc.status === "Queued",
     ).length,
     openFindings: open.length,
+    exposureFindings: openExposure,
     criticalOpen: open.filter((f) => f.severity === "Critical").length,
     exposureScore: exposureOf(open),
     inventoryAssets,
@@ -1707,7 +1712,7 @@ export function computePriorities(filter?: {
   const open = Array.from(s.findings.values()).filter(
     (f) =>
       (f.status === "Open" || f.status === "In Remediation") &&
-      !isOsintFinding(f) && // SSVC is a CVE-vuln model; OSINT lives in Attack Surface
+      isRemediationFinding(f) && // vuln + pentest are remediation items; OSINT lives in Attack Surface
       (!filter?.companyId || f.companyId === filter.companyId),
   );
 
@@ -1794,7 +1799,7 @@ export function computeRemediationSla(): RemediationSlaResult {
   // vulnerability-remediation metric; attack-surface exposures live elsewhere.
   const demo = demoCompanyIds(s);
   const all = Array.from(s.findings.values()).filter(
-    (f) => !demo.has(f.companyId) && !isOsintFinding(f),
+    (f) => !demo.has(f.companyId) && isRemediationFinding(f),
   );
 
   // 30-day burndown: open backlog vs resolved-per-day.
@@ -3916,19 +3921,38 @@ export async function scanAction(
   return toPublic(scan, now);
 }
 
-// OSINT / attack-surface connectors produce exposure findings (no CVE), which
-// are a different class from CVE-based vulnerability-scan findings. Keeping the
-// two apart stops OSINT from polluting the vuln workflow (Findings, SSVC, SLA);
-// OSINT has its own home on the Attack Surface page.
-const OSINT_CONNECTORS = ["artemis", "spiderfoot"];
+// Finding classes are the different LENSES on an org's security, each telling a
+// different part of the story and each first-class:
+//   vuln    — CVE-based vulnerability scans (Nessus/Defender/CrowdStrike/Vulners)
+//   osint   — external attack-surface recon (SpiderFoot/Artemis)
+//   pentest — manual/authenticated app testing (Burp Suite — near-term)
+// Extend by mapping a new connector here; the rest of the app keys off the class.
+export type FindingClass = "vuln" | "osint" | "pentest";
+const CONNECTOR_CLASS: Record<string, FindingClass> = {
+  nessus: "vuln",
+  defender: "vuln",
+  crowdstrike: "vuln",
+  vulners: "vuln",
+  spiderfoot: "osint",
+  artemis: "osint",
+  burp: "pentest",
+};
+export function findingClass(f: Finding): FindingClass {
+  return CONNECTOR_CLASS[f.connector] ?? "vuln";
+}
 export function isOsintFinding(f: Finding): boolean {
-  return OSINT_CONNECTORS.includes(f.connector);
+  return findingClass(f) === "osint";
+}
+// Remediation-worthy findings you patch/fix (vuln + pentest) — as opposed to
+// attack-surface exposures you shrink. Drives the SSVC queue and SLA clock.
+export function isRemediationFinding(f: Finding): boolean {
+  return findingClass(f) !== "osint";
 }
 
 export function listFindings(filter?: {
   scanId?: string;
   companyId?: string;
-  kind?: "vuln" | "osint" | "all";
+  kind?: FindingClass | "all";
 }): Finding[] {
   const s = store();
   tick(s);
@@ -3936,8 +3960,7 @@ export function listFindings(filter?: {
   if (filter?.scanId) all = all.filter((f) => f.scanId === filter.scanId);
   if (filter?.companyId) all = all.filter((f) => f.companyId === filter.companyId);
   const kind = filter?.kind ?? "all";
-  if (kind === "vuln") all = all.filter((f) => !isOsintFinding(f));
-  else if (kind === "osint") all = all.filter((f) => isOsintFinding(f));
+  if (kind !== "all") all = all.filter((f) => findingClass(f) === kind);
   // Default to real-risk order so the most dangerous findings surface first.
   return all.sort((a, b) => b.realRisk - a.realRisk || b.cvss - a.cvss);
 }
@@ -3987,9 +4010,13 @@ export function computeMetrics(filter?: { companyId?: string }): QuantifyMetrics
   tick(s);
   // For a specific company, honor the filter; for the all-company rollup,
   // exclude demo/test companies so they don't inflate production metrics.
+  // Vuln posture engine: CVE-based scan findings only. OSINT/attack-surface is
+  // a separate story (Attack Surface page), never blended into these metrics.
   const demo = demoCompanyIds(s);
-  const all = Array.from(s.findings.values()).filter((f) =>
-    filter?.companyId ? f.companyId === filter.companyId : !demo.has(f.companyId),
+  const all = Array.from(s.findings.values()).filter(
+    (f) =>
+      isRemediationFinding(f) &&
+      (filter?.companyId ? f.companyId === filter.companyId : !demo.has(f.companyId)),
   );
   const open = all.filter(isOpen);
   const now = Date.now();

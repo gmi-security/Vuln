@@ -343,7 +343,7 @@ export default function VulnCompaniesPage() {
                   <Stat
                     icon={<IconBug size={18} />}
                     value={company.openFindings}
-                    label="Open"
+                    label="Vulns"
                   />
                   <Stat
                     icon={<IconAlertTriangle size={18} />}
@@ -352,13 +352,13 @@ export default function VulnCompaniesPage() {
                   />
                   <Stat
                     icon={<Radar size={18} />}
-                    value={company.scanCount}
-                    label="Scans"
+                    value={company.exposureFindings}
+                    label="Exposure"
                   />
                   <Stat
                     icon={<FolderKanban size={18} />}
-                    value={company.folderCount}
-                    label="Folders"
+                    value={company.scanCount}
+                    label="Scans"
                   />
                 </div>
 

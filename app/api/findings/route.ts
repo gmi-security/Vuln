@@ -10,6 +10,8 @@ export async function GET(request: Request) {
   const companyId = searchParams.get("companyId") ?? undefined;
   const kindParam = searchParams.get("kind");
   const kind =
-    kindParam === "osint" || kindParam === "all" ? kindParam : "vuln";
+    kindParam === "osint" || kindParam === "pentest" || kindParam === "all"
+      ? kindParam
+      : "vuln";
   return NextResponse.json({ findings: listFindings({ scanId, companyId, kind }) });
 }

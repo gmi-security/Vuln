@@ -31,7 +31,8 @@ export type Company = {
   folderCount: number;
   scanCount: number;
   activeScans: number;
-  openFindings: number;
+  openFindings: number; // open vulnerability-scan findings (CVE-based)
+  exposureFindings: number; // open OSINT / attack-surface exposures
   criticalOpen: number;
   exposureScore: number;
   // Asset-inventory coverage. inventoryAssets is how many inventory assets
