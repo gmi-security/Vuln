@@ -50,7 +50,7 @@ export default function VulnAttackPathsPage() {
     <VulnShell
       eyebrow="Attack Paths"
       title="Blast radius"
-      subtitle="Internet-facing, exploitable entry points and the high-value assets they can reach. Reachability is modeled from asset exposure, criticality, and network adjacency — connect firewall/identity data for observed topology."
+      subtitle="Full kill chains: each exploitable internet-facing entry, traced hop-by-hop across lateral (same-subnet) and perimeter pivots to the highest-value crown jewel it can reach. Reachability is modeled from exposure, criticality, and /24 adjacency — connect firewall/identity data for observed topology."
       actions={
         <>
           <select
@@ -151,23 +151,25 @@ function AttackPathCard({ entry }: { entry: AttackEntry }) {
           </Pill>
         ) : null}
         <span className="text-zinc-500">
-          reaches {entry.reachable} assets · {entry.crownJewelsReached} crown
+          {entry.hops} hop{entry.hops === 1 ? "" : "s"} to{" "}
+          {entry.targetCriticality ?? "target"} · reaches {entry.reachable} asset
+          {entry.reachable === 1 ? "" : "s"} · {entry.crownJewelsReached} crown
           jewel{entry.crownJewelsReached === 1 ? "" : "s"}
         </span>
       </div>
 
-      {/* Kill-chain: entry -> pivot -> target */}
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-stretch">
+      {/* Multi-hop kill-chain with the move technique labelled per connector. */}
+      <div className="flex flex-col gap-2 lg:flex-row lg:items-stretch lg:overflow-x-auto lg:pb-1">
         {entry.path.map((hop, i) => (
           <React.Fragment key={`${hop.asset}-${i}`}>
-            <div className="flex-1 rounded-2xl border border-zinc-900 bg-[#090909] p-4">
+            <div className="min-w-[190px] flex-1 rounded-2xl border border-zinc-900 bg-[#090909] p-4">
               <div className="flex items-center justify-between gap-2">
                 <Pill className={roleClass[hop.role]}>
                   {hop.role === "entry"
                     ? "Entry"
                     : hop.role === "pivot"
-                      ? "Pivot"
-                      : "Target"}
+                      ? `Pivot ${i}`
+                      : "Objective"}
                 </Pill>
                 {hop.realRisk > 0 ? (
                   <span
@@ -178,7 +180,7 @@ function AttackPathCard({ entry }: { entry: AttackEntry }) {
                   </span>
                 ) : null}
               </div>
-              <div className="mt-3 truncate font-medium text-white">
+              <div className="mt-3 truncate font-medium text-white" title={hop.asset}>
                 {hop.asset}
               </div>
               <div
@@ -197,14 +199,23 @@ function AttackPathCard({ entry }: { entry: AttackEntry }) {
                 </div>
               ) : (
                 <div className="mt-3 text-xs text-zinc-600">
-                  {hop.role === "target" ? "high-value asset" : "no open findings"}
+                  {hop.reachableOnly
+                    ? "reachable · no known exploit"
+                    : hop.role === "target"
+                      ? "high-value asset"
+                      : "no open findings"}
                 </div>
               )}
             </div>
             {i < entry.path.length - 1 ? (
-              <div className="flex items-center justify-center text-zinc-600 lg:px-1">
+              <div className="flex flex-col items-center justify-center gap-1 text-zinc-600 lg:px-1">
                 <span className="hidden lg:block">→</span>
                 <span className="lg:hidden">↓</span>
+                {entry.path[i + 1]?.via ? (
+                  <span className="whitespace-nowrap rounded-full border border-zinc-800 bg-zinc-950 px-2 py-0.5 text-[9px] text-zinc-400">
+                    {entry.path[i + 1].via}
+                  </span>
+                ) : null}
               </div>
             ) : null}
           </React.Fragment>

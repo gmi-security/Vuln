@@ -2225,94 +2225,155 @@ export function computeAttackPaths(filter?: {
     byCompany.set(n.companyId, list);
   }
 
-  // Reachable set from an entry: same-subnet peers + high-value internal
-  // targets in the same company (perimeter breach -> crown-jewel pivot).
-  function reachableFrom(entry: AttackNode): AttackNode[] {
-    const peers = byCompany.get(entry.companyId) ?? [];
-    return peers.filter((n) => {
-      if (n === entry) return false;
-      if (n.exposure === "Isolated") return false; // segmented off
-      const sameSubnet =
-        entry.subnet && n.subnet && entry.subnet === n.subnet;
-      const highValue = n.criticality === "Crown Jewel" || n.criticality === "High";
-      return sameSubnet || highValue;
-    });
+  // --- reachability graph -------------------------------------------------
+  // Edges model lateral movement and perimeter pivots WITHOUT observed
+  // topology (connect firewall/identity data later for the real thing):
+  //   - Lateral: hosts in the same /24 subnet can reach each other.
+  //   - Perimeter pivot: an internet-facing host can reach the high-value
+  //     internal hosts (Crown Jewel / High) — the DMZ box talking inward.
+  // Isolated assets are unreachable (segmented off).
+  const MAX_HOPS = 6;
+  const subnetGroups = new Map<string, AttackNode[]>();
+  const highValueByCompany = new Map<string, AttackNode[]>();
+  for (const n of all) {
+    if (n.subnet) {
+      const k = `${n.companyId}|${n.subnet}`;
+      (subnetGroups.get(k) ?? subnetGroups.set(k, []).get(k)!).push(n);
+    }
+    if (
+      n.exposure !== "Isolated" &&
+      (n.criticality === "Crown Jewel" || n.criticality === "High")
+    ) {
+      (highValueByCompany.get(n.companyId) ?? highValueByCompany.set(n.companyId, []).get(n.companyId)!).push(n);
+    }
   }
+
+  function neighborsOf(node: AttackNode): { node: AttackNode; via: string }[] {
+    const out: { node: AttackNode; via: string }[] = [];
+    if (node.subnet) {
+      for (const peer of subnetGroups.get(`${node.companyId}|${node.subnet}`) ?? []) {
+        if (peer !== node && peer.exposure !== "Isolated") {
+          out.push({ node: peer, via: `lateral · ${node.subnet}.0/24` });
+        }
+      }
+    }
+    if (node.exposure === "Internet-facing") {
+      for (const hv of highValueByCompany.get(node.companyId) ?? []) {
+        if (hv !== node && hv.subnet !== node.subnet) {
+          out.push({ node: hv, via: "perimeter breach → internal" });
+        }
+      }
+    }
+    return out;
+  }
+
+  // BFS shortest paths (in hops) from an entry across the reachability graph.
+  type Came = Map<AttackNode, { prev: AttackNode | null; via: string | null }>;
+  function shortestPaths(entry: AttackNode): Came {
+    const came: Came = new Map();
+    const depth = new Map<AttackNode, number>();
+    came.set(entry, { prev: null, via: null });
+    depth.set(entry, 0);
+    const queue: AttackNode[] = [entry];
+    let guard = 0;
+    while (queue.length && guard < 20000) {
+      guard += 1;
+      const cur = queue.shift()!;
+      const d = depth.get(cur)!;
+      if (d >= MAX_HOPS) continue;
+      for (const { node, via } of neighborsOf(cur)) {
+        if (came.has(node)) continue;
+        came.set(node, { prev: cur, via });
+        depth.set(node, d + 1);
+        queue.push(node);
+      }
+    }
+    return came;
+  }
+
+  const hopFor = (n: AttackNode, role: AttackHop["role"], via: string | null): AttackHop => ({
+    asset: n.asset,
+    exposure: n.exposure,
+    criticality: n.criticality,
+    role,
+    cve: n.topCve,
+    title: n.topTitle,
+    realRisk: n.worstRisk,
+    kev: n.kev,
+    via,
+    reachableOnly: n.open === 0,
+  });
+
+  // Candidate entries: internet-facing and either exploitable or high-risk.
+  // Pre-rank and cap how many we BFS from, so a big estate stays fast.
+  const candidates = all
+    .filter(
+      (n) =>
+        n.exposure === "Internet-facing" &&
+        (n.kev || n.exploitable || n.worstRisk >= 50),
+    )
+    .sort((a, b) => b.worstRisk * (b.kev ? 1.2 : 1) - a.worstRisk * (a.kev ? 1.2 : 1))
+    .slice(0, 60);
 
   const entries: AttackEntry[] = [];
   const crownJewelsAtRisk = new Set<string>();
 
-  for (const entry of all) {
-    const isEntry =
-      entry.exposure === "Internet-facing" &&
-      (entry.kev || entry.exploitable || entry.worstRisk >= 50);
-    if (!isEntry) continue;
-
-    const reachable = reachableFrom(entry);
-    const crownJewels = reachable.filter((n) => n.criticality === "Crown Jewel");
+  for (const entry of candidates) {
+    const came: Came = shortestPaths(entry);
+    const reached = Array.from(came.keys()).filter((n) => n !== entry);
+    const crownJewels = reached.filter((n) => n.criticality === "Crown Jewel");
+    const highs = reached.filter((n) => n.criticality === "High");
     for (const cj of crownJewels) crownJewelsAtRisk.add(keyOf(cj.companyId, cj.asset));
-    const highs = reachable.filter((n) => n.criticality === "High");
 
-    const blastScore = Math.min(
-      100,
-      Math.round(crownJewels.length * 22 + highs.length * 7 + reachable.length * 1.5),
-    );
-    const entryScore = Math.min(
-      100,
-      Math.round(entry.worstRisk * (entry.kev ? 1.15 : 1)),
-    );
-
-    // Representative path: entry -> best same-subnet pivot -> top target.
+    // Objective = the highest-value reachable asset (crown jewel first), then
+    // by risk, then by the shortest chain to get there.
+    const chainLen = (n: AttackNode) => {
+      let len = 0;
+      let cur: AttackNode | null = n;
+      while (cur && came.get(cur)?.prev) {
+        len += 1;
+        cur = came.get(cur)!.prev;
+      }
+      return len;
+    };
     const target =
-      [...crownJewels, ...reachable].sort(
+      reached.sort(
         (a, b) =>
           CRIT_WEIGHT[b.criticality] - CRIT_WEIGHT[a.criticality] ||
-          b.worstRisk - a.worstRisk,
+          b.worstRisk - a.worstRisk ||
+          chainLen(a) - chainLen(b),
       )[0] ?? null;
-    const pivot =
-      reachable.find(
-        (n) =>
-          n !== target &&
-          entry.subnet &&
-          n.subnet === entry.subnet &&
-          (n.criticality === "High" || n.criticality === "Crown Jewel"),
-      ) ?? null;
 
+    // Reconstruct the full multi-hop chain entry -> ... -> target.
     const path: AttackHop[] = [];
-    path.push({
-      asset: entry.asset,
-      exposure: entry.exposure,
-      criticality: entry.criticality,
-      role: "entry",
-      cve: entry.topCve,
-      title: entry.topTitle,
-      realRisk: entry.worstRisk,
-      kev: entry.kev,
-    });
-    if (pivot && pivot !== target) {
-      path.push({
-        asset: pivot.asset,
-        exposure: pivot.exposure,
-        criticality: pivot.criticality,
-        role: "pivot",
-        cve: pivot.topCve,
-        title: pivot.topTitle,
-        realRisk: pivot.worstRisk,
-        kev: pivot.kev,
-      });
-    }
     if (target) {
-      path.push({
-        asset: target.asset,
-        exposure: target.exposure,
-        criticality: target.criticality,
-        role: "target",
-        cve: target.topCve,
-        title: target.topTitle,
-        realRisk: target.worstRisk,
-        kev: target.kev,
+      const stack: { node: AttackNode; via: string | null }[] = [];
+      let cur: AttackNode | null = target;
+      while (cur) {
+        const info: { prev: AttackNode | null; via: string | null } = came.get(cur)!;
+        stack.push({ node: cur, via: info.via });
+        cur = info.prev;
+      }
+      stack.reverse();
+      stack.forEach((step, i) => {
+        const role: AttackHop["role"] =
+          i === 0 ? "entry" : i === stack.length - 1 ? "target" : "pivot";
+        path.push(hopFor(step.node, role, step.via));
       });
+    } else {
+      path.push(hopFor(entry, "entry", null));
     }
+
+    const hops = Math.max(0, path.length - 1);
+    // Blast: value reached, weighted toward shorter (easier) chains.
+    const proximity = target ? Math.max(0.4, 1 - (chainLen(target) - 1) * 0.12) : 0;
+    const blastScore = Math.min(
+      100,
+      Math.round(
+        (crownJewels.length * 22 + highs.length * 7 + reached.length * 1.2) * (0.6 + 0.4 * proximity),
+      ),
+    );
+    const entryScore = Math.min(100, Math.round(entry.worstRisk * (entry.kev ? 1.15 : 1)));
 
     entries.push({
       id: keyOf(entry.companyId, entry.asset),
@@ -2324,11 +2385,13 @@ export function computeAttackPaths(filter?: {
       entryScore,
       kev: entry.kev,
       exploitable: entry.exploitable,
-      reachable: reachable.length,
+      reachable: reached.length,
       crownJewelsReached: crownJewels.length,
       blastScore,
       path,
+      hops,
       targetAsset: target?.asset ?? null,
+      targetCriticality: target?.criticality ?? null,
     });
   }
 

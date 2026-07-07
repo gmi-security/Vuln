@@ -242,6 +242,11 @@ export type AttackHop = {
   title: string | null;
   realRisk: number;
   kev: boolean;
+  // How the attacker reaches THIS hop from the previous one (null on the entry).
+  via: string | null;
+  // Reachable on the network but with no known open finding to exploit — the
+  // hop is a movement step, not a confirmed compromise.
+  reachableOnly: boolean;
 };
 
 export type AttackEntry = {
@@ -258,7 +263,9 @@ export type AttackEntry = {
   crownJewelsReached: number;
   blastScore: number; // 0-100
   path: AttackHop[];
+  hops: number; // number of moves in the chain (path length - 1)
   targetAsset: string | null;
+  targetCriticality: string | null;
 };
 
 export type AttackPathResult = {
