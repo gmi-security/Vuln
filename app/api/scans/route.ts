@@ -29,7 +29,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
   }
 
-  const validConnectors: ConnectorId[] = ["nessus", "vulners", "crowdstrike", "defender", "qualys"];
+  const validConnectors: ConnectorId[] = ["nessus", "vulners", "crowdstrike", "defender", "qualys", "spiderfoot", "artemis", "burp", "nmap"];
   if (!body.connector || !validConnectors.includes(body.connector)) {
     return NextResponse.json({ error: "Unknown connector." }, { status: 400 });
   }
