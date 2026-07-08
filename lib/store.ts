@@ -3894,7 +3894,7 @@ export type CsSyncStatus = {
   phase: string;
   startedAt: number;
   finishedAt: number | null;
-  result: Record<string, number> | null;
+  result: unknown;
   error: string | null;
 };
 
@@ -3923,7 +3923,7 @@ export function startCsDevicesSync(): { started: boolean; error?: string } {
       if ("error" in r) {
         csDevicesSync = { ...csDevicesSync, running: false, phase: "Error", error: r.error, finishedAt: Date.now() };
       } else {
-        csDevicesSync = { ...csDevicesSync, running: false, phase: "Done", result: r as Record<string, number>, finishedAt: Date.now() };
+        csDevicesSync = { ...csDevicesSync, running: false, phase: "Done", result: r, finishedAt: Date.now() };
       }
     } catch (err) {
       csDevicesSync = { ...csDevicesSync, running: false, phase: "Error", error: err instanceof Error ? err.message : "Sync failed.", finishedAt: Date.now() };
@@ -3942,7 +3942,7 @@ export function startCsSpotlightSync(): { started: boolean; error?: string } {
       if ("error" in r) {
         csSpotlightSync = { ...csSpotlightSync, running: false, phase: "Error", error: r.error, finishedAt: Date.now() };
       } else {
-        csSpotlightSync = { ...csSpotlightSync, running: false, phase: "Done", result: r as Record<string, number>, finishedAt: Date.now() };
+        csSpotlightSync = { ...csSpotlightSync, running: false, phase: "Done", result: r, finishedAt: Date.now() };
       }
     } catch (err) {
       csSpotlightSync = { ...csSpotlightSync, running: false, phase: "Error", error: err instanceof Error ? err.message : "Sync failed.", finishedAt: Date.now() };

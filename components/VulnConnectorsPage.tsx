@@ -48,7 +48,7 @@ type CsSyncStatus = {
   phase: string;
   startedAt: number;
   finishedAt: number | null;
-  result: Record<string, number> | null;
+  result: unknown;
   error: string | null;
 };
 
