@@ -3419,9 +3419,26 @@ export async function syncAllConnectors(): Promise<SyncAllEntry[]> {
     run: () => Promise<any>;
   }[] = [
     { connector: "Nessus", ready: Boolean(nessusConfig()), run: importFromNessus },
-    // CrowdStrike: device inventory first (so Spotlight findings can attach to assets)
-    { connector: "CrowdStrike Devices", ready: Boolean(falconConfig()), run: importFromCrowdstrike },
-    { connector: "CrowdStrike Spotlight", ready: Boolean(falconConfig()), run: importFromCrowdstrikeSpotlight },
+    // CrowdStrike: fire background jobs (avoids DO 120s gateway timeout).
+    // Results appear on the next manual sync or page refresh.
+    {
+      connector: "CrowdStrike Devices",
+      ready: Boolean(falconConfig()),
+      run: async () => {
+        const r = startCsDevicesSync();
+        if (!r.started) return { error: r.error ?? "Could not start sync." };
+        return { message: "Sync started in background." };
+      },
+    },
+    {
+      connector: "CrowdStrike Spotlight",
+      ready: Boolean(falconConfig()),
+      run: async () => {
+        const r = startCsSpotlightSync();
+        if (!r.started) return { error: r.error ?? "Could not start sync." };
+        return { message: "Sync started in background." };
+      },
+    },
     { connector: "Defender", ready: Boolean(defenderConfig()), run: importFromDefender },
     { connector: "Tidal", ready: Boolean(tidalConfig()), run: importFromTidal },
     { connector: "Intune", ready: Boolean(intuneConfig()), run: importFromIntune },
