@@ -224,6 +224,9 @@ type InternalScan = Omit<Scan, "progress" | "status"> & {
   // Stable reference to an external source scan (e.g. "spiderfoot:<id>") so
   // pull-based imports stay idempotent. Absent for native/demo scans.
   externalRef?: string;
+  // Set when the scan is running via the Vulners Bridge (nmap active scanner).
+  // Mutually exclusive with vendor — bridge scans self-manage their lifecycle.
+  bridgeScan?: { done: boolean };
 };
 
 const globalStore = globalThis as unknown as { __vulnStore?: StoreShape };
@@ -535,6 +538,7 @@ function generateFindings(s: StoreShape, scan: InternalScan): Finding[] {
 
 function settleScan(s: StoreShape, scan: InternalScan, now: number): void {
   if (scan.vendor) return; // vendor scans settle via refreshVendorScans()
+  if (scan.bridgeScan) return; // bridge scans self-manage via runVulnersBridgeScanAsync
   if (!demoScansEnabled()) return; // production: never fabricate demo findings
   if (scan.status !== "Running") return;
   const progress = computeProgress(scan, now);
@@ -4499,6 +4503,109 @@ export async function getScan(id: string): Promise<Scan | undefined> {
   return scan ? toPublic(scan, Date.now()) : undefined;
 }
 
+// Runs Vulners Bridge scans per target asynchronously after startScan() returns.
+// Updates the scan record in-place and flushes to the DB when done.
+async function runVulnersBridgeScanAsync(
+  scanId: string,
+  targets: string[],
+  companyId: string,
+): Promise<void> {
+  const s = store();
+  const scan = s.scans.get(scanId);
+  if (!scan || !scan.bridgeScan) return;
+
+  const nowIso = new Date().toISOString();
+  const company = s.companies.get(companyId);
+  const companyName = company?.name ?? scan.companyName;
+
+  try {
+    for (const target of targets) {
+      let results: VulnersBridgeFinding[];
+      try {
+        results = await vulnersBridgeScanHost(target);
+      } catch {
+        continue; // skip unreachable targets; don't abort the whole scan
+      }
+      for (const v of results) {
+        const existing = Array.from(s.findings.values()).find(
+          (f) => f.cve === v.cve && f.asset === target && f.status !== "Resolved",
+        );
+        if (existing) {
+          if (v.exploitAvailable && !existing.exploitAvailable) {
+            existing.exploitAvailable = true;
+            rescoreFinding(s, existing);
+          }
+          existing.lastSeen = nowIso;
+          continue;
+        }
+        const severity: Finding["severity"] =
+          v.cvss >= 9 ? "Critical" : v.cvss >= 7 ? "High" : v.cvss >= 4 ? "Medium" : v.cvss > 0 ? "Low" : "Info";
+        const fid = nextId(s, "FIND");
+        const f: Finding = {
+          id: fid,
+          scanId,
+          companyId,
+          companyName,
+          connector: "vulners",
+          cve: v.cve,
+          title: `${v.cve} — ${v.component}`,
+          severity,
+          cvss: v.cvss,
+          cvssV2: 0,
+          cvssV3: v.cvss,
+          vpr: 0,
+          epss: 0,
+          asset: target,
+          port: v.component.match(/Port (\d+)/)?.[1] ?? "",
+          category: "Network Service",
+          description: `${v.cve} detected on ${v.component} at ${target}.`,
+          remediation: `Patch or mitigate ${v.component} — see ${v.cve} for details.`,
+          status: "Open",
+          assignee: null,
+          firstSeen: nowIso,
+          lastSeen: nowIso,
+          resolvedAt: null,
+          exploitAvailable: v.exploitAvailable,
+          kev: false,
+          ransomware: false,
+          assetExposure: "Internet-facing",
+          assetCriticality: "Normal",
+          assetSource: "nmap",
+          realRisk: 0,
+          riskPriority: "Info",
+        };
+        rescoreFinding(s, f);
+        s.findings.set(fid, f);
+      }
+    }
+  } catch (err) {
+    const current = s.scans.get(scanId);
+    if (current) {
+      current.status = "Failed";
+      current.error = err instanceof Error ? err.message : "Bridge scan failed.";
+      current.completedAt = new Date().toISOString();
+      current.progressFrozenAt = 0;
+      if (current.bridgeScan) current.bridgeScan.done = true;
+    }
+    void flushNow();
+    return;
+  }
+
+  const current = s.scans.get(scanId);
+  if (!current || !current.bridgeScan) return;
+  const all = Array.from(s.findings.values()).filter((f) => f.scanId === scanId);
+  current.findingsCount = all.length;
+  const counts = emptySeverityCounts();
+  for (const f of all) counts[f.severity] = (counts[f.severity] ?? 0) + 1;
+  current.severityCounts = counts;
+  current.hostsScanned = new Set(all.map((f) => f.asset)).size || targets.length;
+  current.status = "Completed";
+  current.completedAt = new Date().toISOString();
+  current.progressFrozenAt = 100;
+  current.bridgeScan.done = true;
+  void flushNow();
+}
+
 export async function startScan(input: {
   name: string;
   connector: ConnectorId;
@@ -4520,6 +4627,8 @@ export async function startScan(input: {
 
   const name = input.name || `${input.connector} scan`;
   let vendor: InternalScan["vendor"] = null;
+  const isBridgeScan = input.connector === "vulners" && Boolean(vulnersBridgeConfig());
+
   if (input.connector === "nessus" && nessusConfig()) {
     try {
       const launched = await nessusLaunchScan(name, input.targets, input.profile);
@@ -4531,7 +4640,7 @@ export async function startScan(input: {
     }
   }
 
-  if (!vendor && !demoScansEnabled()) {
+  if (!vendor && !isBridgeScan && !demoScansEnabled()) {
     return {
       error: `${input.connector} is not connected to a live scanner. Configure its credentials to run real scans — demo scans are disabled in production.`,
     };
@@ -4562,11 +4671,17 @@ export async function startScan(input: {
     requestedBy: input.requestedBy || "analyst@gmi.com",
     durationMs:
       demo.minDurationMs + Math.floor(rand() * (demo.maxDurationMs - demo.minDurationMs)),
-    progressFrozenAt: vendor ? 0 : null,
+    progressFrozenAt: vendor ? 0 : isBridgeScan ? 30 : null,
     seed: seedVal,
     vendor,
+    bridgeScan: isBridgeScan ? { done: false } : undefined,
   };
   s.scans.set(id, scan);
+
+  if (isBridgeScan) {
+    void runVulnersBridgeScanAsync(id, input.targets, company.id);
+  }
+
   return toPublic(scan, Date.now());
 }
 
