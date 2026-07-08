@@ -36,6 +36,11 @@ import {
 } from "@/lib/nmap";
 import { buildRisk, grcConfig, grcUpsertRisk, riskCode } from "@/lib/grc";
 import {
+  vulnersConfig,
+  vulnersEnrichCves,
+  type VulnersCveData,
+} from "@/lib/vulners";
+import {
   spiderfootConfig,
   spiderfootImportFindings,
   spiderfootListScans,
@@ -3078,6 +3083,93 @@ export async function importFromNmap(): Promise<NmapImportResult | { error: stri
   return result;
 }
 
+// --- Vulners CVE enrichment --------------------------------------------------
+
+export type VulnersImportResult = {
+  cvesEnriched: number;
+  findingsUpdated: number;
+  exploitsFound: number;
+};
+
+// Enrich every CVE-tagged finding in the store with Vulners intelligence:
+// EPSS probability, exploit availability, and CVSS backfill. Does not replace
+// existing scores — only fills gaps or improves where Vulners has higher signal.
+export async function importFromVulners(): Promise<VulnersImportResult | { error: string }> {
+  if (!vulnersConfig()) {
+    return {
+      error:
+        "Vulners is not configured. Set VULNERS_API_KEY (and optionally VULNERS_URL for a self-hosted instance).",
+    };
+  }
+  const s = store();
+  const cveRe = /^CVE-\d{4}-\d{4,}$/i;
+
+  // Collect all unique CVEs from current findings.
+  const allCves = new Set<string>();
+  for (const f of s.findings.values()) {
+    const cves = f.cves?.length ? f.cves : [f.cve];
+    for (const c of cves) {
+      if (cveRe.test(c)) allCves.add(c.toUpperCase());
+    }
+  }
+
+  if (!allCves.size) {
+    return { cvesEnriched: 0, findingsUpdated: 0, exploitsFound: 0 };
+  }
+
+  let enriched: Map<string, VulnersCveData>;
+  try {
+    enriched = await vulnersEnrichCves([...allCves]);
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : "Vulners enrichment failed." };
+  }
+
+  let findingsUpdated = 0;
+  let exploitsFound = 0;
+
+  for (const f of s.findings.values()) {
+    const cves = f.cves?.length ? f.cves : [f.cve];
+    let best: VulnersCveData | undefined;
+    let bestExploit = false;
+
+    for (const c of cves) {
+      const d = enriched.get(c.toUpperCase());
+      if (!d) continue;
+      if (!best || d.cvss > best.cvss) best = d;
+      if (d.exploitAvailable) bestExploit = true;
+    }
+
+    if (!best) continue;
+
+    let changed = false;
+    if (best.epss > 0 && (!f.epss || best.epss > f.epss)) {
+      f.epss = best.epss;
+      changed = true;
+    }
+    if (best.cvss > 0 && (!f.cvss || f.cvss <= 0)) {
+      f.cvss = best.cvss;
+      if (!f.cvssV3) f.cvssV3 = best.cvss;
+      changed = true;
+    }
+    if (bestExploit && !f.exploitAvailable) {
+      f.exploitAvailable = true;
+      changed = true;
+    }
+    if (best.description && !f.description) {
+      f.description = best.description;
+      changed = true;
+    }
+    if (changed) {
+      rescoreFinding(s, f);
+      findingsUpdated += 1;
+    }
+    if (bestExploit) exploitsFound += 1;
+  }
+
+  await flushNow();
+  return { cvesEnriched: enriched.size, findingsUpdated, exploitsFound };
+}
+
 export type ArtemisImportResult = {
   findingsImported: number;
   tagsProcessed: number;
@@ -3187,6 +3279,7 @@ export async function syncAllConnectors(): Promise<SyncAllEntry[]> {
     { connector: "Artemis", ready: Boolean(artemisConfig()), run: importFromArtemis },
     { connector: "Burp", ready: Boolean(burpConfig()), run: importFromBurp },
     { connector: "Nmap", ready: Boolean(nmapConfig()), run: importFromNmap },
+    { connector: "Vulners", ready: Boolean(vulnersConfig()), run: importFromVulners },
   ];
 
   const out: SyncAllEntry[] = [];
@@ -3682,9 +3775,9 @@ export type EndpointImportResult = {
 };
 
 // Shared endpoint-inventory upsert for Intune / CrowdStrike device sources.
-// Devices belong to the tenant — our own organization — so they attach to the
-// internal company, created if absent. Endpoints are never attributed to an
-// external client (honest linkage).
+// By default devices attach to the internal org. Set customerName to pin
+// them to a specific client company instead (e.g. FALCON_CUSTOMER env var),
+// which is required for MSSP deployments where one Falcon tenant serves a client.
 async function importEndpoints(
   s: StoreShape,
   devices: {
@@ -3698,12 +3791,26 @@ async function importEndpoints(
     exposure: InternalAsset["exposure"];
   }[],
   source: AssetSource,
+  customerName?: string,
 ): Promise<EndpointImportResult> {
-  let internal = Array.from(s.companies.values()).find((c) => c.kind === "internal");
-  if (!internal) {
-    const created = createCompany({ name: "GMI", kind: "internal" });
-    if ("error" in created) throw new Error(created.error);
-    internal = s.companies.get(created.id)!;
+  let internal: InternalCompany | undefined;
+  if (customerName) {
+    // Pin to a named client company; create it if first encounter.
+    internal = Array.from(s.companies.values()).find(
+      (c) => c.name.toLowerCase() === customerName.toLowerCase(),
+    );
+    if (!internal) {
+      const created = createCompany({ name: customerName });
+      if ("error" in created) throw new Error(created.error);
+      internal = s.companies.get(created.id)!;
+    }
+  } else {
+    internal = Array.from(s.companies.values()).find((c) => c.kind === "internal");
+    if (!internal) {
+      const created = createCompany({ name: "GMI", kind: "internal" });
+      if ("error" in created) throw new Error(created.error);
+      internal = s.companies.get(created.id)!;
+    }
   }
 
   let assetsUpserted = 0;
@@ -3742,6 +3849,8 @@ async function importEndpoints(
 }
 
 // Sync CrowdStrike Falcon host inventory (the scan/coverage perspective).
+// Set FALCON_CUSTOMER to pin devices to a specific client company; omit to
+// attach to the internal GMI org (default for own-estate deployments).
 export async function importFromCrowdstrike(): Promise<
   EndpointImportResult | { error: string }
 > {
@@ -3752,9 +3861,10 @@ export async function importFromCrowdstrike(): Promise<
     };
   }
   const s = store();
+  const customer = process.env.FALCON_CUSTOMER?.trim() || undefined;
   try {
     const devices = await falconListAssets();
-    return await importEndpoints(s, devices, "crowdstrike");
+    return await importEndpoints(s, devices, "crowdstrike", customer);
   } catch (err) {
     return {
       error: err instanceof Error ? err.message : "Failed to reach the CrowdStrike API.",
@@ -3799,12 +3909,29 @@ export async function importFromCrowdstrikeSpotlight(): Promise<
     if (!assetKey) { skipped += 1; continue; }
 
     // Match to a company via existing asset, then company-name fuzzy match.
+    // Customer segmentation: FALCON_CUSTOMER pins all Spotlight findings to a
+    // named client company. Without it, findings match via Tidal asset lookup
+    // then hostname tokens, then fall back to the internal org — only when no
+    // FALCON_CUSTOMER is set (own-estate deployment).
+    const falconCustomer = process.env.FALCON_CUSTOMER?.trim() || "";
     const existingAsset = lookupAsset(s, item.hostname, undefined) ?? lookupAsset(s, item.localIp, undefined);
-    const companyId =
-      existingAsset?.companyId ??
-      matchCompanyForScan(s, item.hostname, item.localIp) ??
-      // Fall back to the internal org (CrowdStrike sensors typically protect our own estate).
-      Array.from(s.companies.values()).find((c) => c.kind === "internal")?.id;
+    let companyId: string | null | undefined = existingAsset?.companyId;
+    if (!companyId && falconCustomer) {
+      // Pin to the named customer company; create it if first encounter.
+      let c = Array.from(s.companies.values()).find(
+        (co) => co.name.toLowerCase() === falconCustomer.toLowerCase(),
+      );
+      if (!c) {
+        const cr = createCompany({ name: falconCustomer });
+        if (!("error" in cr)) c = s.companies.get(cr.id);
+      }
+      companyId = c?.id;
+    }
+    if (!companyId) companyId = matchCompanyForScan(s, item.hostname, item.localIp);
+    if (!companyId && !falconCustomer) {
+      // Own-estate fallback only when no FALCON_CUSTOMER is set.
+      companyId = Array.from(s.companies.values()).find((c) => c.kind === "internal")?.id;
+    }
     if (!companyId) { skipped += 1; continue; }
     hosts.add(assetKey);
 

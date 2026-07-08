@@ -37,7 +37,7 @@ const CONNECTOR_DEFS: Record<ConnectorId, ConnectorDef> = {
     description:
       "Package-level audit and CVE enrichment via the Vulners API. Sends installed package inventories for assessment and enriches findings with exploit and EPSS intelligence.",
     capabilities: ["Package audit", "CVE enrichment", "Exploit intel", "EPSS scores"],
-    envVars: ["VULNERS_API_KEY"],
+    envVars: ["VULNERS_API_KEY", "VULNERS_URL"],
     docsUrl: "https://vulners.com/docs",
     demo: {
       minDurationMs: 30_000,

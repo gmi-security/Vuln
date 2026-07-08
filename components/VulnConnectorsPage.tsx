@@ -66,6 +66,7 @@ const HEALTH_ENDPOINTS: Record<string, string> = {
   spiderfoot: "/api/spiderfoot/health",
   burp: "/api/burp/health",
   nmap: "/api/nmap/health",
+  vulners: "/api/vulners/health",
 };
 
 // Connectors with a pull/import endpoint get a "Sync now" button.
@@ -80,6 +81,7 @@ const SYNC_ENDPOINTS: Record<string, string> = {
   intune: "/api/intune/import",
   burp: "/api/burp/import",
   nmap: "/api/nmap/import",
+  vulners: "/api/vulners/import",
 };
 
 // Render a human summary from the various import result shapes.
@@ -97,6 +99,9 @@ function summarizeSync(result: any): string {
   if (n(result.companiesCreated)) parts.push(`${result.companiesCreated} new companies`);
   if (n(result.findingsRescored)) parts.push(`${result.findingsRescored} findings repriced`);
   if (n(result.companiesMatched) != null) parts.push(`${result.companiesMatched} companies`);
+  if (n(result.cvesEnriched) != null) parts.push(`${result.cvesEnriched} CVEs enriched`);
+  if (n(result.findingsUpdated) != null) parts.push(`${result.findingsUpdated} findings updated`);
+  if (n(result.exploitsFound)) parts.push(`${result.exploitsFound} with exploits`);
   const skipped = Array.isArray(result.skipped) ? result.skipped.length : 0;
   if (skipped) parts.push(`${skipped} skipped`);
   return parts.length ? `Synced — ${parts.join(", ")}.` : "Sync complete.";
