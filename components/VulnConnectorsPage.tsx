@@ -71,7 +71,7 @@ const HEALTH_ENDPOINTS: Record<string, string> = {
 // Connectors with a pull/import endpoint get a "Sync now" button.
 const SYNC_ENDPOINTS: Record<string, string> = {
   nessus: "/api/nessus/import",
-  crowdstrike: "/api/crowdstrike/import",
+  crowdstrike: "/api/crowdstrike/spotlight-import",
   "crowdstrike-devices": "/api/crowdstrike/import",
   defender: "/api/defender/import",
   spiderfoot: "/api/spiderfoot/import",
@@ -283,15 +283,26 @@ function SyncAllButton() {
   const [rows, setRows] = useState<
     { connector: string; configured: boolean; ok: boolean; result?: any; error?: string }[] | null
   >(null);
+  const [enrichSummary, setEnrichSummary] = useState<string | null>(null);
 
   async function run() {
     if (busy) return;
     setBusy(true);
     setRows(null);
+    setEnrichSummary(null);
     try {
       const res = await fetch("/api/connectors/sync-all", { method: "POST" });
       const json = await res.json().catch(() => ({}));
       setRows(json.results ?? []);
+      const e = json.enrich;
+      if (e) {
+        const parts = [];
+        if (e.findingsUpdated) parts.push(`${e.findingsUpdated} re-scored`);
+        if (e.kevAdded) parts.push(`${e.kevAdded} KEV`);
+        if (e.ransomwareLinked) parts.push(`${e.ransomwareLinked} ransomware-linked`);
+        if (e.cvesWithEpss) parts.push(`${e.cvesWithEpss} with EPSS`);
+        if (parts.length) setEnrichSummary(`Threat intel: ${parts.join(" · ")}`);
+      }
     } catch {
       setRows([{ connector: "Sync", configured: true, ok: false, error: "Request failed." }]);
     } finally {
@@ -325,6 +336,11 @@ function SyncAllButton() {
               </span>
             </div>
           ))}
+          {enrichSummary ? (
+            <div className="mt-1 border-t border-zinc-900 px-1 pt-1.5 text-emerald-400">
+              {enrichSummary}
+            </div>
+          ) : null}
         </div>
       ) : null}
     </div>

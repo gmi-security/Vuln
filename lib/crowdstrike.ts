@@ -1,4 +1,4 @@
-import type { AssetCriticality, AssetExposure } from "@/lib/types";
+import type { AssetCriticality, AssetExposure, Severity } from "@/lib/types";
 
 // CrowdStrike Falcon device-inventory adapter.
 //
@@ -100,6 +100,100 @@ function normalizeFalconHost(raw: any): FalconAsset {
   };
 }
 
+// --- Spotlight vulnerability findings ----------------------------------------
+
+export type SpotlightFinding = {
+  cve: string;
+  hostname: string;
+  localIp: string;
+  externalIp: string;
+  os: string;
+  severity: Severity;
+  cvss: number;
+  title: string;
+  description: string;
+  remediation: string;
+  exploitAvailable: boolean;
+  status: string; // "open" | "reopen" | etc.
+  exprRating: string; // CrowdStrike ExPRT score label
+};
+
+const EXPRT_SEV: Record<string, Severity> = {
+  CRITICAL: "Critical",
+  HIGH: "High",
+  MEDIUM: "Medium",
+  LOW: "Low",
+};
+
+// CrowdStrike Spotlight API: query open vuln ids, hydrate in batches of 400.
+// Requires scope: spotlight-vulnerabilities:read.
+export async function spotlightListFindings(): Promise<SpotlightFinding[]> {
+  const config = falconConfig();
+  if (!config) throw new Error("CrowdStrike is not configured.");
+  const token = await falconToken(config);
+  const authHeader = { Authorization: `Bearer ${token}`, Accept: "application/json" };
+
+  // Query all open (and reopen) vuln ids.
+  const ids: string[] = [];
+  let after = "";
+  let guard = 0;
+  while (guard < 200) {
+    guard += 1;
+    const url = new URL(`${config.baseUrl}/spotlight/queries/vulnerabilities/v1`);
+    url.searchParams.set("filter", "status:'open',status:'reopen'");
+    url.searchParams.set("limit", "400");
+    if (after) url.searchParams.set("after", after);
+    const r = await fetch(url.toString(), { headers: authHeader, cache: "no-store" });
+    if (!r.ok) {
+      throw new Error(`Spotlight query ${r.status}: ${await r.text().catch(() => r.statusText)}`);
+    }
+    const j: any = await r.json();
+    const batch: string[] = j?.resources ?? [];
+    ids.push(...batch);
+    after = j?.meta?.pagination?.after ?? "";
+    if (!after || !batch.length) break;
+  }
+
+  if (!ids.length) return [];
+
+  // Hydrate in batches of 400 (Spotlight entities limit).
+  const findings: SpotlightFinding[] = [];
+  for (let i = 0; i < ids.length; i += 400) {
+    const batch = ids.slice(i, i + 400);
+    const r = await fetch(`${config.baseUrl}/spotlight/entities/vulnerabilities/v2?ids=${batch.join("&ids=")}`, {
+      headers: authHeader,
+      cache: "no-store",
+    });
+    if (!r.ok) {
+      throw new Error(`Spotlight entities ${r.status}: ${await r.text().catch(() => r.statusText)}`);
+    }
+    const j: any = await r.json();
+    for (const v of j?.resources ?? []) {
+      const cve = String(v?.cve?.id ?? "").toUpperCase() || `CS-${v?.id ?? "vuln"}`;
+      const sev: Severity =
+        EXPRT_SEV[String(v?.cve?.exprt_rating ?? v?.severity ?? "").toUpperCase()] ?? "Medium";
+      const cvss = Number(v?.cve?.cvss_v3 ?? v?.cve?.cvss_v2 ?? 5.0);
+      findings.push({
+        cve,
+        hostname: String(v?.host_info?.hostname ?? ""),
+        localIp: String(v?.host_info?.local_ip ?? ""),
+        externalIp: String(v?.host_info?.external_ip ?? ""),
+        os: String(v?.host_info?.os_version ?? v?.host_info?.platform ?? ""),
+        severity: sev,
+        cvss: isNaN(cvss) ? 5.0 : cvss,
+        title: String(v?.cve?.description ?? v?.cve?.id ?? "CrowdStrike Spotlight finding"),
+        description: String(v?.cve?.description ?? "Reported by CrowdStrike Falcon Spotlight."),
+        remediation: String(v?.remediation?.entities?.[0]?.action ?? "Apply vendor patch."),
+        exploitAvailable: Boolean(v?.cve?.exploit_status ?? false),
+        status: String(v?.status ?? "open"),
+        exprRating: String(v?.cve?.exprt_rating ?? ""),
+      });
+    }
+  }
+  return findings;
+}
+
+// --- Falcon host inventory ---------------------------------------------------
 // List Falcon hosts: query device ids, then hydrate details in batches.
 export async function falconListAssets(): Promise<FalconAsset[]> {
   const config = falconConfig();

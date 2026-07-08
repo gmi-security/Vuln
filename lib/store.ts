@@ -25,7 +25,7 @@ import {
   type TidalProgress,
 } from "@/lib/tidal";
 import { intuneConfig, intuneListAssets } from "@/lib/intune";
-import { falconConfig, falconListAssets } from "@/lib/crowdstrike";
+import { falconConfig, falconListAssets, spotlightListFindings } from "@/lib/crowdstrike";
 import { defenderConfig, defenderListFindings } from "@/lib/defender";
 import { burpConfig, burpListIssues, type BurpFinding } from "@/lib/burp";
 import {
@@ -3177,12 +3177,16 @@ export async function syncAllConnectors(): Promise<SyncAllEntry[]> {
     run: () => Promise<any>;
   }[] = [
     { connector: "Nessus", ready: Boolean(nessusConfig()), run: importFromNessus },
-    { connector: "CrowdStrike", ready: Boolean(falconConfig()), run: importFromCrowdstrike },
+    // CrowdStrike: device inventory first (so Spotlight findings can attach to assets)
+    { connector: "CrowdStrike Devices", ready: Boolean(falconConfig()), run: importFromCrowdstrike },
+    { connector: "CrowdStrike Spotlight", ready: Boolean(falconConfig()), run: importFromCrowdstrikeSpotlight },
     { connector: "Defender", ready: Boolean(defenderConfig()), run: importFromDefender },
     { connector: "Tidal", ready: Boolean(tidalConfig()), run: importFromTidal },
     { connector: "Intune", ready: Boolean(intuneConfig()), run: importFromIntune },
     { connector: "SpiderFoot", ready: Boolean(spiderfootConfig()), run: importFromSpiderfoot },
     { connector: "Artemis", ready: Boolean(artemisConfig()), run: importFromArtemis },
+    { connector: "Burp", ready: Boolean(burpConfig()), run: importFromBurp },
+    { connector: "Nmap", ready: Boolean(nmapConfig()), run: importFromNmap },
   ];
 
   const out: SyncAllEntry[] = [];
@@ -3756,6 +3760,141 @@ export async function importFromCrowdstrike(): Promise<
       error: err instanceof Error ? err.message : "Failed to reach the CrowdStrike API.",
     };
   }
+}
+
+export type SpotlightImportResult = {
+  findingsImported: number;
+  hostsAffected: number;
+  skipped: number;
+};
+
+// Import CrowdStrike Spotlight vulnerabilities as vuln-class findings.
+// Each finding is matched to a company via host lookup (prefers CrowdStrike
+// device assets already in inventory). Requires spotlight-vulnerabilities:read.
+export async function importFromCrowdstrikeSpotlight(): Promise<
+  SpotlightImportResult | { error: string }
+> {
+  if (!falconConfig()) {
+    return {
+      error:
+        "CrowdStrike is not configured. Set FALCON_CLIENT_ID, FALCON_CLIENT_SECRET, and FALCON_CLOUD.",
+    };
+  }
+  const s = store();
+  let items;
+  try {
+    items = await spotlightListFindings();
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : "Failed to reach the CrowdStrike Spotlight API." };
+  }
+
+  const nowIso = new Date().toISOString();
+  let findingsImported = 0;
+  let skipped = 0;
+  const hosts = new Set<string>();
+  const scanByCompany = new Map<string, InternalScan>();
+
+  for (const item of items) {
+    const assetKey = item.hostname || item.localIp;
+    if (!assetKey) { skipped += 1; continue; }
+
+    // Match to a company via existing asset, then company-name fuzzy match.
+    const existingAsset = lookupAsset(s, item.hostname, undefined) ?? lookupAsset(s, item.localIp, undefined);
+    const companyId =
+      existingAsset?.companyId ??
+      matchCompanyForScan(s, item.hostname, item.localIp) ??
+      // Fall back to the internal org (CrowdStrike sensors typically protect our own estate).
+      Array.from(s.companies.values()).find((c) => c.kind === "internal")?.id;
+    if (!companyId) { skipped += 1; continue; }
+    hosts.add(assetKey);
+
+    let scan = scanByCompany.get(companyId);
+    if (!scan) {
+      const company = s.companies.get(companyId)!;
+      const folder = ensureFolder(s, companyId, "Spotlight");
+      const scanId = nextId(s, "SCAN");
+      scan = {
+        id: scanId,
+        name: `CrowdStrike Spotlight — ${company.name}`,
+        companyId: company.id,
+        companyName: company.name,
+        folderId: folder.id,
+        folderName: folder.name,
+        connector: "crowdstrike",
+        profile: "agent-sync",
+        targets: [assetKey],
+        status: "Completed",
+        createdAt: nowIso,
+        startedAt: nowIso,
+        completedAt: nowIso,
+        findingsCount: 0,
+        severityCounts: emptySeverityCounts(),
+        hostsScanned: 0,
+        requestedBy: "imported@crowdstrike-spotlight",
+        durationMs: 1,
+        progressFrozenAt: 100,
+        seed: hashSeed(scanId),
+        vendor: null,
+        externalRef: `spotlight:${companyId}`,
+      };
+      s.scans.set(scanId, scan);
+      scanByCompany.set(companyId, scan);
+    }
+
+    const dedupeKey = `${item.cve}::${assetKey}`;
+    const existing = Array.from(s.findings.values()).find(
+      (f) => `${f.cve}::${f.asset}` === dedupeKey && f.status !== "Resolved",
+    );
+    if (existing) { existing.lastSeen = nowIso; continue; }
+
+    s.findings.set(`VLN-${(s.counter += 1)}`, {
+      id: `VLN-${s.counter}`,
+      scanId: scan.id,
+      companyId: scan.companyId,
+      companyName: scan.companyName,
+      connector: "crowdstrike",
+      cve: item.cve,
+      title: item.title,
+      severity: item.severity,
+      cvss: item.cvss,
+      cvssV3: item.cvss,
+      cvssV2: 0,
+      vpr: 0,
+      epss: 0,
+      asset: item.hostname || item.localIp,
+      port: "N/A",
+      category: "Endpoint",
+      description: `${item.description}${item.exprRating ? `\n\nExPRT Rating: ${item.exprRating}` : ""}`,
+      remediation: item.remediation,
+      status: "Open",
+      assignee: null,
+      firstSeen: nowIso,
+      lastSeen: nowIso,
+      resolvedAt: null,
+      exploitAvailable: item.exploitAvailable,
+      ...riskFields(s, {
+        cve: item.cve,
+        cvss: item.cvss,
+        epss: 0,
+        exploitAvailable: item.exploitAvailable,
+        asset: item.hostname || item.localIp,
+        companyId: scan.companyId,
+      }),
+    });
+    findingsImported += 1;
+  }
+
+  for (const scan of scanByCompany.values()) {
+    const all = Array.from(s.findings.values()).filter((f) => f.scanId === scan.id);
+    scan.findingsCount = all.length;
+    const counts = emptySeverityCounts();
+    for (const f of all) counts[f.severity] += 1;
+    scan.severityCounts = counts;
+    scan.hostsScanned = new Set(all.map((f) => f.asset)).size;
+  }
+
+  await flushNow();
+  return { findingsImported, hostsAffected: hosts.size, skipped };
 }
 
 export type DefenderImportResult = {
