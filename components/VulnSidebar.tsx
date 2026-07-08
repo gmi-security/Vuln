@@ -1,11 +1,12 @@
 "use client";
 
-import React from "react";
+import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import localFont from "next/font/local";
 import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { baseNavItems } from "@/lib/navigation";
+import type { Connector } from "@/lib/types";
 
 const vibrocentric = localFont({
   src: "../fonts/Vibrocentric Rg.otf",
@@ -16,6 +17,13 @@ function isActivePath(pathname: string, href: string) {
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
+function StatusDot({ status }: { status: Connector["status"] }) {
+  if (status === "Planned") return <span className="h-1.5 w-1.5 rounded-full bg-zinc-700" />;
+  if (status === "Connected") return <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />;
+  if (status === "Demo Mode") return <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />;
+  return <span className="h-1.5 w-1.5 rounded-full bg-zinc-600" />;
+}
+
 export default function VulnSidebar({
   collapsed,
   onToggle,
@@ -24,6 +32,14 @@ export default function VulnSidebar({
   onToggle: () => void;
 }) {
   const pathname = usePathname();
+  const [connectors, setConnectors] = useState<Connector[]>([]);
+
+  useEffect(() => {
+    fetch("/api/connectors")
+      .then((r) => r.json())
+      .then((d) => setConnectors(d.connectors ?? []))
+      .catch(() => {});
+  }, []);
 
   return (
     <aside
@@ -119,48 +135,21 @@ export default function VulnSidebar({
       </nav>
 
       <div className="mt-auto px-6 pb-8">
-        {!collapsed ? (
+        {!collapsed && connectors.length > 0 ? (
           <div className="rounded-2xl border border-[rgba(179,14,20,0.14)] bg-[#080808] p-4">
             <div className="text-[11px] uppercase tracking-[0.24em] text-zinc-500">
               Scan Engines
             </div>
             <div className="mt-3 space-y-2 text-[13px] text-zinc-300">
-              <div className="flex items-center gap-2">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                Nessus
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                Vulners
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                CrowdStrike
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                Defender
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                Nmap
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                SpiderFoot
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                Artemis
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                Burp Suite
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="h-1.5 w-1.5 rounded-full bg-zinc-600" />
-                Qualys (planned)
-              </div>
+              {connectors.map((c) => (
+                <div key={c.id} className="flex items-center gap-2">
+                  <StatusDot status={c.status} />
+                  <span className={c.status === "Planned" ? "text-zinc-500" : undefined}>
+                    {c.name}
+                    {c.status === "Planned" ? " (planned)" : ""}
+                  </span>
+                </div>
+              ))}
             </div>
           </div>
         ) : null}
