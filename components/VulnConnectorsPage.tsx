@@ -52,6 +52,7 @@ const cardIcon: Record<string, React.ElementType> = {
   spiderfoot: IconSpider,
   artemis: IconTopologyStar3,
   burp: IconShieldSearch,
+  nmap: IconRadar,
   tidal: IconDatabaseCog,
   intune: IconDeviceLaptop,
   "crowdstrike-devices": IconShieldSearch,
@@ -64,6 +65,7 @@ const HEALTH_ENDPOINTS: Record<string, string> = {
   artemis: "/api/artemis/health",
   spiderfoot: "/api/spiderfoot/health",
   burp: "/api/burp/health",
+  nmap: "/api/nmap/health",
 };
 
 // Connectors with a pull/import endpoint get a "Sync now" button.
@@ -77,6 +79,7 @@ const SYNC_ENDPOINTS: Record<string, string> = {
   tidal: "/api/tidal/import",
   intune: "/api/intune/import",
   burp: "/api/burp/import",
+  nmap: "/api/nmap/import",
 };
 
 // Render a human summary from the various import result shapes.
@@ -88,6 +91,8 @@ function summarizeSync(result: any): string {
   if (n(result.scansImported) != null) parts.push(`${result.scansImported} scans`);
   if (n(result.rowsParsed) != null) parts.push(`${result.rowsParsed} rows`);
   if (n(result.issuesParsed) != null) parts.push(`${result.issuesParsed} issues`);
+  if (n(result.hostsParsed) != null) parts.push(`${result.hostsParsed} hosts`);
+  if (n(result.assetsUpdated)) parts.push(`${result.assetsUpdated} assets updated`);
   if (n(result.assetsUpserted) != null) parts.push(`${result.assetsUpserted} assets`);
   if (n(result.companiesCreated)) parts.push(`${result.companiesCreated} new companies`);
   if (n(result.findingsRescored)) parts.push(`${result.findingsRescored} findings repriced`);
@@ -368,7 +373,17 @@ function IntegrationCard({ card }: { card: CardData }) {
             blurb:
               "Prefer live sync above (set BURP_API_URL / BURP_API_KEY for Burp Suite Enterprise). Or export issues as XML from Burp Suite Professional and drop the file here to load validated web findings.",
           }
-        : null;
+        : card.id === "nmap"
+          ? {
+              endpoint: "/api/nmap/import-file",
+              accept: ".xml,text/xml,application/xml",
+              contentType: "application/xml",
+              label: "XML",
+              eyebrow: "Offline import (nmap -oX)",
+              blurb:
+                "Prefer live sync above (set NMAP_RUNNER_URL / NMAP_RUNNER_TOKEN). Or run nmap with -oX and drop the XML output here to attach open-port facts to assets and raise exposed-service findings.",
+            }
+          : null;
   const supportsCsv = uploadSpec !== null;
   const [health, setHealth] = useState<
     { reachable: boolean; message: string } | null | undefined

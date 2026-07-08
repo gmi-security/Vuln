@@ -28,6 +28,12 @@ import { intuneConfig, intuneListAssets } from "@/lib/intune";
 import { falconConfig, falconListAssets } from "@/lib/crowdstrike";
 import { defenderConfig, defenderListFindings } from "@/lib/defender";
 import { burpConfig, burpListIssues, type BurpFinding } from "@/lib/burp";
+import {
+  nmapConfig,
+  nmapListHosts,
+  nmapServiceFindings,
+  type NmapHost,
+} from "@/lib/nmap";
 import { buildRisk, grcConfig, grcUpsertRisk, riskCode } from "@/lib/grc";
 import {
   spiderfootConfig,
@@ -2886,6 +2892,188 @@ export async function importFromBurp(): Promise<BurpImportResult | { error: stri
     return { error: err instanceof Error ? err.message : "Failed to reach Burp." };
   }
   const result = importBurpFindings(items);
+  await flushNow();
+  return result;
+}
+
+// --- Nmap discovery ---------------------------------------------------------
+
+export type NmapImportResult = {
+  hostsProcessed: number;
+  assetsUpdated: number; // inventory assets that gained ground-truth port facts
+  findingsImported: number; // exposed-service findings
+  companiesMatched: number;
+  skipped: number; // hosts that matched no customer
+};
+
+// Ingest Nmap discovery results: attach ground-truth open ports to the matching
+// inventory asset (creating a discovered asset when none exists), and emit the
+// narrow set of exposed-service findings. Ports/services feed the attack-path
+// model; findings are limited to genuinely risky reachable services.
+export function importNmapScan(hosts: NmapHost[]): NmapImportResult {
+  const s = store();
+  const nowIso = new Date().toISOString();
+  const matched = new Set<string>();
+  let hostsProcessed = 0;
+  let assetsUpdated = 0;
+  let findingsImported = 0;
+  let skipped = 0;
+  const scanByCompany = new Map<string, InternalScan>();
+
+  for (const host of hosts) {
+    const identifier = host.host || host.ip;
+    if (!identifier) continue;
+    // Match by an existing asset first (keeps customer attribution honest),
+    // then fall back to fuzzy name/host matching.
+    const existingAsset =
+      lookupAsset(s, host.host, undefined) ?? lookupAsset(s, host.ip, undefined);
+    const companyId =
+      existingAsset?.companyId ??
+      matchCompanyForScan(s, host.host, host.ip);
+    if (!companyId) {
+      skipped += 1;
+      continue;
+    }
+    matched.add(companyId);
+    hostsProcessed += 1;
+    const company = s.companies.get(companyId)!;
+
+    // Attach ground-truth port facts to the asset (upsert when absent). We do
+    // NOT flip exposure here — an internal-vantage scan seeing open ports does
+    // not imply Internet-facing. That upgrade belongs to an external-scope
+    // runner and can be layered in when the runner reports vantage.
+    const priorExisting = Boolean(existingAsset);
+    const asset = upsertAsset(s, {
+      identifier: existingAsset?.identifier ?? identifier,
+      hostname: existingAsset?.hostname ?? (host.host !== host.ip ? host.host : ""),
+      ipAddresses:
+        existingAsset?.ipAddresses?.length
+          ? Array.from(new Set([...existingAsset.ipAddresses, host.ip].filter(Boolean)))
+          : [host.ip].filter(Boolean),
+      companyId: company.id,
+      companyName: company.name,
+      exposure: existingAsset?.exposure ?? classifyAsset(identifier).exposure,
+      criticality: existingAsset?.criticality ?? classifyAsset(identifier).criticality,
+      os: host.os || existingAsset?.os || "",
+      owner: existingAsset?.owner ?? "",
+      tags: existingAsset?.tags ?? [],
+      source: existingAsset?.source ?? "nmap",
+      externalId: existingAsset?.externalId ?? "",
+    });
+    asset.openPorts = host.ports;
+    if (priorExisting || host.ports.length) assetsUpdated += 1;
+
+    // Emit findings only for risky exposed services.
+    const services = nmapServiceFindings(host);
+    if (!services.length) continue;
+
+    let scan = scanByCompany.get(companyId);
+    if (!scan) {
+      const folder = ensureFolder(s, companyId, "Nmap");
+      const scanId = nextId(s, "SCAN");
+      scan = {
+        id: scanId,
+        name: `Nmap Discovery — ${company.name}`,
+        companyId: company.id,
+        companyName: company.name,
+        folderId: folder.id,
+        folderName: folder.name,
+        connector: "nmap",
+        profile: "discovery",
+        targets: [identifier],
+        status: "Completed",
+        createdAt: nowIso,
+        startedAt: nowIso,
+        completedAt: nowIso,
+        findingsCount: 0,
+        severityCounts: emptySeverityCounts(),
+        hostsScanned: 0,
+        requestedBy: "imported@nmap",
+        durationMs: 1,
+        progressFrozenAt: 100,
+        seed: hashSeed(scanId),
+        vendor: null,
+        externalRef: `nmap:${company.id}`,
+      };
+      s.scans.set(scanId, scan);
+      scanByCompany.set(companyId, scan);
+    }
+
+    for (const svc of services) {
+      const dedupeKey = `${svc.cve}::${svc.asset}::${svc.port}`;
+      const existing = Array.from(s.findings.values()).find(
+        (f) => `${f.cve}::${f.asset}::${f.port}` === dedupeKey && f.status !== "Resolved",
+      );
+      if (existing) {
+        existing.lastSeen = nowIso;
+        continue;
+      }
+      s.findings.set(`VLN-${(s.counter += 1)}`, {
+        id: `VLN-${s.counter}`,
+        scanId: scan.id,
+        companyId: scan.companyId,
+        companyName: scan.companyName,
+        connector: "nmap",
+        cve: svc.cve,
+        title: svc.title,
+        severity: svc.severity,
+        cvss: svc.cvss,
+        cvssV3: svc.cvss,
+        cvssV2: 0,
+        vpr: 0,
+        epss: 0,
+        asset: svc.asset,
+        port: svc.port,
+        category: svc.category,
+        description: svc.description,
+        remediation: svc.remediation,
+        status: "Open",
+        assignee: null,
+        firstSeen: nowIso,
+        lastSeen: nowIso,
+        resolvedAt: null,
+        exploitAvailable: false,
+        ...riskFields(s, {
+          cve: svc.cve,
+          cvss: svc.cvss,
+          epss: 0,
+          exploitAvailable: false,
+          asset: svc.asset,
+          companyId: scan.companyId,
+        }),
+      });
+      findingsImported += 1;
+    }
+  }
+
+  for (const scan of scanByCompany.values()) {
+    const all = Array.from(s.findings.values()).filter((f) => f.scanId === scan.id);
+    scan.findingsCount = all.length;
+    const counts = emptySeverityCounts();
+    for (const f of all) counts[f.severity] += 1;
+    scan.severityCounts = counts;
+    scan.hostsScanned = new Set(all.map((f) => f.asset)).size;
+  }
+
+  return { hostsProcessed, assetsUpdated, findingsImported, companiesMatched: matched.size, skipped };
+}
+
+// Live pull from an Nmap scan-runner. XML upload uses importNmapScan(
+// parseNmapXml(...)) directly from the upload route.
+export async function importFromNmap(): Promise<NmapImportResult | { error: string }> {
+  if (!nmapConfig()) {
+    return {
+      error:
+        "Nmap runner is not configured. Set NMAP_RUNNER_URL and NMAP_RUNNER_TOKEN to pull scan results, or upload an nmap -oX XML export.",
+    };
+  }
+  let hosts: NmapHost[];
+  try {
+    hosts = await nmapListHosts();
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : "Failed to reach the Nmap runner." };
+  }
+  const result = importNmapScan(hosts);
   await flushNow();
   return result;
 }

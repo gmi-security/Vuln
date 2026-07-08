@@ -29,6 +29,7 @@ export const connectorLabels: Record<ConnectorId, string> = {
   spiderfoot: "SpiderFoot",
   artemis: "Artemis",
   burp: "Burp Suite",
+  nmap: "Nmap",
 };
 
 export const severityClass: Record<Severity, string> = {

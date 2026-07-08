@@ -150,6 +150,24 @@ const CONNECTOR_DEFS: Record<ConnectorId, ConnectorDef> = {
       categories: ["Web Vulnerability", "Injection", "Authentication", "Misconfiguration"],
     },
   },
+  nmap: {
+    id: "nmap",
+    name: "Nmap",
+    vendor: "Nmap Project",
+    kind: "Network Discovery & Service Enumeration",
+    description:
+      "Open-source network discovery. Enumerates open ports and running services per host and attaches that ground truth to the asset inventory — sharpening attack-path reachability — while raising findings only for genuinely risky exposed services (RDP, SMB, Telnet, databases). Pulls from a scan-runner or imports an nmap -oX XML export.",
+    capabilities: ["Port discovery", "Service enumeration", "Exposed-service findings", "XML import"],
+    envVars: ["NMAP_RUNNER_URL", "NMAP_RUNNER_TOKEN"],
+    docsUrl: "https://nmap.org/book/output-formats-xml-output.html",
+    demo: {
+      minDurationMs: 30_000,
+      maxDurationMs: 90_000,
+      minFindings: 4,
+      maxFindings: 14,
+      categories: ["Exposed Service", "Open Port", "Service Enumeration"],
+    },
+  },
 };
 
 export const SCAN_PROFILES: ScanProfile[] = [

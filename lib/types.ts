@@ -75,8 +75,18 @@ export type AssetSource =
   | "tidal"
   | "intune"
   | "crowdstrike"
+  | "nmap"
   | "manual"
   | "inferred";
+
+// An open port/service observed on an asset (from an Nmap discovery scan).
+export type OpenPort = {
+  port: number;
+  protocol: string; // tcp / udp
+  service: string; // e.g. https, rdp, ssh
+  product: string; // banner product, when known
+  version: string; // banner version, when known
+};
 
 // An asset in the inventory (sourced from Tidal.io, or entered manually).
 // This is the authoritative environmental context for real-risk scoring.
@@ -96,6 +106,9 @@ export type InventoryAsset = {
   externalId: string; // Tidal asset id, when sourced from Tidal
   lastSynced: string;
   openFindings: number; // derived
+  // Ground-truth open ports/services from the most recent Nmap discovery scan,
+  // when one has run against this asset. Empty/absent until then.
+  openPorts?: OpenPort[];
 };
 
 export type ConnectorId =
@@ -106,7 +119,8 @@ export type ConnectorId =
   | "qualys"
   | "spiderfoot"
   | "artemis"
-  | "burp";
+  | "burp"
+  | "nmap";
 
 export type ConnectorStatus =
   | "Connected"
