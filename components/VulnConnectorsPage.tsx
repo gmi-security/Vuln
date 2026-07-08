@@ -62,6 +62,8 @@ const cardIcon: Record<string, React.ElementType> = {
 // Connectors with a reachability probe get a live health dot.
 const HEALTH_ENDPOINTS: Record<string, string> = {
   nessus: "/api/nessus/health",
+  crowdstrike: "/api/crowdstrike/health",
+  "crowdstrike-devices": "/api/crowdstrike/health",
   artemis: "/api/artemis/health",
   spiderfoot: "/api/spiderfoot/health",
   burp: "/api/burp/health",
