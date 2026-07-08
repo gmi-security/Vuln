@@ -133,7 +133,7 @@ export async function spotlightListFindings(): Promise<SpotlightFinding[]> {
   const token = await falconToken(config);
   const authHeader = { Authorization: `Bearer ${token}`, Accept: "application/json" };
 
-  // Query all open (and reopen) vuln ids.
+  // Cursor-based ID pagination — must be sequential (each page depends on prior cursor).
   const ids: string[] = [];
   let after = "";
   let guard = 0;
@@ -156,90 +156,109 @@ export async function spotlightListFindings(): Promise<SpotlightFinding[]> {
 
   if (!ids.length) return [];
 
-  // Hydrate in batches of 400 (Spotlight entities limit).
-  const findings: SpotlightFinding[] = [];
-  for (let i = 0; i < ids.length; i += 400) {
-    const batch = ids.slice(i, i + 400);
-    const r = await fetch(`${config.baseUrl}/spotlight/entities/vulnerabilities/v2?ids=${batch.join("&ids=")}`, {
-      headers: authHeader,
-      cache: "no-store",
-    });
-    if (!r.ok) {
-      throw new Error(`Spotlight entities ${r.status}: ${await r.text().catch(() => r.statusText)}`);
-    }
-    const j: any = await r.json();
-    for (const v of j?.resources ?? []) {
-      const cve = String(v?.cve?.id ?? "").toUpperCase() || `CS-${v?.id ?? "vuln"}`;
-      const sev: Severity =
-        EXPRT_SEV[String(v?.cve?.exprt_rating ?? v?.severity ?? "").toUpperCase()] ?? "Medium";
-      const cvss = Number(v?.cve?.cvss_v3 ?? v?.cve?.cvss_v2 ?? 5.0);
-      findings.push({
-        cve,
-        hostname: String(v?.host_info?.hostname ?? ""),
-        localIp: String(v?.host_info?.local_ip ?? ""),
-        externalIp: String(v?.host_info?.external_ip ?? ""),
-        os: String(v?.host_info?.os_version ?? v?.host_info?.platform ?? ""),
-        severity: sev,
-        cvss: isNaN(cvss) ? 5.0 : cvss,
-        title: String(v?.cve?.description ?? v?.cve?.id ?? "CrowdStrike Spotlight finding"),
-        description: String(v?.cve?.description ?? "Reported by CrowdStrike Falcon Spotlight."),
-        remediation: String(v?.remediation?.entities?.[0]?.action ?? "Apply vendor patch."),
-        exploitAvailable: Boolean(v?.cve?.exploit_status ?? false),
-        status: String(v?.status ?? "open"),
-        exprRating: String(v?.cve?.exprt_rating ?? ""),
-      });
-    }
-  }
-  return findings;
+  // Build entity-fetch tasks for all 400-ID batches, then run them in parallel.
+  const batches: string[][] = [];
+  for (let i = 0; i < ids.length; i += 400) batches.push(ids.slice(i, i + 400));
+
+  const parseResource = (v: any): SpotlightFinding => {
+    const cve = String(v?.cve?.id ?? "").toUpperCase() || `CS-${v?.id ?? "vuln"}`;
+    const sev: Severity =
+      EXPRT_SEV[String(v?.cve?.exprt_rating ?? v?.severity ?? "").toUpperCase()] ?? "Medium";
+    const cvss = Number(v?.cve?.cvss_v3 ?? v?.cve?.cvss_v2 ?? 5.0);
+    return {
+      cve,
+      hostname: String(v?.host_info?.hostname ?? ""),
+      localIp: String(v?.host_info?.local_ip ?? ""),
+      externalIp: String(v?.host_info?.external_ip ?? ""),
+      os: String(v?.host_info?.os_version ?? v?.host_info?.platform ?? ""),
+      severity: sev,
+      cvss: isNaN(cvss) ? 5.0 : cvss,
+      title: String(v?.cve?.description ?? v?.cve?.id ?? "CrowdStrike Spotlight finding"),
+      description: String(v?.cve?.description ?? "Reported by CrowdStrike Falcon Spotlight."),
+      remediation: String(v?.remediation?.entities?.[0]?.action ?? "Apply vendor patch."),
+      exploitAvailable: Boolean(v?.cve?.exploit_status ?? false),
+      status: String(v?.status ?? "open"),
+      exprRating: String(v?.cve?.exprt_rating ?? ""),
+    };
+  };
+
+  const results = await Promise.all(
+    batches.map(async (batch) => {
+      const r = await fetch(
+        `${config.baseUrl}/spotlight/entities/vulnerabilities/v2?ids=${batch.join("&ids=")}`,
+        { headers: authHeader, cache: "no-store" },
+      );
+      if (!r.ok) {
+        throw new Error(`Spotlight entities ${r.status}: ${await r.text().catch(() => r.statusText)}`);
+      }
+      const j: any = await r.json();
+      return (j?.resources ?? []).map(parseResource) as SpotlightFinding[];
+    }),
+  );
+  return results.flat();
 }
 
 // --- Falcon host inventory ---------------------------------------------------
-// List Falcon hosts: query device ids, then hydrate details in batches.
+// List Falcon hosts: query device ids (first page gives total → remaining pages
+// fire in parallel), then hydrate all ID batches in parallel.
 export async function falconListAssets(): Promise<FalconAsset[]> {
   const config = falconConfig();
   if (!config) throw new Error("CrowdStrike is not configured.");
   const token = await falconToken(config);
   const authHeader = { Authorization: `Bearer ${token}`, Accept: "application/json" };
 
-  const assets: FalconAsset[] = [];
-  let offset = 0;
-  let guard = 0;
-  while (guard < 100) {
-    guard += 1;
-    const q: Response = await fetch(
-      `${config.baseUrl}/devices/queries/devices/v1?limit=500&offset=${offset}`,
+  const PAGE = 500;
+
+  const fetchIdPage = async (offset: number): Promise<{ ids: string[]; total: number }> => {
+    const r = await fetch(
+      `${config.baseUrl}/devices/queries/devices/v1?limit=${PAGE}&offset=${offset}`,
       { headers: authHeader, cache: "no-store" },
     );
-    if (!q.ok) {
+    if (!r.ok) {
       throw new Error(
-        `Falcon devices query ${q.status}: ${await q.text().catch(() => q.statusText)}`,
+        `Falcon devices query ${r.status}: ${await r.text().catch(() => r.statusText)}`,
       );
     }
-    const qData: any = await q.json();
-    const ids: string[] = qData?.resources ?? [];
-    if (!ids.length) break;
+    const j: any = await r.json();
+    return {
+      ids: j?.resources ?? [],
+      total: j?.meta?.pagination?.total ?? 0,
+    };
+  };
 
-    // Hydrate device details.
-    const d: Response = await fetch(`${config.baseUrl}/devices/entities/devices/v2`, {
+  const hydrateIds = async (ids: string[]): Promise<FalconAsset[]> => {
+    const r = await fetch(`${config.baseUrl}/devices/entities/devices/v2`, {
       method: "POST",
       headers: { ...authHeader, "Content-Type": "application/json" },
       body: JSON.stringify({ ids }),
       cache: "no-store",
     });
-    if (!d.ok) {
+    if (!r.ok) {
       throw new Error(
-        `Falcon devices entities ${d.status}: ${await d.text().catch(() => d.statusText)}`,
+        `Falcon devices entities ${r.status}: ${await r.text().catch(() => r.statusText)}`,
       );
     }
-    const dData: any = await d.json();
-    for (const host of dData?.resources ?? []) {
-      const asset = normalizeFalconHost(host);
-      if (asset.hostname) assets.push(asset);
-    }
+    const j: any = await r.json();
+    return (j?.resources ?? [])
+      .map(normalizeFalconHost)
+      .filter((a: FalconAsset) => a.hostname);
+  };
 
-    const total: number = qData?.meta?.pagination?.total ?? ids.length;
-    offset += ids.length;
-    if (offset >= total) break;
-  }
-  return assets;
+  // Fetch first page to learn the total, then fire remaining pages in parallel.
+  const first = await fetchIdPage(0);
+  if (!first.ids.length) return [];
+
+  const total = first.total || first.ids.length;
+  const remainingOffsets: number[] = [];
+  for (let off = PAGE; off < total; off += PAGE) remainingOffsets.push(off);
+
+  const restPages = await Promise.all(remainingOffsets.map((off) => fetchIdPage(off)));
+  const allIds = [first.ids, ...restPages.map((p) => p.ids)].flat();
+
+  // Hydrate all ID batches in parallel (API accepts up to 500 per POST).
+  const idBatches: string[][] = [];
+  for (let i = 0; i < allIds.length; i += PAGE) idBatches.push(allIds.slice(i, i + PAGE));
+
+  const results = await Promise.all(idBatches.map(hydrateIds));
+  return results.flat();
 }
