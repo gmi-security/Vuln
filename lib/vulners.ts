@@ -1,16 +1,17 @@
 import type { Severity } from "@/lib/types";
 
-// Vulners adapter — vulnerability intelligence & package audit.
+// Vulners adapter — two modes:
 //
-// Supports both the Vulners cloud API (vulners.com) and a self-hosted
-// instance. Configure with:
-//   VULNERS_API_KEY   API key
-//   VULNERS_URL       base URL (default: https://vulners.com — override for
-//                     self-hosted, e.g. http://165.245.174.129:5173)
+// 1. Cloud CVE enrichment (vulners.com or compatible self-hosted):
+//      VULNERS_API_KEY   API key for vulners.com
+//      VULNERS_URL       override base URL (default: https://vulners.com)
 //
-// The primary use-case is the /audit endpoint: given a list of installed
-// packages per host, Vulners returns CVEs that affect them. This can be
-// driven against the asset inventory's known OS/packages.
+// 2. Vulners Bridge (nmap --script vulners active scanner):
+//      VULNERS_BRIDGE_URL    http://<host>:8000
+//      VULNERS_BRIDGE_USER   username (default: admin)
+//      VULNERS_BRIDGE_PASS   password
+//    The bridge runs nmap -sV --script vulners against a target IP and
+//    returns CVEs matched to the detected service versions.
 
 export type VulnersConfig = {
   apiKey: string;
@@ -48,20 +49,107 @@ function mapSeverity(cvss: number): Severity {
   return "Info";
 }
 
+// --- Vulners Bridge (nmap active scanner) ------------------------------------
+export type VulnersBridgeConfig = {
+  url: string;
+  user: string;
+  pass: string;
+};
+
+export function vulnersBridgeConfig(): VulnersBridgeConfig | null {
+  const url = process.env.VULNERS_BRIDGE_URL?.trim();
+  const pass = process.env.VULNERS_BRIDGE_PASS?.trim();
+  if (!url || !pass) return null;
+  return {
+    url: url.replace(/\/+$/, ""),
+    user: process.env.VULNERS_BRIDGE_USER?.trim() || "admin",
+    pass,
+  };
+}
+
+export type VulnersBridgeFinding = {
+  cve: string;
+  cvss: number;
+  component: string; // e.g. "HTTP (Port 80)"
+  exploitAvailable: boolean;
+  target: string;
+};
+
+async function bridgeLogin(cfg: VulnersBridgeConfig): Promise<string> {
+  const res = await fetch(`${cfg.url}/api/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username: cfg.user, password: cfg.pass }),
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(`Bridge login failed: HTTP ${res.status}`);
+  const data: any = await res.json();
+  if (!data?.access_token) throw new Error("Bridge login: no access_token returned");
+  return data.access_token;
+}
+
+// Trigger an nmap --script vulners scan against one target via the bridge.
+export async function vulnersBridgeScanHost(target: string): Promise<VulnersBridgeFinding[]> {
+  const cfg = vulnersBridgeConfig();
+  if (!cfg) throw new Error("Vulners bridge is not configured.");
+  const token = await bridgeLogin(cfg);
+  const res = await fetch(`${cfg.url}/api/scan?target=${encodeURIComponent(target)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    throw new Error(
+      `Bridge scan ${res.status}: ${await res.text().catch(() => res.statusText)}`,
+    );
+  }
+  const data: any = await res.json();
+  return (data?.vulnerabilities ?? [])
+    .map((v: any) => ({
+      cve: String(v?.cve ?? "").toUpperCase(),
+      cvss: Number(v?.cvss ?? 0),
+      component: String(v?.component ?? ""),
+      exploitAvailable: String(v?.status ?? "").toLowerCase().includes("exploit"),
+      target,
+    }))
+    .filter((f: VulnersBridgeFinding) => f.cve.startsWith("CVE-"));
+}
+
 // --- Reachability probe -----------------------------------------------------
+// Checks bridge first (if configured), then cloud API.
 export async function vulnersStatus(): Promise<{
   configured: boolean;
   reachable: boolean;
   status: string;
   message: string;
 }> {
+  const bridge = vulnersBridgeConfig();
+  if (bridge) {
+    try {
+      await bridgeLogin(bridge);
+      return {
+        configured: true,
+        reachable: true,
+        status: "Connected",
+        message: "Vulners bridge reachable (nmap active scanner).",
+      };
+    } catch (err) {
+      return {
+        configured: true,
+        reachable: false,
+        status: "Unreachable",
+        message: err instanceof Error ? err.message : "Bridge connection failed.",
+      };
+    }
+  }
+
   const config = vulnersConfig();
   if (!config) {
     return {
       configured: false,
       reachable: false,
       status: "Not Configured",
-      message: "Set VULNERS_API_KEY and optionally VULNERS_URL for a self-hosted instance.",
+      message:
+        "Set VULNERS_API_KEY for cloud CVE enrichment, or VULNERS_BRIDGE_URL + VULNERS_BRIDGE_PASS for the nmap active scanner.",
     };
   }
   try {
@@ -71,12 +159,12 @@ export async function vulnersStatus(): Promise<{
       body: JSON.stringify({ query: "type:cve", skip: 0, size: 1, apiKey: config.apiKey }),
       cache: "no-store",
     });
-    const ok = res.ok || res.status === 400; // 400 = reached but bad params (still reachable)
+    const ok = res.ok || res.status === 400;
     return {
       configured: true,
       reachable: ok,
       status: ok ? "Connected" : `HTTP ${res.status}`,
-      message: ok ? "Vulners API reachable." : await res.text().catch(() => res.statusText),
+      message: ok ? "Vulners cloud API reachable." : await res.text().catch(() => res.statusText),
     };
   } catch (err) {
     return {

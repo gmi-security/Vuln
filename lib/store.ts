@@ -38,7 +38,10 @@ import { buildRisk, grcConfig, grcUpsertRisk, riskCode } from "@/lib/grc";
 import {
   vulnersConfig,
   vulnersEnrichCves,
+  vulnersBridgeConfig,
+  vulnersBridgeScanHost,
   type VulnersCveData,
+  type VulnersBridgeFinding,
 } from "@/lib/vulners";
 import {
   spiderfootConfig,
@@ -3170,6 +3173,149 @@ export async function importFromVulners(): Promise<VulnersImportResult | { error
   return { cvesEnriched: enriched.size, findingsUpdated, exploitsFound };
 }
 
+// --- Vulners Bridge (nmap active scanner) ------------------------------------
+
+export type VulnersBridgeImportResult = {
+  hostsScanned: number;
+  findingsImported: number;
+  skipped: number;
+};
+
+// Scan each known asset IP via the Vulners bridge (nmap --script vulners -sV).
+// Findings are attributed to the same company as the asset.
+export async function importFromVulnersBridge(): Promise<
+  VulnersBridgeImportResult | { error: string }
+> {
+  if (!vulnersBridgeConfig()) {
+    return {
+      error:
+        "Vulners bridge is not configured. Set VULNERS_BRIDGE_URL and VULNERS_BRIDGE_PASS.",
+    };
+  }
+  const s = store();
+  const nowIso = new Date().toISOString();
+  let hostsScanned = 0;
+  let findingsImported = 0;
+  let skipped = 0;
+  const scanByCompany = new Map<string, InternalScan>();
+
+  // Collect unique IPs from asset inventory — scan each once.
+  const targets = new Map<string, { companyId: string; companyName: string; asset: InternalAsset }>();
+  for (const asset of s.assets.values()) {
+    for (const ip of asset.ipAddresses ?? []) {
+      if (!ip || targets.has(ip)) continue;
+      targets.set(ip, {
+        companyId: asset.companyId,
+        companyName: asset.companyName,
+        asset,
+      });
+    }
+  }
+
+  for (const [ip, { companyId, companyName, asset }] of Array.from(targets.entries())) {
+    let results: VulnersBridgeFinding[];
+    try {
+      results = await vulnersBridgeScanHost(ip);
+    } catch {
+      skipped += 1;
+      continue;
+    }
+    if (!results.length) { hostsScanned += 1; continue; }
+    hostsScanned += 1;
+
+    let scan = scanByCompany.get(companyId);
+    if (!scan) {
+      const folder = ensureFolder(s, companyId, "Vulners Bridge");
+      const scanId = nextId(s, "SCAN");
+      scan = {
+        id: scanId,
+        name: `Vulners Bridge — ${companyName}`,
+        companyId,
+        companyName,
+        folderId: folder.id,
+        folderName: folder.name,
+        connector: "vulners",
+        profile: "standard",
+        targets: [ip],
+        status: "Completed",
+        createdAt: nowIso,
+        startedAt: nowIso,
+        completedAt: nowIso,
+        findingsCount: 0,
+        severityCounts: emptySeverityCounts(),
+        hostsScanned: 0,
+        requestedBy: "imported@vulners-bridge",
+        durationMs: 1,
+        progressFrozenAt: 100,
+        seed: hashSeed(scanId),
+        vendor: null,
+        externalRef: `vulners-bridge:${companyId}`,
+      };
+      s.scans.set(scanId, scan);
+      scanByCompany.set(companyId, scan);
+    }
+
+    for (const v of results) {
+      const dedupeKey = `${v.cve}::${ip}`;
+      const existing = Array.from(s.findings.values()).find(
+        (f) => f.cve === v.cve && (f.asset === ip || f.asset === asset.hostname),
+      );
+      if (existing) {
+        if (v.exploitAvailable && !existing.exploitAvailable) {
+          existing.exploitAvailable = true;
+          rescoreFinding(s, existing);
+        }
+        existing.lastSeen = nowIso;
+        continue;
+      }
+      const severity = v.cvss >= 9 ? "Critical" : v.cvss >= 7 ? "High" : v.cvss >= 4 ? "Medium" : v.cvss > 0 ? "Low" : "Info";
+      const fid = nextId(s, "FIND");
+      const f: Finding = {
+        id: fid,
+        scanId: scan.id,
+        companyId,
+        companyName,
+        connector: "vulners",
+        cve: v.cve,
+        title: `${v.cve} — ${v.component}`,
+        severity: severity as Finding["severity"],
+        cvss: v.cvss,
+        cvssV2: 0,
+        cvssV3: v.cvss,
+        vpr: 0,
+        epss: 0,
+        asset: asset.hostname || ip,
+        port: v.component.match(/Port (\d+)/)?.[1] ?? "",
+        category: "Network Service",
+        description: `${v.cve} detected on ${v.component} at ${ip}`,
+        remediation: `Patch or mitigate ${v.component} — see ${v.cve} for details.`,
+        status: "Open",
+        assignee: null,
+        firstSeen: nowIso,
+        lastSeen: nowIso,
+        resolvedAt: null,
+        exploitAvailable: v.exploitAvailable,
+        kev: false,
+        ransomware: false,
+        assetExposure: asset.exposure ?? "Internal",
+        assetCriticality: asset.criticality ?? "Normal",
+        assetSource: "nmap",
+        realRisk: 0,
+        riskPriority: "Info",
+      };
+      rescoreFinding(s, f);
+      s.findings.set(fid, f);
+      scan.findingsCount += 1;
+      scan.severityCounts[f.severity] = (scan.severityCounts[f.severity] ?? 0) + 1;
+      scan.hostsScanned += 1;
+      findingsImported += 1;
+    }
+  }
+
+  await flushNow();
+  return { hostsScanned, findingsImported, skipped };
+}
+
 export type ArtemisImportResult = {
   findingsImported: number;
   tagsProcessed: number;
@@ -3279,7 +3425,8 @@ export async function syncAllConnectors(): Promise<SyncAllEntry[]> {
     { connector: "Artemis", ready: Boolean(artemisConfig()), run: importFromArtemis },
     { connector: "Burp", ready: Boolean(burpConfig()), run: importFromBurp },
     { connector: "Nmap", ready: Boolean(nmapConfig()), run: importFromNmap },
-    { connector: "Vulners", ready: Boolean(vulnersConfig()), run: importFromVulners },
+    { connector: "Vulners Enrichment", ready: Boolean(vulnersConfig()), run: importFromVulners },
+    { connector: "Vulners Bridge", ready: Boolean(vulnersBridgeConfig()), run: importFromVulnersBridge },
   ];
 
   const out: SyncAllEntry[] = [];
