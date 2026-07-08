@@ -4135,6 +4135,26 @@ export async function importFromCrowdstrikeSpotlight(): Promise<
   let skipped = 0;
   const hosts = new Set<string>();
   const scanByCompany = new Map<string, InternalScan>();
+  const falconCustomer = process.env.FALCON_CUSTOMER?.trim() || "";
+
+  // Build a dedupe index once — O(n) — instead of scanning all findings per item.
+  const existingDedupeKeys = new Set<string>();
+  const existingFindingByKey = new Map<string, Finding>();
+  for (const f of s.findings.values()) {
+    if (f.connector === "crowdstrike" && f.status !== "Resolved") {
+      const k = `${f.cve}::${f.asset}`;
+      existingDedupeKeys.add(k);
+      existingFindingByKey.set(k, f);
+    }
+  }
+
+  // Reuse existing spotlight scan per company (upsert by externalRef).
+  const existingScanByCompany = new Map<string, InternalScan>();
+  for (const scan of s.scans.values()) {
+    if (scan.externalRef?.startsWith("spotlight:")) {
+      existingScanByCompany.set(scan.companyId, scan);
+    }
+  }
 
   for (const item of items) {
     const assetKey = item.hostname || item.localIp;
@@ -4145,7 +4165,6 @@ export async function importFromCrowdstrikeSpotlight(): Promise<
     // named client company. Without it, findings match via Tidal asset lookup
     // then hostname tokens, then fall back to the internal org — only when no
     // FALCON_CUSTOMER is set (own-estate deployment).
-    const falconCustomer = process.env.FALCON_CUSTOMER?.trim() || "";
     const existingAsset = lookupAsset(s, item.hostname, undefined) ?? lookupAsset(s, item.localIp, undefined);
     let companyId: string | null | undefined = existingAsset?.companyId;
     if (!companyId && falconCustomer) {
@@ -4167,7 +4186,8 @@ export async function importFromCrowdstrikeSpotlight(): Promise<
     if (!companyId) { skipped += 1; continue; }
     hosts.add(assetKey);
 
-    let scan = scanByCompany.get(companyId);
+    // Reuse an existing scan for this company rather than creating a new one each sync.
+    let scan = scanByCompany.get(companyId) ?? existingScanByCompany.get(companyId);
     if (!scan) {
       const company = s.companies.get(companyId)!;
       const folder = ensureFolder(s, companyId, "Spotlight");
@@ -4197,14 +4217,13 @@ export async function importFromCrowdstrikeSpotlight(): Promise<
         externalRef: `spotlight:${companyId}`,
       };
       s.scans.set(scanId, scan);
-      scanByCompany.set(companyId, scan);
     }
+    scan.completedAt = nowIso;
+    scanByCompany.set(companyId, scan);
 
     const dedupeKey = `${item.cve}::${assetKey}`;
-    const existing = Array.from(s.findings.values()).find(
-      (f) => `${f.cve}::${f.asset}` === dedupeKey && f.status !== "Resolved",
-    );
-    if (existing) { existing.lastSeen = nowIso; continue; }
+    const existingFinding = existingFindingByKey.get(dedupeKey);
+    if (existingFinding) { existingFinding.lastSeen = nowIso; continue; }
 
     s.findings.set(`VLN-${(s.counter += 1)}`, {
       id: `VLN-${s.counter}`,
