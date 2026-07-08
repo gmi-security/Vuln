@@ -3887,6 +3887,70 @@ export function startTidalSync(): { started: boolean; error?: string } {
   return { started: true };
 }
 
+// --- CrowdStrike background sync state --------------------------------------
+
+export type CsSyncStatus = {
+  running: boolean;
+  phase: string;
+  startedAt: number;
+  finishedAt: number | null;
+  result: Record<string, number> | null;
+  error: string | null;
+};
+
+const csIdleState = (): CsSyncStatus => ({
+  running: false,
+  phase: "idle",
+  startedAt: 0,
+  finishedAt: null,
+  result: null,
+  error: null,
+});
+
+let csDevicesSync: CsSyncStatus = csIdleState();
+let csSpotlightSync: CsSyncStatus = csIdleState();
+
+export function getCsDevicesSyncStatus(): CsSyncStatus { return csDevicesSync; }
+export function getCsSpotlightSyncStatus(): CsSyncStatus { return csSpotlightSync; }
+
+export function startCsDevicesSync(): { started: boolean; error?: string } {
+  if (!falconConfig()) return { started: false, error: "CrowdStrike is not configured." };
+  if (csDevicesSync.running) return { started: false, error: "Devices sync already running." };
+  csDevicesSync = { running: true, phase: "Syncing", startedAt: Date.now(), finishedAt: null, result: null, error: null };
+  void (async () => {
+    try {
+      const r = await importFromCrowdstrike();
+      if ("error" in r) {
+        csDevicesSync = { ...csDevicesSync, running: false, phase: "Error", error: r.error, finishedAt: Date.now() };
+      } else {
+        csDevicesSync = { ...csDevicesSync, running: false, phase: "Done", result: r as Record<string, number>, finishedAt: Date.now() };
+      }
+    } catch (err) {
+      csDevicesSync = { ...csDevicesSync, running: false, phase: "Error", error: err instanceof Error ? err.message : "Sync failed.", finishedAt: Date.now() };
+    }
+  })();
+  return { started: true };
+}
+
+export function startCsSpotlightSync(): { started: boolean; error?: string } {
+  if (!falconConfig()) return { started: false, error: "CrowdStrike is not configured." };
+  if (csSpotlightSync.running) return { started: false, error: "Spotlight sync already running." };
+  csSpotlightSync = { running: true, phase: "Syncing", startedAt: Date.now(), finishedAt: null, result: null, error: null };
+  void (async () => {
+    try {
+      const r = await importFromCrowdstrikeSpotlight();
+      if ("error" in r) {
+        csSpotlightSync = { ...csSpotlightSync, running: false, phase: "Error", error: r.error, finishedAt: Date.now() };
+      } else {
+        csSpotlightSync = { ...csSpotlightSync, running: false, phase: "Done", result: r as Record<string, number>, finishedAt: Date.now() };
+      }
+    } catch (err) {
+      csSpotlightSync = { ...csSpotlightSync, running: false, phase: "Error", error: err instanceof Error ? err.message : "Sync failed.", finishedAt: Date.now() };
+    }
+  })();
+  return { started: true };
+}
+
 export type IntuneImportResult = {
   assetsUpserted: number;
   findingsRescored: number;

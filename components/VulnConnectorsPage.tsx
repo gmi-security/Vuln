@@ -43,6 +43,15 @@ type TidalSyncStatus = {
   error: string | null;
 };
 
+type CsSyncStatus = {
+  running: boolean;
+  phase: string;
+  startedAt: number;
+  finishedAt: number | null;
+  result: Record<string, number> | null;
+  error: string | null;
+};
+
 const cardIcon: Record<string, React.ElementType> = {
   nessus: IconRadar,
   vulners: IconPackage,
@@ -370,9 +379,11 @@ function IntegrationCard({ card }: { card: CardData }) {
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [progress, setProgress] = useState<TidalSyncStatus | null>(null);
+  const [csProgress, setCsProgress] = useState<CsSyncStatus | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
   const isTidal = card.id === "tidal";
+  const isCrowdstrike = card.id === "crowdstrike" || card.id === "crowdstrike-devices";
   // Offline upload fallback: Tidal takes a CSV inventory export, Burp takes an
   // XML issue export. Same flow, different endpoint/format.
   const uploadSpec =
@@ -433,6 +444,7 @@ function IntegrationCard({ card }: { card: CardData }) {
     setSyncing(true);
     setSyncMsg(null);
     setProgress(null);
+    setCsProgress(null);
     try {
       const res = await fetch(syncUrl, { method: "POST" });
       const json = await res.json().catch(() => ({}));
@@ -442,9 +454,11 @@ function IntegrationCard({ card }: { card: CardData }) {
         return;
       }
       if (isTidal) {
-        // Background job — poll for progress until it finishes.
         setProgress(json.status ?? null);
         await pollTidal();
+      } else if (isCrowdstrike) {
+        setCsProgress(json.status ?? null);
+        await pollCrowdstrike();
       } else {
         setSyncMsg({ ok: true, text: summarizeSync(json.result ?? json) });
         setSyncing(false);
@@ -453,6 +467,29 @@ function IntegrationCard({ card }: { card: CardData }) {
       setSyncMsg({ ok: false, text: err instanceof Error ? err.message : "Sync failed." });
       setSyncing(false);
     }
+  }
+
+  async function pollCrowdstrike() {
+    for (let i = 0; i < 600; i += 1) {
+      await new Promise((r) => setTimeout(r, 2000));
+      let st: CsSyncStatus | null = null;
+      try {
+        const r = await fetch(syncUrl!, { method: "GET", cache: "no-store" });
+        const j = await r.json().catch(() => ({}));
+        st = j.status ?? null;
+      } catch {
+        continue;
+      }
+      if (!st) break;
+      setCsProgress(st);
+      if (!st.running) {
+        if (st.error) setSyncMsg({ ok: false, text: st.error });
+        else if (st.result) setSyncMsg({ ok: true, text: summarizeSync(st.result) });
+        else setSyncMsg({ ok: true, text: "Sync complete." });
+        break;
+      }
+    }
+    setSyncing(false);
   }
 
   async function pollTidal() {
@@ -648,6 +685,17 @@ function IntegrationCard({ card }: { card: CardData }) {
           </button>
         ) : null}
       </div>
+
+      {isCrowdstrike && syncing && csProgress ? (
+        <div className="mt-3 rounded-lg border border-zinc-800 bg-[#090909] px-3 py-3">
+          <div className="flex items-center justify-between text-xs text-zinc-300">
+            <span className="flex items-center gap-1.5">
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#ff4d57]" />
+              {csProgress.phase === "Syncing" ? "Syncing from CrowdStrike API…" : csProgress.phase}
+            </span>
+          </div>
+        </div>
+      ) : null}
 
       {isTidal && syncing && progress ? (
         <div className="mt-3 rounded-lg border border-zinc-800 bg-[#090909] px-3 py-3">

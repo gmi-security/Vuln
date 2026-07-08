@@ -1,17 +1,17 @@
 import { NextResponse } from "next/server";
-import { ensureHydrated, importFromCrowdstrikeSpotlight } from "@/lib/store";
+import { ensureHydrated, startCsSpotlightSync, getCsSpotlightSyncStatus } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 300;
 
-// Pull CrowdStrike Falcon Spotlight open vulnerabilities as vuln-class findings.
-// Requires FALCON_CLIENT_ID / FALCON_CLIENT_SECRET / FALCON_CLOUD and the
-// spotlight-vulnerabilities:read scope on the API client.
 export async function POST() {
   await ensureHydrated();
-  const result = await importFromCrowdstrikeSpotlight();
-  if ("error" in result) {
-    return NextResponse.json({ error: result.error }, { status: 400 });
+  const launch = startCsSpotlightSync();
+  if (!launch.started && launch.error) {
+    return NextResponse.json({ error: launch.error }, { status: 400 });
   }
-  return NextResponse.json({ result });
+  return NextResponse.json({ status: getCsSpotlightSyncStatus() });
+}
+
+export async function GET() {
+  return NextResponse.json({ status: getCsSpotlightSyncStatus() });
 }
