@@ -47,16 +47,28 @@ export type FalconAsset = {
   exposure: AssetExposure;
 };
 
+// Wraps fetch with a hard timeout. Node's native fetch has no default timeout
+// so CrowdStrike API stalls would hang background tasks indefinitely.
+function timedFetch(url: string, init: RequestInit, timeoutMs = 60_000): Promise<Response> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  return fetch(url, { ...init, signal: ac.signal }).finally(() => clearTimeout(timer));
+}
+
 async function falconToken(config: FalconConfig): Promise<string> {
-  const res = await fetch(`${config.baseUrl}/oauth2/token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      client_id: config.clientId,
-      client_secret: config.clientSecret,
-    }),
-    cache: "no-store",
-  });
+  const res = await timedFetch(
+    `${config.baseUrl}/oauth2/token`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: config.clientId,
+        client_secret: config.clientSecret,
+      }),
+      cache: "no-store",
+    },
+    15_000,
+  );
   if (!res.ok) {
     throw new Error(
       `Falcon auth failed: ${res.status} ${await res.text().catch(() => res.statusText)}`,
@@ -143,7 +155,7 @@ export async function spotlightListFindings(): Promise<SpotlightFinding[]> {
     url.searchParams.set("filter", "status:'open',status:'reopen'");
     url.searchParams.set("limit", "400");
     if (after) url.searchParams.set("after", after);
-    const r = await fetch(url.toString(), { headers: authHeader, cache: "no-store" });
+    const r = await timedFetch(url.toString(), { headers: authHeader, cache: "no-store" });
     if (!r.ok) {
       throw new Error(`Spotlight query ${r.status}: ${await r.text().catch(() => r.statusText)}`);
     }
@@ -184,7 +196,7 @@ export async function spotlightListFindings(): Promise<SpotlightFinding[]> {
 
   const results = await Promise.all(
     batches.map(async (batch) => {
-      const r = await fetch(
+      const r = await timedFetch(
         `${config.baseUrl}/spotlight/entities/vulnerabilities/v2?ids=${batch.join("&ids=")}`,
         { headers: authHeader, cache: "no-store" },
       );
@@ -210,7 +222,7 @@ export async function falconListAssets(): Promise<FalconAsset[]> {
   const PAGE = 500;
 
   const fetchIdPage = async (offset: number): Promise<{ ids: string[]; total: number }> => {
-    const r = await fetch(
+    const r = await timedFetch(
       `${config.baseUrl}/devices/queries/devices/v1?limit=${PAGE}&offset=${offset}`,
       { headers: authHeader, cache: "no-store" },
     );
@@ -227,12 +239,15 @@ export async function falconListAssets(): Promise<FalconAsset[]> {
   };
 
   const hydrateIds = async (ids: string[]): Promise<FalconAsset[]> => {
-    const r = await fetch(`${config.baseUrl}/devices/entities/devices/v2`, {
-      method: "POST",
-      headers: { ...authHeader, "Content-Type": "application/json" },
-      body: JSON.stringify({ ids }),
-      cache: "no-store",
-    });
+    const r = await timedFetch(
+      `${config.baseUrl}/devices/entities/devices/v2`,
+      {
+        method: "POST",
+        headers: { ...authHeader, "Content-Type": "application/json" },
+        body: JSON.stringify({ ids }),
+        cache: "no-store",
+      },
+    );
     if (!r.ok) {
       throw new Error(
         `Falcon devices entities ${r.status}: ${await r.text().catch(() => r.statusText)}`,
