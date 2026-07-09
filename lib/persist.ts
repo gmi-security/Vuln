@@ -142,7 +142,7 @@ export async function saveSnapshot(data: unknown): Promise<void> {
        ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = now()`,
       [JSON.stringify(data)],
     ),
-    10000,
+    60000,
     "saveSnapshot",
   );
 }
