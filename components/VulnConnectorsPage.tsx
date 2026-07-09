@@ -112,8 +112,9 @@ function summarizeSync(result: any): string {
   if (n(result.companiesMatched) != null) parts.push(`${result.companiesMatched} companies`);
   if (n(result.cvesEnriched) != null) parts.push(`${result.cvesEnriched} CVEs enriched`);
   if (n(result.findingsUpdated) != null) parts.push(`${result.findingsUpdated} findings updated`);
+  if (n(result.hostsAffected) != null) parts.push(`${result.hostsAffected} hosts`);
   if (n(result.exploitsFound)) parts.push(`${result.exploitsFound} with exploits`);
-  const skipped = Array.isArray(result.skipped) ? result.skipped.length : 0;
+  const skipped = Array.isArray(result.skipped) ? result.skipped.length : (typeof result.skipped === "number" ? result.skipped : 0);
   if (skipped) parts.push(`${skipped} skipped`);
   return parts.length ? `Synced — ${parts.join(", ")}.` : "Sync complete.";
 }
@@ -470,6 +471,7 @@ function IntegrationCard({ card }: { card: CardData }) {
   }
 
   async function pollCrowdstrike() {
+    let finished = false;
     for (let i = 0; i < 600; i += 1) {
       await new Promise((r) => setTimeout(r, 2000));
       let st: CsSyncStatus | null = null;
@@ -483,12 +485,14 @@ function IntegrationCard({ card }: { card: CardData }) {
       if (!st) break;
       setCsProgress(st);
       if (!st.running) {
+        finished = true;
         if (st.error) setSyncMsg({ ok: false, text: st.error });
         else if (st.result) setSyncMsg({ ok: true, text: summarizeSync(st.result) });
         else setSyncMsg({ ok: true, text: "Sync complete." });
         break;
       }
     }
+    if (!finished) setSyncMsg({ ok: false, text: "Sync timed out waiting for a response. Check /api/crowdstrike/debug." });
     setSyncing(false);
   }
 
