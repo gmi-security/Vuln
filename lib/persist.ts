@@ -13,13 +13,10 @@ let ready: Promise<void> | null = null;
 // Detect common misconfigurations in DATABASE_URL.
 function diagnoseDatabaseUrl(url: string): string | null {
   if (!url) return "DATABASE_URL is not set.";
-  // DO private VPC hostname contains ".private-" or ".i." — unreachable from
-  // App Platform without a VPC attachment. Must use the public hostname instead.
-  if (/\.private[-.]/.test(url) || /db\.ondigitalocean\.com/.test(url) === false) {
-    // not necessarily wrong, but let through
-  }
-  if (url.includes(".i.") && !url.includes(".db.ondigitalocean.com")) {
-    return "DATABASE_URL appears to use a private VPC hostname (.i.). Use the public hostname from the DigitalOcean database dashboard (Connection Details → Public Network).";
+  // DO private VPC hostnames have a "private-" prefix — unreachable from
+  // App Platform without VPC peering. Public hostnames have no "private-" prefix.
+  if (/\/\/private-/.test(url) && url.includes(".db.ondigitalocean.com")) {
+    return "DATABASE_URL uses the private VPC hostname ('private-' prefix). Use the public hostname from the DigitalOcean database dashboard (Connection Details → Public Network).";
   }
   if (!url.startsWith("postgres://") && !url.startsWith("postgresql://")) {
     return `DATABASE_URL does not look like a Postgres URL (got: ${url.slice(0, 30)}…).`;
