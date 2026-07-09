@@ -43,15 +43,19 @@ export default function VulnDashboardPage() {
     }
   }, []);
 
-  useEffect(() => {
-    void load();
-    const timer = setInterval(() => void load(), 30_000);
-    return () => clearInterval(timer);
-  }, [load]);
-
   const running = scans.filter(
     (s) => s.status === "Running" || s.status === "Paused",
   );
+
+  // Poll fast when scans are active (10s), slow when idle (60s).
+  // Interval resets whenever running-scan count changes.
+  useEffect(() => {
+    void load();
+    const interval = running.length > 0 ? 10_000 : 60_000;
+    const timer = setInterval(() => void load(), interval);
+    return () => clearInterval(timer);
+  }, [load, running.length]);
+
   const recentScans = scans.slice(0, 6);
   const maxSeverity = Math.max(
     1,
