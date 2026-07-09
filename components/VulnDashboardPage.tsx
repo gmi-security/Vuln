@@ -33,10 +33,11 @@ export default function VulnDashboardPage() {
         fetch("/api/scans", { cache: "no-store" }),
         fetch("/api/metrics", { cache: "no-store" }),
       ]);
+      if (!scansRes.ok || !metricsRes.ok) return; // keep last good state on server errors
       const scansJson = await scansRes.json();
       const metricsJson = await metricsRes.json();
-      setScans(scansJson.scans ?? []);
-      setMetrics(metricsJson.metrics ?? null);
+      if (scansJson.scans) setScans(scansJson.scans);
+      if (metricsJson.metrics) setMetrics(metricsJson.metrics);
     } catch {
       // keep the last good snapshot on transient errors
     }
@@ -44,7 +45,7 @@ export default function VulnDashboardPage() {
 
   useEffect(() => {
     void load();
-    const timer = setInterval(() => void load(), 5000);
+    const timer = setInterval(() => void load(), 30_000);
     return () => clearInterval(timer);
   }, [load]);
 
@@ -56,6 +57,8 @@ export default function VulnDashboardPage() {
     1,
     ...SEVERITIES.map((s) => metrics?.severityCounts[s] ?? 0),
   );
+
+  const hasData = metrics !== null && metrics.totalOpen > 0;
 
   return (
     <VulnShell
@@ -107,6 +110,19 @@ export default function VulnDashboardPage() {
           icon={<IconGauge size={26} />}
         />
       </div>
+
+      {metrics !== null && !hasData ? (
+        <div className="rounded-2xl border border-[rgba(179,14,20,0.22)] bg-[rgba(179,14,20,0.06)] px-6 py-5">
+          <div className="text-sm font-semibold text-white">No findings yet</div>
+          <p className="mt-1 text-sm text-zinc-400">
+            The console is live but has no scan data yet. Go to{" "}
+            <Link href="/connectors" className="text-[#ff4d57] hover:text-white transition">
+              Connectors
+            </Link>{" "}
+            and click <strong className="text-zinc-200">Sync now</strong> on CrowdStrike Devices and CrowdStrike Spotlight to import your first dataset.
+          </p>
+        </div>
+      ) : null}
 
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
         <PanelCard

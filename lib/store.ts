@@ -347,13 +347,9 @@ async function doHydrate(): Promise<void> {
   store(); // seed if still uninitialized
   persistGlobal.__vulnHydrated = true;
   startFlusher();
-  if (persistenceEnabled() && globalStore.__vulnStore) {
-    try {
-      await saveSnapshot(serializeStore(globalStore.__vulnStore));
-    } catch (err) {
-      console.error("[persist] initial save failed:", err);
-    }
-  }
+  // Kick off an initial persist in the background — the flusher covers it
+  // anyway and we must not block the first request waiting for a DB write.
+  void persistSnapshot();
 }
 
 function startFlusher(): void {
