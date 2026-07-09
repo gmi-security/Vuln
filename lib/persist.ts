@@ -10,6 +10,23 @@ import { Pool } from "pg";
 let pool: Pool | null = null;
 let ready: Promise<void> | null = null;
 
+// Detect common misconfigurations in DATABASE_URL.
+function diagnoseDatabaseUrl(url: string): string | null {
+  if (!url) return "DATABASE_URL is not set.";
+  // DO private VPC hostname contains ".private-" or ".i." — unreachable from
+  // App Platform without a VPC attachment. Must use the public hostname instead.
+  if (/\.private[-.]/.test(url) || /db\.ondigitalocean\.com/.test(url) === false) {
+    // not necessarily wrong, but let through
+  }
+  if (url.includes(".i.") && !url.includes(".db.ondigitalocean.com")) {
+    return "DATABASE_URL appears to use a private VPC hostname (.i.). Use the public hostname from the DigitalOcean database dashboard (Connection Details → Public Network).";
+  }
+  if (!url.startsWith("postgres://") && !url.startsWith("postgresql://")) {
+    return `DATABASE_URL does not look like a Postgres URL (got: ${url.slice(0, 30)}…).`;
+  }
+  return null;
+}
+
 function getPool(): Pool | null {
   if (!process.env.DATABASE_URL) return null;
   if (!pool) {
@@ -22,7 +39,13 @@ function getPool(): Pool | null {
       connectionTimeoutMillis: 8000,
       idleTimeoutMillis: 30000,
     });
-    pool.on("error", (err) => console.error("[persist] pool error:", err.message));
+    pool.on("error", (err) => {
+      console.error("[persist] pool error:", err.message);
+      // Reset the cached pool on fatal errors so the next getPool() call
+      // creates a fresh one that can re-resolve a recovered hostname.
+      pool = null;
+      ready = null;
+    });
   }
   return pool;
 }
@@ -62,6 +85,25 @@ async function ensureTable(): Promise<void> {
 
 export function persistenceEnabled(): boolean {
   return Boolean(process.env.DATABASE_URL);
+}
+
+// Explicit connectivity probe: connect, run SELECT 1, return ok/error.
+export async function pingDb(): Promise<{ ok: boolean; error?: string; hint?: string }> {
+  const url = process.env.DATABASE_URL ?? "";
+  const configHint = diagnoseDatabaseUrl(url);
+  if (!url) return { ok: false, error: "DATABASE_URL is not set.", hint: configHint ?? undefined };
+  const p = getPool();
+  if (!p) return { ok: false, error: "Could not create connection pool.", hint: configHint ?? undefined };
+  try {
+    await withTimeout(p.query("SELECT 1"), 8000, "ping");
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+      hint: configHint ?? "Check that DATABASE_URL in DigitalOcean uses the PUBLIC connection string (Connection Details → Public Network).",
+    };
+  }
 }
 
 export async function snapshotMeta(): Promise<{ updatedAt: string | null }> {

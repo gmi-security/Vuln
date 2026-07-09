@@ -26,6 +26,10 @@ const SEVERITIES: Severity[] = ["Critical", "High", "Medium", "Low", "Info"];
 export default function VulnDashboardPage() {
   const [scans, setScans] = useState<Scan[]>([]);
   const [metrics, setMetrics] = useState<QuantifyMetrics | null>(null);
+  const [dbStatus, setDbStatus] = useState<{ reachable: boolean | null; error: string | null }>({
+    reachable: null,
+    error: null,
+  });
 
   const load = useCallback(async () => {
     try {
@@ -41,6 +45,19 @@ export default function VulnDashboardPage() {
     } catch {
       // keep the last good snapshot on transient errors
     }
+  }, []);
+
+  // Check DB health once on mount to surface connection errors early.
+  useEffect(() => {
+    void fetch("/api/health", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((j) => {
+        setDbStatus({
+          reachable: j.persistence?.dbReachable ?? null,
+          error: j.persistence?.dbError ?? null,
+        });
+      })
+      .catch(() => setDbStatus({ reachable: false, error: "Health check failed." }));
   }, []);
 
   const running = scans.filter(
@@ -76,6 +93,18 @@ export default function VulnDashboardPage() {
         </Link>
       }
     >
+      {dbStatus.reachable === false ? (
+        <div className="rounded-2xl border border-amber-900/60 bg-amber-950/30 px-5 py-4 text-sm">
+          <span className="font-semibold text-amber-300">⚠ Database not connected</span>
+          <span className="ml-2 text-amber-400/80">
+            {dbStatus.error ?? "DATABASE_URL may be missing or unreachable."}
+          </span>
+          <span className="ml-2 text-amber-600">
+            All sync data will be lost on redeploy until this is fixed. Check DATABASE_URL in your DigitalOcean environment variables.
+          </span>
+        </div>
+      ) : null}
+
       <div className="grid gap-5 md:grid-cols-2 2xl:grid-cols-4">
         <StatCard
           label="Open findings"
