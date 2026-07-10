@@ -4,9 +4,16 @@ import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import localFont from "next/font/local";
-import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
-import { baseNavItems } from "@/lib/navigation";
+import { PanelLeftClose, PanelLeftOpen, SlidersHorizontal } from "lucide-react";
+import { baseNavItems, type VulnNavItem } from "@/lib/navigation";
 import type { Connector } from "@/lib/types";
+
+// Appended after the shared nav list: console-level configuration screens.
+const settingsNavItems: VulnNavItem[] = [
+  { label: "Settings", icon: SlidersHorizontal, href: "/settings" },
+];
+
+const navItems: VulnNavItem[] = [...baseNavItems, ...settingsNavItems];
 
 const vibrocentric = localFont({
   src: "../fonts/Vibrocentric Rg.otf",
@@ -99,7 +106,7 @@ export default function VulnSidebar({
       )}
 
       <nav className={collapsed ? "space-y-2 px-3" : "space-y-2 px-4"}>
-        {baseNavItems.map((item) => {
+        {navItems.map((item) => {
           const Icon = item.icon;
           const active = isActivePath(pathname, item.href);
 

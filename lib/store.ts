@@ -61,8 +61,20 @@ import {
   type ComplianceSignals,
 } from "@/lib/compliance";
 import { dueInfo, ssvc, type SsvcDecision } from "@/lib/ssvc";
-import { loadSnapshot, persistenceEnabled, saveSnapshot } from "@/lib/persist";
+import {
+  appendMetricsSnapshots,
+  loadSnapshot,
+  persistenceEnabled,
+  saveSnapshot,
+} from "@/lib/persist";
+import {
+  emailConfigured,
+  sendMonthlyReportEmail,
+  sendSyncAlerts,
+  type SyncAlertFinding,
+} from "@/lib/alerts";
 import type {
+  AppSettings,
   AssetSource,
   AttackEntry,
   AttackHop,
@@ -80,7 +92,10 @@ import type {
   QuantifyMetrics,
   Scan,
   ScanStatus,
+  ScheduleSettings,
   Severity,
+  SlaSettings,
+  SlaSeverity,
 } from "@/lib/types";
 
 // Threat + environment enrichment for a finding: KEV status, the asset's
@@ -197,11 +212,63 @@ type InternalFolder = {
 
 type InternalAsset = Omit<InventoryAsset, "openFindings">;
 
-type Settings = {
-  // When on, discovering a known-but-unscanned asset (via the coverage diff or
-  // a Tidal sync) automatically launches a scan for it.
-  autoScanNewAssets: boolean;
+type Settings = AppSettings;
+
+function defaultSettings(): Settings {
+  return {
+    autoScanNewAssets: false,
+    schedule: {
+      autoSyncEnabled: false,
+      autoSyncIntervalHours: 24,
+      alertsEnabled: true,
+      monthlyReportsEnabled: false,
+    },
+    sla: { Critical: 7, High: 30, Medium: 60, Low: 90 },
+  };
+}
+
+// Merge a persisted settings blob over the defaults so snapshots written
+// before a field existed hydrate cleanly (missing nested keys get defaults).
+function normalizeSettings(raw: unknown): Settings {
+  const d = defaultSettings();
+  if (raw === null || typeof raw !== "object") return d;
+  const obj = raw as Partial<Settings> & {
+    schedule?: Partial<ScheduleSettings>;
+    sla?: Partial<SlaSettings>;
+  };
+  return {
+    autoScanNewAssets:
+      typeof obj.autoScanNewAssets === "boolean"
+        ? obj.autoScanNewAssets
+        : d.autoScanNewAssets,
+    schedule: { ...d.schedule, ...(obj.schedule ?? {}) },
+    sla: { ...d.sla, ...(obj.sla ?? {}) },
+  };
+}
+
+// Bookkeeping the scheduler + alerting need to survive restarts (persisted in
+// the snapshot's meta row so a redeploy never double-runs a sync or report).
+type StoreMeta = {
+  lastAutoSyncAt: number | null; // epoch ms of the last scheduler-launched sync-all
+  lastAlertCheckAt: string | null; // ISO — findings first seen after this are "new"
+  lastMetricsSnapshotDay: string | null; // "YYYY-MM-DD" (UTC)
+  lastMonthlyReportMonth: string | null; // "YYYY-MM" (UTC)
 };
+
+function defaultMeta(): StoreMeta {
+  return {
+    lastAutoSyncAt: null,
+    lastAlertCheckAt: null,
+    lastMetricsSnapshotDay: null,
+    lastMonthlyReportMonth: null,
+  };
+}
+
+function normalizeMeta(raw: unknown): StoreMeta {
+  const d = defaultMeta();
+  if (raw === null || typeof raw !== "object") return d;
+  return { ...d, ...(raw as Partial<StoreMeta>) };
+}
 
 type StoreShape = {
   companies: Map<string, InternalCompany>;
@@ -210,6 +277,7 @@ type StoreShape = {
   findings: Map<string, Finding>;
   assets: Map<string, InternalAsset>;
   settings: Settings;
+  meta: StoreMeta;
   seeded: boolean;
   counter: number;
 };
@@ -239,7 +307,8 @@ function store(): StoreShape {
       scans: new Map(),
       findings: new Map(),
       assets: new Map(),
-      settings: { autoScanNewAssets: false },
+      settings: defaultSettings(),
+      meta: defaultMeta(),
       seeded: false,
       counter: 1000,
     };
@@ -258,6 +327,7 @@ function serializeStore(s: StoreShape) {
     findings: [...s.findings.entries()],
     assets: [...s.assets.entries()],
     settings: s.settings,
+    meta: s.meta,
     counter: s.counter,
   };
 }
@@ -268,7 +338,8 @@ function deserializeStore(obj: {
   scans?: [string, InternalScan][];
   findings?: [string, Finding][];
   assets?: [string, InternalAsset][];
-  settings?: Settings;
+  settings?: unknown;
+  meta?: unknown;
   counter?: number;
 }): StoreShape {
   return {
@@ -277,7 +348,8 @@ function deserializeStore(obj: {
     scans: new Map(obj.scans ?? []),
     findings: new Map(obj.findings ?? []),
     assets: new Map(obj.assets ?? []),
-    settings: obj.settings ?? { autoScanNewAssets: false },
+    settings: normalizeSettings(obj.settings),
+    meta: normalizeMeta(obj.meta),
     seeded: true,
     counter: obj.counter ?? 1000,
   };
@@ -296,6 +368,11 @@ const persistGlobal = globalThis as unknown as {
   // Set by mutations, cleared by a successful snapshot save, so the interval
   // flusher can skip serializing an unchanged store.
   __vulnDirty?: boolean;
+  // 60s scheduler driving auto-sync, daily metrics snapshots, and monthly
+  // reports (same singleton pattern as the flusher).
+  __vulnScheduler?: ReturnType<typeof setInterval>;
+  // In-flight scheduler tick, so a slow tick is never overlapped by the next.
+  __vulnSchedulerTick?: Promise<void> | null;
 };
 
 // True when persistence is fail-closed after a hydration failure. Lib callers
@@ -403,6 +480,7 @@ async function doHydrate(): Promise<void> {
   store(); // seed if still uninitialized
   persistGlobal.__vulnHydrated = true;
   startFlusher();
+  startScheduler();
   // Kick off an initial persist in the background — the flusher covers it
   // anyway and we must not block the first request waiting for a DB write.
   // (No-op while persistence is blocked.)
@@ -426,6 +504,268 @@ function startFlusher(): void {
     if (!persistGlobal.__vulnDirty) return;
     void persistSnapshot();
   }, 6000);
+}
+
+// --- in-process scheduler ----------------------------------------------------
+// Drives scheduled syncs (settings.schedule.autoSyncEnabled), the daily
+// metrics-history snapshot, and monthly exec report emails. Runs from process
+// boot via instrumentation.ts (register() → ensureHydrated → here), not just
+// from the first request, and is a globalThis singleton like the flusher.
+
+function todayUtc(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function startScheduler(): void {
+  if (persistGlobal.__vulnScheduler) return;
+  persistGlobal.__vulnScheduler = setInterval(() => {
+    if (persistGlobal.__vulnSchedulerTick) return; // previous tick still running
+    const run = schedulerTick().catch((err) => {
+      console.error("[scheduler] tick failed:", err);
+    });
+    persistGlobal.__vulnSchedulerTick = run.finally(() => {
+      if (persistGlobal.__vulnSchedulerTick === run) {
+        persistGlobal.__vulnSchedulerTick = null;
+      }
+    });
+  }, 60_000);
+}
+
+async function schedulerTick(): Promise<void> {
+  const s = store();
+  const sched = s.settings.schedule;
+  const now = Date.now();
+
+  // Scheduled sync-all: interval elapsed and nothing currently running.
+  // lastAutoSyncAt is persisted, so a restart doesn't immediately re-sync.
+  if (sched.autoSyncEnabled && !syncAllStatus().running) {
+    const intervalHours = Math.min(168, Math.max(1, sched.autoSyncIntervalHours));
+    const intervalMs = intervalHours * 3_600_000;
+    const last = s.meta.lastAutoSyncAt ?? 0;
+    if (now - last >= intervalMs) {
+      s.meta.lastAutoSyncAt = now;
+      markDirty();
+      const r = startSyncAll();
+      if (r.started) {
+        console.log("[scheduler] auto sync-all started");
+      }
+    }
+  }
+
+  // Daily metrics snapshot (UTC), so trends accumulate even on days with no
+  // sync. Post-sync snapshots also stamp the day, avoiding duplicates.
+  if (s.meta.lastMetricsSnapshotDay !== todayUtc()) {
+    try {
+      await snapshotMetricsNow();
+    } catch (err) {
+      console.error("[scheduler] daily metrics snapshot failed:", err);
+    }
+  }
+
+  // Monthly exec report emails on the 1st (UTC), once per month.
+  const month = todayUtc().slice(0, 7);
+  if (
+    sched.monthlyReportsEnabled &&
+    new Date().getUTCDate() === 1 &&
+    s.meta.lastMonthlyReportMonth !== month
+  ) {
+    s.meta.lastMonthlyReportMonth = month;
+    markDirty();
+    try {
+      await sendMonthlyExecReports(month);
+    } catch (err) {
+      console.error("[scheduler] monthly report send failed:", err);
+    }
+  }
+}
+
+// Test customers (e.g. SplashWorks) never receive or appear in outbound
+// notifications — they exist to demo the console, not to page anyone.
+function isAlertExcludedCompany(name: string): boolean {
+  return /splashworks/i.test(name);
+}
+
+// Post-sync hooks: metrics history append + alert evaluation. Best-effort —
+// a failure here must never disturb the sync-all status the UI is polling.
+async function runPostSyncTasks(results: SyncAllEntry[]): Promise<void> {
+  try {
+    await snapshotMetricsNow();
+  } catch (err) {
+    console.error("[post-sync] metrics snapshot failed:", err);
+  }
+  try {
+    await evaluateAlertsAfterSync(results);
+  } catch (err) {
+    console.error("[post-sync] alert evaluation failed:", err);
+  }
+}
+
+// Evaluate what's alert-worthy since the last check and hand it to
+// lib/alerts.ts. The check watermark always advances (even while alerting is
+// disabled) so re-enabling alerts doesn't replay weeks of old findings.
+async function evaluateAlertsAfterSync(results: SyncAllEntry[]): Promise<void> {
+  const s = store();
+  const since = s.meta.lastAlertCheckAt;
+  const nowIso = new Date().toISOString();
+  s.meta.lastAlertCheckAt = nowIso;
+  markDirty();
+  if (!s.settings.schedule.alertsEnabled) return;
+
+  const failures = results
+    .filter((r) => r.configured && !r.ok)
+    .map((r) => ({ connector: r.connector, error: r.error }));
+
+  const toAlertFinding = (f: Finding): SyncAlertFinding => ({
+    companyId: f.companyId,
+    companyName: f.companyName,
+    cve: f.cve,
+    title: f.title,
+    severity: f.severity,
+    kev: f.kev,
+    ransomware: f.ransomware,
+  });
+
+  // "New" = first seen after the previous evaluation. On the very first
+  // evaluation there is no watermark, so nothing is treated as new (avoids
+  // flooding the channel with the entire backlog).
+  let newSevere: SyncAlertFinding[] = [];
+  let newThreat: SyncAlertFinding[] = [];
+  if (since) {
+    const sinceMs = new Date(since).getTime();
+    const fresh = Array.from(s.findings.values()).filter(
+      (f) =>
+        isOpen(f) &&
+        new Date(f.firstSeen).getTime() > sinceMs &&
+        !isAlertExcludedCompany(f.companyName),
+    );
+    newSevere = fresh
+      .filter((f) => f.severity === "Critical" || f.severity === "High")
+      .map(toAlertFinding);
+    newThreat = fresh.filter((f) => f.kev || f.ransomware).map(toAlertFinding);
+  }
+
+  if (failures.length === 0 && newSevere.length === 0 && newThreat.length === 0) {
+    return;
+  }
+  await sendSyncAlerts({ failures, newSevere, newThreat });
+}
+
+// --- metrics history snapshots -------------------------------------------------
+
+// Mean days-to-remediate over findings resolved in the last 90 days.
+function mttr90Days(findings: Finding[]): number | null {
+  const cutoff = Date.now() - 90 * 86_400_000;
+  const resolved = findings.filter(
+    (f) =>
+      f.status === "Resolved" &&
+      f.resolvedAt &&
+      new Date(f.resolvedAt).getTime() >= cutoff,
+  );
+  if (resolved.length === 0) return null;
+  const meanMs =
+    resolved.reduce(
+      (sum, f) =>
+        sum + (new Date(f.resolvedAt!).getTime() - new Date(f.firstSeen).getTime()),
+      0,
+    ) / resolved.length;
+  return Math.round((meanMs / 86_400_000) * 10) / 10;
+}
+
+type MetricsSnapshotData = {
+  totalOpen: number;
+  severityCounts: Record<Severity, number>;
+  exploitableOpen: number;
+  kevOpen: number;
+  composite: number;
+  exposureScore: number;
+  resolvedTotal: number;
+  mttrDays: number | null;
+};
+
+function metricsSnapshotData(
+  metrics: QuantifyMetrics,
+  findings: Finding[],
+): MetricsSnapshotData {
+  return {
+    totalOpen: metrics.totalOpen,
+    severityCounts: metrics.severityCounts,
+    exploitableOpen: metrics.exploitableOpen,
+    kevOpen: metrics.kevOpen,
+    composite: metrics.composite.score,
+    exposureScore: metrics.exposureScore,
+    resolvedTotal: metrics.statusCounts.Resolved,
+    mttrDays: mttr90Days(findings),
+  };
+}
+
+// Append one metrics-history row per company plus a global row (companyId
+// null) to vuln_metrics_history. Called after every sync-all and by the
+// scheduler at most once per UTC day; the day stamp lives in meta so restarts
+// don't double-snapshot. Fail-safe — the append itself never throws.
+export async function snapshotMetricsNow(): Promise<{ rows: number }> {
+  await ensureHydrated();
+  const s = store();
+  s.meta.lastMetricsSnapshotDay = todayUtc();
+  markDirty();
+
+  const remediation = Array.from(s.findings.values()).filter(isRemediationFinding);
+  const demo = demoCompanyIds(s);
+  const rows: { companyId: string | null; data: MetricsSnapshotData }[] = [
+    {
+      companyId: null,
+      data: metricsSnapshotData(
+        computeMetrics(),
+        remediation.filter((f) => !demo.has(f.companyId)),
+      ),
+    },
+  ];
+  for (const companyId of s.companies.keys()) {
+    rows.push({
+      companyId,
+      data: metricsSnapshotData(
+        computeMetrics({ companyId }),
+        remediation.filter((f) => f.companyId === companyId),
+      ),
+    });
+  }
+  await appendMetricsSnapshots(rows);
+  return { rows: rows.length };
+}
+
+// --- monthly executive report emails ---------------------------------------------
+
+async function sendMonthlyExecReports(month: string): Promise<void> {
+  if (!emailConfigured()) {
+    console.log("[scheduler] monthly reports skipped: email not configured");
+    return;
+  }
+  const s = store();
+  const remediation = Array.from(s.findings.values()).filter(isRemediationFinding);
+  for (const company of s.companies.values()) {
+    if (isAlertExcludedCompany(company.name)) continue;
+    if (!company.contactEmail) continue;
+    const metrics = computeMetrics({ companyId: company.id });
+    const ok = await sendMonthlyReportEmail({
+      to: company.contactEmail,
+      contactName: company.contactName,
+      companyName: company.name,
+      companyId: company.id,
+      month,
+      openBySeverity: metrics.severityCounts,
+      compositeScore: metrics.composite.score,
+      compositeBand: metrics.composite.band,
+      mttrDays: mttr90Days(remediation.filter((f) => f.companyId === company.id)),
+      topRisks: metrics.topRisks.slice(0, 5).map((r) => ({
+        cve: r.cve,
+        title: r.title,
+        asset: r.asset,
+        realRisk: r.realRisk,
+      })),
+    });
+    if (!ok) {
+      console.error(`[scheduler] monthly report send failed for ${company.name}`);
+    }
+  }
 }
 
 // Non-sensitive counts + a stable seed marker, for the health endpoint. The
@@ -1250,15 +1590,60 @@ export function assetCoverage(filter?: { companyId?: string }): AssetCoverage {
   };
 }
 
-export function getSettings(): Settings {
-  return { ...store().settings };
+function copySettings(settings: Settings): Settings {
+  return {
+    ...settings,
+    schedule: { ...settings.schedule },
+    sla: { ...settings.sla },
+  };
 }
 
-export function updateSettings(patch: Partial<Settings>): Settings {
+export function getSettings(): Settings {
+  return copySettings(store().settings);
+}
+
+export type SettingsPatch = {
+  autoScanNewAssets?: boolean;
+  schedule?: Partial<ScheduleSettings>;
+  sla?: Partial<SlaSettings>;
+};
+
+// Nested sections merge key-by-key so a PATCH can flip one flag without
+// resending the whole schedule/sla blocks.
+export function updateSettings(patch: SettingsPatch): Settings {
   const s = store();
-  s.settings = { ...s.settings, ...patch };
+  s.settings = {
+    autoScanNewAssets: patch.autoScanNewAssets ?? s.settings.autoScanNewAssets,
+    schedule: { ...s.settings.schedule, ...patch.schedule },
+    sla: { ...s.settings.sla, ...patch.sla },
+  };
   markDirty();
-  return { ...s.settings };
+  return copySettings(s.settings);
+}
+
+// --- SLA due dates -----------------------------------------------------------
+// dueAt is derived on read from firstSeen + settings.sla[severity], never
+// stored, so changing the SLA config re-dates every finding immediately.
+// Info findings carry no SLA clock; overdue is only meaningful while open.
+
+export function findingSlaInfo(f: Finding): {
+  dueAt: string | null;
+  overdue: boolean;
+} {
+  if (f.severity === "Info") return { dueAt: null, overdue: false };
+  const sla = store().settings.sla[f.severity as SlaSeverity];
+  const due = new Date(f.firstSeen).getTime() + sla * 86_400_000;
+  if (!Number.isFinite(due)) return { dueAt: null, overdue: false };
+  return {
+    dueAt: new Date(due).toISOString(),
+    overdue: isOpen(f) && due < Date.now(),
+  };
+}
+
+// Copy of a finding decorated with dueAt/overdue for API responses (the
+// stored record stays undecorated).
+export function withSlaInfo(f: Finding): Finding {
+  return { ...f, ...findingSlaInfo(f) };
 }
 
 export type AutoScanResult = {
@@ -1373,6 +1758,12 @@ export type ExecReport = {
     webVulnerabilities: number;
   };
   financial: { ale: number };
+  // Remediation SLA rollup: open + overdue counts per severity against the
+  // configured settings.sla days, plus 90-day mean time to remediate.
+  sla: {
+    bySeverity: Record<Severity, { open: number; overdue: number }>;
+    mttrDays: number | null;
+  };
   topRisks: {
     cve: string;
     title: string;
@@ -1399,6 +1790,16 @@ export function computeExecReport(companyId: string): ExecReport | null {
   );
   const ale = Math.round(
     open.reduce((sum, f) => sum + SLE_BY_SEVERITY[f.severity] * annualRate(f), 0),
+  );
+
+  const slaBySeverity = {} as Record<Severity, { open: number; overdue: number }>;
+  for (const sev of SEVERITIES) slaBySeverity[sev] = { open: 0, overdue: 0 };
+  for (const f of open.filter(isRemediationFinding)) {
+    slaBySeverity[f.severity].open += 1;
+    if (findingSlaInfo(f).overdue) slaBySeverity[f.severity].overdue += 1;
+  }
+  const companyRemediation = Array.from(s.findings.values()).filter(
+    (f) => f.companyId === companyId && isRemediationFinding(f),
   );
 
   const compliance = FRAMEWORKS.map((fw) => {
@@ -1434,6 +1835,10 @@ export function computeExecReport(companyId: string): ExecReport | null {
       webVulnerabilities: surfaceSummary.byCategory["Web Vulnerabilities"],
     },
     financial: { ale },
+    sla: {
+      bySeverity: slaBySeverity,
+      mttrDays: mttr90Days(companyRemediation),
+    },
     topRisks: priorities.items.slice(0, 5).map((i) => ({
       cve: i.cve,
       title: i.title,
@@ -4190,6 +4595,13 @@ export function startSyncAll(): { started: boolean; error?: string } {
         error: err instanceof Error ? err.message : "Sync-all failed.",
         finishedAt: Date.now(),
       };
+    }
+    // Post-sync hooks: metrics history snapshot + alert evaluation. The job
+    // status above is already finalized, so failures here can't break it.
+    try {
+      await runPostSyncTasks(syncAllStatus().results ?? []);
+    } catch (err) {
+      console.error("[post-sync] tasks failed:", err);
     }
     // Individual imports flush as they go; this covers anything still dirty.
     try {

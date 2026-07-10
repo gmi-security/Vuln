@@ -1,7 +1,16 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
+import TrendChart, { type TrendSnapshot } from "@/components/TrendChart";
 import { compositeColor } from "@/lib/format";
+
+// SLA rollup severities shown in the report (Info carries no SLA).
+const SLA_SEVERITIES = ["Critical", "High", "Medium", "Low"] as const;
+
+type SlaSummary = {
+  bySeverity: Partial<Record<string, { open: number; overdue: number }>>;
+  mttrDays: number | null;
+};
 
 type ExecReport = {
   generatedAt: string;
@@ -25,6 +34,9 @@ type ExecReport = {
     decision: string;
     kev: boolean;
   }[];
+  // Optional until the backend deploy lands / data accumulates.
+  sla?: SlaSummary | null;
+  trend?: TrendSnapshot[] | null;
 };
 
 function money(n: number): string {
@@ -66,7 +78,15 @@ export default function VulnExecReport({ companyId }: { companyId: string }) {
         if (!r.ok) throw new Error((await r.json()).error ?? "Failed to load report.");
         return r.json();
       })
-      .then((j) => setReport(j.report))
+      // sla/trend are additive contract fields — accept them on the report
+      // object or at the payload root, whichever the backend ships.
+      .then((j) =>
+        setReport({
+          ...j.report,
+          sla: j.report?.sla ?? j.sla ?? null,
+          trend: j.report?.trend ?? j.trend ?? null,
+        }),
+      )
       .catch((e) => setError(e instanceof Error ? e.message : "Failed to load report."));
   }, [companyId]);
 
@@ -80,8 +100,25 @@ export default function VulnExecReport({ companyId }: { companyId: string }) {
   });
 
   return (
-    <div style={{ background: "#f1f5f9", minHeight: "100vh", padding: 24 }}>
-      <style>{`@media print { .no-print { display:none !important } body { background:#fff !important } .sheet { box-shadow:none !important; margin:0 !important } }`}</style>
+    <div className="report-root" style={{ background: "#f1f5f9", minHeight: "100vh", padding: 24 }}>
+      <style>{`
+        @page { margin: 14mm; }
+        @media print {
+          .no-print { display: none !important; }
+          html, body { background: #fff !important; }
+          .report-root { background: #fff !important; padding: 0 !important; }
+          .sheet {
+            box-shadow: none !important;
+            margin: 0 !important;
+            max-width: 100% !important;
+            border-radius: 0 !important;
+            padding: 0 !important;
+            color: #0f172a !important;
+          }
+          .avoid-break { break-inside: avoid; page-break-inside: avoid; }
+          a { color: inherit !important; text-decoration: none !important; }
+        }
+      `}</style>
 
       <div className="no-print" style={{ maxWidth: 820, margin: "0 auto 16px", display: "flex", justifyContent: "space-between", alignItems: "center", fontFamily: "system-ui" }}>
         <div style={{ fontSize: 13, color: "#475569" }}>Board / QBR one-pager — use your browser to Print → Save as PDF.</div>
@@ -120,7 +157,7 @@ export default function VulnExecReport({ companyId }: { companyId: string }) {
         </div>
 
         {/* Posture hero */}
-        <div style={{ display: "flex", gap: 20, alignItems: "center", margin: "18px 0" }}>
+        <div className="avoid-break" style={{ display: "flex", gap: 20, alignItems: "center", margin: "18px 0" }}>
           <div style={{ textAlign: "center", minWidth: 120, border: "1px solid #e2e8f0", borderRadius: 12, padding: "14px 8px" }}>
             <div style={{ fontSize: 44, fontWeight: 800, lineHeight: 1, color: compositeColor(report.posture.compositeScore) }}>
               {report.posture.compositeScore}
@@ -141,7 +178,7 @@ export default function VulnExecReport({ companyId }: { companyId: string }) {
         </div>
 
         {/* Compliance */}
-        <div style={{ marginTop: 8 }}>
+        <div className="avoid-break" style={{ marginTop: 8 }}>
           <div style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, color: "#334155", marginBottom: 8 }}>Compliance posture</div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
             {report.compliance.map((c) => (
@@ -157,7 +194,7 @@ export default function VulnExecReport({ companyId }: { companyId: string }) {
         </div>
 
         {/* Attack surface */}
-        <div style={{ marginTop: 16 }}>
+        <div className="avoid-break" style={{ marginTop: 16 }}>
           <div style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, color: "#334155", marginBottom: 8 }}>External attack surface (OSINT)</div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10 }}>
             <Stat label="Total exposures" value={report.attackSurface.total} />
@@ -167,8 +204,56 @@ export default function VulnExecReport({ companyId }: { companyId: string }) {
           </div>
         </div>
 
+        {/* SLA performance */}
+        {report.sla ? (
+          <div className="avoid-break" style={{ marginTop: 16 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, color: "#334155", marginBottom: 8 }}>SLA performance</div>
+            <div style={{ display: "flex", gap: 14, alignItems: "stretch" }}>
+              <div style={{ flex: 1 }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ textAlign: "left", color: "#64748b", borderBottom: "1px solid #e2e8f0" }}>
+                      <th style={{ padding: "6px 4px" }}>Severity</th>
+                      <th style={{ padding: "6px 4px", textAlign: "right" }}>Open</th>
+                      <th style={{ padding: "6px 4px", textAlign: "right" }}>Past SLA</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {SLA_SEVERITIES.map((sev) => {
+                      const row = report.sla?.bySeverity?.[sev] ?? { open: 0, overdue: 0 };
+                      return (
+                        <tr key={sev} style={{ borderBottom: "1px solid #f1f5f9" }}>
+                          <td style={{ padding: "6px 4px", fontWeight: 600 }}>{sev}</td>
+                          <td style={{ padding: "6px 4px", textAlign: "right" }}>{row.open}</td>
+                          <td style={{ padding: "6px 4px", textAlign: "right", fontWeight: 700, color: row.overdue > 0 ? "#dc2626" : "#16a34a" }}>
+                            {row.overdue}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <div style={{ minWidth: 150, border: "1px solid #e2e8f0", borderRadius: 10, padding: "12px 14px", display: "flex", flexDirection: "column", justifyContent: "center" }}>
+                <div style={{ fontSize: 26, fontWeight: 800, color: "#0f172a" }}>
+                  {report.sla.mttrDays !== null && report.sla.mttrDays !== undefined ? `${report.sla.mttrDays}d` : "—"}
+                </div>
+                <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>Mean time to remediate</div>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {/* Trend */}
+        {(report.trend?.length ?? 0) >= 2 ? (
+          <div className="avoid-break" style={{ marginTop: 16 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, color: "#334155", marginBottom: 8 }}>Trend — open findings, last 90 days</div>
+            <TrendChart snapshots={report.trend ?? []} theme="light" />
+          </div>
+        ) : null}
+
         {/* Top risks */}
-        <div style={{ marginTop: 16 }}>
+        <div className="avoid-break" style={{ marginTop: 16 }}>
           <div style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, color: "#334155", marginBottom: 8 }}>Top priorities</div>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
             <thead>

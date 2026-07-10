@@ -1,5 +1,27 @@
 export type Severity = "Critical" | "High" | "Medium" | "Low" | "Info";
 
+// Scheduler knobs: in-process auto-sync + post-sync alerting + monthly
+// customer report emails. All default OFF except alerts so nothing surprises
+// an existing deployment.
+export type ScheduleSettings = {
+  autoSyncEnabled: boolean;
+  autoSyncIntervalHours: number; // 1-168
+  alertsEnabled: boolean;
+  monthlyReportsEnabled: boolean;
+};
+
+// Days-to-remediate SLA per severity. Info findings carry no SLA clock.
+export type SlaSeverity = Exclude<Severity, "Info">;
+export type SlaSettings = Record<SlaSeverity, number>;
+
+export type AppSettings = {
+  // When on, discovering a known-but-unscanned asset (via the coverage diff or
+  // a Tidal sync) automatically launches a scan for it.
+  autoScanNewAssets: boolean;
+  schedule: ScheduleSettings;
+  sla: SlaSettings;
+};
+
 export type CvssVersion = "v2" | "v3";
 
 export type ScanStatus =
@@ -212,6 +234,12 @@ export type Finding = {
   // Composite real-risk score (0-100) and its priority band
   realRisk: number;
   riskPriority: "Critical" | "High" | "Medium" | "Low" | "Info";
+
+  // SLA due date, derived on read from firstSeen + settings.sla[severity]
+  // (never stored — SLA config changes reflect immediately). Null for Info.
+  // `overdue` is only ever true while the finding is still open.
+  dueAt?: string | null;
+  overdue?: boolean;
 };
 
 export type ComplianceStatus = "Pass" | "Fail" | "At Risk" | "Info";

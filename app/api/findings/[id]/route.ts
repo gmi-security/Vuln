@@ -1,5 +1,10 @@
 import { NextResponse } from "next/server";
-import { ensureHydrated, listFindings, updateFinding } from "@/lib/store";
+import {
+  ensureHydrated,
+  listFindings,
+  updateFinding,
+  withSlaInfo,
+} from "@/lib/store";
 import type { FindingStatus } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -22,7 +27,7 @@ export async function GET(
   if (!finding) {
     return NextResponse.json({ error: "Finding not found." }, { status: 404 });
   }
-  return NextResponse.json({ finding });
+  return NextResponse.json({ finding: withSlaInfo(finding) });
 }
 
 export async function PATCH(
@@ -44,5 +49,5 @@ export async function PATCH(
   if ("error" in result) {
     return NextResponse.json({ error: result.error }, { status: 404 });
   }
-  return NextResponse.json({ finding: result });
+  return NextResponse.json({ finding: withSlaInfo(result) });
 }

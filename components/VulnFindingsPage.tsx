@@ -37,6 +37,18 @@ import {
 } from "@/lib/format";
 import type { CvssVersion, Finding, FindingStatus } from "@/lib/types";
 
+// Finding plus the aging fields the API now returns per row. Kept as a local
+// extension so the page renders cleanly whether or not the fields are present.
+type FindingRow = Finding & { dueAt?: string | null; overdue?: boolean };
+
+// Per-company outcome of a bulk remediation request.
+type RemediationResult = {
+  sent: { companyId: string; count: number }[];
+  skipped: { companyId: string; reason: string }[];
+};
+
+const SELECTION_CAP = 100;
+
 const STATUSES: FindingStatus[] = [
   "Open",
   "In Remediation",
@@ -50,7 +62,7 @@ const PAGE_SIZE = 200;
 // Score for the selected CVSS version, falling back to the other version when
 // the source only carries one. Returns the number and which version was used.
 function cvssFor(
-  finding: Finding,
+  finding: FindingRow,
   version: CvssVersion,
 ): { value: number; used: CvssVersion | null } {
   const primary = version === "v3" ? finding.cvssV3 : finding.cvssV2;
@@ -94,7 +106,7 @@ function CvssToggle({
 
 export default function VulnFindingsPage() {
   const searchParams = useSearchParams();
-  const [findings, setFindings] = useState<Finding[]>([]);
+  const [findings, setFindings] = useState<FindingRow[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
   const [kind, setKind] = useState<"vuln" | "osint" | "all">("vuln");
@@ -108,14 +120,21 @@ export default function VulnFindingsPage() {
   );
   const [companies, setCompanies] = useState<{ id: string; name: string }[]>([]);
   const [exploitOnly, setExploitOnly] = useState(false);
+  const [overdueOnly, setOverdueOnly] = useState(false);
   const [cvssVersion, setCvssVersion] = useState<ScoreView>("v3");
   const [focusId, setFocusId] = useState<string | null>(
     searchParams.get("focus"),
   );
   // Deep-linked finding fetched directly when it isn't in the current page.
-  const [focusFetched, setFocusFetched] = useState<Finding | null>(null);
+  const [focusFetched, setFocusFetched] = useState<FindingRow | null>(null);
   const [assigneeDraft, setAssigneeDraft] = useState("");
   const [patchError, setPatchError] = useState<string | null>(null);
+  // Bulk remediation selection + request outcome.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [remediationBusy, setRemediationBusy] = useState(false);
+  const [remediationError, setRemediationError] = useState<string | null>(null);
+  const [remediationResult, setRemediationResult] =
+    useState<RemediationResult | null>(null);
   // Monotonic request id — a slow older response must never overwrite a newer one.
   const loadSeq = useRef(0);
 
@@ -125,9 +144,11 @@ export default function VulnFindingsPage() {
     return () => clearTimeout(timer);
   }, [search]);
 
-  // Any filter change starts back at the first page.
+  // Any filter change starts back at the first page and drops the selection —
+  // rows selected under different filters shouldn't feed a bulk action.
   useEffect(() => {
     setOffset(0);
+    setSelected(new Set());
   }, [
     kind,
     debouncedSearch,
@@ -136,6 +157,7 @@ export default function VulnFindingsPage() {
     connectorFilter,
     companyFilter,
     exploitOnly,
+    overdueOnly,
   ]);
 
   const load = useCallback(async () => {
@@ -150,6 +172,7 @@ export default function VulnFindingsPage() {
     if (statusFilter !== "All") params.set("status", statusFilter);
     if (connectorFilter !== "All") params.set("connector", connectorFilter);
     if (exploitOnly) params.set("exploit", "1");
+    if (overdueOnly) params.set("overdue", "1");
     if (debouncedSearch.trim()) params.set("q", debouncedSearch.trim());
     try {
       const res = await fetch(`/api/findings?${params.toString()}`, {
@@ -178,6 +201,7 @@ export default function VulnFindingsPage() {
     connectorFilter,
     companyFilter,
     exploitOnly,
+    overdueOnly,
   ]);
 
   useEffect(() => {
@@ -255,6 +279,70 @@ export default function VulnFindingsPage() {
     }
   }
 
+  function toggleSelected(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else if (next.size < SELECTION_CAP) next.add(id);
+      return next;
+    });
+  }
+
+  const pageAllSelected =
+    findings.length > 0 && findings.every((f) => selected.has(f.id));
+
+  function togglePageSelected() {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (pageAllSelected) {
+        for (const f of findings) next.delete(f.id);
+      } else {
+        for (const f of findings) {
+          if (next.size >= SELECTION_CAP) break;
+          next.add(f.id);
+        }
+      }
+      return next;
+    });
+  }
+
+  const companyName = useCallback(
+    (id: string) => companies.find((c) => c.id === id)?.name ?? id,
+    [companies],
+  );
+
+  async function requestRemediation() {
+    if (selected.size === 0 || remediationBusy) return;
+    setRemediationBusy(true);
+    setRemediationError(null);
+    setRemediationResult(null);
+    try {
+      const res = await fetch("/api/remediation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ findingIds: Array.from(selected) }),
+      });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        setRemediationError(
+          json.error ?? `Remediation request failed (HTTP ${res.status}).`,
+        );
+        return;
+      }
+      const json = await res.json();
+      setRemediationResult({
+        sent: json.sent ?? [],
+        skipped: json.skipped ?? [],
+      });
+      setSelected(new Set());
+      void load(); // statuses may have moved to In Remediation
+    } catch {
+      setRemediationError("Failed to reach the API — nothing was sent.");
+    } finally {
+      setRemediationBusy(false);
+    }
+  }
+
   return (
     <VulnShell
       eyebrow="Findings"
@@ -285,7 +373,7 @@ export default function VulnFindingsPage() {
       </div>
 
       <PanelCard eyebrow="Filters">
-        <div className="grid gap-3 xl:grid-cols-[minmax(0,1.3fr)_180px_150px_180px_170px_150px_130px]">
+        <div className="grid gap-3 xl:grid-cols-[minmax(0,1.3fr)_180px_150px_180px_170px_150px_120px_130px]">
           <div className="relative">
             <Search
               className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-zinc-500"
@@ -350,6 +438,17 @@ export default function VulnFindingsPage() {
           >
             Exploitable only
           </button>
+          <button
+            onClick={() => setOverdueOnly((prev) => !prev)}
+            className={[
+              "flex h-[52px] items-center justify-center gap-2 rounded-2xl border px-4 text-sm transition",
+              overdueOnly
+                ? "border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.16)] text-white"
+                : "border-zinc-800 bg-[#0b0b0b] text-zinc-300 hover:bg-[#101010]",
+            ].join(" ")}
+          >
+            Overdue
+          </button>
           <button onClick={() => void load()} className={ghostButtonClass}>
             <RefreshCcw size={16} className="text-zinc-400" />
             Refresh
@@ -366,8 +465,83 @@ export default function VulnFindingsPage() {
         }
         actions={<CvssToggle version={cvssVersion} onChange={setCvssVersion} />}
       >
+        {selected.size > 0 ? (
+          <div className="mb-4 flex flex-wrap items-center gap-3 rounded-2xl border border-[rgba(179,14,20,0.30)] bg-[rgba(179,14,20,0.08)] px-4 py-3">
+            <span className="text-sm font-medium text-white">
+              {selected.size} selected
+            </span>
+            {selected.size >= SELECTION_CAP ? (
+              <span className="text-xs text-amber-300">
+                Selection capped at {SELECTION_CAP} findings per request.
+              </span>
+            ) : null}
+            <div className="ml-auto flex items-center gap-2">
+              <button
+                onClick={() => void requestRemediation()}
+                disabled={remediationBusy}
+                className="h-[44px] rounded-2xl border border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.16)] px-5 text-sm font-medium text-white transition hover:bg-[rgba(179,14,20,0.28)] disabled:opacity-50"
+              >
+                {remediationBusy
+                  ? "Sending…"
+                  : `Request remediation (${selected.size})`}
+              </button>
+              <button
+                onClick={() => setSelected(new Set())}
+                className={`${ghostButtonClass} h-[44px]`}
+              >
+                Clear
+              </button>
+            </div>
+            {remediationError ? (
+              <p className="w-full text-xs text-[#ff4d57]">{remediationError}</p>
+            ) : null}
+          </div>
+        ) : remediationError ? (
+          <p className="mb-4 text-xs text-[#ff4d57]">{remediationError}</p>
+        ) : null}
+
+        {remediationResult ? (
+          <div className="mb-4 space-y-1.5 rounded-2xl border border-zinc-800 bg-[#090909] px-4 py-3">
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-xs uppercase tracking-[0.2em] text-zinc-500">
+                Remediation request results
+              </span>
+              <button
+                onClick={() => setRemediationResult(null)}
+                className="text-xs text-zinc-500 transition hover:text-white"
+              >
+                Dismiss
+              </button>
+            </div>
+            {remediationResult.sent.map((s) => (
+              <div key={`sent-${s.companyId}`} className="text-sm text-emerald-300">
+                {companyName(s.companyId)} — sent for {s.count} finding
+                {s.count === 1 ? "" : "s"}
+              </div>
+            ))}
+            {remediationResult.skipped.map((s) => (
+              <div key={`skip-${s.companyId}`} className="text-sm text-amber-300">
+                {companyName(s.companyId)} — skipped: {s.reason}
+              </div>
+            ))}
+            {remediationResult.sent.length === 0 &&
+            remediationResult.skipped.length === 0 ? (
+              <div className="text-sm text-zinc-500">Nothing to send.</div>
+            ) : null}
+          </div>
+        ) : null}
+
         <div className="overflow-hidden rounded-[24px] border border-[rgba(179,14,20,0.12)] bg-[#040404]">
-          <div className="grid grid-cols-[100px_1.9fr_1.1fr_120px_80px_100px_140px_80px] gap-4 border-b border-zinc-900 px-5 py-4 text-xs uppercase tracking-[0.2em] text-zinc-500">
+          <div className="grid grid-cols-[28px_100px_1.9fr_1.1fr_120px_80px_100px_130px_110px_80px] items-center gap-4 border-b border-zinc-900 px-5 py-4 text-xs uppercase tracking-[0.2em] text-zinc-500">
+            <div>
+              <input
+                type="checkbox"
+                checked={pageAllSelected}
+                onChange={togglePageSelected}
+                aria-label="Select all findings on this page"
+                className="h-4 w-4 cursor-pointer rounded border-zinc-700 bg-[#0b0b0b] accent-[#b30e14]"
+              />
+            </div>
             <div>ID</div>
             <div>Finding</div>
             <div>Asset</div>
@@ -375,18 +549,37 @@ export default function VulnFindingsPage() {
             <div>{cvssVersion === "vpr" ? "VPR" : `CVSS ${cvssVersion}`}</div>
             <div>Severity</div>
             <div>Status</div>
+            <div>Due</div>
             <div>Age</div>
           </div>
           <div className={`max-h-[680px] ${scrollAreaClass}`}>
             {findings.map((finding) => (
-              <button
+              <div
                 key={finding.id}
+                role="button"
+                tabIndex={0}
                 onClick={() => setFocusId(finding.id)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    setFocusId(finding.id);
+                  }
+                }}
                 className={[
-                  "grid w-full grid-cols-[100px_1.9fr_1.1fr_120px_80px_100px_140px_80px] items-center gap-4 border-b border-zinc-900/70 px-5 py-4 text-left transition last:border-b-0 hover:bg-[#0a0a0a]",
+                  "grid w-full cursor-pointer grid-cols-[28px_100px_1.9fr_1.1fr_120px_80px_100px_130px_110px_80px] items-center gap-4 border-b border-zinc-900/70 px-5 py-4 text-left transition last:border-b-0 hover:bg-[#0a0a0a]",
                   focusId === finding.id ? "bg-[rgba(179,14,20,0.06)]" : "",
                 ].join(" ")}
               >
+                <div onClick={(e) => e.stopPropagation()}>
+                  <input
+                    type="checkbox"
+                    checked={selected.has(finding.id)}
+                    onChange={() => toggleSelected(finding.id)}
+                    onKeyDown={(e) => e.stopPropagation()}
+                    aria-label={`Select ${finding.id}`}
+                    className="h-4 w-4 cursor-pointer rounded border-zinc-700 bg-[#0b0b0b] accent-[#b30e14]"
+                  />
+                </div>
                 <div className="text-sm font-medium text-[#ff4d57]">
                   {finding.id}
                 </div>
@@ -466,10 +659,13 @@ export default function VulnFindingsPage() {
                     {finding.status}
                   </Pill>
                 </div>
+                <div>
+                  <DuePill dueAt={finding.dueAt} overdue={finding.overdue} />
+                </div>
                 <div className="text-sm text-zinc-400">
                   {formatAge(finding.firstSeen)}
                 </div>
-              </button>
+              </div>
             ))}
             {findings.length === 0 ? (
               <div className="px-5 py-12 text-center text-sm text-zinc-500">
@@ -533,6 +729,9 @@ export default function VulnFindingsPage() {
                   <Pill className="border border-orange-900/60 bg-[rgba(245,110,35,0.12)] text-orange-300">
                     Exploit available
                   </Pill>
+                ) : null}
+                {focus.overdue || focus.dueAt ? (
+                  <DuePill dueAt={focus.dueAt} overdue={focus.overdue} />
                 ) : null}
               </div>
             </div>
@@ -647,6 +846,19 @@ export default function VulnFindingsPage() {
                 label="Last seen"
                 value={formatDateTime(focus.lastSeen)}
               />
+              <Detail
+                label="Remediation due"
+                value={
+                  focus.dueAt ? (
+                    <span className={focus.overdue ? "text-[#ff4d57]" : undefined}>
+                      {formatDateTime(focus.dueAt)}
+                      {focus.overdue ? " · overdue" : ""}
+                    </span>
+                  ) : (
+                    "—"
+                  )
+                }
+              />
             </dl>
 
             <div>
@@ -734,6 +946,44 @@ export default function VulnFindingsPage() {
         </div>
       ) : null}
     </VulnShell>
+  );
+}
+
+// Compact due-state pill: red "Overdue Xd", amber "Due in Xd" when the window
+// is a week or less, muted zinc otherwise. Renders an em dash when no SLA due
+// date applies (already resolved, Info severity, backend not deployed yet).
+function DuePill({
+  dueAt,
+  overdue,
+}: {
+  dueAt?: string | null;
+  overdue?: boolean;
+}) {
+  if (overdue) {
+    const days = dueAt
+      ? Math.max(0, Math.floor((Date.now() - new Date(dueAt).getTime()) / 86_400_000))
+      : null;
+    return (
+      <Pill className="border border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.16)] text-[#ff4d57]">
+        {days !== null ? `Overdue ${days}d` : "Overdue"}
+      </Pill>
+    );
+  }
+  if (!dueAt) return <span className="text-sm text-zinc-600">—</span>;
+  const days = Math.max(
+    0,
+    Math.ceil((new Date(dueAt).getTime() - Date.now()) / 86_400_000),
+  );
+  return (
+    <Pill
+      className={
+        days <= 7
+          ? "border border-amber-900/60 bg-[rgba(245,166,35,0.10)] text-amber-300"
+          : "border border-zinc-800 bg-zinc-900 text-zinc-400"
+      }
+    >
+      Due in {days}d
+    </Pill>
   );
 }
 

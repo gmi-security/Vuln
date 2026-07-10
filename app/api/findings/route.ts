@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { ensureHydrated, listFindings } from "@/lib/store";
+import { ensureHydrated, listFindings, withSlaInfo } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
@@ -20,6 +20,7 @@ export async function GET(request: Request) {
   const status = searchParams.get("status") ?? undefined;
   const connector = searchParams.get("connector") ?? undefined;
   const exploitOnly = searchParams.get("exploit") === "1";
+  const overdueOnly = searchParams.get("overdue") === "1";
   const q = (searchParams.get("q") ?? "").trim().toLowerCase();
   const limitParam = Number.parseInt(searchParams.get("limit") ?? "", 10);
   const limit = Number.isFinite(limitParam)
@@ -30,8 +31,10 @@ export async function GET(request: Request) {
     Number.isFinite(offsetParam) && offsetParam > 0 ? offsetParam : 0;
 
   // listFindings already returns real-risk display order; filter server-side
-  // so the client only ever receives a single page of results.
-  let findings = listFindings({ scanId, companyId, kind });
+  // so the client only ever receives a single page of results. Decorating
+  // with SLA info up front lets overdue=1 filter on the computed field.
+  let findings = listFindings({ scanId, companyId, kind }).map(withSlaInfo);
+  if (overdueOnly) findings = findings.filter((f) => f.overdue);
   if (severity) findings = findings.filter((f) => f.severity === severity);
   if (status) findings = findings.filter((f) => f.status === status);
   if (connector) findings = findings.filter((f) => f.connector === connector);

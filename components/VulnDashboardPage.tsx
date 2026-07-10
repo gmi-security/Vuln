@@ -10,6 +10,7 @@ import {
   IconRadar,
 } from "@tabler/icons-react";
 import VulnShell from "@/components/VulnShell";
+import TrendChart, { type TrendSnapshot } from "@/components/TrendChart";
 import { PanelCard, Pill, StatCard, primaryButtonClass } from "@/components/ui";
 import {
   compositeColor,
@@ -23,6 +24,40 @@ import type { QuantifyMetrics, Scan, Severity } from "@/lib/types";
 
 const SEVERITIES: Severity[] = ["Critical", "High", "Medium", "Low", "Info"];
 
+// This-week vs last-week change in open Criticals, from daily snapshots.
+// Returns null when the history doesn't span two full weeks yet.
+function weeklyCriticalDelta(
+  snapshots: TrendSnapshot[],
+): { thisWeek: number; lastWeek: number } | null {
+  if (snapshots.length < 3) return null;
+  const rows = [...snapshots].sort(
+    (a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime(),
+  );
+  const latest = rows[rows.length - 1];
+  const latestMs = new Date(latest.ts).getTime();
+  const spanDays = (latestMs - new Date(rows[0].ts).getTime()) / 86_400_000;
+  if (spanDays < 13) return null;
+  const closestTo = (targetMs: number) =>
+    rows.reduce((best, r) =>
+      Math.abs(new Date(r.ts).getTime() - targetMs) <
+      Math.abs(new Date(best.ts).getTime() - targetMs)
+        ? r
+        : best,
+    );
+  const weekAgo = closestTo(latestMs - 7 * 86_400_000);
+  const twoWeeksAgo = closestTo(latestMs - 14 * 86_400_000);
+  if (weekAgo === latest || twoWeeksAgo === weekAgo) return null;
+  const crit = (s: TrendSnapshot) => s.severityCounts?.Critical ?? 0;
+  return {
+    thisWeek: crit(latest) - crit(weekAgo),
+    lastWeek: crit(weekAgo) - crit(twoWeeksAgo),
+  };
+}
+
+function signed(n: number): string {
+  return n > 0 ? `+${n}` : String(n);
+}
+
 export default function VulnDashboardPage() {
   const [scans, setScans] = useState<Scan[]>([]);
   const [metrics, setMetrics] = useState<QuantifyMetrics | null>(null);
@@ -30,6 +65,8 @@ export default function VulnDashboardPage() {
     reachable: null,
     error: null,
   });
+  // null = still loading; [] = loaded but no snapshots yet (cold start).
+  const [snapshots, setSnapshots] = useState<TrendSnapshot[] | null>(null);
 
   // Monotonic request id — a slow older response must never overwrite a newer one.
   const loadSeq = useRef(0);
@@ -65,6 +102,23 @@ export default function VulnDashboardPage() {
       .catch(() => setDbStatus({ reachable: false, error: "Health check failed." }));
   }, []);
 
+  // 90-day global history for the trend panel. Snapshots accrue daily, so a
+  // single fetch on mount is enough; guard against out-of-order settles.
+  useEffect(() => {
+    let cancelled = false;
+    void fetch("/api/history?days=90", { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((json) => {
+        if (!cancelled && json && Array.isArray(json.snapshots)) {
+          setSnapshots(json.snapshots);
+        }
+      })
+      .catch(() => undefined); // panel keeps its cold-start message
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const running = scans.filter(
     (s) =>
       s.status === "Queued" || s.status === "Running" || s.status === "Paused",
@@ -86,6 +140,7 @@ export default function VulnDashboardPage() {
   );
 
   const hasData = metrics !== null && metrics.totalOpen > 0;
+  const critDelta = snapshots ? weeklyCriticalDelta(snapshots) : null;
 
   return (
     <VulnShell
@@ -162,6 +217,39 @@ export default function VulnDashboardPage() {
           </p>
         </div>
       ) : null}
+
+      <PanelCard
+        eyebrow="Trend"
+        description="Open findings across all customers — last 90 days"
+        actions={
+          critDelta ? (
+            <div className="text-right text-sm">
+              <div
+                className={
+                  critDelta.thisWeek > 0
+                    ? "font-semibold text-[#ff4d57]"
+                    : critDelta.thisWeek < 0
+                      ? "font-semibold text-emerald-300"
+                      : "font-semibold text-zinc-300"
+                }
+              >
+                {signed(critDelta.thisWeek)} Criticals this week
+              </div>
+              <div className="mt-1 text-xs text-zinc-500">
+                {signed(critDelta.lastWeek)} last week
+              </div>
+            </div>
+          ) : undefined
+        }
+      >
+        {snapshots === null ? (
+          <div className="flex h-48 items-center justify-center text-sm text-zinc-500">
+            Loading trend…
+          </div>
+        ) : (
+          <TrendChart snapshots={snapshots} theme="dark" />
+        )}
+      </PanelCard>
 
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
         <PanelCard

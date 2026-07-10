@@ -194,7 +194,15 @@ async function ensureTable(): Promise<void> {
            key TEXT PRIMARY KEY,
            data JSONB NOT NULL,
            updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-         )`,
+         );
+         CREATE TABLE IF NOT EXISTS vuln_metrics_history (
+           id BIGSERIAL PRIMARY KEY,
+           ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+           company_id TEXT NULL,
+           data JSONB NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS vuln_metrics_history_company_ts_idx
+           ON vuln_metrics_history (company_id, ts)`,
       )
       .then(() => undefined)
       .catch((err) => {
@@ -339,4 +347,82 @@ export async function saveSnapshot(data: unknown): Promise<void> {
   }
   client.release();
   for (const row of changed) lastWrittenHashes.set(row.key, row.hash);
+}
+
+// --- metrics history ---------------------------------------------------------
+// Append-only time series of metrics snapshots (per company plus a global row
+// with company_id NULL), completely separate from the sharded store snapshot.
+// Both functions are fail-safe: a DB outage logs and no-ops so trend capture
+// never breaks a sync or a request.
+
+export async function appendMetricsSnapshots(
+  rows: { companyId: string | null; data: unknown }[],
+): Promise<void> {
+  const p = getPool();
+  if (!p || rows.length === 0) return;
+  try {
+    await withTimeout(ensureTable(), 10000, "ensureTable");
+    const client = await p.connect();
+    try {
+      await withTimeout(
+        (async () => {
+          await client.query("BEGIN");
+          for (const row of rows) {
+            await client.query(
+              "INSERT INTO vuln_metrics_history (company_id, data) VALUES ($1, $2)",
+              [row.companyId, JSON.stringify(row.data)],
+            );
+          }
+          await client.query("COMMIT");
+        })(),
+        30000,
+        "appendMetricsSnapshots",
+      );
+    } catch (err) {
+      // Same as saveSnapshot: destroy the connection so an in-flight query
+      // can't leak and the uncommitted transaction aborts server-side.
+      client.release(err instanceof Error ? err : new Error(String(err)));
+      throw err;
+    }
+    client.release();
+  } catch (err) {
+    console.error(
+      "[persist] metrics snapshot append failed:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+// Load history rows for one company (or the global series when companyId is
+// null), newest `days` days, ordered oldest → newest.
+export async function loadMetricsHistory(
+  companyId: string | null,
+  days: number,
+): Promise<{ ts: string; data: unknown }[]> {
+  const p = getPool();
+  if (!p) return [];
+  try {
+    await withTimeout(ensureTable(), 10000, "ensureTable");
+    const res = await withTimeout(
+      p.query(
+        `SELECT ts, data FROM vuln_metrics_history
+         WHERE company_id IS NOT DISTINCT FROM $1
+           AND ts >= now() - make_interval(days => $2::int)
+         ORDER BY ts ASC`,
+        [companyId, Math.max(1, Math.floor(days))],
+      ),
+      15000,
+      "loadMetricsHistory",
+    );
+    return res.rows.map((r: { ts: unknown; data: unknown }) => ({
+      ts: r.ts instanceof Date ? r.ts.toISOString() : String(r.ts),
+      data: r.data,
+    }));
+  } catch (err) {
+    console.error(
+      "[persist] metrics history load failed:",
+      err instanceof Error ? err.message : err,
+    );
+    return [];
+  }
 }

@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { signOut, useSession } from "next-auth/react";
-import { ChevronDown, LogOut, Settings, UserCircle2 } from "lucide-react";
+import { ChevronDown, LogOut, PlugZap, Settings, UserCircle2 } from "lucide-react";
 import VulnSidebar from "@/components/VulnSidebar";
 
 // Page chrome shared by every screen: SONAR-style sidebar + header over a
@@ -108,11 +108,19 @@ export default function VulnShell({
                   </div>
                   <div className="p-2">
                     <Link
-                      href="/connectors"
+                      href="/settings"
                       onClick={() => setMenuOpen(false)}
                       className="flex items-center gap-3 rounded-xl px-3 py-3 text-sm text-zinc-200 transition hover:bg-zinc-900"
                     >
                       <Settings size={16} className="text-zinc-400" />
+                      Settings
+                    </Link>
+                    <Link
+                      href="/connectors"
+                      onClick={() => setMenuOpen(false)}
+                      className="flex items-center gap-3 rounded-xl px-3 py-3 text-sm text-zinc-200 transition hover:bg-zinc-900"
+                    >
+                      <PlugZap size={16} className="text-zinc-400" />
                       Connectors
                     </Link>
                     <button
