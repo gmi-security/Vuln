@@ -409,3 +409,196 @@ export async function sendMonthlyReportEmail(
     html,
   });
 }
+
+// --- on-demand customer report email ----------------------------------------
+// Full scan report + "what changed" update, sent to the customer contact on
+// demand from the console. Email-client-safe: tables + inline styles only.
+
+export type CustomerReportEmailInput = {
+  companyId: string;
+  companyName: string;
+  contactName: string;
+  generatedAt: string; // ISO
+  posture: { compositeScore: number; compositeBand: string; exposureScore: number };
+  openBySeverity: Record<Severity, number>;
+  sla: {
+    bySeverity: Record<Severity, { open: number; overdue: number }>;
+    mttrDays: number | null;
+  };
+  topRisks: {
+    severity: Severity;
+    cve: string;
+    title: string;
+    asset: string;
+    dueAt: string | null;
+  }[];
+  delta: {
+    since: string | null;
+    newFindings: number;
+    newCriticals: {
+      cve: string;
+      title: string;
+      asset: string;
+      severity: Severity;
+      dueAt: string | null;
+    }[];
+    resolvedFindings: number;
+  } | null;
+};
+
+const EMAIL_CELL = "padding:6px 10px;border-bottom:1px solid #e2e5ea;";
+const EMAIL_HEAD_ROW = "text-align:left;background:#f4f6f8;";
+const EMAIL_SECTION_TITLE =
+  "margin:22px 0 6px;font-size:15px;color:#1a202c;";
+
+const EMAIL_SEVERITY_COLOR: Record<Severity, string> = {
+  Critical: "#b91c1c",
+  High: "#c2410c",
+  Medium: "#a16207",
+  Low: "#3f6212",
+  Info: "#5a6472",
+};
+
+function emailDate(iso: string | null): string {
+  return iso ? iso.slice(0, 10) : "—";
+}
+
+// Full customer report email (subject + HTML). Subject reads "Security
+// update" when a delta section is present, "Security report" for the
+// baseline (first) send.
+export function buildCustomerReportHtml(input: CustomerReportEmailInput): {
+  subject: string;
+  html: string;
+} {
+  const base = consoleBaseUrl();
+  const generated = new Date(input.generatedAt);
+  const monthYear = generated.toLocaleDateString("en-US", {
+    month: "long",
+    year: "numeric",
+  });
+  const reportDate = generated.toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
+  const subject = `${input.delta ? "Security update" : "Security report"} — ${input.companyName} — ${monthYear}`;
+
+  const sev: Severity[] = ["Critical", "High", "Medium", "Low", "Info"];
+  const slaSev: Severity[] = ["Critical", "High", "Medium", "Low"];
+
+  const severityCells = sev
+    .map(
+      (x) =>
+        `<td style="padding:8px 14px;text-align:center;border:1px solid #e2e5ea;"><div style="font-size:20px;font-weight:bold;color:${input.openBySeverity[x] > 0 ? EMAIL_SEVERITY_COLOR[x] : "#1a202c"};">${input.openBySeverity[x]}</div><div style="font-size:12px;color:#5a6472;">${x}</div></td>`,
+    )
+    .join("");
+
+  const slaRows = slaSev
+    .map((x) => {
+      const row = input.sla.bySeverity[x] ?? { open: 0, overdue: 0 };
+      return `<tr>
+        <td style="${EMAIL_CELL}font-weight:bold;color:${EMAIL_SEVERITY_COLOR[x]};">${x}</td>
+        <td style="${EMAIL_CELL}text-align:right;">${row.open}</td>
+        <td style="${EMAIL_CELL}text-align:right;font-weight:bold;color:${row.overdue > 0 ? "#b91c1c" : "#15803d"};">${row.overdue}</td>
+      </tr>`;
+    })
+    .join("");
+
+  // "Since your last report" (delta) vs baseline wording.
+  let deltaSection: string;
+  if (input.delta) {
+    const d = input.delta;
+    const newCritRows = d.newCriticals
+      .map(
+        (f) => `<tr>
+          <td style="${EMAIL_CELL}font-weight:bold;color:${EMAIL_SEVERITY_COLOR[f.severity]};">${escapeHtml(f.severity)}</td>
+          <td style="${EMAIL_CELL}">${escapeHtml(f.cve || "—")}</td>
+          <td style="${EMAIL_CELL}">${escapeHtml(f.title)}</td>
+          <td style="${EMAIL_CELL}">${escapeHtml(f.asset)}</td>
+          <td style="${EMAIL_CELL}">${escapeHtml(emailDate(f.dueAt))}</td>
+        </tr>`,
+      )
+      .join("");
+    deltaSection = `
+      <h3 style="${EMAIL_SECTION_TITLE}">Since your last report (${escapeHtml(emailDate(d.since))})</h3>
+      <table style="border-collapse:collapse;margin:8px 0;"><tr>
+        <td style="padding:8px 14px;text-align:center;border:1px solid #e2e5ea;"><div style="font-size:20px;font-weight:bold;color:${d.newFindings > 0 ? "#b91c1c" : "#1a202c"};">${d.newFindings}</div><div style="font-size:12px;color:#5a6472;">New findings</div></td>
+        <td style="padding:8px 14px;text-align:center;border:1px solid #e2e5ea;"><div style="font-size:20px;font-weight:bold;color:#15803d;">${d.resolvedFindings}</div><div style="font-size:12px;color:#5a6472;">Resolved</div></td>
+      </tr></table>
+      ${
+        newCritRows
+          ? `<p style="margin:8px 0 4px;font-size:13px;color:#5a6472;">New Critical / High findings:</p>
+      <table style="border-collapse:collapse;width:100%;font-size:13px;">
+        <thead><tr style="${EMAIL_HEAD_ROW}">
+          <th style="padding:6px 10px;">Severity</th><th style="padding:6px 10px;">CVE</th><th style="padding:6px 10px;">Finding</th><th style="padding:6px 10px;">Asset</th><th style="padding:6px 10px;">Due</th>
+        </tr></thead>
+        <tbody>${newCritRows}</tbody>
+      </table>`
+          : `<p style="margin:8px 0;font-size:13px;color:#15803d;">No new Critical or High findings since the last report.</p>`
+      }`;
+  } else {
+    deltaSection = `
+      <h3 style="${EMAIL_SECTION_TITLE}">Baseline report</h3>
+      <p style="margin:6px 0;font-size:13px;color:#5a6472;">This is your first report from GMI Security Operations — it establishes the baseline. Future reports will highlight what changed since the previous one.</p>`;
+  }
+
+  const riskRows = input.topRisks
+    .map(
+      (r) => `<tr>
+        <td style="${EMAIL_CELL}font-weight:bold;color:${EMAIL_SEVERITY_COLOR[r.severity]};">${escapeHtml(r.severity)}</td>
+        <td style="${EMAIL_CELL}">${escapeHtml(r.cve || "—")}</td>
+        <td style="${EMAIL_CELL}">${escapeHtml(r.title)}</td>
+        <td style="${EMAIL_CELL}">${escapeHtml(r.asset)}</td>
+        <td style="${EMAIL_CELL}">${escapeHtml(emailDate(r.dueAt))}</td>
+      </tr>`,
+    )
+    .join("");
+
+  const html = `
+    <div style="font-family:Arial,Helvetica,sans-serif;color:#1a202c;max-width:720px;">
+      <div style="border-bottom:2px solid #1a202c;padding-bottom:10px;margin-bottom:14px;">
+        <div style="font-size:12px;letter-spacing:2px;color:#5a6472;text-transform:uppercase;">GMI Security Operations</div>
+        <h2 style="margin:4px 0 2px;">${input.delta ? "Security Update" : "Security Report"} — ${escapeHtml(input.companyName)}</h2>
+        <div style="font-size:13px;color:#5a6472;">${escapeHtml(reportDate)}</div>
+      </div>
+
+      <p>Hello${input.contactName ? ` ${escapeHtml(input.contactName)}` : ""}, here is your ${input.delta ? "security update" : "full security report"} covering vulnerability posture, remediation SLA performance, and top risks.</p>
+
+      <h3 style="${EMAIL_SECTION_TITLE}">Security posture</h3>
+      <p style="margin:6px 0;">
+        Composite risk score: <strong>${input.posture.compositeScore}/100 (${escapeHtml(input.posture.compositeBand)})</strong><br/>
+        Exposure score: <strong>${input.posture.exposureScore}/100</strong><br/>
+        Mean time to remediate (90 days): <strong>${input.sla.mttrDays === null ? "n/a" : `${input.sla.mttrDays} days`}</strong>
+      </p>
+
+      <h3 style="${EMAIL_SECTION_TITLE}">Open findings by severity</h3>
+      <table style="border-collapse:collapse;margin:8px 0;"><tr>${severityCells}</tr></table>
+
+      <h3 style="${EMAIL_SECTION_TITLE}">Remediation SLA performance</h3>
+      <table style="border-collapse:collapse;width:100%;max-width:420px;font-size:13px;">
+        <thead><tr style="${EMAIL_HEAD_ROW}">
+          <th style="padding:6px 10px;">Severity</th><th style="padding:6px 10px;text-align:right;">Open</th><th style="padding:6px 10px;text-align:right;">Past due</th>
+        </tr></thead>
+        <tbody>${slaRows}</tbody>
+      </table>
+
+      ${deltaSection}
+
+      ${
+        riskRows
+          ? `<h3 style="${EMAIL_SECTION_TITLE}">Top risks</h3>
+      <table style="border-collapse:collapse;width:100%;font-size:13px;">
+        <thead><tr style="${EMAIL_HEAD_ROW}">
+          <th style="padding:6px 10px;">Severity</th><th style="padding:6px 10px;">CVE</th><th style="padding:6px 10px;">Finding</th><th style="padding:6px 10px;">Asset</th><th style="padding:6px 10px;">Due</th>
+        </tr></thead>
+        <tbody>${riskRows}</tbody>
+      </table>`
+          : `<p style="margin:8px 0;font-size:13px;color:#15803d;">No open risks — the remediation queue is clear.</p>`
+      }
+
+      ${base ? `<p style="margin-top:18px;"><a href="${base}/report/${encodeURIComponent(input.companyId)}" style="color:#1d4ed8;">View the full interactive report</a></p>` : ""}
+      <p style="margin-top:14px;font-size:13px;color:#5a6472;">Questions about anything in this report? Reach out to your GMI contact — we are happy to walk through the details.</p>
+    </div>`;
+
+  return { subject, html };
+}

@@ -68,9 +68,38 @@ function Stat({ label, value, color }: { label: string; value: React.ReactNode; 
   );
 }
 
+// Inline result of the last "email to customer" attempt. "skipped" covers the
+// amber cases (no contact email / email not configured / test customer) where
+// retrying without a config change is pointless.
+type SendResult = { kind: "sent" | "skipped" | "error"; message: string };
+
 export default function VulnExecReport({ companyId }: { companyId: string }) {
   const [report, setReport] = useState<ExecReport | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Outward-facing send: idle → confirm (two-step) → sending → result.
+  const [sendPhase, setSendPhase] = useState<"idle" | "confirm" | "sending">("idle");
+  const [sendResult, setSendResult] = useState<SendResult | null>(null);
+
+  async function sendReportEmail() {
+    setSendPhase("sending");
+    setSendResult(null);
+    try {
+      const res = await fetch(`/api/report/${companyId}/send`, { method: "POST" });
+      const json = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setSendResult({ kind: "sent", message: `Sent to ${json.to}${json.cc?.length ? ` (cc ${json.cc.join(", ")})` : ""}` });
+      } else if (res.status === 400 || res.status === 503) {
+        // Skipped for a stated reason (no contact email, test customer,
+        // email not configured) — retrying won't change the outcome.
+        setSendResult({ kind: "skipped", message: json.error ?? `Not sent (HTTP ${res.status}).` });
+      } else {
+        setSendResult({ kind: "error", message: json.error ?? `Send failed (HTTP ${res.status}).` });
+      }
+    } catch {
+      setSendResult({ kind: "error", message: "Failed to reach the API — report not sent." });
+    }
+    setSendPhase("idle");
+  }
 
   useEffect(() => {
     void fetch(`/api/report/${companyId}`, { cache: "no-store" })
@@ -120,14 +149,69 @@ export default function VulnExecReport({ companyId }: { companyId: string }) {
         }
       `}</style>
 
-      <div className="no-print" style={{ maxWidth: 820, margin: "0 auto 16px", display: "flex", justifyContent: "space-between", alignItems: "center", fontFamily: "system-ui" }}>
+      <div className="no-print" style={{ maxWidth: 820, margin: "0 auto 16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap", fontFamily: "system-ui" }}>
         <div style={{ fontSize: 13, color: "#475569" }}>Board / QBR one-pager — use your browser to Print → Save as PDF.</div>
-        <button
-          onClick={() => window.print()}
-          style={{ background: "#b30e14", color: "#fff", border: 0, borderRadius: 8, padding: "8px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
-        >
-          Print / Save as PDF
-        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          {sendResult ? (
+            <span
+              style={{
+                fontSize: 12,
+                fontWeight: 600,
+                color:
+                  sendResult.kind === "sent"
+                    ? "#16a34a"
+                    : sendResult.kind === "skipped"
+                      ? "#d97706"
+                      : "#dc2626",
+              }}
+            >
+              {sendResult.message}
+            </span>
+          ) : null}
+          {sendPhase === "confirm" ? (
+            <>
+              <span style={{ fontSize: 12, color: "#475569" }}>Email this report to the customer contact?</span>
+              <button
+                onClick={() => void sendReportEmail()}
+                style={{ background: "#16a34a", color: "#fff", border: 0, borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
+              >
+                Confirm send
+              </button>
+              <button
+                onClick={() => setSendPhase("idle")}
+                style={{ background: "#fff", color: "#475569", border: "1px solid #cbd5e1", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
+              >
+                Cancel
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={() => {
+                setSendResult(null);
+                setSendPhase("confirm");
+              }}
+              disabled={sendPhase === "sending" || sendResult?.kind === "skipped"}
+              style={{
+                background: "#fff",
+                color: sendPhase === "sending" || sendResult?.kind === "skipped" ? "#94a3b8" : "#0f172a",
+                border: "1px solid #cbd5e1",
+                borderRadius: 8,
+                padding: "8px 14px",
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: sendPhase === "sending" || sendResult?.kind === "skipped" ? "default" : "pointer",
+              }}
+            >
+              {sendPhase === "sending" ? "Sending…" : "Email to customer"}
+            </button>
+          )}
+          <button
+            onClick={() => window.print()}
+            style={{ background: "#b30e14", color: "#fff", border: 0, borderRadius: 8, padding: "8px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
+          >
+            Print / Save as PDF
+          </button>
+        </div>
       </div>
 
       <div

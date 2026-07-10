@@ -156,6 +156,9 @@ type InternalCompany = {
   contactName: string;
   contactEmail: string;
   createdAt: string;
+  // Stamped by markReportSent() when a customer report email goes out.
+  // Optional so snapshots written before the field existed hydrate cleanly.
+  lastReportSentAt?: string;
 };
 
 // GMI is our own organization — treat any company named GMI as internal.
@@ -1848,6 +1851,130 @@ export function computeExecReport(companyId: string): ExecReport | null {
       kev: i.kev,
     })),
   };
+}
+
+// --- customer report email data ---------------------------------------------
+
+// What changed since the last report send: findings first seen after the
+// watermark (still unresolved) and findings resolved after it. Null when no
+// report has ever been sent (the email uses "baseline report" wording).
+export type CustomerReportDelta = {
+  since: string | null;
+  newFindings: number;
+  newCriticals: {
+    cve: string;
+    title: string;
+    asset: string;
+    severity: Severity;
+    dueAt: string | null;
+  }[];
+  resolvedFindings: number;
+};
+
+export type CustomerReportData = {
+  company: {
+    id: string;
+    name: string;
+    contactName: string;
+    contactEmail: string;
+    lastReportSentAt: string | null;
+  };
+  report: ExecReport;
+  delta: CustomerReportDelta | null;
+  // Top open remediation findings by real risk, with SLA due dates — fuller
+  // than the exec report's 5-row SSVC list (the email shows up to 10).
+  topRisks: {
+    severity: Severity;
+    cve: string;
+    title: string;
+    asset: string;
+    realRisk: number;
+    dueAt: string | null;
+  }[];
+};
+
+// Everything the customer report email needs. Test customers (SplashWorks)
+// are refused with an error marker so outbound mail can never reach them.
+export function buildCustomerReportData(
+  companyId: string,
+): CustomerReportData | { error: string } {
+  const s = store();
+  tick(s);
+  const company = s.companies.get(companyId);
+  if (!company) return { error: "Company not found." };
+  if (isAlertExcludedCompany(company.name)) return { error: "test customer" };
+
+  const report = computeExecReport(companyId);
+  if (!report) return { error: "Company not found." };
+  report.generatedAt = new Date().toISOString();
+
+  // Remediation findings only — OSINT exposures live in Attack Surface and
+  // never drive the customer remediation story.
+  const companyFindings = Array.from(s.findings.values()).filter(
+    (f) => f.companyId === companyId && isRemediationFinding(f),
+  );
+
+  const since = company.lastReportSentAt ?? null;
+  let delta: CustomerReportDelta | null = null;
+  if (since) {
+    const sinceMs = new Date(since).getTime();
+    const fresh = companyFindings.filter(
+      (f) =>
+        f.status !== "Resolved" && new Date(f.firstSeen).getTime() > sinceMs,
+    );
+    const newCriticals = fresh
+      .filter((f) => f.severity === "Critical" || f.severity === "High")
+      .sort((a, b) => b.realRisk - a.realRisk)
+      .slice(0, 10)
+      .map((f) => ({
+        cve: f.cve,
+        title: f.title,
+        asset: f.asset,
+        severity: f.severity,
+        dueAt: findingSlaInfo(f).dueAt,
+      }));
+    const resolvedFindings = companyFindings.filter(
+      (f) => f.resolvedAt && new Date(f.resolvedAt).getTime() > sinceMs,
+    ).length;
+    delta = { since, newFindings: fresh.length, newCriticals, resolvedFindings };
+  }
+
+  const topRisks = companyFindings
+    .filter(isOpen)
+    .sort((a, b) => b.realRisk - a.realRisk || b.cvss - a.cvss)
+    .slice(0, 10)
+    .map((f) => ({
+      severity: f.severity,
+      cve: f.cve,
+      title: f.title,
+      asset: f.asset,
+      realRisk: f.realRisk,
+      dueAt: findingSlaInfo(f).dueAt,
+    }));
+
+  return {
+    company: {
+      id: company.id,
+      name: company.name,
+      contactName: company.contactName,
+      contactEmail: company.contactEmail,
+      lastReportSentAt: since,
+    },
+    report,
+    delta,
+    topRisks,
+  };
+}
+
+// Stamp the report-send watermark and flush lightly (the interval flusher
+// would catch it anyway; the immediate write just narrows the loss window).
+export function markReportSent(companyId: string): void {
+  const s = store();
+  const company = s.companies.get(companyId);
+  if (!company) return;
+  company.lastReportSentAt = new Date().toISOString();
+  markDirty();
+  void persistSnapshot();
 }
 
 // Purge every demo/simulated scan and its findings. Only the demo engine

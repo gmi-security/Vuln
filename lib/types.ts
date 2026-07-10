@@ -49,6 +49,9 @@ export type Company = {
   contactName: string;
   contactEmail: string;
   createdAt: string;
+  // When the last customer report email was sent (ISO). Absent until the
+  // first send — old snapshots hydrate without it.
+  lastReportSentAt?: string;
   // derived rollups
   folderCount: number;
   scanCount: number;

@@ -13,6 +13,7 @@ import {
   Bug,
   Folder as FolderIcon,
   FolderPlus,
+  Mail,
   Play,
 } from "lucide-react";
 import { IconAlertTriangle, IconBug, IconGauge, IconRadar } from "@tabler/icons-react";
@@ -71,6 +72,15 @@ export default function VulnCompanyDetailPage({
   const [folderName, setFolderName] = useState("");
   const [notFound, setNotFound] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  // Customer report email: idle → confirm (two-step, it's outward-facing) →
+  // sending → inline result. "skipped" = stated reason, retry won't help.
+  const [emailPhase, setEmailPhase] = useState<"idle" | "confirm" | "sending">(
+    "idle",
+  );
+  const [emailResult, setEmailResult] = useState<{
+    kind: "sent" | "skipped" | "error";
+    message: string;
+  } | null>(null);
   // Monotonic request id — invalidated on company change so an in-flight load
   // for company A can never land on company B.
   const loadSeq = useRef(0);
@@ -86,6 +96,8 @@ export default function VulnCompanyDetailPage({
     setMetrics(null);
     setNotFound(false);
     setActionError(null);
+    setEmailPhase("idle");
+    setEmailResult(null);
   }, [companyId]);
 
   const load = useCallback(async () => {
@@ -169,6 +181,40 @@ export default function VulnCompanyDetailPage({
     }
   }
 
+  async function sendReportEmail() {
+    setEmailPhase("sending");
+    setEmailResult(null);
+    try {
+      const res = await fetch(`/api/report/${companyId}/send`, {
+        method: "POST",
+      });
+      const json = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setEmailResult({
+          kind: "sent",
+          message: `Report sent to ${json.to}`,
+        });
+        await load(); // refresh lastReportSentAt
+      } else if (res.status === 400 || res.status === 503) {
+        setEmailResult({
+          kind: "skipped",
+          message: json.error ?? `Report not sent (HTTP ${res.status}).`,
+        });
+      } else {
+        setEmailResult({
+          kind: "error",
+          message: json.error ?? `Report send failed (HTTP ${res.status}).`,
+        });
+      }
+    } catch {
+      setEmailResult({
+        kind: "error",
+        message: "Failed to reach the API — report not sent.",
+      });
+    }
+    setEmailPhase("idle");
+  }
+
   async function runAction(scan: Scan, action: string) {
     if (
       action === "delete" &&
@@ -235,6 +281,42 @@ export default function VulnCompanyDetailPage({
             <ArrowLeft size={16} />
             All
           </Link>
+          {emailPhase === "confirm" ? (
+            <>
+              <span className="text-sm text-zinc-400">
+                Send to {company?.contactEmail}?
+              </span>
+              <button
+                onClick={() => void sendReportEmail()}
+                className={primaryButtonClass}
+              >
+                Confirm
+              </button>
+              <button
+                onClick={() => setEmailPhase("idle")}
+                className={ghostButtonClass}
+              >
+                Cancel
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={() => {
+                setEmailResult(null);
+                setEmailPhase("confirm");
+              }}
+              disabled={!company?.contactEmail || emailPhase === "sending"}
+              title={
+                company && !company.contactEmail
+                  ? "No contact email on file for this company."
+                  : undefined
+              }
+              className={`${ghostButtonClass} disabled:cursor-not-allowed disabled:opacity-50`}
+            >
+              <Mail size={16} className="text-zinc-400" />
+              {emailPhase === "sending" ? "Sending…" : "Email report"}
+            </button>
+          )}
           <button onClick={() => setShowNew(true)} className={primaryButtonClass}>
             <Play size={16} />
             Start scan
@@ -306,6 +388,24 @@ export default function VulnCompanyDetailPage({
             Add folder
           </button>
         )}
+        {emailResult ? (
+          <span
+            className={`text-sm ${
+              emailResult.kind === "sent"
+                ? "text-emerald-400"
+                : emailResult.kind === "skipped"
+                  ? "text-amber-400"
+                  : "text-[#ff4d57]"
+            }`}
+          >
+            {emailResult.message}
+          </span>
+        ) : null}
+        {company?.lastReportSentAt ? (
+          <span className="text-sm text-zinc-500">
+            Report last sent {formatDateTime(company.lastReportSentAt)}
+          </span>
+        ) : null}
         {actionError ? (
           <span className="text-sm text-[#ff4d57]">{actionError}</span>
         ) : null}
