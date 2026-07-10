@@ -78,6 +78,8 @@ const HEALTH_ENDPOINTS: Record<string, string> = {
   burp: "/api/burp/health",
   nmap: "/api/nmap/health",
   vulners: "/api/vulners/health",
+  "resend-email": "/api/alerts/health?channel=email",
+  "slack-alerts": "/api/alerts/health?channel=slack",
 };
 
 // Connectors with a pull/import endpoint get a "Sync now" button.

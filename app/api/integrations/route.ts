@@ -3,6 +3,7 @@ import { tidalConfig } from "@/lib/tidal";
 import { intuneConfig } from "@/lib/intune";
 import { falconConfig } from "@/lib/crowdstrike";
 import { grcConfig } from "@/lib/grc";
+import { emailConfigured, slackConfigured } from "@/lib/alerts";
 
 export const dynamic = "force-dynamic";
 
@@ -87,6 +88,42 @@ export async function GET() {
         configured: Boolean(grc),
         status: grc ? "Connected" : "Demo Mode",
         docsUrl: `${(process.env.GRC_API_URL ?? "").replace(/\/+$/, "") || "https://www.opengrc.com"}/app/dashboard`,
+      },
+      {
+        id: "resend-email",
+        name: "Resend Email",
+        vendor: "Resend",
+        kind: "Alerting & Reporting (email delivery)",
+        description:
+          "Outbound email for the console — sync alerts to the ops inbox, remediation requests to customer contacts, and scheduled monthly executive reports. Uses the Resend API; no SMTP server needed.",
+        capabilities: [
+          "Sync alerts",
+          "Remediation requests",
+          "Monthly exec reports",
+          "Test from Settings",
+        ],
+        envVars: ["RESEND_API_KEY", "REPORT_FROM_EMAIL", "ALERT_EMAIL"],
+        configured: emailConfigured(),
+        status: emailConfigured() ? "Connected" : "Not Configured",
+        docsUrl: "https://resend.com/docs/introduction",
+      },
+      {
+        id: "slack-alerts",
+        name: "Slack Alerts",
+        vendor: "Slack",
+        kind: "Alerting (incoming webhook)",
+        description:
+          "Real-time alerts to a Slack channel after every sync — connector failures, new Critical/High findings per customer, and KEV/ransomware-linked findings called out separately. Planned until workspace access lands; activates the moment SLACK_WEBHOOK_URL is set.",
+        capabilities: [
+          "Sync failure alerts",
+          "New Critical/High alerts",
+          "KEV / ransomware callouts",
+          "Test from Settings",
+        ],
+        envVars: ["SLACK_WEBHOOK_URL"],
+        configured: slackConfigured(),
+        status: slackConfigured() ? "Connected" : "Planned",
+        docsUrl: "https://api.slack.com/messaging/webhooks",
       },
     ],
   });
