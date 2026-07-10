@@ -35,7 +35,8 @@ export async function PATCH(
   }
   const result = updateCompany(id, body);
   if ("error" in result) {
-    return NextResponse.json({ error: result.error }, { status: 400 });
+    const status = result.error === "Company not found." ? 404 : 400;
+    return NextResponse.json({ error: result.error }, { status });
   }
   return NextResponse.json({ company: result });
 }
@@ -48,7 +49,8 @@ export async function DELETE(
   const { id } = await params;
   const result = deleteCompany(id);
   if ("error" in result) {
-    return NextResponse.json({ error: result.error }, { status: 400 });
+    const status = result.error === "Company not found." ? 404 : 400;
+    return NextResponse.json({ error: result.error }, { status });
   }
   return NextResponse.json(result);
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Radar, RefreshCcw } from "lucide-react";
 import {
@@ -51,12 +51,18 @@ export default function VulnCoveragePage() {
   const [autoScan, setAutoScan] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [scanMsg, setScanMsg] = useState<string | null>(null);
+  const [toggleError, setToggleError] = useState<string | null>(null);
+  // Monotonic request id — a slow older response must never overwrite a newer one.
+  const loadSeq = useRef(0);
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     const q = companyFilter === "All" ? "" : `?companyId=${companyFilter}`;
     try {
       const res = await fetch(`/api/assets/coverage${q}`, { cache: "no-store" });
-      setCoverage((await res.json()).coverage ?? null);
+      const json = await res.json();
+      if (seq !== loadSeq.current) return; // superseded by a newer request
+      setCoverage(json.coverage ?? null);
     } catch {
       // keep last snapshot
     }
@@ -80,13 +86,27 @@ export default function VulnCoveragePage() {
   async function toggleAutoScan() {
     const next = !autoScan;
     setAutoScan(next);
-    await fetch("/api/settings", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ autoScanNewAssets: next }),
-    });
-    // Turning it on sweeps the current gap immediately.
-    if (next) await runAutoScan();
+    setToggleError(null);
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ autoScanNewAssets: next }),
+      });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        setAutoScan(!next); // roll back the optimistic flip
+        setToggleError(
+          json.error ?? `Failed to save setting (HTTP ${res.status}).`,
+        );
+        return;
+      }
+      // Turning it on sweeps the current gap immediately.
+      if (next) await runAutoScan();
+    } catch {
+      setAutoScan(!next); // roll back the optimistic flip
+      setToggleError("Failed to reach the API — setting not saved.");
+    }
   }
 
   async function runAutoScan() {
@@ -157,6 +177,9 @@ export default function VulnCoveragePage() {
             Automatically launch a scan whenever a known asset has no coverage —
             on the diff and after each Tidal sync.
           </p>
+          {toggleError ? (
+            <p className="mt-1 text-xs text-[#ff4d57]">{toggleError}</p>
+          ) : null}
         </div>
         <button
           role="switch"

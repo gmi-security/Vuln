@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Play } from "lucide-react";
 import {
@@ -31,7 +31,11 @@ export default function VulnDashboardPage() {
     error: null,
   });
 
+  // Monotonic request id — a slow older response must never overwrite a newer one.
+  const loadSeq = useRef(0);
+
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     try {
       const [scansRes, metricsRes] = await Promise.all([
         fetch("/api/scans", { cache: "no-store" }),
@@ -40,6 +44,7 @@ export default function VulnDashboardPage() {
       if (!scansRes.ok || !metricsRes.ok) return; // keep last good state on server errors
       const scansJson = await scansRes.json();
       const metricsJson = await metricsRes.json();
+      if (seq !== loadSeq.current) return; // superseded by a newer request
       if (scansJson.scans) setScans(scansJson.scans);
       if (metricsJson.metrics) setMetrics(metricsJson.metrics);
     } catch {
@@ -61,7 +66,8 @@ export default function VulnDashboardPage() {
   }, []);
 
   const running = scans.filter(
-    (s) => s.status === "Running" || s.status === "Paused",
+    (s) =>
+      s.status === "Queued" || s.status === "Running" || s.status === "Paused",
   );
 
   // Poll fast when scans are active (10s), slow when idle (60s).

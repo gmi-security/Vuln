@@ -25,10 +25,14 @@ export default function VulnScanDetailPage({ scanId }: { scanId: string }) {
     try {
       const res = await fetch(`/api/scans/${scanId}`, { cache: "no-store" });
       if (res.status === 404) {
+        // Clear any stale scan so the not-found panel renders on its own.
+        setScan(null);
+        setFindings([]);
         setNotFound(true);
         return;
       }
       const json = await res.json();
+      setNotFound(false);
       setScan(json.scan ?? null);
       setFindings(json.findings ?? []);
     } catch {
@@ -36,15 +40,27 @@ export default function VulnScanDetailPage({ scanId }: { scanId: string }) {
     }
   }, [scanId]);
 
+  // Poll while the scan is active; stop once it reaches a terminal state or
+  // no longer exists.
+  const settled =
+    notFound ||
+    (scan !== null &&
+      (scan.status === "Completed" ||
+        scan.status === "Failed" ||
+        scan.status === "Stopped"));
+
   useEffect(() => {
     void load();
+    if (settled) return;
     const timer = setInterval(() => void load(), 3000);
     return () => clearInterval(timer);
-  }, [load]);
+  }, [load, settled]);
 
   const subtitle = scan
     ? `${connectorLabels[scan.connector]} · ${scan.profile} · requested by ${scan.requestedBy}`
-    : "Loading scan...";
+    : notFound
+      ? "This scan no longer exists."
+      : "Loading scan...";
 
   return (
     <VulnShell

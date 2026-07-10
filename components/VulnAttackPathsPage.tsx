@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { RefreshCcw } from "lucide-react";
 import {
   IconBomb,
@@ -22,12 +22,17 @@ export default function VulnAttackPathsPage() {
   const [data, setData] = useState<AttackPathResult | null>(null);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [companyFilter, setCompanyFilter] = useState("All");
+  // Monotonic request id — a slow older response must never overwrite a newer one.
+  const loadSeq = useRef(0);
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     const q = companyFilter === "All" ? "" : `?companyId=${companyFilter}`;
     try {
       const res = await fetch(`/api/attack-paths${q}`, { cache: "no-store" });
-      setData((await res.json()).attackPaths ?? null);
+      const json = await res.json();
+      if (seq !== loadSeq.current) return; // superseded by a newer request
+      setData(json.attackPaths ?? null);
     } catch {
       // keep last snapshot
     }

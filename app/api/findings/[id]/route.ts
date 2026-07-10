@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { ensureHydrated, updateFinding } from "@/lib/store";
+import { ensureHydrated, listFindings, updateFinding } from "@/lib/store";
 import type { FindingStatus } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -11,6 +11,19 @@ const VALID_STATUSES: FindingStatus[] = [
   "False Positive",
   "Resolved",
 ];
+
+export async function GET(
+  _request: Request,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  await ensureHydrated();
+  const { id } = await params;
+  const finding = listFindings().find((f) => f.id === id);
+  if (!finding) {
+    return NextResponse.json({ error: "Finding not found." }, { status: 404 });
+  }
+  return NextResponse.json({ finding });
+}
 
 export async function PATCH(
   request: Request,

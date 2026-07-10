@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { FileText, RefreshCcw, Upload } from "lucide-react";
 import {
   IconBuildingBank,
@@ -28,13 +28,17 @@ export default function VulnCompliancePage() {
   const [selected, setSelected] = useState("pci");
   const [pushing, setPushing] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  // Monotonic request id — a slow older response must never overwrite a newer one.
+  const loadSeq = useRef(0);
 
   const load = useCallback(async (framework: string) => {
+    const seq = ++loadSeq.current;
     try {
       const res = await fetch(`/api/compliance?framework=${framework}`, {
         cache: "no-store",
       });
       const json = await res.json();
+      if (seq !== loadSeq.current) return; // superseded by a newer request
       setData(json.compliance ?? null);
       if (json.frameworks) setFrameworks(json.frameworks);
     } catch {

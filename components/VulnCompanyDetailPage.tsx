@@ -1,6 +1,12 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import Link from "next/link";
 import {
   ArrowLeft,
@@ -64,8 +70,26 @@ export default function VulnCompanyDetailPage({
   const [addingFolder, setAddingFolder] = useState(false);
   const [folderName, setFolderName] = useState("");
   const [notFound, setNotFound] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  // Monotonic request id — invalidated on company change so an in-flight load
+  // for company A can never land on company B.
+  const loadSeq = useRef(0);
+
+  // Navigating between companies must clear the previous company's data
+  // immediately — never render one client's data under another's header.
+  useEffect(() => {
+    loadSeq.current += 1;
+    setCompany(null);
+    setFolders([]);
+    setScans([]);
+    setAssets([]);
+    setMetrics(null);
+    setNotFound(false);
+    setActionError(null);
+  }, [companyId]);
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     try {
       const [companyRes, foldersRes, scansRes, metricsRes, assetsRes] =
         await Promise.all([
@@ -76,14 +100,24 @@ export default function VulnCompanyDetailPage({
           fetch(`/api/assets?companyId=${companyId}`, { cache: "no-store" }),
         ]);
       if (companyRes.status === 404) {
-        setNotFound(true);
+        if (seq === loadSeq.current) setNotFound(true);
         return;
       }
-      setCompany((await companyRes.json()).company ?? null);
-      setFolders((await foldersRes.json()).folders ?? []);
-      setScans((await scansRes.json()).scans ?? []);
-      setMetrics((await metricsRes.json()).metrics ?? null);
-      setAssets((await assetsRes.json()).assets ?? []);
+      const [companyJson, foldersJson, scansJson, metricsJson, assetsJson] =
+        await Promise.all([
+          companyRes.json(),
+          foldersRes.json(),
+          scansRes.json(),
+          metricsRes.json(),
+          assetsRes.json(),
+        ]);
+      if (seq !== loadSeq.current) return; // stale — superseded by a newer load
+      setNotFound(false);
+      setCompany(companyJson.company ?? null);
+      setFolders(foldersJson.folders ?? []);
+      setScans(scansJson.scans ?? []);
+      setMetrics(metricsJson.metrics ?? null);
+      setAssets(assetsJson.assets ?? []);
     } catch {
       // keep last snapshot
     }
@@ -113,14 +147,26 @@ export default function VulnCompanyDetailPage({
   async function addFolder(event: React.FormEvent) {
     event.preventDefault();
     if (!folderName.trim()) return;
-    await fetch("/api/folders", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ companyId, name: folderName }),
-    });
-    setFolderName("");
-    setAddingFolder(false);
-    await load();
+    setActionError(null);
+    try {
+      const res = await fetch("/api/folders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ companyId, name: folderName }),
+      });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        setActionError(
+          json.error ?? `Failed to add folder (HTTP ${res.status}).`,
+        );
+        return;
+      }
+      setFolderName("");
+      setAddingFolder(false);
+      await load();
+    } catch {
+      setActionError("Failed to reach the API — folder not added.");
+    }
   }
 
   async function runAction(scan: Scan, action: string) {
@@ -130,12 +176,24 @@ export default function VulnCompanyDetailPage({
     ) {
       return;
     }
-    await fetch(`/api/scans/${scan.id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action }),
-    });
-    await load();
+    setActionError(null);
+    try {
+      const res = await fetch(`/api/scans/${scan.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        setActionError(
+          json.error ?? `Failed to ${action} scan (HTTP ${res.status}).`,
+        );
+        return;
+      }
+      await load();
+    } catch {
+      setActionError(`Failed to reach the API — could not ${action} scan.`);
+    }
   }
 
   if (notFound) {
@@ -248,6 +306,9 @@ export default function VulnCompanyDetailPage({
             Add folder
           </button>
         )}
+        {actionError ? (
+          <span className="text-sm text-[#ff4d57]">{actionError}</span>
+        ) : null}
       </div>
 
       <PanelCard

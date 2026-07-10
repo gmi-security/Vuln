@@ -46,6 +46,7 @@ export default function VulnScansPage({
   const [companyFilter, setCompanyFilter] = useState("All");
   const [showNew, setShowNew] = useState(searchParams.get("new") === "1");
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -127,13 +128,23 @@ export default function VulnScansPage({
       return;
     }
     setBusyId(scan.id);
+    setActionError(null);
     try {
-      await fetch(`/api/scans/${scan.id}`, {
+      const res = await fetch(`/api/scans/${scan.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action }),
       });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        setActionError(
+          json.error ?? `Failed to ${action} ${scan.name} (HTTP ${res.status}).`,
+        );
+        return;
+      }
       await load();
+    } catch {
+      setActionError(`Failed to reach the API — could not ${action} ${scan.name}.`);
     } finally {
       setBusyId(null);
     }
@@ -182,11 +193,17 @@ export default function VulnScansPage({
             onChange={(e) => setStatusFilter(e.target.value)}
             className={selectClass}
           >
-            {["All", "Running", "Paused", "Completed", "Stopped", "Failed"].map(
-              (s) => (
-                <option key={s}>{s}</option>
-              ),
-            )}
+            {[
+              "All",
+              "Queued",
+              "Running",
+              "Paused",
+              "Completed",
+              "Stopped",
+              "Failed",
+            ].map((s) => (
+              <option key={s}>{s}</option>
+            ))}
           </select>
           <select
             value={connectorFilter}
@@ -205,6 +222,12 @@ export default function VulnScansPage({
           </button>
         </div>
       </PanelCard>
+
+      {actionError ? (
+        <div className="rounded-2xl border border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.10)] px-5 py-3 text-sm text-[#ff4d57]">
+          {actionError}
+        </div>
+      ) : null}
 
       {grouped.length === 0 ? (
         <PanelCard eyebrow="All scans">

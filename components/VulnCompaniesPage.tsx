@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Building2, Database, DownloadCloud, FolderKanban, Laptop, Plus, Radar, ShieldAlert, ShieldCheck, X } from "lucide-react";
 import { IconAlertTriangle, IconBug } from "@tabler/icons-react";
@@ -28,6 +28,15 @@ export default function VulnCompaniesPage() {
   const [importMsg, setImportMsg] = useState<
     { ok: boolean; text: string } | null
   >(null);
+  // Stops the Tidal sync poll loop when the page unmounts — otherwise it keeps
+  // polling (and calling setState) for up to an hour after navigation.
+  const aliveRef = useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -154,6 +163,7 @@ export default function VulnCompaniesPage() {
       // Background job — poll until it finishes (spans ~49 client companies).
       for (let i = 0; i < 3000; i += 1) {
         await new Promise((r) => setTimeout(r, 1200));
+        if (!aliveRef.current) return; // unmounted — stop polling
         let st: any = null;
         try {
           const pr = await fetch("/api/tidal/import", { cache: "no-store" });
@@ -161,6 +171,7 @@ export default function VulnCompaniesPage() {
         } catch {
           continue;
         }
+        if (!aliveRef.current) return;
         if (!st) break;
         if (st.running) {
           setImportMsg({
@@ -185,9 +196,11 @@ export default function VulnCompaniesPage() {
         break;
       }
     } catch {
-      setImportMsg({ ok: false, text: "Failed to reach the Tidal API." });
+      if (aliveRef.current) {
+        setImportMsg({ ok: false, text: "Failed to reach the Tidal API." });
+      }
     } finally {
-      setImporting(false);
+      if (aliveRef.current) setImporting(false);
     }
   }
 

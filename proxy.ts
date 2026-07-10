@@ -44,6 +44,11 @@ export async function proxy(request: NextRequest) {
 
   if (!token) {
     if (isLoginPage) return NextResponse.next();
+    // API callers expect JSON, not the login page — a 302 to HTML makes the
+    // client's res.json() blow up. Pages keep the redirect.
+    if (pathname.startsWith("/api/")) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
     const loginUrl = new URL("/login", request.url);
     loginUrl.searchParams.set("callbackUrl", pathname);
     return NextResponse.redirect(loginUrl);

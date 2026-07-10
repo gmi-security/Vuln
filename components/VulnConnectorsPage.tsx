@@ -382,6 +382,15 @@ function IntegrationCard({ card }: { card: CardData }) {
   const [progress, setProgress] = useState<TidalSyncStatus | null>(null);
   const [csProgress, setCsProgress] = useState<CsSyncStatus | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+  // Stops the sync poll loops when the card unmounts — otherwise they keep
+  // polling (and calling setState) for up to an hour after navigation.
+  const aliveRef = React.useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
   const [uploading, setUploading] = useState(false);
   const isTidal = card.id === "tidal";
   const isCrowdstrike = card.id === "crowdstrike" || card.id === "crowdstrike-devices";
@@ -474,6 +483,7 @@ function IntegrationCard({ card }: { card: CardData }) {
     let finished = false;
     for (let i = 0; i < 600; i += 1) {
       await new Promise((r) => setTimeout(r, 2000));
+      if (!aliveRef.current) return; // unmounted — stop polling
       let st: CsSyncStatus | null = null;
       try {
         const r = await fetch(syncUrl!, { method: "GET", cache: "no-store" });
@@ -482,6 +492,7 @@ function IntegrationCard({ card }: { card: CardData }) {
       } catch {
         continue;
       }
+      if (!aliveRef.current) return;
       if (!st) break;
       setCsProgress(st);
       if (!st.running) {
@@ -492,13 +503,16 @@ function IntegrationCard({ card }: { card: CardData }) {
         break;
       }
     }
+    if (!aliveRef.current) return;
     if (!finished) setSyncMsg({ ok: false, text: "Sync timed out waiting for a response. Check /api/crowdstrike/debug." });
     setSyncing(false);
   }
 
   async function pollTidal() {
+    let finished = false;
     for (let i = 0; i < 3000; i += 1) {
       await new Promise((r) => setTimeout(r, 1200));
+      if (!aliveRef.current) return; // unmounted — stop polling
       let st: TidalSyncStatus | null = null;
       try {
         const r = await fetch(syncUrl, { method: "GET", cache: "no-store" });
@@ -507,14 +521,18 @@ function IntegrationCard({ card }: { card: CardData }) {
       } catch {
         continue; // transient — keep polling
       }
+      if (!aliveRef.current) return;
       if (!st) break;
       setProgress(st);
       if (!st.running) {
+        finished = true;
         if (st.error) setSyncMsg({ ok: false, text: st.error });
         else if (st.result) setSyncMsg({ ok: true, text: summarizeSync(st.result) });
         break;
       }
     }
+    if (!aliveRef.current) return;
+    if (!finished) setSyncMsg({ ok: false, text: "Sync timed out waiting for a response. Check the Tidal connector and try again." });
     setSyncing(false);
   }
 

@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/auth";
 import { ensureHydrated, listScans, startScan } from "@/lib/store";
 import type { ConnectorId } from "@/lib/types";
 
@@ -40,6 +42,11 @@ export async function POST(request: Request) {
     .map((t) => t.trim())
     .filter(Boolean);
 
+  // Attribute the scan to the signed-in user rather than the store default.
+  const session = await getServerSession(authOptions);
+  const requestedBy =
+    session?.user?.email ?? session?.user?.name ?? undefined;
+
   const result = await startScan({
     name: (body.name ?? "").trim(),
     connector: body.connector,
@@ -48,6 +55,7 @@ export async function POST(request: Request) {
     companyId: body.companyId,
     folderId: body.folderId,
     folderName: body.folderName,
+    requestedBy,
   });
 
   if ("error" in result) {

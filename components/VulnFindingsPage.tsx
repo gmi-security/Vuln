@@ -1,8 +1,21 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useSearchParams } from "next/navigation";
-import { ExternalLink, RefreshCcw, Search, X } from "lucide-react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  ExternalLink,
+  RefreshCcw,
+  Search,
+  X,
+} from "lucide-react";
 import VulnShell from "@/components/VulnShell";
 import {
   PanelCard,
@@ -31,6 +44,8 @@ const STATUSES: FindingStatus[] = [
   "False Positive",
   "Resolved",
 ];
+
+const PAGE_SIZE = 200;
 
 // Score for the selected CVSS version, falling back to the other version when
 // the source only carries one. Returns the number and which version was used.
@@ -80,8 +95,11 @@ function CvssToggle({
 export default function VulnFindingsPage() {
   const searchParams = useSearchParams();
   const [findings, setFindings] = useState<Finding[]>([]);
+  const [total, setTotal] = useState(0);
+  const [offset, setOffset] = useState(0);
   const [kind, setKind] = useState<"vuln" | "osint" | "all">("vuln");
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [severityFilter, setSeverityFilter] = useState("All");
   const [statusFilter, setStatusFilter] = useState("All");
   const [connectorFilter, setConnectorFilter] = useState("All");
@@ -94,20 +112,79 @@ export default function VulnFindingsPage() {
   const [focusId, setFocusId] = useState<string | null>(
     searchParams.get("focus"),
   );
+  // Deep-linked finding fetched directly when it isn't in the current page.
+  const [focusFetched, setFocusFetched] = useState<Finding | null>(null);
   const [assigneeDraft, setAssigneeDraft] = useState("");
+  const [patchError, setPatchError] = useState<string | null>(null);
+  // Monotonic request id — a slow older response must never overwrite a newer one.
+  const loadSeq = useRef(0);
+
+  // Debounce the search box so we don't refetch on every keystroke.
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(search), 300);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  // Any filter change starts back at the first page.
+  useEffect(() => {
+    setOffset(0);
+  }, [
+    kind,
+    debouncedSearch,
+    severityFilter,
+    statusFilter,
+    connectorFilter,
+    companyFilter,
+    exploitOnly,
+  ]);
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
+    const params = new URLSearchParams({
+      kind,
+      limit: String(PAGE_SIZE),
+      offset: String(offset),
+    });
+    if (companyFilter !== "All") params.set("companyId", companyFilter);
+    if (severityFilter !== "All") params.set("severity", severityFilter);
+    if (statusFilter !== "All") params.set("status", statusFilter);
+    if (connectorFilter !== "All") params.set("connector", connectorFilter);
+    if (exploitOnly) params.set("exploit", "1");
+    if (debouncedSearch.trim()) params.set("q", debouncedSearch.trim());
     try {
-      const res = await fetch(`/api/findings?kind=${kind}`, { cache: "no-store" });
+      const res = await fetch(`/api/findings?${params.toString()}`, {
+        cache: "no-store",
+      });
       const json = await res.json();
+      if (seq !== loadSeq.current) return; // superseded by a newer request
+      const nextTotal = json.total ?? 0;
       setFindings(json.findings ?? []);
+      setTotal(nextTotal);
+      // If the data shrank under us, snap back to the last valid page.
+      setOffset((prev) =>
+        prev > 0 && prev >= nextTotal
+          ? Math.max(0, Math.floor(Math.max(nextTotal - 1, 0) / PAGE_SIZE) * PAGE_SIZE)
+          : prev,
+      );
     } catch {
       // keep last snapshot
     }
-  }, [kind]);
+  }, [
+    kind,
+    offset,
+    debouncedSearch,
+    severityFilter,
+    statusFilter,
+    connectorFilter,
+    companyFilter,
+    exploitOnly,
+  ]);
 
   useEffect(() => {
     void load();
+  }, [load]);
+
+  useEffect(() => {
     void fetch("/api/companies", { cache: "no-store" })
       .then((res) => res.json())
       .then((json) =>
@@ -119,57 +196,62 @@ export default function VulnFindingsPage() {
         ),
       )
       .catch(() => undefined);
-  }, [load]);
+  }, []);
 
-  const focus = useMemo(
+  const focusInPage = useMemo(
     () => findings.find((f) => f.id === focusId) ?? null,
     [findings, focusId],
   );
+  const focus =
+    focusInPage ??
+    (focusFetched && focusFetched.id === focusId ? focusFetched : null);
+
+  // ?focus=<id> deep link: the finding may not be on the current page — fetch
+  // it directly so the detail panel still opens.
+  useEffect(() => {
+    if (!focusId || focusInPage) return;
+    let cancelled = false;
+    void fetch(`/api/findings/${focusId}`, { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((json) => {
+        if (!cancelled && json?.finding) setFocusFetched(json.finding);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [focusId, focusInPage]);
 
   useEffect(() => {
     setAssigneeDraft(focus?.assignee ?? "");
+    setPatchError(null);
   }, [focus?.id, focus?.assignee]);
-
-  const filtered = useMemo(() => {
-    return findings.filter((f) => {
-      if (severityFilter !== "All" && f.severity !== severityFilter)
-        return false;
-      if (statusFilter !== "All" && f.status !== statusFilter) return false;
-      if (connectorFilter !== "All" && f.connector !== connectorFilter)
-        return false;
-      if (companyFilter !== "All" && f.companyId !== companyFilter) return false;
-      if (exploitOnly && !f.exploitAvailable) return false;
-      if (search) {
-        const haystack =
-          `${f.cve} ${f.title} ${f.asset} ${f.category} ${f.companyName}`.toLowerCase();
-        if (!haystack.includes(search.toLowerCase())) return false;
-      }
-      return true;
-    });
-  }, [
-    findings,
-    search,
-    severityFilter,
-    statusFilter,
-    connectorFilter,
-    companyFilter,
-    exploitOnly,
-  ]);
 
   async function patchFinding(
     id: string,
     patch: { status?: FindingStatus; assignee?: string | null },
   ) {
-    const res = await fetch(`/api/findings/${id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(patch),
-    });
-    if (res.ok) {
+    setPatchError(null);
+    try {
+      const res = await fetch(`/api/findings/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        setPatchError(json.error ?? `Update failed (HTTP ${res.status}).`);
+        return;
+      }
       const json = await res.json();
       setFindings((prev) =>
         prev.map((f) => (f.id === id ? json.finding : f)),
       );
+      setFocusFetched((prev) =>
+        prev && prev.id === id ? json.finding : prev,
+      );
+    } catch {
+      setPatchError("Failed to reach the API — change not saved.");
     }
   }
 
@@ -277,7 +359,11 @@ export default function VulnFindingsPage() {
 
       <PanelCard
         eyebrow="Findings"
-        description={`${filtered.length} of ${findings.length} findings`}
+        description={
+          total > 0
+            ? `Showing ${offset + 1}–${offset + findings.length} of ${total} findings`
+            : "0 findings"
+        }
         actions={<CvssToggle version={cvssVersion} onChange={setCvssVersion} />}
       >
         <div className="overflow-hidden rounded-[24px] border border-[rgba(179,14,20,0.12)] bg-[#040404]">
@@ -292,7 +378,7 @@ export default function VulnFindingsPage() {
             <div>Age</div>
           </div>
           <div className={`max-h-[680px] ${scrollAreaClass}`}>
-            {filtered.map((finding) => (
+            {findings.map((finding) => (
               <button
                 key={finding.id}
                 onClick={() => setFocusId(finding.id)}
@@ -385,11 +471,38 @@ export default function VulnFindingsPage() {
                 </div>
               </button>
             ))}
-            {filtered.length === 0 ? (
+            {findings.length === 0 ? (
               <div className="px-5 py-12 text-center text-sm text-zinc-500">
                 No findings match the current filters.
               </div>
             ) : null}
+          </div>
+        </div>
+        <div className="mt-4 flex items-center justify-between gap-4">
+          <span className="text-sm text-zinc-500">
+            {total > 0
+              ? `Showing ${offset + 1}–${offset + findings.length} of ${total}`
+              : "Showing 0 of 0"}
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={offset === 0}
+              onClick={() => setOffset((prev) => Math.max(0, prev - PAGE_SIZE))}
+              className={`${ghostButtonClass} h-[44px] disabled:opacity-40`}
+            >
+              <ChevronLeft size={16} className="text-zinc-400" />
+              Previous
+            </button>
+            <button
+              type="button"
+              disabled={offset + findings.length >= total}
+              onClick={() => setOffset((prev) => prev + PAGE_SIZE)}
+              className={`${ghostButtonClass} h-[44px] disabled:opacity-40`}
+            >
+              Next
+              <ChevronRight size={16} className="text-zinc-400" />
+            </button>
           </div>
         </div>
       </PanelCard>
@@ -612,6 +725,9 @@ export default function VulnFindingsPage() {
                     </button>
                   </div>
                 </div>
+                {patchError ? (
+                  <p className="text-xs text-[#ff4d57]">{patchError}</p>
+                ) : null}
               </div>
             </div>
           </div>
