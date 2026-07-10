@@ -4,8 +4,9 @@ import { getToken } from "next-auth/jwt";
 
 // Edge auth gate (Next 16 "proxy" convention). Every request that isn't a
 // public asset, the login page, or an auth endpoint must carry a valid
-// session token; otherwise it's redirected to /login. Org-membership
-// enforcement happens at sign-in time in lib/auth.ts.
+// session token; otherwise it's redirected to /login. Org membership is
+// checked at sign-in and periodically re-verified in lib/auth.ts, which
+// flips orgMember to false when the user has been removed from the org.
 const PUBLIC_ASSET_PREFIXES = ["/_next", "/favicon.ico", "/fonts"];
 
 function isPublicAsset(pathname: string) {
@@ -42,7 +43,11 @@ export async function proxy(request: NextRequest) {
 
   const isLoginPage = pathname === "/login";
 
-  if (!token) {
+  // orgMember === false means the periodic re-check in lib/auth.ts found the
+  // user is no longer in the org (or their token was revoked). Legacy tokens
+  // minted before that field existed are still honored, so a deploy doesn't
+  // log everyone out at once.
+  if (!token || token.orgMember === false) {
     if (isLoginPage) return NextResponse.next();
     // API callers expect JSON, not the login page — a 302 to HTML makes the
     // client's res.json() blow up. Pages keep the redirect.

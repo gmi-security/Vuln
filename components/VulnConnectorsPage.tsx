@@ -294,35 +294,113 @@ function OsintLaunchBanner() {
   );
 }
 
-// One-click "Sync all" — pull results from every configured connector.
+type SyncAllStatus = {
+  running: boolean;
+  startedAt: number;
+  finishedAt: number | null;
+  results:
+    | { connector: string; configured: boolean; ok: boolean; result?: any; error?: string }[]
+    | null;
+  enrich: Record<string, any> | null;
+  error: string | null;
+};
+
+// One-click "Sync all" — pull results from every configured connector. The
+// server runs the sweep as a background job, so this POSTs to start it and
+// polls GET until it finishes.
 function SyncAllButton() {
   const [busy, setBusy] = useState(false);
   const [rows, setRows] = useState<
     { connector: string; configured: boolean; ok: boolean; result?: any; error?: string }[] | null
   >(null);
   const [enrichSummary, setEnrichSummary] = useState<string | null>(null);
+  const [errMsg, setErrMsg] = useState<string | null>(null);
+  // Stops the poll loop when the page unmounts — otherwise it keeps polling
+  // (and calling setState) for up to 15 minutes after navigation.
+  const aliveRef = React.useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
+
+  function applyFinished(st: SyncAllStatus) {
+    setRows(st.results ?? null);
+    if (st.error) setErrMsg(st.error);
+    const e = st.enrich;
+    if (e) {
+      const parts = [];
+      if (e.findingsUpdated) parts.push(`${e.findingsUpdated} re-scored`);
+      if (e.kevAdded) parts.push(`${e.kevAdded} KEV`);
+      if (e.ransomwareLinked) parts.push(`${e.ransomwareLinked} ransomware-linked`);
+      if (e.cvesWithEpss) parts.push(`${e.cvesWithEpss} with EPSS`);
+      if (parts.length) setEnrichSummary(`Threat intel: ${parts.join(" · ")}`);
+    }
+  }
+
+  async function poll() {
+    let finished = false;
+    for (let i = 0; i < 450; i += 1) {
+      // ~15 min at 2s per tick
+      await new Promise((r) => setTimeout(r, 2000));
+      if (!aliveRef.current) return; // unmounted — stop polling
+      let st: SyncAllStatus | null = null;
+      try {
+        const r = await fetch("/api/connectors/sync-all", { method: "GET", cache: "no-store" });
+        const j = await r.json().catch(() => ({}));
+        st = j.status ?? null;
+      } catch {
+        continue; // transient — keep polling
+      }
+      if (!aliveRef.current) return;
+      if (!st) break;
+      if (!st.running) {
+        finished = true;
+        applyFinished(st);
+        break;
+      }
+    }
+    if (!aliveRef.current) return;
+    if (!finished) {
+      setErrMsg("Sync timed out waiting for a response. It may still be running — refresh to check.");
+    }
+    setBusy(false);
+  }
+
+  // On mount: if a sync-all is already in flight (started before a refresh or
+  // in another tab), resume showing its progress instead of a stale idle button.
+  useEffect(() => {
+    void fetch("/api/connectors/sync-all", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((j) => {
+        const st: SyncAllStatus | null = j.status ?? null;
+        if (!aliveRef.current || !st?.running) return;
+        setBusy(true);
+        void poll();
+      })
+      .catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function run() {
     if (busy) return;
     setBusy(true);
     setRows(null);
     setEnrichSummary(null);
+    setErrMsg(null);
     try {
       const res = await fetch("/api/connectors/sync-all", { method: "POST" });
       const json = await res.json().catch(() => ({}));
-      setRows(json.results ?? []);
-      const e = json.enrich;
-      if (e) {
-        const parts = [];
-        if (e.findingsUpdated) parts.push(`${e.findingsUpdated} re-scored`);
-        if (e.kevAdded) parts.push(`${e.kevAdded} KEV`);
-        if (e.ransomwareLinked) parts.push(`${e.ransomwareLinked} ransomware-linked`);
-        if (e.cvesWithEpss) parts.push(`${e.cvesWithEpss} with EPSS`);
-        if (parts.length) setEnrichSummary(`Threat intel: ${parts.join(" · ")}`);
+      if (!res.ok || json.error) {
+        setErrMsg(json.error ?? `Failed (HTTP ${res.status})`);
+        setBusy(false);
+        return;
       }
-    } catch {
-      setRows([{ connector: "Sync", configured: true, ok: false, error: "Request failed." }]);
-    } finally {
+      // Started (or joined an already-running sweep) — poll until it finishes.
+      await poll();
+    } catch (err) {
+      setErrMsg(err instanceof Error ? err.message : "Request failed.");
       setBusy(false);
     }
   }
@@ -340,6 +418,11 @@ function SyncAllButton() {
         <RefreshCw size={14} className={busy ? "animate-spin" : ""} />
         {busy ? "Syncing all…" : "Sync all engines"}
       </button>
+      {errMsg ? (
+        <div className="w-full max-w-md rounded-lg border border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.12)] px-3 py-2 text-xs text-[#ff8a8a]">
+          {errMsg}
+        </div>
+      ) : null}
       {active.length ? (
         <div className="w-full max-w-md rounded-lg border border-zinc-900 bg-[#080808] p-2 text-xs">
           {active.map((r) => (

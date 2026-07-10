@@ -3956,7 +3956,10 @@ export async function importFromTidal(
 // --- Background Tidal sync with pollable progress ---------------------------
 // The live sync spans ~49 client companies and can pull thousands of devices,
 // so it runs as a background job. The UI starts it (POST) and polls its status
-// (GET). Progress lives in module scope — one sync at a time.
+// (GET). Progress lives on globalThis (like the store itself) — Next bundles
+// the start-POST and status-GET routes separately, so module-scope state would
+// give each route its own instance and the poller would only ever see "idle".
+// One sync of each kind at a time.
 export type TidalSyncStatus = {
   running: boolean;
   phase: string;
@@ -3970,7 +3973,14 @@ export type TidalSyncStatus = {
   error: string | null;
 };
 
-let tidalSync: TidalSyncStatus = {
+const syncJobGlobal = globalThis as unknown as {
+  __vulnTidalSync?: TidalSyncStatus;
+  __vulnCsDevicesSync?: CsSyncStatus;
+  __vulnCsSpotlightSync?: CsSyncStatus;
+  __vulnSyncAll?: SyncAllStatus;
+};
+
+const tidalIdleState = (): TidalSyncStatus => ({
   running: false,
   phase: "idle",
   companiesTotal: 0,
@@ -3981,10 +3991,15 @@ let tidalSync: TidalSyncStatus = {
   finishedAt: null,
   result: null,
   error: null,
-};
+});
+
+function tidalSync(): TidalSyncStatus {
+  if (!syncJobGlobal.__vulnTidalSync) syncJobGlobal.__vulnTidalSync = tidalIdleState();
+  return syncJobGlobal.__vulnTidalSync;
+}
 
 export function getTidalSyncStatus(): TidalSyncStatus {
-  return tidalSync;
+  return tidalSync();
 }
 
 // Kick off the background sync. Returns immediately; poll getTidalSyncStatus().
@@ -3996,9 +4011,9 @@ export function startTidalSync(): { started: boolean; error?: string } {
         "Tidal is not configured. Set TIDAL_EMAIL and TIDAL_PASSWORD to sign in and pull the live inventory (or upload a CSV export).",
     };
   }
-  if (tidalSync.running) return { started: false, error: "A Tidal sync is already running." };
+  if (tidalSync().running) return { started: false, error: "A Tidal sync is already running." };
 
-  tidalSync = {
+  syncJobGlobal.__vulnTidalSync = {
     running: true,
     phase: "Starting",
     companiesTotal: 0,
@@ -4016,13 +4031,13 @@ export function startTidalSync(): { started: boolean; error?: string } {
   void (async () => {
     try {
       const result = await importFromTidal((p) => {
-        tidalSync = { ...tidalSync, ...p };
+        syncJobGlobal.__vulnTidalSync = { ...tidalSync(), ...p };
       });
       if ("error" in result) {
-        tidalSync = { ...tidalSync, running: false, phase: "Error", error: result.error, finishedAt: Date.now() };
+        syncJobGlobal.__vulnTidalSync = { ...tidalSync(), running: false, phase: "Error", error: result.error, finishedAt: Date.now() };
       } else {
-        tidalSync = {
-          ...tidalSync,
+        syncJobGlobal.__vulnTidalSync = {
+          ...tidalSync(),
           running: false,
           phase: "Done",
           currentCompany: "",
@@ -4031,8 +4046,8 @@ export function startTidalSync(): { started: boolean; error?: string } {
         };
       }
     } catch (err) {
-      tidalSync = {
-        ...tidalSync,
+      syncJobGlobal.__vulnTidalSync = {
+        ...tidalSync(),
         running: false,
         phase: "Error",
         error: err instanceof Error ? err.message : "Tidal sync failed.",
@@ -4064,26 +4079,33 @@ const csIdleState = (): CsSyncStatus => ({
   error: null,
 });
 
-let csDevicesSync: CsSyncStatus = csIdleState();
-let csSpotlightSync: CsSyncStatus = csIdleState();
+function csDevicesSync(): CsSyncStatus {
+  if (!syncJobGlobal.__vulnCsDevicesSync) syncJobGlobal.__vulnCsDevicesSync = csIdleState();
+  return syncJobGlobal.__vulnCsDevicesSync;
+}
 
-export function getCsDevicesSyncStatus(): CsSyncStatus { return csDevicesSync; }
-export function getCsSpotlightSyncStatus(): CsSyncStatus { return csSpotlightSync; }
+function csSpotlightSync(): CsSyncStatus {
+  if (!syncJobGlobal.__vulnCsSpotlightSync) syncJobGlobal.__vulnCsSpotlightSync = csIdleState();
+  return syncJobGlobal.__vulnCsSpotlightSync;
+}
+
+export function getCsDevicesSyncStatus(): CsSyncStatus { return csDevicesSync(); }
+export function getCsSpotlightSyncStatus(): CsSyncStatus { return csSpotlightSync(); }
 
 export function startCsDevicesSync(): { started: boolean; error?: string } {
   if (!falconConfig()) return { started: false, error: "CrowdStrike is not configured." };
-  if (csDevicesSync.running) return { started: false, error: "Devices sync already running." };
-  csDevicesSync = { running: true, phase: "Syncing", startedAt: Date.now(), finishedAt: null, result: null, error: null };
+  if (csDevicesSync().running) return { started: false, error: "Devices sync already running." };
+  syncJobGlobal.__vulnCsDevicesSync = { running: true, phase: "Syncing", startedAt: Date.now(), finishedAt: null, result: null, error: null };
   void (async () => {
     try {
       const r = await importFromCrowdstrike();
       if ("error" in r) {
-        csDevicesSync = { ...csDevicesSync, running: false, phase: "Error", error: r.error, finishedAt: Date.now() };
+        syncJobGlobal.__vulnCsDevicesSync = { ...csDevicesSync(), running: false, phase: "Error", error: r.error, finishedAt: Date.now() };
       } else {
-        csDevicesSync = { ...csDevicesSync, running: false, phase: "Done", result: r, finishedAt: Date.now() };
+        syncJobGlobal.__vulnCsDevicesSync = { ...csDevicesSync(), running: false, phase: "Done", result: r, finishedAt: Date.now() };
       }
     } catch (err) {
-      csDevicesSync = { ...csDevicesSync, running: false, phase: "Error", error: err instanceof Error ? err.message : "Sync failed.", finishedAt: Date.now() };
+      syncJobGlobal.__vulnCsDevicesSync = { ...csDevicesSync(), running: false, phase: "Error", error: err instanceof Error ? err.message : "Sync failed.", finishedAt: Date.now() };
     }
   })();
   return { started: true };
@@ -4091,20 +4113,92 @@ export function startCsDevicesSync(): { started: boolean; error?: string } {
 
 export function startCsSpotlightSync(): { started: boolean; error?: string } {
   if (!falconConfig()) return { started: false, error: "CrowdStrike is not configured." };
-  if (csSpotlightSync.running) return { started: false, error: "Spotlight sync already running." };
-  csSpotlightSync = { running: true, phase: "Syncing", startedAt: Date.now(), finishedAt: null, result: null, error: null };
+  if (csSpotlightSync().running) return { started: false, error: "Spotlight sync already running." };
+  syncJobGlobal.__vulnCsSpotlightSync = { running: true, phase: "Syncing", startedAt: Date.now(), finishedAt: null, result: null, error: null };
   void (async () => {
     try {
       const r = await importFromCrowdstrikeSpotlight();
       if ("error" in r) {
-        csSpotlightSync = { ...csSpotlightSync, running: false, phase: "Error", error: r.error, finishedAt: Date.now() };
+        syncJobGlobal.__vulnCsSpotlightSync = { ...csSpotlightSync(), running: false, phase: "Error", error: r.error, finishedAt: Date.now() };
       } else {
-        csSpotlightSync = { ...csSpotlightSync, running: false, phase: "Done", result: r, finishedAt: Date.now() };
+        syncJobGlobal.__vulnCsSpotlightSync = { ...csSpotlightSync(), running: false, phase: "Done", result: r, finishedAt: Date.now() };
       }
     } catch (err) {
-      csSpotlightSync = { ...csSpotlightSync, running: false, phase: "Error", error: err instanceof Error ? err.message : "Sync failed.", finishedAt: Date.now() };
+      syncJobGlobal.__vulnCsSpotlightSync = { ...csSpotlightSync(), running: false, phase: "Error", error: err instanceof Error ? err.message : "Sync failed.", finishedAt: Date.now() };
     }
   })();
+  return { started: true };
+}
+
+// --- Background "sync all" job -----------------------------------------------
+// Pulling every configured connector in series can take minutes, so the route
+// no longer holds the request open — POST starts this job, GET polls it.
+
+export type SyncAllStatus = {
+  running: boolean;
+  startedAt: number;
+  finishedAt: number | null;
+  results: SyncAllEntry[] | null;
+  enrich: Record<string, unknown> | null;
+  error: string | null;
+};
+
+const syncAllIdleState = (): SyncAllStatus => ({
+  running: false,
+  startedAt: 0,
+  finishedAt: null,
+  results: null,
+  enrich: null,
+  error: null,
+});
+
+export function syncAllStatus(): SyncAllStatus {
+  if (!syncJobGlobal.__vulnSyncAll) syncJobGlobal.__vulnSyncAll = syncAllIdleState();
+  return syncJobGlobal.__vulnSyncAll;
+}
+
+// Kick off the background sync-all. Returns immediately; poll syncAllStatus().
+export function startSyncAll(): { started: boolean; error?: string } {
+  if (syncAllStatus().running) return { started: false, error: "A sync-all is already running." };
+  syncJobGlobal.__vulnSyncAll = {
+    running: true,
+    startedAt: Date.now(),
+    finishedAt: null,
+    results: null,
+    enrich: null,
+    error: null,
+  };
+
+  // Fire-and-forget: the DO app is a persistent Node server, so the async
+  // continues running after the POST response returns.
+  void (async () => {
+    try {
+      const results = await syncAllConnectors();
+      let enrich: Record<string, unknown> | null = null;
+      if (results.some((r) => r.ok)) {
+        try {
+          enrich = (await enrichThreatIntel()) as Record<string, unknown>;
+        } catch {
+          // enrichment failure doesn't fail the whole sync
+        }
+      }
+      syncJobGlobal.__vulnSyncAll = { ...syncAllStatus(), running: false, results, enrich, finishedAt: Date.now() };
+    } catch (err) {
+      syncJobGlobal.__vulnSyncAll = {
+        ...syncAllStatus(),
+        running: false,
+        error: err instanceof Error ? err.message : "Sync-all failed.",
+        finishedAt: Date.now(),
+      };
+    }
+    // Individual imports flush as they go; this covers anything still dirty.
+    try {
+      await flushNow();
+    } catch {
+      // the interval flusher will retry
+    }
+  })();
+
   return { started: true };
 }
 
