@@ -150,7 +150,7 @@ function mapCriticality(raw: unknown): AssetCriticality {
 function mapExposure(raw: unknown): AssetExposure {
   const v = String(raw ?? "").toLowerCase();
   if (/(internet|external|public|dmz|perimeter|edge)/.test(v)) return "Internet-facing";
-  if (/(isolated|air.?gap|ot|scada|segmented)/.test(v)) return "Isolated";
+  if (/(isolated|air.?gap|\bot\b|scada|segmented)/.test(v)) return "Isolated";
   return "Internal";
 }
 
@@ -330,7 +330,10 @@ async function listCompanies(config: TidalConfig, jar: Jar): Promise<TidalCompan
 }
 
 // Point the session at a given company. State-changing, so it carries the XSRF
-// header; the response cookies are absorbed so the jar stays valid.
+// header; the response cookies are absorbed so the jar stays valid. Throws on
+// a non-2xx response — if the switch fails the session is still parked on the
+// PREVIOUS company, and pulling devices would attribute them to the wrong
+// customer, so the caller must skip this company entirely.
 async function switchCompany(config: TidalConfig, jar: Jar, companyId: string): Promise<void> {
   const res = await fetch(`${config.url}/api/v1/admin/companies/switch-company`, {
     method: "POST",
@@ -343,6 +346,11 @@ async function switchCompany(config: TidalConfig, jar: Jar, companyId: string): 
     cache: "no-store",
   });
   absorb(jar, res);
+  if (!res.ok) {
+    throw new Error(
+      `Tidal switch-company failed (HTTP ${res.status}) — skipping this company to avoid cross-customer attribution.`,
+    );
+  }
 }
 
 // Best-effort Auvik tenant_id -> display_name for the CURRENT company context.

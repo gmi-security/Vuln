@@ -224,7 +224,9 @@ export function classifyAsset(asset: string): {
   if (internetHints.some((h) => a.includes(h)) || isPublicDomain || isPublicIp) {
     exposure = "Internet-facing";
   }
-  if (a.includes("isolated") || a.includes("ot") || a.includes("scada") || a.includes("air")) {
+  // "ot" must match as its own token (ot-plc-01, plant.ot.local) — a bare
+  // substring test would flag notebook/pilot/hotfix hosts as Isolated.
+  if (a.includes("isolated") || /\bot\b/.test(a) || a.includes("scada") || a.includes("air")) {
     exposure = "Isolated";
   }
 

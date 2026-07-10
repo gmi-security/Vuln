@@ -39,9 +39,12 @@ function getPool(): Pool | null {
     pool.on("error", (err) => {
       console.error("[persist] pool error:", err.message);
       // Reset the cached pool on fatal errors so the next getPool() call
-      // creates a fresh one that can re-resolve a recovered hostname.
+      // creates a fresh one that can re-resolve a recovered hostname. Drain
+      // the old pool's sockets so abandoned clients don't leak.
+      const old = pool;
       pool = null;
       ready = null;
+      old?.end().catch(() => {});
     });
   }
   return pool;

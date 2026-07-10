@@ -289,18 +289,46 @@ const persistGlobal = globalThis as unknown as {
   __vulnFlusher?: ReturnType<typeof setInterval>;
   __vulnFlushing?: Promise<void> | null;
   __vulnDrainHooked?: boolean;
+  // Set when hydration could not read an existing snapshot: the app serves
+  // from memory but all snapshot writes are disabled so a transient DB outage
+  // can never overwrite good stored data with a freshly seeded store.
+  __vulnPersistBlocked?: boolean;
+  // Set by mutations, cleared by a successful snapshot save, so the interval
+  // flusher can skip serializing an unchanged store.
+  __vulnDirty?: boolean;
 };
+
+// True when persistence is fail-closed after a hydration failure. Lib callers
+// (health endpoints, admin UI) can surface this state.
+export function persistenceBlocked(): boolean {
+  return Boolean(persistGlobal.__vulnPersistBlocked);
+}
+
+// Record that the in-memory store changed since the last snapshot save.
+function markDirty(): void {
+  persistGlobal.__vulnDirty = true;
+}
 
 // Serialize all snapshot writes through a single in-flight promise so an
 // interval tick and a flushNow() (or two mutations) can never commit out of
 // order and let a stale snapshot clobber a newer one.
 function persistSnapshot(): Promise<void> {
-  if (!persistenceEnabled() || !globalStore.__vulnStore) return Promise.resolve();
+  if (
+    !persistenceEnabled() ||
+    persistGlobal.__vulnPersistBlocked ||
+    !globalStore.__vulnStore
+  ) {
+    return Promise.resolve();
+  }
   const run = (persistGlobal.__vulnFlushing ?? Promise.resolve()).then(async () => {
-    if (!globalStore.__vulnStore) return;
+    if (!globalStore.__vulnStore || persistGlobal.__vulnPersistBlocked) return;
+    // Clear the dirty flag before serializing so mutations that land during
+    // the save re-mark it and get picked up by the next flush.
+    persistGlobal.__vulnDirty = false;
     try {
       await saveSnapshot(serializeStore(globalStore.__vulnStore));
     } catch (err) {
+      persistGlobal.__vulnDirty = true;
       console.error("[persist] snapshot save failed:", err);
     }
   });
@@ -333,15 +361,43 @@ export async function ensureHydrated(): Promise<void> {
   await persistGlobal.__vulnHydrating;
 }
 
+const HYDRATE_ATTEMPTS = 3;
+
 async function doHydrate(): Promise<void> {
   if (persistenceEnabled()) {
-    try {
-      const snap = await loadSnapshot();
-      if (snap) {
-        globalStore.__vulnStore = deserializeStore(snap as never);
+    // A transient DB error here must never be treated as "empty DB" — that
+    // path would seed a fresh store and overwrite the good snapshot. Retry,
+    // and if the snapshot still can't be read, fail closed: serve from
+    // memory with all snapshot writes disabled. A load that succeeds and
+    // returns null (no row yet) is a genuinely empty DB, where seeding and
+    // saving is correct.
+    let snap: unknown | null = null;
+    let loadFailed = true;
+    for (let attempt = 1; attempt <= HYDRATE_ATTEMPTS; attempt += 1) {
+      try {
+        snap = await loadSnapshot();
+        loadFailed = false;
+        break;
+      } catch (err) {
+        console.error(
+          `[persist] hydrate attempt ${attempt}/${HYDRATE_ATTEMPTS} failed:`,
+          err,
+        );
+        if (attempt < HYDRATE_ATTEMPTS) {
+          await new Promise((r) => setTimeout(r, 1000 * attempt));
+        }
       }
-    } catch (err) {
-      console.error("[persist] hydrate failed, seeding fresh:", err);
+    }
+    if (loadFailed) {
+      persistGlobal.__vulnPersistBlocked = true;
+      console.error(
+        "[persist] PERSISTENCE BLOCKED: could not load the snapshot after " +
+          `${HYDRATE_ATTEMPTS} attempts. Serving from an in-memory store; ` +
+          "all snapshot writes are disabled until restart so the stored data " +
+          "is never overwritten by a fresh seed.",
+      );
+    } else if (snap) {
+      globalStore.__vulnStore = deserializeStore(snap as never);
     }
   }
   store(); // seed if still uninitialized
@@ -349,16 +405,25 @@ async function doHydrate(): Promise<void> {
   startFlusher();
   // Kick off an initial persist in the background — the flusher covers it
   // anyway and we must not block the first request waiting for a DB write.
+  // (No-op while persistence is blocked.)
   void persistSnapshot();
 }
 
 function startFlusher(): void {
-  if (!persistenceEnabled() || persistGlobal.__vulnFlusher) return;
+  if (
+    !persistenceEnabled() ||
+    persistGlobal.__vulnPersistBlocked ||
+    persistGlobal.__vulnFlusher
+  ) {
+    return;
+  }
   hookDrainOnce();
   persistGlobal.__vulnFlusher = setInterval(() => {
     // Skip this tick if a save is already in flight — persistSnapshot chains
     // writes so nothing overlaps or commits out of order.
     if (persistGlobal.__vulnFlushing) return;
+    // Nothing changed since the last save: skip the (large) serialization.
+    if (!persistGlobal.__vulnDirty) return;
     void persistSnapshot();
   }, 6000);
 }
@@ -368,6 +433,7 @@ function startFlusher(): void {
 // but changes if the store was re-seeded — so it proves persistence.
 export async function storeStatus(): Promise<{
   hydrated: boolean;
+  persistBlocked: boolean;
   counts: { companies: number; scans: number; findings: number; assets: number };
   oldestCompanyCreatedAt: string | null;
 }> {
@@ -378,6 +444,7 @@ export async function storeStatus(): Promise<{
     .sort()[0];
   return {
     hydrated: Boolean(persistGlobal.__vulnHydrated),
+    persistBlocked: persistenceBlocked(),
     counts: {
       companies: s.companies.size,
       scans: s.scans.size,
@@ -454,6 +521,7 @@ function demoScansEnabled(): boolean {
 
 function nextId(s: StoreShape, prefix: string): string {
   s.counter += 1;
+  markDirty(); // every entity creation funnels through here
   return `${prefix}-${s.counter}`;
 }
 
@@ -483,11 +551,13 @@ function generateFindings(s: StoreShape, scan: InternalScan): Finding[] {
   for (let i = 0; i < count; i++) {
     const template = pool[Math.floor(rand() * pool.length)];
     const asset = assets[Math.floor(rand() * assets.length)];
-    const dedupeKey = `${template.cve}::${asset}`;
-    // Same CVE on the same asset seen by a new scan updates lastSeen instead
-    // of duplicating the finding.
+    const dedupeKey = `${scan.companyId}::${template.cve}::${asset}`;
+    // Same CVE on the same asset seen by a new scan for the same customer
+    // updates lastSeen instead of duplicating the finding.
     const existing = Array.from(s.findings.values()).find(
-      (f) => `${f.cve}::${f.asset}` === dedupeKey && f.status !== "Resolved",
+      (f) =>
+        `${f.companyId}::${f.cve}::${f.asset}` === dedupeKey &&
+        f.status !== "Resolved",
     );
     if (existing) {
       existing.lastSeen = completedAt;
@@ -539,6 +609,7 @@ function settleScan(s: StoreShape, scan: InternalScan, now: number): void {
   if (scan.status !== "Running") return;
   const progress = computeProgress(scan, now);
   if (progress < 100) return;
+  markDirty();
   scan.status = "Completed";
   scan.completedAt = new Date(
     new Date(scan.startedAt!).getTime() + scan.durationMs,
@@ -591,6 +662,7 @@ async function refreshVendorScans(s: StoreShape): Promise<void> {
       const remote = await nessusScanStatus(scan.vendor.nessusScanId);
       scan.progressFrozenAt = remote.progress;
       scan.status = NESSUS_STATUS_MAP[remote.status] ?? scan.status;
+      markDirty();
       if (
         (scan.status === "Completed" || scan.status === "Stopped") &&
         !scan.completedAt
@@ -598,11 +670,14 @@ async function refreshVendorScans(s: StoreShape): Promise<void> {
         scan.completedAt = new Date(now).toISOString();
       }
       if (scan.status === "Completed" && !scan.vendor.imported) {
-        scan.vendor.imported = true;
+        // Mark imported only after the import succeeds, so a transient
+        // Nessus failure leaves it false and the next poll retries.
         await importVendorFindings(s, scan);
+        scan.vendor.imported = true;
       }
     } catch (err) {
       scan.error = err instanceof Error ? err.message : "Nessus polling failed.";
+      markDirty();
     }
   }
 }
@@ -611,9 +686,13 @@ async function importVendorFindings(s: StoreShape, scan: InternalScan): Promise<
   const imported = await nessusImportFindings(scan.vendor!.nessusScanId);
   const completedAt = scan.completedAt ?? new Date().toISOString();
   for (const item of imported) {
-    const dedupeKey = `${item.cve}::${item.asset}::${item.title}`;
+    // Company-scoped dedupe: customers can share asset strings (10.x IPs,
+    // DESKTOP-XXXX), so one client's finding must never swallow another's.
+    const dedupeKey = `${scan.companyId}::${item.cve}::${item.asset}::${item.title}`;
     const existing = Array.from(s.findings.values()).find(
-      (f) => `${f.cve}::${f.asset}::${f.title}` === dedupeKey && f.status !== "Resolved",
+      (f) =>
+        `${f.companyId}::${f.cve}::${f.asset}::${f.title}` === dedupeKey &&
+        f.status !== "Resolved",
     );
     if (existing) {
       existing.lastSeen = completedAt;
@@ -910,6 +989,7 @@ export function updateCompany(
   if (patch.industry !== undefined) company.industry = patch.industry.trim();
   if (patch.contactName !== undefined) company.contactName = patch.contactName.trim();
   if (patch.contactEmail !== undefined) company.contactEmail = patch.contactEmail.trim();
+  markDirty();
   return toPublicCompany(s, company);
 }
 
@@ -925,6 +1005,7 @@ export function deleteCompany(id: string): { deleted: true } | { error: string }
     if (f.companyId === id) s.folders.delete(f.id);
   }
   s.companies.delete(id);
+  markDirty();
   return { deleted: true };
 }
 
@@ -971,6 +1052,7 @@ export function deleteFolder(id: string): { deleted: true } | { error: string } 
   const hasScans = Array.from(s.scans.values()).some((sc) => sc.folderId === id);
   if (hasScans) return { error: "Move this folder's scans before deleting it." };
   s.folders.delete(id);
+  markDirty();
   return { deleted: true };
 }
 
@@ -1007,6 +1089,23 @@ function lookupAsset(
     if (a.ipAddresses.some((ip) => ip.toLowerCase() === key)) return a;
   }
   return undefined;
+}
+
+// Company ids owning any inventory asset that matches one of the given
+// strings. Lets importers detect when an asset string is ambiguous across
+// customers (shared 10.x IPs, DESKTOP-XXXX) instead of trusting whichever
+// asset an unscoped lookup happens to hit first.
+function assetOwners(s: StoreShape, ...assetStrs: string[]): Set<string> {
+  const keys = assetStrs.map((x) => (x ?? "").trim().toLowerCase()).filter(Boolean);
+  const owners = new Set<string>();
+  if (!keys.length) return owners;
+  for (const a of s.assets.values()) {
+    const ids = [a.identifier, a.hostname, ...a.ipAddresses]
+      .filter(Boolean)
+      .map((x) => x.toLowerCase());
+    if (keys.some((k) => ids.includes(k))) owners.add(a.companyId);
+  }
+  return owners;
 }
 
 function toPublicAsset(s: StoreShape, a: InternalAsset): InventoryAsset {
@@ -1158,6 +1257,7 @@ export function getSettings(): Settings {
 export function updateSettings(patch: Partial<Settings>): Settings {
   const s = store();
   s.settings = { ...s.settings, ...patch };
+  markDirty();
   return { ...s.settings };
 }
 
@@ -1210,12 +1310,29 @@ export async function resyncFromNessus(options?: {
 }): Promise<NessusImportResult | { error: string }> {
   await ensureHydrated();
   const s = store();
+  // Back up the current state before wiping — if Nessus is unreachable the
+  // import fails and we must restore instead of persisting an empty store.
+  const backup = serializeStore(s);
   s.companies.clear();
   s.folders.clear();
   s.scans.clear();
   s.findings.clear();
   if (options?.clearInventory) s.assets.clear();
-  const result = await importFromNessus();
+  markDirty();
+  let result: NessusImportResult | { error: string };
+  try {
+    result = await importFromNessus();
+  } catch (err) {
+    result = { error: err instanceof Error ? err.message : "Nessus import failed." };
+  }
+  if ("error" in result) {
+    globalStore.__vulnStore = deserializeStore(backup);
+    markDirty();
+    // Re-persist the restored state in case the interval flusher wrote the
+    // wiped store while the import was in flight.
+    await flushNow();
+    return result;
+  }
   await flushNow();
   return result;
 }
@@ -1328,10 +1445,12 @@ export function computeExecReport(companyId: string): ExecReport | null {
   };
 }
 
-// Purge every demo/simulated scan and its findings. A real scan always has a
-// `vendor` (Nessus-backed) or an `externalRef` (Artemis/SpiderFoot import);
-// anything else was fabricated by the demo engine. Real connector data and
-// companies are left untouched.
+// Purge every demo/simulated scan and its findings. Only the demo engine
+// (seed() and DEMO_SCANS runs) fabricates scans with no external linkage at
+// all: no scanner binding (`vendor`), no import provenance (`externalRef`),
+// and no bridge lifecycle (`bridgeScan`). Connector syncs that create
+// synthetic scan records without those markers (Defender) are real data and
+// must survive the purge. Real connector data and companies are untouched.
 export async function purgeDemoData(): Promise<{
   scansRemoved: number;
   findingsRemoved: number;
@@ -1339,7 +1458,9 @@ export async function purgeDemoData(): Promise<{
   const s = store();
   const demoScanIds = new Set<string>();
   for (const [id, sc] of s.scans) {
-    if (!sc.vendor && !sc.externalRef) demoScanIds.add(id);
+    if (sc.vendor || sc.externalRef || sc.bridgeScan) continue;
+    if (sc.connector === "defender") continue;
+    demoScanIds.add(id);
   }
   let findingsRemoved = 0;
   for (const [fid, f] of s.findings) {
@@ -2500,6 +2621,7 @@ export function computeAttackPaths(filter?: {
 // Recompute a finding's environmental context + real risk against the current
 // inventory. Used after an inventory sync so existing findings reprice.
 function rescoreFinding(s: StoreShape, f: Finding): void {
+  markDirty();
   Object.assign(
     f,
     riskFields(s, {
@@ -2527,6 +2649,7 @@ function upsertAsset(
   );
   if (existing) {
     Object.assign(existing, input, { lastSynced: nowIso });
+    markDirty();
     return existing;
   }
   const id = input.id ?? nextId(s, "AST");
@@ -2698,10 +2821,11 @@ export async function importFromSpiderfoot(): Promise<
     matchedCompanies.add(companyId);
 
     for (const item of imported) {
-      const dedupeKey = `${item.cve}::${item.asset}::${item.title}`;
+      const dedupeKey = `${scan.companyId}::${item.cve}::${item.asset}::${item.title}`;
       const existing = Array.from(s.findings.values()).find(
         (f) =>
-          `${f.cve}::${f.asset}::${f.title}` === dedupeKey && f.status !== "Resolved",
+          `${f.companyId}::${f.cve}::${f.asset}::${f.title}` === dedupeKey &&
+          f.status !== "Resolved",
       );
       if (existing) {
         existing.lastSeen = nowIso;
@@ -2780,6 +2904,7 @@ export type BurpImportResult = {
 // under a per-company "Burp" scan. Unmatched hosts are skipped (counted).
 export function importBurpFindings(items: BurpFinding[]): BurpImportResult {
   const s = store();
+  markDirty(); // callers (XML upload) may not flush explicitly
   const nowIso = new Date().toISOString();
   const matched = new Set<string>();
   let findingsImported = 0;
@@ -2826,10 +2951,14 @@ export function importBurpFindings(items: BurpFinding[]): BurpImportResult {
     }
     matched.add(companyId);
 
-    const dedupeKey = `${item.cve}::${item.asset}::${item.path}::${item.title}`;
+    // Findings store item.port (path only lives in the description), so the
+    // key must be built from port too — a path-based key never matches and
+    // every re-import would duplicate all findings.
+    const dedupeKey = `${scan.companyId}::${item.cve}::${item.asset}::${item.port}::${item.title}`;
     const existing = Array.from(s.findings.values()).find(
       (f) =>
-        `${f.cve}::${f.asset}::${f.port}::${f.title}` === dedupeKey && f.status !== "Resolved",
+        `${f.companyId}::${f.cve}::${f.asset}::${f.port}::${f.title}` === dedupeKey &&
+        f.status !== "Resolved",
     );
     if (existing) {
       existing.lastSeen = nowIso;
@@ -2920,6 +3049,7 @@ export type NmapImportResult = {
 // model; findings are limited to genuinely risky reachable services.
 export function importNmapScan(hosts: NmapHost[]): NmapImportResult {
   const s = store();
+  markDirty(); // callers (XML upload) may not flush explicitly
   const nowIso = new Date().toISOString();
   const matched = new Set<string>();
   let hostsProcessed = 0;
@@ -2931,17 +3061,22 @@ export function importNmapScan(hosts: NmapHost[]): NmapImportResult {
   for (const host of hosts) {
     const identifier = host.host || host.ip;
     if (!identifier) continue;
-    // Match by an existing asset first (keeps customer attribution honest),
-    // then fall back to fuzzy name/host matching.
-    const existingAsset =
-      lookupAsset(s, host.host, undefined) ?? lookupAsset(s, host.ip, undefined);
+    // Match by an existing asset first (keeps customer attribution honest) —
+    // but only when every inventory match agrees on one owner; asset strings
+    // shared across customers are inconclusive. Then fall back to fuzzy
+    // name/host matching, and scope the asset lookup to the resolved company
+    // so inventory context is never borrowed cross-tenant.
+    const owners = assetOwners(s, host.host, host.ip);
     const companyId =
-      existingAsset?.companyId ??
-      matchCompanyForScan(s, host.host, host.ip);
+      owners.size === 1
+        ? owners.values().next().value!
+        : matchCompanyForScan(s, host.host, host.ip);
     if (!companyId) {
       skipped += 1;
       continue;
     }
+    const existingAsset =
+      lookupAsset(s, host.host, companyId) ?? lookupAsset(s, host.ip, companyId);
     matched.add(companyId);
     hostsProcessed += 1;
     const company = s.companies.get(companyId)!;
@@ -3008,9 +3143,11 @@ export function importNmapScan(hosts: NmapHost[]): NmapImportResult {
     }
 
     for (const svc of services) {
-      const dedupeKey = `${svc.cve}::${svc.asset}::${svc.port}`;
+      const dedupeKey = `${scan.companyId}::${svc.cve}::${svc.asset}::${svc.port}`;
       const existing = Array.from(s.findings.values()).find(
-        (f) => `${f.cve}::${f.asset}::${f.port}` === dedupeKey && f.status !== "Resolved",
+        (f) =>
+          `${f.companyId}::${f.cve}::${f.asset}::${f.port}` === dedupeKey &&
+          f.status !== "Resolved",
       );
       if (existing) {
         existing.lastSeen = nowIso;
@@ -3256,9 +3393,15 @@ export async function importFromVulnersBridge(): Promise<
     }
 
     for (const v of results) {
-      const dedupeKey = `${v.cve}::${ip}`;
+      // Company-scoped, and only non-Resolved findings match — a re-detected
+      // CVE that was Resolved is a regression and must surface as a new Open
+      // finding (same behavior as the other importers).
       const existing = Array.from(s.findings.values()).find(
-        (f) => f.cve === v.cve && (f.asset === ip || f.asset === asset.hostname),
+        (f) =>
+          f.companyId === companyId &&
+          f.cve === v.cve &&
+          (f.asset === ip || f.asset === asset.hostname) &&
+          f.status !== "Resolved",
       );
       if (existing) {
         if (v.exploitAvailable && !existing.exploitAvailable) {
@@ -3657,10 +3800,11 @@ export async function importFromArtemis(): Promise<
     matchedCompanies.add(companyId);
 
     for (const item of items) {
-      const dedupeKey = `${item.cve}::${item.asset}::${item.title}`;
+      const dedupeKey = `${scan.companyId}::${item.cve}::${item.asset}::${item.title}`;
       const existing = Array.from(s.findings.values()).find(
         (f) =>
-          `${f.cve}::${f.asset}::${f.title}` === dedupeKey && f.status !== "Resolved",
+          `${f.companyId}::${f.cve}::${f.asset}::${f.title}` === dedupeKey &&
+          f.status !== "Resolved",
       );
       if (existing) {
         existing.lastSeen = nowIso;
@@ -4133,14 +4277,13 @@ export async function importFromCrowdstrikeSpotlight(): Promise<
   const scanByCompany = new Map<string, InternalScan>();
   const falconCustomer = process.env.FALCON_CUSTOMER?.trim() || "";
 
-  // Build a dedupe index once — O(n) — instead of scanning all findings per item.
-  const existingDedupeKeys = new Set<string>();
+  // Build a dedupe index once — O(n) — instead of scanning all findings per
+  // item. Keys are company-scoped so customers sharing asset strings never
+  // swallow each other's findings.
   const existingFindingByKey = new Map<string, Finding>();
   for (const f of s.findings.values()) {
     if (f.connector === "crowdstrike" && f.status !== "Resolved") {
-      const k = `${f.cve}::${f.asset}`;
-      existingDedupeKeys.add(k);
-      existingFindingByKey.set(k, f);
+      existingFindingByKey.set(`${f.companyId}::${f.cve}::${f.asset}`, f);
     }
   }
 
@@ -4160,9 +4303,12 @@ export async function importFromCrowdstrikeSpotlight(): Promise<
     // Customer segmentation: FALCON_CUSTOMER pins all Spotlight findings to a
     // named client company. Without it, findings match via Tidal asset lookup
     // then hostname tokens, then fall back to the internal org — only when no
-    // FALCON_CUSTOMER is set (own-estate deployment).
-    const existingAsset = lookupAsset(s, item.hostname, undefined) ?? lookupAsset(s, item.localIp, undefined);
-    let companyId: string | null | undefined = existingAsset?.companyId;
+    // FALCON_CUSTOMER is set (own-estate deployment). Inventory attribution
+    // only counts when every matching asset agrees on a single owner —
+    // hostnames/IPs shared across customers are inconclusive.
+    const owners = assetOwners(s, item.hostname, item.localIp);
+    let companyId: string | null | undefined =
+      owners.size === 1 ? owners.values().next().value : undefined;
     if (!companyId && falconCustomer) {
       // Pin to the named customer company; create it if first encounter.
       let c = Array.from(s.companies.values()).find(
@@ -4217,7 +4363,7 @@ export async function importFromCrowdstrikeSpotlight(): Promise<
     scan.completedAt = nowIso;
     scanByCompany.set(companyId, scan);
 
-    const dedupeKey = `${item.cve}::${assetKey}`;
+    const dedupeKey = `${companyId}::${item.cve}::${assetKey}`;
     const existingFinding = existingFindingByKey.get(dedupeKey);
     if (existingFinding) { existingFinding.lastSeen = nowIso; continue; }
 
@@ -4624,7 +4770,11 @@ async function runVulnersBridgeScanAsync(
       }
       for (const v of results) {
         const existing = Array.from(s.findings.values()).find(
-          (f) => f.cve === v.cve && f.asset === target && f.status !== "Resolved",
+          (f) =>
+            f.companyId === companyId &&
+            f.cve === v.cve &&
+            f.asset === target &&
+            f.status !== "Resolved",
         );
         if (existing) {
           if (v.exploitAvailable && !existing.exploitAvailable) {
@@ -4799,6 +4949,7 @@ export async function scanAction(
       scan.status =
         action === "pause" ? "Paused" : action === "resume" ? "Running" : "Stopped";
       if (action === "stop") scan.completedAt = new Date(now).toISOString();
+      markDirty();
       return toPublic(scan, now);
     } catch (err) {
       return {
@@ -4814,6 +4965,7 @@ export async function scanAction(
       scan.startedAt = new Date(now).toISOString();
       scan.completedAt = null;
       scan.progressFrozenAt = 0;
+      markDirty();
       return toPublic(scan, now);
     } catch (err) {
       return {
@@ -4852,6 +5004,7 @@ export async function scanAction(
         if (f.scanId === id) s.findings.delete(f.id);
       }
       s.scans.delete(id);
+      markDirty();
       return { deleted: true };
     }
     case "rescan": {
@@ -4866,6 +5019,7 @@ export async function scanAction(
       break;
     }
   }
+  markDirty();
   return toPublic(scan, now);
 }
 
@@ -4928,6 +5082,7 @@ export function updateFinding(
         : null;
   }
   if (patch.assignee !== undefined) finding.assignee = patch.assignee || null;
+  markDirty();
   return finding;
 }
 
