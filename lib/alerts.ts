@@ -134,6 +134,18 @@ function escapeHtml(text: string): string {
     .replace(/"/g, "&quot;");
 }
 
+// One-line operational alert to every configured channel (Slack + ops inbox).
+// Used by the connector-health watchdog for degraded/recovered transitions.
+export async function sendOpsAlert(subject: string, text: string): Promise<void> {
+  const inbox = process.env.ALERT_EMAIL?.trim() ?? "";
+  await Promise.all([
+    sendSlack(`*${subject}*\n${text}`),
+    inbox
+      ? sendEmail({ to: inbox, subject, html: `<p>${escapeHtml(text)}</p>`, text })
+      : Promise.resolve(false),
+  ]);
+}
+
 // --- config verification (POST /api/alerts/test) -------------------------------
 
 export type AlertTestResult = {

@@ -8,6 +8,7 @@ import {
   nessusListScans,
   nessusScanControl,
   nessusScanStatus,
+  nessusServerStatus,
 } from "@/lib/nessus";
 import {
   classifyAsset,
@@ -70,6 +71,7 @@ import {
 import {
   emailConfigured,
   sendMonthlyReportEmail,
+  sendOpsAlert,
   sendSyncAlerts,
   type SyncAlertFinding,
 } from "@/lib/alerts";
@@ -256,6 +258,8 @@ type StoreMeta = {
   lastAlertCheckAt: string | null; // ISO — findings first seen after this are "new"
   lastMetricsSnapshotDay: string | null; // "YYYY-MM-DD" (UTC)
   lastMonthlyReportMonth: string | null; // "YYYY-MM" (UTC)
+  lastNessusHealthOk: boolean | null; // watchdog state; null = never probed
+  lastNessusHealthCheckAt: number | null; // epoch ms of the last watchdog probe
 };
 
 function defaultMeta(): StoreMeta {
@@ -264,6 +268,8 @@ function defaultMeta(): StoreMeta {
     lastAlertCheckAt: null,
     lastMetricsSnapshotDay: null,
     lastMonthlyReportMonth: null,
+    lastNessusHealthOk: null,
+    lastNessusHealthCheckAt: null,
   };
 }
 
@@ -578,6 +584,42 @@ async function schedulerTick(): Promise<void> {
       await sendMonthlyExecReports(month);
     } catch (err) {
       console.error("[scheduler] monthly report send failed:", err);
+    }
+  }
+
+  // Nessus health watchdog: probe hourly and alert on state TRANSITIONS only
+  // (degraded ↔ recovered), so a scanner stuck in "download-failed" pages the
+  // ops channel once instead of silently returning zero findings for weeks.
+  if (
+    sched.alertsEnabled &&
+    now - (s.meta.lastNessusHealthCheckAt ?? 0) >= 3_600_000
+  ) {
+    s.meta.lastNessusHealthCheckAt = now;
+    markDirty();
+    try {
+      const health = await nessusServerStatus();
+      if (health.configured) {
+        const ok = health.reachable && health.ready;
+        const previous = s.meta.lastNessusHealthOk;
+        // null = first probe ever: alert if born broken, stay quiet if fine.
+        if ((previous === true || previous === null) && !ok) {
+          await sendOpsAlert(
+            "gmi-vuln: Nessus scanner degraded",
+            `Nessus reports "${health.status}" (${health.message}). Scans and syncs will return no findings until it recovers. Common causes: plugin feed download failure, expired activation, low disk space on the scanner host.`,
+          );
+        } else if (previous === false && ok) {
+          await sendOpsAlert(
+            "gmi-vuln: Nessus scanner recovered",
+            "Nessus is reachable and ready again. Consider running a sync to catch up.",
+          );
+        }
+        if (previous !== ok) {
+          s.meta.lastNessusHealthOk = ok;
+          markDirty();
+        }
+      }
+    } catch (err) {
+      console.error("[scheduler] nessus health probe failed:", err);
     }
   }
 }
