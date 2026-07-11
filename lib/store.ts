@@ -776,23 +776,31 @@ async function sendMonthlyExecReports(month: string): Promise<void> {
 // but changes if the store was re-seeded — so it proves persistence.
 export async function storeStatus(): Promise<{
   hydrated: boolean;
+  hydrating: boolean;
   persistBlocked: boolean;
   counts: { companies: number; scans: number; findings: number; assets: number };
   oldestCompanyCreatedAt: string | null;
 }> {
-  await ensureHydrated();
-  const s = globalStore.__vulnStore!;
-  const oldest = Array.from(s.companies.values())
-    .map((c) => c.createdAt)
-    .sort()[0];
+  // Deliberately does NOT await hydration: /api/health must answer instantly
+  // even while a large snapshot is streaming in, so monitoring can tell
+  // "hydrating" from "down". Kick hydration off if nothing has yet.
+  const hydrated = Boolean(persistGlobal.__vulnHydrated);
+  if (!hydrated) void ensureHydrated().catch(() => {});
+  const s = globalStore.__vulnStore;
+  const oldest = s
+    ? Array.from(s.companies.values())
+        .map((c) => c.createdAt)
+        .sort()[0]
+    : undefined;
   return {
-    hydrated: Boolean(persistGlobal.__vulnHydrated),
+    hydrated,
+    hydrating: !hydrated,
     persistBlocked: persistenceBlocked(),
     counts: {
-      companies: s.companies.size,
-      scans: s.scans.size,
-      findings: s.findings.size,
-      assets: s.assets.size,
+      companies: s?.companies.size ?? 0,
+      scans: s?.scans.size ?? 0,
+      findings: s?.findings.size ?? 0,
+      assets: s?.assets.size ?? 0,
     },
     oldestCompanyCreatedAt: oldest ?? null,
   };

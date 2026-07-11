@@ -272,17 +272,33 @@ export async function loadSnapshot(): Promise<unknown | null> {
   const p = getPool();
   if (!p) return null;
   await withTimeout(ensureTable(), 10000, "ensureTable");
-  const res = await withTimeout(
-    p.query("SELECT key, data FROM vuln_store"),
-    60000,
-    "loadSnapshot",
+  // Fetch shard keys first, then each row individually: one giant
+  // SELECT * of a multi-hundred-MB table can outlast any single-query
+  // timeout and buffers everything at once, wedging the event loop. Per-row
+  // reads keep each query small and yield between rows so the server keeps
+  // answering requests while hydration streams in.
+  const keysRes = await withTimeout(
+    p.query("SELECT key FROM vuln_store"),
+    15000,
+    "loadSnapshot(keys)",
   );
-  if (res.rows.length > 0) {
-    return assembleSnapshot(res.rows as { key: string; data: unknown }[]);
+  if (keysRes.rows.length > 0) {
+    const rows: { key: string; data: unknown }[] = [];
+    for (const { key } of keysRes.rows as { key: string }[]) {
+      const row = await withTimeout(
+        p.query("SELECT data FROM vuln_store WHERE key = $1", [key]),
+        30000,
+        `loadSnapshot(${key})`,
+      );
+      if (row.rows[0]) rows.push({ key, data: row.rows[0].data });
+      // Yield so concurrent requests aren't starved during a large load.
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    return assembleSnapshot(rows);
   }
   const legacy = await withTimeout(
     p.query("SELECT data FROM vuln_snapshot WHERE id = 1"),
-    60000,
+    120000,
     "loadSnapshot(legacy)",
   );
   return legacy.rows[0]?.data ?? null;
