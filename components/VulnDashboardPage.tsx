@@ -61,9 +61,14 @@ function signed(n: number): string {
 export default function VulnDashboardPage() {
   const [scans, setScans] = useState<Scan[]>([]);
   const [metrics, setMetrics] = useState<QuantifyMetrics | null>(null);
-  const [dbStatus, setDbStatus] = useState<{ reachable: boolean | null; error: string | null }>({
+  const [dbStatus, setDbStatus] = useState<{
+    reachable: boolean | null;
+    error: string | null;
+    persistBlocked: boolean;
+  }>({
     reachable: null,
     error: null,
+    persistBlocked: false,
   });
   // null = still loading; [] = loaded but no snapshots yet (cold start).
   const [snapshots, setSnapshots] = useState<TrendSnapshot[] | null>(null);
@@ -97,9 +102,12 @@ export default function VulnDashboardPage() {
         setDbStatus({
           reachable: j.persistence?.dbReachable ?? null,
           error: j.persistence?.dbError ?? null,
+          persistBlocked: Boolean(j.persistBlocked),
         });
       })
-      .catch(() => setDbStatus({ reachable: false, error: "Health check failed." }));
+      .catch(() =>
+        setDbStatus({ reachable: false, error: "Health check failed.", persistBlocked: false }),
+      );
   }, []);
 
   // 90-day global history for the trend panel. Snapshots accrue daily, so a
@@ -154,7 +162,19 @@ export default function VulnDashboardPage() {
         </Link>
       }
     >
-      {dbStatus.reachable === false ? (
+      {dbStatus.persistBlocked ? (
+        <div className="rounded-2xl border border-red-900/60 bg-red-950/30 px-5 py-4 text-sm">
+          <span className="font-semibold text-red-300">⛔ Writes disabled — changes are not being saved</span>
+          <span className="ml-2 text-red-400/80">
+            The database was unreachable at startup, so persistence was blocked to protect existing data from
+            being overwritten.
+          </span>
+          <span className="ml-2 text-red-600">
+            Everything you do right now (syncs, triage, settings) will be lost on the next restart. Fix
+            DATABASE_URL / DB connectivity, then restart the app to re-enable saving.
+          </span>
+        </div>
+      ) : dbStatus.reachable === false ? (
         <div className="rounded-2xl border border-amber-900/60 bg-amber-950/30 px-5 py-4 text-sm">
           <span className="font-semibold text-amber-300">⚠ Database not connected</span>
           <span className="ml-2 text-amber-400/80">

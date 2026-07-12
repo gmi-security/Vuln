@@ -18,7 +18,7 @@ import type { Severity } from "@/lib/types";
 //                                    scan_target }, ...]
 //
 // Configure with:
-//   SPIDERFOOT_URL             base URL, e.g. http://137.184.89.60:5000
+//   SPIDERFOOT_URL             base URL, e.g. http://<host>:5000
 //   SPIDERFOOT_USER / _PASS    optional HTTP Basic creds if the instance is
 //                              fronted by auth
 //

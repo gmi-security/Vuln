@@ -625,8 +625,10 @@ async function schedulerTick(): Promise<void> {
 }
 
 // Test customers (e.g. SplashWorks) never receive or appear in outbound
-// notifications — they exist to demo the console, not to page anyone.
-function isAlertExcludedCompany(name: string): boolean {
+// notifications — they exist to demo the console, not to page anyone. The
+// single source of truth for this rule — every outbound-mail path (alerts,
+// remediation, reports) must call this rather than re-testing the name.
+export function isAlertExcludedCompany(name: string): boolean {
   return /splashworks/i.test(name);
 }
 
@@ -1504,6 +1506,7 @@ function assetOwners(s: StoreShape, ...assetStrs: string[]): Set<string> {
 function toPublicAsset(s: StoreShape, a: InternalAsset): InventoryAsset {
   const openFindings = Array.from(s.findings.values()).filter(
     (f) =>
+      f.companyId === a.companyId &&
       (f.status === "Open" || f.status === "In Remediation") &&
       (f.asset.toLowerCase() === a.identifier.toLowerCase() ||
         f.asset.toLowerCase() === a.hostname.toLowerCase() ||
@@ -3222,11 +3225,13 @@ function upsertAsset(
   input: Omit<InternalAsset, "id" | "lastSynced"> & { id?: string },
 ): InternalAsset {
   const nowIso = new Date().toISOString();
-  // Match an existing asset by external id or identifier within the company.
+  // Match an existing asset by external id or identifier, always scoped to
+  // the same company — a vendor externalId collision (or a caller passing
+  // the wrong companyId) must never reassign an asset across customers.
   const existing = Array.from(s.assets.values()).find(
     (a) =>
-      (input.externalId && a.externalId === input.externalId) ||
-      (a.companyId === input.companyId &&
+      a.companyId === input.companyId &&
+      ((input.externalId && a.externalId === input.externalId) ||
         a.identifier.toLowerCase() === input.identifier.toLowerCase()),
   );
   if (existing) {

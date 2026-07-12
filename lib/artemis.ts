@@ -13,7 +13,7 @@ import type { Severity } from "@/lib/types";
 //   POST /api/add   { targets, tag, ... }  -> { ok, ids }
 //
 // Configure with:
-//   ARTEMIS_API_URL    base URL, e.g. http://137.184.89.60:5000
+//   ARTEMIS_API_URL    base URL, e.g. http://<host>:5000
 //   ARTEMIS_API_TOKEN  value of the server's API_TOKEN
 //
 // Task-result field names vary by Artemis version; extractors below read

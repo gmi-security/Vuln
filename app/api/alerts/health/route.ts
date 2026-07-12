@@ -1,11 +1,13 @@
 import { NextResponse } from "next/server";
 import { emailConfigured, slackConfigured } from "@/lib/alerts";
+import { cachedHealth } from "@/lib/health-cache";
 
 export const dynamic = "force-dynamic";
 
 // Reachability probe for the alerting channels, shaped like the scanner
 // health endpoints ({ reachable, message }) so the Connectors page can show
-// a live health dot. ?channel=slack|email.
+// a live health dot. ?channel=slack|email. The email branch makes a live
+// Resend API call, so it's cached briefly — this route is unauthenticated.
 export async function GET(request: Request) {
   const channel = new URL(request.url).searchParams.get("channel");
 
@@ -35,35 +37,45 @@ export async function GET(request: Request) {
         message: "RESEND_API_KEY / REPORT_FROM_EMAIL not set.",
       });
     }
-    // Verify the API key with a read-only call (no email is sent).
-    try {
-      const res = await fetch("https://api.resend.com/domains", {
-        headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY!.trim()}` },
-        signal: AbortSignal.timeout(8000),
-        cache: "no-store",
-      });
-      if (res.ok) {
-        return NextResponse.json({
-          configured: true,
-          reachable: true,
-          message: `Resend API key valid — sending as ${process.env.REPORT_FROM_EMAIL!.trim()}.`,
+    // Verify the API key with a read-only call (no email is sent), cached
+    // briefly since this route has no session gate.
+    const { body } = await cachedHealth("alerts-email", 30_000, async () => {
+      try {
+        const res = await fetch("https://api.resend.com/domains", {
+          headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY!.trim()}` },
+          signal: AbortSignal.timeout(8000),
+          cache: "no-store",
         });
+        if (res.ok) {
+          return {
+            body: {
+              configured: true,
+              reachable: true,
+              message: `Resend API key valid — sending as ${process.env.REPORT_FROM_EMAIL!.trim()}.`,
+            },
+          };
+        }
+        return {
+          body: {
+            configured: true,
+            reachable: false,
+            message:
+              res.status === 401
+                ? "Resend rejected the API key (HTTP 401) — check RESEND_API_KEY."
+                : `Resend API returned HTTP ${res.status}.`,
+          },
+        };
+      } catch {
+        return {
+          body: {
+            configured: true,
+            reachable: false,
+            message: "Could not reach the Resend API.",
+          },
+        };
       }
-      return NextResponse.json({
-        configured: true,
-        reachable: false,
-        message:
-          res.status === 401
-            ? "Resend rejected the API key (HTTP 401) — check RESEND_API_KEY."
-            : `Resend API returned HTTP ${res.status}.`,
-      });
-    } catch {
-      return NextResponse.json({
-        configured: true,
-        reachable: false,
-        message: "Could not reach the Resend API.",
-      });
-    }
+    });
+    return NextResponse.json(body);
   }
 
   return NextResponse.json({ error: "Unknown channel." }, { status: 400 });

@@ -5,7 +5,7 @@
 // compliance live in one place. Resources used: /api/risks (and /api/assets).
 //
 // Configure with:
-//   GRC_API_URL    base URL (e.g. http://64.227.55.62:8080)
+//   GRC_API_URL    base URL (e.g. http://<host>:8080)
 //   GRC_API_TOKEN  Sanctum token from Profile Settings
 
 export type GrcConfig = {

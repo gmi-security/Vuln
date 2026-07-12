@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import {
   ensureHydrated,
   getCompany,
+  isAlertExcludedCompany,
   listFindings,
   withSlaInfo,
 } from "@/lib/store";
@@ -59,7 +60,7 @@ export async function POST(request: Request) {
       skipped.push({ companyId, reason: "company not found" });
       continue;
     }
-    if (/splashworks/i.test(company.name)) {
+    if (isAlertExcludedCompany(company.name)) {
       skipped.push({ companyId, reason: "test customer" });
       continue;
     }
