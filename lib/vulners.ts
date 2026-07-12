@@ -81,6 +81,9 @@ async function bridgeLogin(cfg: VulnersBridgeConfig): Promise<string> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ username: cfg.user, password: cfg.pass }),
     cache: "no-store",
+    // Auth handshake, not the scan itself — a hung bridge must never hang
+    // the health check (or a caller awaiting it) indefinitely.
+    signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) throw new Error(`Bridge login failed: HTTP ${res.status}`);
   const data: any = await res.json();
@@ -96,6 +99,9 @@ export async function vulnersBridgeScanHost(target: string): Promise<VulnersBrid
   const res = await fetch(`${cfg.url}/api/scan?target=${encodeURIComponent(target)}`, {
     headers: { Authorization: `Bearer ${token}` },
     cache: "no-store",
+    // A real nmap scan can legitimately run long — bound it generously
+    // (5 min) rather than leaving it fully unbounded.
+    signal: AbortSignal.timeout(300_000),
   });
   if (!res.ok) {
     throw new Error(
@@ -158,6 +164,7 @@ export async function vulnersStatus(): Promise<{
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query: "type:cve", skip: 0, size: 1, apiKey: config.apiKey }),
       cache: "no-store",
+      signal: AbortSignal.timeout(15_000),
     });
     const ok = res.ok || res.status === 400;
     return {
@@ -200,6 +207,7 @@ export async function vulnersAuditHost(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
     cache: "no-store",
+    signal: AbortSignal.timeout(30_000),
   });
   if (!res.ok) {
     throw new Error(`Vulners audit ${res.status}: ${await res.text().catch(() => res.statusText)}`);
@@ -259,6 +267,7 @@ export async function vulnersEnrichCves(cves: string[]): Promise<Map<string, Vul
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: batch, apiKey: config.apiKey }),
         cache: "no-store",
+        signal: AbortSignal.timeout(15_000),
       });
       if (!res.ok) continue;
       const data: any = await res.json();
