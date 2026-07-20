@@ -21,6 +21,23 @@ export function zapConfig(): ZapConfig | null {
   return { baseUrl: baseUrl.replace(/\/+$/, ""), apiKey };
 }
 
+// Node's fetch() throws a generic "fetch failed" TypeError for DNS/connect
+// failures and buries the actual reason (ECONNREFUSED, ENOTFOUND, an abort
+// timeout, ...) in `.cause`. Surface that instead so a health-check error
+// says what actually went wrong rather than the useless top-level message.
+function describeFetchError(err: unknown): string {
+  if (err instanceof Error) {
+    const cause = (err as { cause?: unknown }).cause;
+    if (err.name === "AbortError" || err.name === "TimeoutError") {
+      return "Request timed out.";
+    }
+    if (cause instanceof Error) return cause.message;
+    if (typeof cause === "string") return cause;
+    return err.message;
+  }
+  return "Connection failed.";
+}
+
 // Every ZAP call needs `Host: zap` (gateway routing) and `apikey` on the
 // query string. action/status calls are cheap and bounded at 15s; the report
 // pull can be large, so it gets its own longer timeout at the call site.
@@ -37,7 +54,9 @@ async function zapFetch(
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) {
-    throw new Error(`ZAP ${path} ${res.status}: ${await res.text().catch(() => res.statusText)}`);
+    throw new Error(
+      `ZAP ${path} HTTP ${res.status}: ${await res.text().catch(() => res.statusText)}`,
+    );
   }
   return res.json();
 }
@@ -73,7 +92,7 @@ export async function zapStatus(): Promise<{
       configured: true,
       reachable: false,
       status: "Unreachable",
-      message: err instanceof Error ? err.message : "Connection failed.",
+      message: describeFetchError(err),
     };
   }
 }
