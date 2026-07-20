@@ -145,7 +145,8 @@ export type ConnectorId =
   | "spiderfoot"
   | "artemis"
   | "burp"
-  | "nmap";
+  | "nmap"
+  | "zap";
 
 export type ConnectorStatus =
   | "Connected"

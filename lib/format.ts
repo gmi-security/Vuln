@@ -30,6 +30,7 @@ export const connectorLabels: Record<ConnectorId, string> = {
   artemis: "Artemis",
   burp: "Burp Suite",
   nmap: "Nmap",
+  zap: "OWASP ZAP",
 };
 
 export const severityClass: Record<Severity, string> = {

@@ -35,6 +35,15 @@ import {
   nmapServiceFindings,
   type NmapHost,
 } from "@/lib/nmap";
+import {
+  zapConfig,
+  zapStartSpider,
+  zapSpiderStatus,
+  zapStartActiveScan,
+  zapActiveScanStatus,
+  zapFetchReport,
+  type ZapFinding,
+} from "@/lib/zap";
 import { buildRisk, grcConfig, grcUpsertRisk, riskCode } from "@/lib/grc";
 import {
   vulnersConfig,
@@ -304,6 +313,9 @@ type InternalScan = Omit<Scan, "progress" | "status"> & {
   // Set when the scan is running via the Vulners Bridge (nmap active scanner).
   // Mutually exclusive with vendor — bridge scans self-manage their lifecycle.
   bridgeScan?: { done: boolean };
+  // Set when the scan is running against OWASP ZAP. Mutually exclusive with
+  // vendor/bridgeScan — ZAP scans self-manage their lifecycle too.
+  zapScan?: { phase: "spidering" | "scanning" | "done"; spiderScanId?: string; activeScanId?: string };
 };
 
 const globalStore = globalThis as unknown as { __vulnStore?: StoreShape };
@@ -1000,6 +1012,7 @@ function generateFindings(s: StoreShape, scan: InternalScan): Finding[] {
 function settleScan(s: StoreShape, scan: InternalScan, now: number): void {
   if (scan.vendor) return; // vendor scans settle via refreshVendorScans()
   if (scan.bridgeScan) return; // bridge scans self-manage via runVulnersBridgeScanAsync
+  if (scan.zapScan) return; // ZAP scans self-manage via runZapScanAsync
   if (!demoScansEnabled()) return; // production: never fabricate demo findings
   if (scan.status !== "Running") return;
   const progress = computeProgress(scan, now);
@@ -2043,7 +2056,7 @@ export async function purgeDemoData(): Promise<{
   const s = store();
   const demoScanIds = new Set<string>();
   for (const [id, sc] of s.scans) {
-    if (sc.vendor || sc.externalRef || sc.bridgeScan) continue;
+    if (sc.vendor || sc.externalRef || sc.bridgeScan || sc.zapScan) continue;
     if (sc.connector === "defender") continue;
     demoScanIds.add(id);
   }
@@ -5540,6 +5553,162 @@ async function runVulnersBridgeScanAsync(
   void flushNow();
 }
 
+function zapTargetPort(target: string): string {
+  try {
+    const u = new URL(target);
+    if (u.port) return u.port;
+    return u.protocol === "https:" ? "443" : "80";
+  } catch {
+    return "N/A";
+  }
+}
+
+// Runs an OWASP ZAP spider + active scan per target asynchronously after
+// startScan() returns. Updates the scan record in-place and flushes to the
+// DB when done — mirrors runVulnersBridgeScanAsync's structure exactly.
+async function runZapScanAsync(
+  scanId: string,
+  targets: string[],
+  companyId: string,
+): Promise<void> {
+  const s = store();
+  const scan = s.scans.get(scanId);
+  if (!scan || !scan.zapScan) return;
+
+  const nowIso = new Date().toISOString();
+  const company = s.companies.get(companyId);
+  const companyName = company?.name ?? scan.companyName;
+
+  try {
+    for (const target of targets) {
+      try {
+        const current = s.scans.get(scanId);
+        if (!current || !current.zapScan) break; // scan was removed mid-flight
+
+        current.zapScan.phase = "spidering";
+        current.progressFrozenAt = 5;
+        const spiderScanId = await zapStartSpider(target);
+        current.zapScan.spiderScanId = spiderScanId;
+
+        for (let i = 0; i < 60; i++) {
+          const progress = await zapSpiderStatus(spiderScanId);
+          current.progressFrozenAt = 5 + Math.round((progress / 100) * 35); // 5..40
+          if (progress >= 100) break;
+          await new Promise((r) => setTimeout(r, 5000));
+        }
+
+        current.zapScan.phase = "scanning";
+        current.progressFrozenAt = 40;
+        const activeScanId = await zapStartActiveScan(target);
+        current.zapScan.activeScanId = activeScanId;
+
+        for (let i = 0; i < 120; i++) {
+          const progress = await zapActiveScanStatus(activeScanId);
+          current.progressFrozenAt = 40 + Math.round((progress / 100) * 55); // 40..95
+          if (progress >= 100) break;
+          await new Promise((r) => setTimeout(r, 5000));
+        }
+        current.progressFrozenAt = 95;
+
+        let report: ZapFinding[];
+        try {
+          report = await zapFetchReport();
+        } catch {
+          continue; // skip unreachable report; don't abort the whole scan
+        }
+        // The report covers every site ZAP currently holds — keep only the
+        // one matching this target (tolerate a trailing-slash mismatch).
+        const targetNorm = target.replace(/\/+$/, "").toLowerCase();
+        const siteFindings = report.filter((f) => {
+          const assetNorm = f.asset.replace(/\/+$/, "").toLowerCase();
+          return (
+            assetNorm === targetNorm ||
+            assetNorm.startsWith(targetNorm) ||
+            targetNorm.startsWith(assetNorm)
+          );
+        });
+
+        for (const v of siteFindings) {
+          const existing = Array.from(s.findings.values()).find(
+            (f) =>
+              f.companyId === companyId &&
+              f.cve === v.cve &&
+              f.asset === target &&
+              f.status !== "Resolved",
+          );
+          if (existing) {
+            existing.lastSeen = nowIso;
+            continue;
+          }
+          const fid = nextId(s, "FIND");
+          const f: Finding = {
+            id: fid,
+            scanId,
+            companyId,
+            companyName,
+            connector: "zap",
+            cve: v.cve,
+            title: v.title,
+            severity: v.severity,
+            cvss: v.cvss,
+            cvssV2: 0,
+            cvssV3: v.cvss,
+            vpr: 0,
+            epss: 0,
+            asset: target,
+            port: zapTargetPort(target),
+            category: v.category,
+            description: v.description,
+            remediation: v.remediation,
+            status: "Open",
+            assignee: null,
+            firstSeen: nowIso,
+            lastSeen: nowIso,
+            resolvedAt: null,
+            exploitAvailable: false,
+            kev: false,
+            ransomware: false,
+            assetExposure: "Internet-facing",
+            assetCriticality: "Normal",
+            assetSource: "inferred",
+            realRisk: 0,
+            riskPriority: "Info",
+          };
+          rescoreFinding(s, f);
+          s.findings.set(fid, f);
+        }
+      } catch {
+        continue; // skip a failing target; don't abort the whole scan
+      }
+    }
+  } catch (err) {
+    const current = s.scans.get(scanId);
+    if (current) {
+      current.status = "Failed";
+      current.error = err instanceof Error ? err.message : "ZAP scan failed.";
+      current.completedAt = new Date().toISOString();
+      current.progressFrozenAt = 0;
+      if (current.zapScan) current.zapScan.phase = "done";
+    }
+    void flushNow();
+    return;
+  }
+
+  const current = s.scans.get(scanId);
+  if (!current || !current.zapScan) return;
+  const all = Array.from(s.findings.values()).filter((f) => f.scanId === scanId);
+  current.findingsCount = all.length;
+  const counts = emptySeverityCounts();
+  for (const f of all) counts[f.severity] = (counts[f.severity] ?? 0) + 1;
+  current.severityCounts = counts;
+  current.hostsScanned = new Set(all.map((f) => f.asset)).size || targets.length;
+  current.status = "Completed";
+  current.completedAt = new Date().toISOString();
+  current.progressFrozenAt = 100;
+  current.zapScan.phase = "done";
+  void flushNow();
+}
+
 export async function startScan(input: {
   name: string;
   connector: ConnectorId;
@@ -5562,6 +5731,7 @@ export async function startScan(input: {
   const name = input.name || `${input.connector} scan`;
   let vendor: InternalScan["vendor"] = null;
   const isBridgeScan = input.connector === "vulners" && Boolean(vulnersBridgeConfig());
+  const isZapScan = input.connector === "zap" && Boolean(zapConfig());
 
   if (input.connector === "nessus" && nessusConfig()) {
     try {
@@ -5574,7 +5744,7 @@ export async function startScan(input: {
     }
   }
 
-  if (!vendor && !isBridgeScan && !demoScansEnabled()) {
+  if (!vendor && !isBridgeScan && !isZapScan && !demoScansEnabled()) {
     return {
       error: `${input.connector} is not connected to a live scanner. Configure its credentials to run real scans — demo scans are disabled in production.`,
     };
@@ -5605,15 +5775,19 @@ export async function startScan(input: {
     requestedBy: input.requestedBy || "analyst@gmi.com",
     durationMs:
       demo.minDurationMs + Math.floor(rand() * (demo.maxDurationMs - demo.minDurationMs)),
-    progressFrozenAt: vendor ? 0 : isBridgeScan ? 30 : null,
+    progressFrozenAt: vendor ? 0 : isBridgeScan ? 30 : isZapScan ? 5 : null,
     seed: seedVal,
     vendor,
     bridgeScan: isBridgeScan ? { done: false } : undefined,
+    zapScan: isZapScan ? { phase: "spidering" } : undefined,
   };
   s.scans.set(id, scan);
 
   if (isBridgeScan) {
     void runVulnersBridgeScanAsync(id, input.targets, company.id);
+  }
+  if (isZapScan) {
+    void runZapScanAsync(id, input.targets, company.id);
   }
 
   return toPublic(scan, Date.now());

@@ -168,6 +168,24 @@ const CONNECTOR_DEFS: Record<ConnectorId, ConnectorDef> = {
       categories: ["Exposed Service", "Open Port", "Service Enumeration"],
     },
   },
+  zap: {
+    id: "zap",
+    name: "OWASP ZAP",
+    vendor: "OWASP",
+    kind: "Dynamic Application Security Testing (DAST)",
+    description:
+      "Live web-app scanning via the OWASP ZAP API. Crawls a target URL with the spider, then runs ZAP's active scan against everything it found — surfacing OWASP Top 10-class issues (injection, XSS, misconfiguration) confirmed against the running application, not just its source.",
+    capabilities: ["Crawl & spider", "Active vulnerability scan", "OWASP Top 10 coverage", "Per-target findings"],
+    envVars: ["ZAP_URL", "ZAP_API_KEY"],
+    docsUrl: "https://www.zaproxy.org/docs/api/",
+    demo: {
+      minDurationMs: 60_000,
+      maxDurationMs: 180_000,
+      minFindings: 6,
+      maxFindings: 18,
+      categories: ["Web Vulnerability", "Injection", "Authentication", "Misconfiguration"],
+    },
+  },
 };
 
 export const SCAN_PROFILES: ScanProfile[] = [

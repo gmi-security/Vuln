@@ -3,6 +3,7 @@
 import React, { useEffect, useState } from "react";
 import { ExternalLink, RefreshCw, Upload } from "lucide-react";
 import {
+  IconBug,
   IconClipboardCheck,
   IconCloudLock,
   IconDatabaseCog,
@@ -62,6 +63,7 @@ const cardIcon: Record<string, React.ElementType> = {
   artemis: IconTopologyStar3,
   burp: IconShieldSearch,
   nmap: IconRadar,
+  zap: IconBug,
   tidal: IconDatabaseCog,
   intune: IconDeviceLaptop,
   "crowdstrike-devices": IconShieldSearch,
@@ -77,6 +79,7 @@ const HEALTH_ENDPOINTS: Record<string, string> = {
   spiderfoot: "/api/spiderfoot/health",
   burp: "/api/burp/health",
   nmap: "/api/nmap/health",
+  zap: "/api/zap/health",
   vulners: "/api/vulners/health",
   "resend-email": "/api/alerts/health?channel=email",
   "slack-alerts": "/api/alerts/health?channel=slack",
