@@ -24,6 +24,7 @@ export async function proxy(request: NextRequest) {
     pathname === "/api/artemis/health" ||
     pathname === "/api/burp/health" ||
     pathname === "/api/nmap/health" ||
+    pathname === "/api/zap/health" ||
     pathname === "/api/vulners/health" ||
     pathname === "/api/crowdstrike/health" ||
     pathname === "/api/health" ||
