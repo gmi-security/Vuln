@@ -49,7 +49,9 @@ import {
   vulnersConfig,
   vulnersEnrichCves,
   vulnersBridgeConfig,
-  vulnersBridgeScanHost,
+  vulnersBridgeStartScan,
+  vulnersBridgeJobStatus,
+  vulnersBridgeJobFindings,
   type VulnersCveData,
   type VulnersBridgeFinding,
 } from "@/lib/vulners";
@@ -3926,7 +3928,7 @@ export async function importFromVulnersBridge(): Promise<
   if (!vulnersBridgeConfig()) {
     return {
       error:
-        "Vulners bridge is not configured. Set VULNERS_BRIDGE_URL and VULNERS_BRIDGE_PASS.",
+        "Vulners bridge is not configured. Set VULNERS_BRIDGE_URL and VULNERS_BRIDGE_API_KEY.",
     };
   }
   const s = store();
@@ -3952,7 +3954,9 @@ export async function importFromVulnersBridge(): Promise<
   for (const [ip, { companyId, companyName, asset }] of Array.from(targets.entries())) {
     let results: VulnersBridgeFinding[];
     try {
-      results = await vulnersBridgeScanHost(ip);
+      // Bulk inventory sweep — many targets, so cap each one at ~5 minutes
+      // (30 * 10s) rather than the analyst-launched path's 70-minute cap.
+      results = await runBridgeScanToCompletion(ip, "Vulners Bridge sync", 30);
     } catch {
       skipped += 1;
       continue;
@@ -5446,6 +5450,30 @@ export async function getScan(id: string): Promise<Scan | undefined> {
   return scan ? toPublic(scan, Date.now()) : undefined;
 }
 
+// Launches a Vulners Bridge job for one target and polls it to completion,
+// returning the imported-ready findings. Throws on failure or on exhausting
+// maxPolls (still "running"/"queued") — callers decide whether to skip the
+// target or abort. pollMs defaults to 10s.
+async function runBridgeScanToCompletion(
+  target: string,
+  scanName: string | undefined,
+  maxPolls: number,
+  pollMs = 10_000,
+): Promise<VulnersBridgeFinding[]> {
+  const job = await vulnersBridgeStartScan(target, scanName);
+  let terminal = job.status;
+  for (let i = 0; i < maxPolls && (terminal === "queued" || terminal === "running"); i++) {
+    await new Promise((r) => setTimeout(r, pollMs));
+    const polled = await vulnersBridgeJobStatus(job.jobId);
+    terminal = polled.status;
+    if (terminal === "failed") throw new Error(polled.error ?? "Bridge scan failed.");
+  }
+  if (terminal !== "complete") {
+    throw new Error(`Bridge scan timed out waiting for completion (status: ${terminal}).`);
+  }
+  return vulnersBridgeJobFindings(job.jobId, target);
+}
+
 // Runs Vulners Bridge scans per target asynchronously after startScan() returns.
 // Updates the scan record in-place and flushes to the DB when done.
 async function runVulnersBridgeScanAsync(
@@ -5465,9 +5493,11 @@ async function runVulnersBridgeScanAsync(
     for (const target of targets) {
       let results: VulnersBridgeFinding[];
       try {
-        results = await vulnersBridgeScanHost(target);
+        // Analyst-launched, small target list — server's own job timeout is
+        // 1 hour, so poll comfortably past that (420 * 10s = 70 min).
+        results = await runBridgeScanToCompletion(target, scan.name, 420);
       } catch {
-        continue; // skip unreachable targets; don't abort the whole scan
+        continue; // skip unreachable/failed targets; don't abort the whole scan
       }
       for (const v of results) {
         const existing = Array.from(s.findings.values()).find(

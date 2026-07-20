@@ -6,6 +6,11 @@ import type { Connector, ConnectorId, ScanProfile } from "@/lib/types";
 
 type ConnectorDef = Omit<Connector, "status" | "configured"> & {
   planned?: boolean;
+  // Set when a connector supports two independent, alternative auth modes
+  // (e.g. Vulners' cloud API key vs its bridge URL+key) — configured is true
+  // if EITHER full set is present, not requiring both. envVars stays the
+  // union of both sets for display (each shown with its own set/unset pill).
+  envVarsAlt?: string[];
   // Demo simulation profile: how long a simulated scan runs and how noisy it is.
   demo: {
     minDurationMs: number;
@@ -35,9 +40,11 @@ const CONNECTOR_DEFS: Record<ConnectorId, ConnectorDef> = {
     vendor: "Vulners",
     kind: "Vulnerability Intelligence & Audit",
     description:
-      "Package-level audit and CVE enrichment via the Vulners API. Sends installed package inventories for assessment and enriches findings with exploit and EPSS intelligence.",
-    capabilities: ["Package audit", "CVE enrichment", "Exploit intel", "EPSS scores"],
+      "Package-level audit and CVE enrichment via the Vulners cloud API, plus an active nmap --script vulners scan against a live target through the Vulners Bridge. Enriches findings with exploit and EPSS intelligence.",
+    capabilities: ["Package audit", "CVE enrichment", "Exploit intel", "EPSS scores", "Active bridge scan"],
+    // Two independent auth modes — either is enough to be "configured".
     envVars: ["VULNERS_API_KEY"],
+    envVarsAlt: ["VULNERS_BRIDGE_URL", "VULNERS_BRIDGE_API_KEY"],
     docsUrl: "https://vulners.com/docs",
     demo: {
       minDurationMs: 30_000,
@@ -216,8 +223,15 @@ export const SCAN_PROFILES: ScanProfile[] = [
   },
 ];
 
+function envSetComplete(vars: string[]): boolean {
+  return vars.every((v) => Boolean(process.env[v]));
+}
+
+// Configured if the primary set is complete, OR (when present) the
+// alternative set is — the two are independent auth modes, not a combined
+// requirement.
 function isConfigured(def: ConnectorDef): boolean {
-  return def.envVars.every((v) => Boolean(process.env[v]));
+  return envSetComplete(def.envVars) || Boolean(def.envVarsAlt && envSetComplete(def.envVarsAlt));
 }
 
 export function getConnectors(): Connector[] {
@@ -230,7 +244,7 @@ export function getConnectors(): Connector[] {
       kind: def.kind,
       description: def.description,
       capabilities: def.capabilities,
-      envVars: def.envVars,
+      envVars: [...def.envVars, ...(def.envVarsAlt ?? [])],
       docsUrl: def.docsUrl,
       configured,
       status: def.planned
