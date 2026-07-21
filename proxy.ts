@@ -25,7 +25,7 @@ export async function proxy(request: NextRequest) {
     pathname === "/api/burp/health" ||
     pathname === "/api/nmap/health" ||
     pathname === "/api/zap/health" ||
-    pathname === "/api/vulners/health" ||
+    pathname === "/api/vulners-bridge-health" ||
     pathname === "/api/crowdstrike/health" ||
     pathname === "/api/health" ||
     // Independently protected by ADMIN_TOKEN (not a session), so they must stay

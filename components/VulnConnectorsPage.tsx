@@ -80,7 +80,7 @@ const HEALTH_ENDPOINTS: Record<string, string> = {
   burp: "/api/burp/health",
   nmap: "/api/nmap/health",
   zap: "/api/zap/health",
-  vulners: "/api/vulners/health",
+  vulners: "/api/vulners-bridge-health",
   "resend-email": "/api/alerts/health?channel=email",
   "slack-alerts": "/api/alerts/health?channel=slack",
 };
