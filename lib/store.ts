@@ -5362,15 +5362,26 @@ export async function importFromNessus(): Promise<
     if (existing) {
       // Older records (imported before this field existed, or created by the
       // live Start-Scan flow which doesn't set it) have no stamped
-      // lastModified yet — backfill it now rather than treating this as a
-      // fresh run and creating a duplicate for the same completed scan.
+      // lastModified yet. Don't just trust Nessus's current value as "already
+      // known" — Nessus may have already completed newer runs since this
+      // record's own completion, whose findings were never imported. Compare
+      // against what this record actually reflects (completedAt, which the
+      // original import derived from that run's lastModified) and only treat
+      // it as caught-up when Nessus's current value is no newer than that.
       if (existing.vendor && existing.vendor.nessusLastModified == null) {
-        existing.vendor.nessusLastModified = summary.lastModified;
-        skipped += 1;
-        continue;
-      }
-      // Same run we've already imported — nothing new.
-      if (existing.vendor?.nessusLastModified === summary.lastModified) {
+        const recordedAt = existing.completedAt
+          ? Math.floor(new Date(existing.completedAt).getTime() / 1000)
+          : 0;
+        if (!summary.lastModified || summary.lastModified <= recordedAt) {
+          existing.vendor.nessusLastModified = summary.lastModified;
+          skipped += 1;
+          continue;
+        }
+        // Nessus has already completed a newer run than this record reflects
+        // — fall through and import it as a fresh scan record below, which
+        // stamps its own nessusLastModified.
+      } else if (existing.vendor?.nessusLastModified === summary.lastModified) {
+        // Same run we've already imported — nothing new.
         skipped += 1;
         continue;
       }
