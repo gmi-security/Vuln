@@ -308,7 +308,17 @@ type InternalScan = Omit<Scan, "progress" | "status"> & {
   progressFrozenAt: number | null; // progress % locked in when paused/stopped
   seed: number;
   // Present when the scan runs on a real scanner instead of the demo engine.
-  vendor: { nessusScanId: number; lastPoll: number; imported: boolean } | null;
+  vendor: {
+    nessusScanId: number;
+    lastPoll: number;
+    imported: boolean;
+    // Nessus's last_modification_date at import time. Nessus scans are
+    // recurring objects that keep the same id across every scheduled run —
+    // only this timestamp advances when a scan re-runs. Used by
+    // importFromNessus to detect a fresh completed run of a scan it has
+    // already imported before, instead of skipping it forever.
+    nessusLastModified?: number | null;
+  } | null;
   // Stable reference to an external source scan (e.g. "spiderfoot:<id>") so
   // pull-based imports stay idempotent. Absent for native/demo scans.
   externalRef?: string;
@@ -5343,13 +5353,29 @@ export async function importFromNessus(): Promise<
       skipped += 1;
       continue;
     }
-    // Skip scans already linked to a Vuln scan record.
-    const already = Array.from(s.scans.values()).some(
+    // Nessus scans are recurring objects: the same id persists across every
+    // scheduled run, only last_modification_date advances. Find any record
+    // already linked to this scan id.
+    const existing = Array.from(s.scans.values()).find(
       (sc) => sc.vendor?.nessusScanId === summary.id,
     );
-    if (already) {
-      skipped += 1;
-      continue;
+    if (existing) {
+      // Older records (imported before this field existed, or created by the
+      // live Start-Scan flow which doesn't set it) have no stamped
+      // lastModified yet — backfill it now rather than treating this as a
+      // fresh run and creating a duplicate for the same completed scan.
+      if (existing.vendor && existing.vendor.nessusLastModified == null) {
+        existing.vendor.nessusLastModified = summary.lastModified;
+        skipped += 1;
+        continue;
+      }
+      // Same run we've already imported — nothing new.
+      if (existing.vendor?.nessusLastModified === summary.lastModified) {
+        skipped += 1;
+        continue;
+      }
+      // Otherwise: this scan has completed a new scheduled run since we last
+      // imported it. Fall through and import it as a fresh scan record.
     }
     const company = s.companies.get(companyId)!;
     const folder = ensureFolder(s, companyId, "Nessus");
@@ -5383,7 +5409,12 @@ export async function importFromNessus(): Promise<
       durationMs: 1,
       progressFrozenAt: status === "Completed" ? 100 : 0,
       seed: hashSeed(id + summary.name),
-      vendor: { nessusScanId: summary.id, lastPoll: Date.now(), imported: false },
+      vendor: {
+        nessusScanId: summary.id,
+        lastPoll: Date.now(),
+        imported: false,
+        nessusLastModified: summary.lastModified,
+      },
     };
     s.scans.set(id, scan);
     scansImported += 1;
