@@ -271,6 +271,12 @@ type StoreMeta = {
   lastMonthlyReportMonth: string | null; // "YYYY-MM" (UTC)
   lastNessusHealthOk: boolean | null; // watchdog state; null = never probed
   lastNessusHealthCheckAt: number | null; // epoch ms of the last watchdog probe
+  // One-time correction: the recurring-scan-import fix's first backfill pass
+  // unconditionally trusted Nessus's current lastModified as "already
+  // known," which could silently skip past already-completed newer runs.
+  // Set once importFromNessus has re-evaluated every existing record against
+  // the corrected (completedAt-compared) logic, so it only resets once.
+  nessusBackfillCorrected: boolean;
 };
 
 function defaultMeta(): StoreMeta {
@@ -281,6 +287,7 @@ function defaultMeta(): StoreMeta {
     lastMonthlyReportMonth: null,
     lastNessusHealthOk: null,
     lastNessusHealthCheckAt: null,
+    nessusBackfillCorrected: false,
   };
 }
 
@@ -5299,6 +5306,22 @@ export async function importFromNessus(): Promise<
     };
   }
   const s = store();
+
+  // One-time correction for the recurring-scan-import fix's first backfill
+  // pass, which unconditionally trusted Nessus's current lastModified as
+  // "already known" and could silently skip past runs Nessus had already
+  // completed since a record's own completion. Clear every stamped value so
+  // this sync re-evaluates each record against the corrected (completedAt-
+  // compared) logic below instead of short-circuiting on the equality check.
+  if (!s.meta.nessusBackfillCorrected) {
+    for (const scan of s.scans.values()) {
+      if (scan.connector === "nessus" && scan.vendor) {
+        scan.vendor.nessusLastModified = null;
+      }
+    }
+    s.meta.nessusBackfillCorrected = true;
+    markDirty();
+  }
 
   let folders;
   try {
