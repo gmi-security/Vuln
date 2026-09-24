@@ -41,7 +41,7 @@ async function run(mode) {
       await delay(100);
     }
     assert.ok(started, `Server did not start: ${output}`);
-    const token = await encode({ secret, token: { name: "Local test", orgMember: true }, maxAge: 60 });
+    const token = await encode({ secret, token: { name: "Local test", orgMember: true, orgRole: "MEMBER" }, maxAge: 120 });
     const headers = { cookie: `next-auth.session-token=${token}` };
     assert.equal((await fetch(`${base}/api/elastic-vulnerabilities`)).status, 401);
     assert.equal((await fetch(`${base}/api/elastic-vulnerabilities/status`)).status, 401);
@@ -82,29 +82,34 @@ async function run(mode) {
     if (mode === "disabled") assert.equal(dashboard.status, 404);
     else {
       const model = await dashboard.json();
-      assert.equal(model.canManage, false);
+      assert.equal(model.canManage, true);
       assert.equal(model.endpoint, undefined);
       assert.equal(model.connected, false);
       const adminToken = await encode({ secret, token: { name: "Local admin", email: "admin@example.test", orgMember: true, orgRole: "ADMIN" }, maxAge: 120 });
       const adminHeaders = { cookie: `next-auth.session-token=${adminToken}`, origin: base, "Content-Type": "application/json" };
-      const request = (route, body, requestHeaders = adminHeaders) => fetch(`${base}/api/elastic-dashboard/${route}`, { method: "POST", headers: requestHeaders, body: JSON.stringify(body) });
+      const memberHeaders = { ...headers, origin: base, "Content-Type": "application/json" };
+      const removedToken = await encode({ secret, token: { name: "Removed member", orgMember: false, orgRole: "MEMBER" }, maxAge: 120 });
+      const request = (route, body, requestHeaders = memberHeaders) => fetch(`${base}/api/elastic-dashboard/${route}`, { method: "POST", headers: requestHeaders, body: JSON.stringify(body) });
       for (const route of ["connection", "queries", "preview", "refresh"]) {
-        assert.equal((await request(route, {}, { ...headers, origin: base, "Content-Type": "application/json" })).status, 403, `Members cannot mutate ${route}`);
-        assert.equal((await request(route, {}, { ...adminHeaders, origin: "https://untrusted.example" })).status, 403);
+        assert.equal((await request(route, {}, { origin: base, "Content-Type": "application/json" })).status, 401, `Anonymous users cannot mutate ${route}`);
+        assert.equal((await request(route, {}, { ...memberHeaders, cookie: `next-auth.session-token=${removedToken}` })).status, 401, `Removed members cannot mutate ${route}`);
+        assert.equal((await request(route, {}, { ...memberHeaders, origin: "https://untrusted.example" })).status, 403);
       }
       assert.equal((await request("connection", { endpoint: "http://localhost", apiKey: "test" })).status, 400);
       assert.equal((await request("preview", { query: "" })).status, 400);
       assert.equal((await request("preview", { query: "ROW x = 1" })).status, env.ELASTIC_VULN_DATABASE_URL ? 409 : 503);
       assert.equal((await request("queries", { title: "x".repeat(34000) })).status, 413);
+      assert.equal((await request("queries", { title: "Valid title", query: "ROW x = 1", display: "auto", refreshMinutes: 15, enabled: true })).status, env.ELASTIC_VULN_DATABASE_URL ? 409 : 503);
+      assert.equal((await request("refresh", {})).status, 202);
       const adminModel = await (await fetch(`${base}/api/elastic-dashboard`, { headers: adminHeaders })).json();
       assert.equal(adminModel.canManage, true);
       if (mode === "empty") {
-        const html = await (await fetch(`${base}/elastic-vulnerabilities`, { headers: adminHeaders })).text();
+        const html = await (await fetch(`${base}/elastic-vulnerabilities`, { headers: memberHeaders })).text();
         assert.match(html, /Add query/);
         assert.match(html, /Connection/);
       }
     }
-    console.log(`PASS: ${mode} mode — sessions, admin roles, CSRF, page/API, existing routes, ingestion guards`);
+    console.log(`PASS: ${mode} mode — sessions, member management, CSRF, page/API, existing routes, ingestion guards`);
   } finally {
     child.kill();
     await once(child, "exit");

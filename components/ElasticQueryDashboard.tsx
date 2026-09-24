@@ -100,7 +100,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
     {message && <p role="status" className="rounded-xl border border-emerald-900 bg-emerald-950/20 p-4 text-sm text-emerald-300">{message}</p>}
     {!dashboard.connected && <div role="status" className="rounded-2xl border border-amber-600/30 bg-amber-950/20 p-4 text-sm text-amber-200">
       {dashboard.storageReady ? "Awaiting the data connection. No live results are available yet." : "Dashboard storage is not available yet."}
-      <p className="mt-2">{dashboard.canManage ? "Open Connection to add your Elasticsearch endpoint and read-only API key." : "An organization admin can connect Elasticsearch and manage saved queries."}</p>
+      <p className="mt-2">{dashboard.canManage ? "Open Connection to add your Elasticsearch endpoint and read-only API key." : "Sign in as an organization member to connect Elasticsearch and manage saved queries."}</p>
     </div>}
 
     {dashboard.canManage && connectionOpen && <PanelCard eyebrow="Elasticsearch connection" description="Use the Elasticsearch HTTPS endpoint, not the Kibana dashboard address.">

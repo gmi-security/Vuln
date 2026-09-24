@@ -9,7 +9,7 @@ direct-deployment workflow.
 
 Open **Elastic Dashboard** at `/elastic-vulnerabilities`.
 
-1. An organization admin opens **Connection**, enters the Elasticsearch HTTPS
+1. A signed-in organization member opens **Connection**, enters the Elasticsearch HTTPS
    endpoint and encoded read-only API key, and clicks **Test and save connection**.
    A Kibana `.kb.` address cannot be used as the Elasticsearch API address.
 2. The supplied asset coverage query is already saved. Connection verification
@@ -28,8 +28,9 @@ the user's exact 25-hour record window and seven-day last-seen filter. IDs obser
 in both categories can count in both. The query is not rewritten to deduplicate
 those categories. ES|QL distinct-count accuracy follows Elastic's aggregation.
 
-All organization members can read this dashboard; only active organization
-admins can configure connections or queries. This is an organization-wide view,
+All signed-in organization members can read this dashboard and configure
+connections or queries. The admin-only restriction was removed at the user's
+request on 2026-09-24. This is an organization-wide view,
 not a customer portal. Customer-level authorization would need a separate design.
 
 ## Connection and persistence
@@ -61,7 +62,7 @@ UPDATE rights. The existing app database transport configuration is inherited.
 - Claims are atomic in Postgres to avoid duplicate work across app instances.
   Connection/query revisions prevent stale in-flight results from overwriting
   edits. Failed refreshes preserve the last successful result and timestamp.
-- Two outbound queries at a time per process; up to 24 saved queries. Admin
+- Two outbound queries at a time per process; up to 24 saved queries. Member
   previews/saves have a two-second throttle; forced refresh has a 30-second
   cooldown per query. Preview and save each execute the query.
 - ES|QL source is limited to 16,000 characters. A final `LIMIT 101` bounds returned
@@ -74,7 +75,7 @@ UPDATE rights. The existing app database transport configuration is inherited.
   results are pinned for each request, blocking loopback/private/link-local
   destinations and DNS rebinding. IPv6-only/private-network clusters are not
   supported by this first connection form.
-- Mutation routes require both an admin session and the expected Origin;
+- Mutation routes require both an organization member session and the expected Origin;
   credentials are never accepted in URLs. Audit records contain actor, action,
   query ID, and time only.
 - `ELASTIC_VULN_ENABLED=false` hides the feature and stops automatic queries.
@@ -111,3 +112,21 @@ credentials, but authenticated Elastic results have not yet been verified.
 
 References: [ES|QL REST API](https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-esql-query),
 [Elastic API keys](https://www.elastic.co/docs/deploy-manage/api-keys/elasticsearch-api-keys).
+
+## Production release evidence (2026-09-24)
+
+- Production commit: `88292583598fe32dcb90b33eaeaa0de92a1dfa85` on
+  `claude/vuln-site-design-vxswd6`; its tree matched the tested feature branch.
+- DigitalOcean deployment `62e3ea1e-74bc-4749-975f-207af95b78f4` reached ACTIVE,
+  with successful build and deploy steps.
+- Live `/api/health` returned HTTP 200, `ok: true`, persistence enabled, and
+  `dbReachable: true`. `/login` returned 200. The dashboard redirected anonymous
+  requests to login (307), and its read API and connection mutation rejected
+  anonymous requests (401).
+- No dashboard refresh initialization errors appeared in the deployment's
+  startup log. The disposable local test database container was removed.
+- Signed-in browser interaction and authenticated live ES|QL results remain
+  unverified. Next step: an organization member enters the read-only API key in
+  Connection, tests/saves it, and compares the resulting coverage with Kibana.
+- To roll back this release, revert the production commit through Git. Its three
+  additive dashboard tables can remain; existing scanner tables were not migrated.
