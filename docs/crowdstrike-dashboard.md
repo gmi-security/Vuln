@@ -175,6 +175,12 @@ No stored query, credential, or schema changes are needed. Retry a failed saved
 tile with Refresh, or add the draft without preview. Authenticated live query
 execution remains unverified from the development environment.
 
+Facet fix release: commit `f221d3f0881e0739ff50bf553ebde67534e06c61` became ACTIVE
+on September 24, 2026 in deployment `eab8f5da-cc40-4de4-bd6c-dca4333ba7ab`.
+Build and deploy succeeded; live health and database reachability were true.
+Anonymous dashboard API access remained 401. Next verification is a signed-in
+retry of the user's failed CrowdStrike tile; no production credentials were read.
+
 Patch worklist and tile deletion validation (September 24, 2026): all 21 tests
 passed without skips, including full-page ranking, duplicate device counting,
 tenant separation, missing fields, unchanged risk boundaries, CSV escaping,
