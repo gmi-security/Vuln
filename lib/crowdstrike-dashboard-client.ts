@@ -69,6 +69,11 @@ async function jsonRequest(url: URL, init: RequestInit, deadline: number, secret
       if (!body || typeof body !== "object" || Array.isArray(body)) throw new DashboardError("CrowdStrike returned an invalid response.");
     } catch (error) {
       if (error instanceof DashboardError) throw error;
+      // Retrying a GET repeats only the current page. Already collected pages
+      // are retained, and all attempts remain inside the collection deadline.
+      if ((init.method ?? "GET") === "GET" && retry < 2 && Date.now() + 1000 < deadline) {
+        await delay(1000); continue;
+      }
       throw new DashboardError("CrowdStrike could not be reached or the request timed out. Retry later.");
     } finally { clearTimeout(timer); }
     if ((response.status === 429 || response.status >= 500) && retry < 2) {

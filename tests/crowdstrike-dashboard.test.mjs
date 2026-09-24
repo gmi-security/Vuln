@@ -49,6 +49,25 @@ async function mockHttp(replies, work) {
 const auth = { access_token: "fake-access-token" };
 
 const cveOptions = { ...options, view: "cve-devices", measure: "hosts", groupBy: "cve", top: 10 };
+test("a transient GET failure retries the same page without restarting collection", async () => {
+  const original = globalThis.fetch, calls = [];
+  let nextPageAttempts = 0;
+  globalThis.fetch = async (url) => {
+    const parsed = new URL(url); calls.push(parsed);
+    if (parsed.pathname === "/oauth2/token") return new Response(JSON.stringify(auth));
+    if (!parsed.searchParams.has("after")) return new Response(JSON.stringify(page([raw("first")], "second", 2)));
+    if (++nextPageAttempts === 1) throw new TypeError("Transient network failure");
+    return new Response(JSON.stringify(page([raw("last")], "", 2)));
+  };
+  try {
+    const result = await client.executeCrowdStrike(connection, input);
+    assert.deepEqual(result.rows, [[2]]);
+    assert.equal(calls.length, 4);
+    assert.equal(calls[2].toString(), calls[3].toString());
+    assert.equal(nextPageAttempts, 2);
+  } finally { globalThis.fetch = original; }
+});
+
 test("CVE device table deduplicates devices and sorts severity before prevalence", () => {
   const items = [raw("a"), raw("b"), raw("c", { aid: "host-2" }), raw("d", { cid: "tenant-b" }),
     raw("e", { cve: { id: "CVE-2026-2", severity: "CRITICAL", base_score: 9.8 } }),
