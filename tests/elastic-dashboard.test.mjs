@@ -19,6 +19,7 @@ async function load(path) {
   path = resolve(path);
   if (modules.has(path)) return modules.get(path);
   const source = await readFile(path, "utf8");
+  if (modules.has(path)) return modules.get(path);
   const js = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext, jsx: ts.JsxEmit.ReactJSX } }).outputText;
   const module = new SourceTextModule(js, { identifier: path });
   modules.set(path, module);
@@ -200,6 +201,15 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
   };
   overrides.set("./elastic-query-client", { ...client, executeEsql: fakeQuery });
   overrides.set("./elastic-async-client", { executeEsqlAsync: fakeQuery });
+  const falconModule = await load("lib/crowdstrike-dashboard-client.ts");
+  await falconModule.evaluate();
+  let falconFail = false, falconHold = null;
+  const falconResult = { columns: [{ name: "findings", type: "long" }], rows: [[7]], truncated: false };
+  overrides.set("./crowdstrike-dashboard-client", { ...falconModule.namespace, testCrowdStrikeConnection: async () => {}, executeCrowdStrike: async () => {
+    if (falconHold) { const wait = falconHold; falconHold = null; return wait; }
+    if (falconFail) throw new contract.DashboardError("Simulated CrowdStrike outage.");
+    return falconResult;
+  } });
   const storeModule = await load("lib/elastic-dashboard-store.ts");
   await storeModule.evaluate();
   const store = storeModule.namespace;
@@ -208,7 +218,7 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
     assert.fail("Timed out waiting for refresh.");
   }
   try {
-    await db.query("DROP TABLE IF EXISTS elastic_dashboard_jobs, elastic_dashboard_audit, elastic_dashboard_queries, elastic_dashboard_connection");
+    await db.query("DROP TABLE IF EXISTS dashboard_daily_history, dashboard_source_connections, elastic_dashboard_jobs, elastic_dashboard_audit, elastic_dashboard_queries, elastic_dashboard_connection");
     await db.query("CREATE TABLE IF NOT EXISTS vuln_store (key TEXT PRIMARY KEY, data JSONB); INSERT INTO vuln_store VALUES ('sentinel', '{\"keep\":true}') ON CONFLICT DO NOTHING");
     const first = await store.readDashboard(true);
     assert.equal(first.storageReady, true);
@@ -286,11 +296,75 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
     jobs.triggerDashboardJobs();
     await waitFor(async () => (await db.query("SELECT status FROM elastic_dashboard_jobs WHERE actor = 'interrupted'")).rows[0].status === "failed");
     await waitFor(() => !globalThis.__elasticJobs.working);
+    const falconConnection = { region: "us-2", clientId: "fake-falcon-id", clientSecret: "fake-falcon-secret" };
+    const elasticBefore = (await store.readDashboard(true)).queries.find((q) => q.id === "extra");
+    await store.saveCrowdStrikeConnection(falconConnection, "falcon-connect");
+    assert.deepEqual((await store.readDashboard(true)).queries.find((q) => q.id === "extra").result, elasticBefore.result);
+    const publicView = await store.readDashboard(true);
+    assert.equal(publicView.crowdstrike.connected, true);
+    assert.equal(publicView.crowdstrike.region, "us-2");
+    assert.doesNotMatch(JSON.stringify(publicView), /fake-falcon/);
+    const sealedFalcon = (await db.query("SELECT secret FROM dashboard_source_connections")).rows[0].secret;
+    assert.ok(!sealedFalcon.includes("fake-falcon"));
+    const falconDefinition = { id: "falcon-history", title: "Open findings", query: "status:['open','reopen']", source: "crowdstrike",
+      crowdstrike: { ...contract.DEFAULT_CROWDSTRIKE, history: true }, display: "line", chart: { category: "day", value: "findings" }, refreshMinutes: 1440, enabled: true };
+    const falconPreview = await jobs.enqueueDashboardJob("preview", falconDefinition, "falcon-preview");
+    await waitFor(async () => (await jobs.readDashboardJob(falconPreview.jobId, "falcon-preview")).status === "succeeded");
+    assert.equal((await jobs.readDashboardJob(falconPreview.jobId, "falcon-preview")).result.rows[0][1], 7);
+    assert.equal((await db.query("SELECT count(*)::int AS count FROM dashboard_daily_history")).rows[0].count, 0, "Preview never saves history");
+    const falconSave = await jobs.enqueueDashboardJob("save", falconDefinition, "falcon-save");
+    await waitFor(async () => (await jobs.readDashboardJob(falconSave.jobId, "falcon-save")).status === "succeeded");
+    assert.equal((await db.query("SELECT count(*)::int AS count FROM dashboard_daily_history")).rows[0].count, 1);
+    const signature = store.historySignature(falconDefinition);
+    await db.query(`INSERT INTO dashboard_daily_history (query_id, connection_revision, signature, day, value)
+      VALUES ('falcon-history', 1, $1, (now() AT TIME ZONE 'UTC')::date - 2, 10)`, [signature]);
+    await store.saveQuery(falconDefinition, "falcon-resave");
+    const trend = (await store.readDashboard(true)).queries.find((q) => q.id === falconDefinition.id);
+    assert.deepEqual(trend.result.rows.map((row) => row[1]), [10, null, 7], "Missing days are gaps and same-day saves upsert");
+    assert.equal((await db.query("SELECT count(*)::int AS count FROM dashboard_daily_history")).rows[0].count, 2);
+    falconFail = true;
+    await waitFor(() => !globalThis.__elasticDashboard.ticking);
+    await db.query("UPDATE elastic_dashboard_queries SET next_attempt = now() - interval '1 hour' WHERE id = 'falcon-history'");
+    store.triggerRefresh();
+    await waitFor(async () => Boolean((await store.readDashboard(true)).queries.find((q) => q.id === falconDefinition.id).error));
+    assert.deepEqual((await store.readDashboard(true)).queries.find((q) => q.id === falconDefinition.id).result, trend.result);
+    assert.equal((await db.query("SELECT count(*)::int AS count FROM dashboard_daily_history")).rows[0].count, 2);
+    falconFail = false;
+    await waitFor(() => !globalThis.__elasticDashboard.ticking);
+    await store.saveQuery({ ...falconDefinition, query: "status:'open'" }, "falcon-changed-filter");
+    assert.equal((await store.readDashboard(true)).queries.find((q) => q.id === falconDefinition.id).result.rows.length, 1, "Changed filters do not mix past populations");
+    // Replacing Elastic cannot invalidate CrowdStrike results or private jobs.
+    await store.saveConnection({ endpoint: "https://replacement.example.com", apiKey: "replacement-test-key" }, "elastic-replacement");
+    assert.equal((await store.readDashboard(true)).queries.find((q) => q.id === falconDefinition.id).result.rows[0][1], 7);
+    assert.equal((await jobs.readDashboardJob(falconPreview.jobId, "falcon-preview")).status, "succeeded");
+    await waitFor(() => !globalThis.__elasticDashboard.ticking);
+    let releaseFalcon;
+    falconHold = new Promise((resolve) => { releaseFalcon = resolve; });
+    const staleFalcon = await jobs.enqueueDashboardJob("save", { ...falconDefinition, title: "Stale connection" }, "falcon-stale");
+    await waitFor(() => falconHold === null);
+    await store.saveCrowdStrikeConnection({ ...falconConnection, region: "us-1" }, "falcon-replacement");
+    releaseFalcon(falconResult);
+    await waitFor(() => !globalThis.__elasticJobs.working);
+    await assert.rejects(() => jobs.readDashboardJob(staleFalcon.jobId, "falcon-stale"), /connection changed/);
+    assert.notEqual((await store.readDashboard(true)).queries.find((q) => q.id === falconDefinition.id).title, "Stale connection");
+    await waitFor(() => !globalThis.__elasticDashboard.ticking);
+    const recoverSecret = (await db.query("SELECT secret FROM dashboard_source_connections WHERE source = 'crowdstrike'")).rows[0].secret;
+    await db.query("UPDATE dashboard_source_connections SET secret = 'unreadable' WHERE source = 'crowdstrike'");
+    await db.query("UPDATE elastic_dashboard_queries SET next_attempt = now() - interval '2 hours' WHERE id = 'falcon-history'");
+    await db.query("UPDATE elastic_dashboard_queries SET next_attempt = now() - interval '1 hour' WHERE id = 'extra'");
+    response = { ...numeric, rows: [[321, 80]] };
+    store.triggerRefresh();
+    await waitFor(() => !globalThis.__elasticDashboard.ticking);
+    const recoveredView = await store.readDashboard(true);
+    assert.match(recoveredView.queries.find((q) => q.id === falconDefinition.id).error, /cannot be opened/);
+    assert.equal(recoveredView.queries.find((q) => q.id === "extra").result.rows[0][0], 321, "A broken source must not block other source refreshes");
+    await db.query("UPDATE dashboard_source_connections SET secret = $1 WHERE source = 'crowdstrike'", [recoverSecret]);
     const oldSecret = process.env.NEXTAUTH_SECRET;
     process.env.NEXTAUTH_SECRET = randomBytes(32).toString("hex");
     assert.equal((await store.readDashboard(true)).storageReady, true, "Reconnect must remain available after secret rotation.");
     process.env.NEXTAUTH_SECRET = oldSecret;
     // Leave the isolated DB unconnected for the subsequent HTTP authorization checks.
     await db.query("DELETE FROM elastic_dashboard_connection");
+    await db.query("DELETE FROM dashboard_source_connections; DELETE FROM dashboard_daily_history; DELETE FROM elastic_dashboard_queries WHERE definition->>'source' = 'crowdstrike'");
   } finally { await db.end(); }
 });

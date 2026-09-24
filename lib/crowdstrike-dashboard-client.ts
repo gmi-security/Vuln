@@ -1,0 +1,148 @@
+import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
+import { DashboardError, parseQueryInput, type QueryInput, type QueryResult } from "./elastic-dashboard";
+import { CROWDSTRIKE_DATASETS, FALCON_REGIONS, type CrowdStrikeConnection, type Vulnerability } from "./crowdstrike-dashboard";
+
+export function parseCrowdStrikeConnection(value: unknown): CrowdStrikeConnection {
+  const body = value as CrowdStrikeConnection | null;
+  if (!body || !Object.hasOwn(FALCON_REGIONS, body.region)) throw new DashboardError("Choose your CrowdStrike cloud region.");
+  for (const field of ["clientId", "clientSecret"] as const) {
+    if (typeof body[field] !== "string" || !body[field].trim() || body[field].length > 4096 || /\s/.test(body[field].trim())) {
+      throw new DashboardError("Enter the CrowdStrike client ID and client secret.");
+    }
+  }
+  return { region: body.region, clientId: body.clientId.trim(), clientSecret: body.clientSecret.trim() };
+}
+
+function key() {
+  const secret = process.env.NEXTAUTH_SECRET;
+  if (!secret || secret.length < 32) throw new DashboardError("Server encryption is not configured.");
+  return Buffer.from(hkdfSync("sha256", secret, "gmi-vuln", "crowdstrike-dashboard-connection-v1", 32));
+}
+export function sealCrowdStrike(connection: CrowdStrikeConnection): string {
+  const iv = randomBytes(12), cipher = createCipheriv("aes-256-gcm", key(), iv);
+  const data = Buffer.concat([cipher.update(JSON.stringify(connection), "utf8"), cipher.final()]);
+  return ["v1", iv.toString("base64"), cipher.getAuthTag().toString("base64"), data.toString("base64")].join(".");
+}
+export function openCrowdStrike(value: string): CrowdStrikeConnection {
+  try {
+    const [version, iv, tag, data] = value.split(".");
+    if (version !== "v1") throw new Error();
+    const cipher = createDecipheriv("aes-256-gcm", key(), Buffer.from(iv, "base64"));
+    cipher.setAuthTag(Buffer.from(tag, "base64"));
+    return parseCrowdStrikeConnection(JSON.parse(Buffer.concat([cipher.update(Buffer.from(data, "base64")), cipher.final()]).toString("utf8")));
+  } catch { throw new DashboardError("The saved CrowdStrike connection cannot be opened. Enter the credentials again."); }
+}
+
+function failure(status: number, body: Record<string, any>, secrets: string[]): DashboardError {
+  if (status === 401 || status === 403) return new DashboardError("CrowdStrike rejected access. Check the cloud region, client credentials, and Vulnerabilities: Read permission.");
+  if (status === 429) return new DashboardError("CrowdStrike's rate limit was reached. Retry later or reduce the refresh frequency.", 429);
+  let reason = Array.isArray(body.errors) ? body.errors.map((e: any) => typeof e?.message === "string" ? e.message : "").join(" ") : "";
+  for (const secret of secrets) if (secret) reason = reason.split(secret).join("[redacted]");
+  reason = reason.replace(/Bearer\s+\S+/gi, "[redacted]").replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 600);
+  return new DashboardError(`CrowdStrike query failed (HTTP ${status}). ${reason || "Check the FQL filter and try again."}`);
+}
+
+async function jsonRequest(url: URL, init: RequestInit, deadline: number, secrets: string[]): Promise<Record<string, any>> {
+  for (let retry = 0; retry < 3; retry++) {
+    if (Date.now() >= deadline) throw new DashboardError("CrowdStrike collection exceeded five minutes. Narrow the filter or reduce the dataset size. No partial totals were saved.");
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), Math.min(20_000, deadline - Date.now()));
+    let response: Response;
+    let body: Record<string, any>;
+    try {
+      response = await fetch(url, { ...init, redirect: "error", cache: "no-store", signal: controller.signal });
+      const reader = response.body?.getReader();
+      if (!reader) throw new DashboardError("CrowdStrike returned an empty response.");
+      let size = 0; const chunks: Uint8Array[] = [];
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          size += value.byteLength;
+          if (size > 8 * 1024 * 1024) { await reader.cancel(); throw new DashboardError("CrowdStrike returned an oversized page. No partial totals were saved."); }
+          chunks.push(value);
+        }
+      } finally { reader.releaseLock(); }
+      try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
+      catch { throw new DashboardError(`CrowdStrike returned an invalid response (HTTP ${response.status}).`); }
+      if (!body || typeof body !== "object" || Array.isArray(body)) throw new DashboardError("CrowdStrike returned an invalid response.");
+    } catch (error) {
+      if (error instanceof DashboardError) throw error;
+      throw new DashboardError("CrowdStrike could not be reached or the request timed out. Retry later.");
+    } finally { clearTimeout(timer); }
+    if ((response.status === 429 || response.status >= 500) && retry < 2) {
+      const retryAfter = response.headers.get("retry-after");
+      const seconds = retryAfter ? (/^\d+$/.test(retryAfter) ? Number(retryAfter) : (Date.parse(retryAfter) - Date.now()) / 1000) : 2 ** (retry + 1);
+      if (Number.isFinite(seconds) && seconds >= 0 && seconds <= 30 && Date.now() + seconds * 1000 < deadline) {
+        await delay(seconds * 1000); continue;
+      }
+    }
+    if (!response.ok || (Array.isArray(body.errors) && body.errors.length)) throw failure(response.status, body, secrets);
+    return body;
+  }
+  throw new DashboardError("CrowdStrike collection failed.");
+}
+
+async function session(connection: CrowdStrikeConnection, deadline: number) {
+  const config = parseCrowdStrikeConnection(connection);
+  const secrets = [config.clientId, config.clientSecret];
+  const base = FALCON_REGIONS[config.region];
+  const auth = await jsonRequest(new URL(`${base}/oauth2/token`), {
+    method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+    body: new URLSearchParams({ client_id: config.clientId, client_secret: config.clientSecret }),
+  }, deadline, secrets);
+  if (typeof auth.access_token !== "string" || !auth.access_token) throw new DashboardError("CrowdStrike returned no access token.");
+  secrets.push(auth.access_token);
+  return { base, secrets, headers: { Authorization: `Bearer ${auth.access_token}`, Accept: "application/json" } };
+}
+
+export async function testCrowdStrikeConnection(connection: CrowdStrikeConnection): Promise<void> {
+  const deadline = Date.now() + 45_000;
+  const auth = await session(connection, deadline);
+  const url = new URL(`${auth.base}${CROWDSTRIKE_DATASETS.vulnerabilities.path}`);
+  url.searchParams.set("filter", "status:['open','reopen']"); url.searchParams.set("limit", "1");
+  const result = await jsonRequest(url, { headers: auth.headers }, deadline, auth.secrets);
+  if (!Array.isArray(result.resources)) throw new DashboardError("CrowdStrike did not return vulnerability data.");
+}
+
+export async function executeCrowdStrike(connection: CrowdStrikeConnection, value: QueryInput, budgetMs = 300_000): Promise<QueryResult> {
+  const input = parseQueryInput(value), options = input.crowdstrike;
+  if (!options) throw new DashboardError("Choose a CrowdStrike dataset.");
+  const dataset = CROWDSTRIKE_DATASETS[options.dataset];
+  const deadline = Date.now() + budgetMs, auth = await session(connection, deadline);
+  const records = new Map<string, Vulnerability>(), cursors = new Set<string>();
+  let after = "", received = 0, expected = 0;
+  for (let page = 0; page < 500; page++) {
+    const url = new URL(`${auth.base}${dataset.path}`);
+    url.searchParams.set("filter", input.query); url.searchParams.set("limit", "500");
+    url.searchParams.set("facet", dataset.facets);
+    if (after) url.searchParams.set("after", after);
+    const body = await jsonRequest(url, { headers: auth.headers }, deadline, auth.secrets);
+    const pagination = body.meta?.pagination;
+    if (!Array.isArray(body.resources) || !pagination || typeof pagination !== "object") throw new DashboardError("CrowdStrike returned invalid pagination. No totals were saved.");
+    if (!Number.isSafeInteger(pagination.total) || pagination.total < 0) throw new DashboardError("CrowdStrike returned an invalid total count. No totals were saved.");
+    expected = Math.max(expected, pagination.total);
+    if (expected > 250_000) throw new DashboardError("This filter matches more than 250,000 findings. Narrow the filter before saving a tile.");
+    received += body.resources.length;
+    if (received > 250_000) throw new DashboardError("CrowdStrike collection exceeds 250,000 records. Narrow the filter. No partial totals were saved.");
+    for (const raw of body.resources) {
+      const row = dataset.normalize(raw), key = JSON.stringify([row.cid, row.id]), old = records.get(key);
+      if (!old) records.set(key, row);
+      else if (JSON.stringify(old) !== JSON.stringify(row)) {
+        const previous = Date.parse(old.updated), next = Date.parse(row.updated);
+        if (!Number.isFinite(previous) || !Number.isFinite(next) || previous === next) throw new DashboardError("CrowdStrike returned conflicting copies of a finding without a clear update order. Retry; no totals were saved.");
+        if (next > previous) records.set(key, row);
+      }
+    }
+    if (pagination.after !== undefined && pagination.after !== null && typeof pagination.after !== "string") throw new DashboardError("CrowdStrike returned an invalid page cursor.");
+    after = pagination.after || "";
+    if (!after || records.size >= expected) {
+      if (records.size < expected) throw new DashboardError("CrowdStrike pagination ended before all findings were received. Retry; no partial totals were saved.");
+      return dataset.summarize(records.values(), options);
+    }
+    if (!body.resources.length || cursors.has(after)) throw new DashboardError("CrowdStrike pagination did not advance. Retry; no partial totals were saved.");
+    cursors.add(after);
+  }
+  throw new DashboardError("CrowdStrike collection reached the page limit. Narrow the filter. No partial totals were saved.");
+}

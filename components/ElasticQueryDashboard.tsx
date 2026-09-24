@@ -6,10 +6,11 @@ import VulnShell from "@/components/VulnShell";
 import ElasticResultChart from "@/components/ElasticResultChart";
 import { OPEN_VULN_TREND } from "@/lib/elastic-query-templates";
 import { ghostButtonClass, inputClass, PanelCard, primaryButtonClass, selectClass, StatCard } from "@/components/ui";
-import { canShowMetrics, columnLabel, isChartDisplay, numericColumn, suggestChart, type DashboardQuery, type ElasticDashboard, type QueryDefinition, type QueryResult } from "@/lib/elastic-dashboard";
+import { DEFAULT_CROWDSTRIKE, canShowMetrics, columnLabel, isChartDisplay, numericColumn, suggestChart, type CrowdStrikeOptions, type DashboardSource, type DashboardQuery, type ElasticDashboard, type QueryDefinition, type QueryResult } from "@/lib/elastic-dashboard";
 
 type Draft = Omit<QueryDefinition, "id"> & { id?: string };
 const newDraft = (): Draft => ({ title: "", query: "", display: "auto", refreshMinutes: 15, enabled: true });
+const crowdStrikeDraft = (): Draft => ({ ...newDraft(), source: "crowdstrike", query: "status:['open','reopen']", crowdstrike: { ...DEFAULT_CROWDSTRIKE }, refreshMinutes: 1440 });
 
 function formatValue(value: string | number | boolean | null, column: string): string {
   if (value === null) return "—";
@@ -30,7 +31,7 @@ function Results({ result, display, chart }: { result: QueryResult; display: Que
   }
   return <div className="overflow-x-auto">
     <table className="w-full text-left text-sm">
-      <caption className="sr-only">ES|QL query results</caption>
+      <caption className="sr-only">Dashboard query results</caption>
       <thead><tr>{result.columns.map((column) => <th key={column.name} scope="col" className="border-b border-zinc-800 px-3 py-3 font-medium text-zinc-400">{columnLabel(column.name)}</th>)}</tr></thead>
       <tbody>{result.rows.map((row, index) => <tr key={index} className="border-b border-zinc-900">
         {row.map((value, cell) => <td key={cell} className="max-w-md break-words px-3 py-3 text-zinc-200">{formatValue(value, result.columns[cell].name)}</td>)}
@@ -55,6 +56,10 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
   const [connectionOpen, setConnectionOpen] = useState(false);
   const [endpoint, setEndpoint] = useState(initial.endpoint ?? "");
   const [apiKey, setApiKey] = useState("");
+  const [connectionSource, setConnectionSource] = useState<DashboardSource>("crowdstrike");
+  const [region, setRegion] = useState(initial.crowdstrike?.region ?? "us-1");
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
   const [draft, setDraft] = useState<Draft | null>(null);
   const [preview, setPreview] = useState<QueryResult | null>(null);
   const [busy, setBusy] = useState("");
@@ -95,32 +100,66 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
   }
   function edit(query?: DashboardQuery) {
     setDraft(query ? { id: query.id, title: query.title, query: query.query, display: query.display,
-      refreshMinutes: query.refreshMinutes, enabled: query.enabled, chart: query.chart } : newDraft());
+      source: query.source, crowdstrike: query.crowdstrike,
+      refreshMinutes: query.refreshMinutes, enabled: query.enabled, chart: query.chart } : dashboard.crowdstrike?.connected ? crowdStrikeDraft() : newDraft());
     setPreview(query?.result ?? null); setError(""); setMessage("");
   }
+  function updateCrowdStrike(options: Partial<CrowdStrikeOptions>) {
+    if (!draft) return;
+    const crowdstrike = { ...DEFAULT_CROWDSTRIKE, ...draft.crowdstrike, ...options };
+    if (crowdstrike.history) crowdstrike.groupBy = "none";
+    setDraft({ ...draft, crowdstrike, chart: undefined, display: crowdstrike.history ? "line" : "auto" });
+    setPreview(null);
+  }
+  const anyConnected = dashboard.connected || dashboard.crowdstrike?.connected;
+  const sourceConnected = (source?: DashboardSource) => source === "crowdstrike" ? dashboard.crowdstrike?.connected : dashboard.connected;
 
-  return <VulnShell eyebrow="Elasticsearch" title="Elastic dashboard"
-    subtitle="Save ES|QL queries as dashboard tiles. Results refresh automatically in the app."
+  return <VulnShell eyebrow="Elastic · CrowdStrike" title="Query dashboard"
+    subtitle="Build tiles from Elastic ES|QL or CrowdStrike FQL. Results refresh automatically in the app."
     actions={<div className="flex flex-wrap gap-2">
       <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => action("refresh", async () => {
-        if (dashboard.canManage && dashboard.connected) {
+        if (dashboard.canManage && anyConnected) {
           await post("refresh"); setMessage("Refresh requested. Results will update here as queries finish.");
         }
         await reload();
       })}><RefreshCw size={16} className={busy === "refresh" ? "animate-spin" : ""} />Refresh</button>
       {dashboard.canManage && <>
         <button type="button" className={ghostButtonClass} onClick={() => setConnectionOpen((open) => !open)}><Settings2 size={16} />Connection</button>
-        <button type="button" className={primaryButtonClass} disabled={!dashboard.connected || Boolean(busy)} onClick={() => edit()}><Plus size={16} />Add query</button>
+        <button type="button" className={primaryButtonClass} disabled={!anyConnected || Boolean(busy)} onClick={() => edit()}><Plus size={16} />Add query</button>
       </>}
     </div>}>
     {error && <p role="alert" className="rounded-xl border border-red-900 bg-red-950/20 p-4 text-sm text-red-300">{error}</p>}
     {message && <p role="status" className="rounded-xl border border-emerald-900 bg-emerald-950/20 p-4 text-sm text-emerald-300">{message}</p>}
-    {!dashboard.connected && <div role="status" className="rounded-2xl border border-amber-600/30 bg-amber-950/20 p-4 text-sm text-amber-200">
+    {!anyConnected && <div role="status" className="rounded-2xl border border-amber-600/30 bg-amber-950/20 p-4 text-sm text-amber-200">
       {dashboard.storageReady ? "Awaiting the data connection. No live results are available yet." : "Dashboard storage is not available yet."}
-      <p className="mt-2">{dashboard.canManage ? "Open Connection to add your Elasticsearch endpoint and read-only API key." : "Sign in as an organization member to connect Elasticsearch and manage saved queries."}</p>
+      <p className="mt-2">{dashboard.canManage ? "Open Connection to connect CrowdStrike or Elasticsearch." : "Sign in as an organization member to connect a source and manage saved queries."}</p>
     </div>}
 
-    {dashboard.canManage && connectionOpen && <PanelCard eyebrow="Elasticsearch connection" description="Use the Elasticsearch HTTPS endpoint, not the Kibana dashboard address.">
+    {dashboard.canManage && connectionOpen && <PanelCard eyebrow="Connections" description="Choose the source to connect. Credentials stay encrypted on the server.">
+      <label className="mb-5 block text-sm text-zinc-300">Connection source
+        <select disabled={Boolean(busy)} className={`${selectClass} mt-2 block`} value={connectionSource} onChange={(event) => setConnectionSource(event.target.value as DashboardSource)}>
+          <option value="crowdstrike">CrowdStrike{dashboard.crowdstrike?.connected ? " — connected" : ""}</option>
+          <option value="elastic">Elasticsearch{dashboard.connected ? " — connected" : ""}</option>
+        </select>
+      </label>
+      {connectionSource === "crowdstrike" ? <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void action("connection", async () => {
+        await post("connections/crowdstrike", { region, clientId, clientSecret }); setClientId(""); setClientSecret("");
+        await reload(); setConnectionOpen(false); setMessage("CrowdStrike connection verified. Choose Add query to create an FQL tile.");
+      }); }}>
+        <label className="block text-sm text-zinc-300">Falcon cloud region
+          <select disabled={Boolean(busy)} className={`${selectClass} mt-2 block`} value={region} onChange={(event) => setRegion(event.target.value)}>
+            <option value="us-1">US-1</option><option value="us-2">US-2</option><option value="eu-1">EU-1</option><option value="us-gov-1">US-GOV-1</option>
+          </select>
+        </label>
+        <label className="block text-sm text-zinc-300">Client ID
+          <input disabled={Boolean(busy)} required value={clientId} onChange={(event) => setClientId(event.target.value)} autoComplete="off" spellCheck={false} className={`${inputClass} mt-2`} />
+        </label>
+        <label className="block text-sm text-zinc-300">Client secret
+          <input disabled={Boolean(busy)} required type="password" value={clientSecret} onChange={(event) => setClientSecret(event.target.value)} autoComplete="new-password" spellCheck={false} className={`${inputClass} mt-2`} />
+        </label>
+        <p className="text-sm text-zinc-500">Create a Falcon API client with Vulnerabilities: Read. Use the region shown in Falcon’s API Clients and Keys page. Testing reads one page with at most one finding. Replacing this connection clears its cached tiles and starts a new history series.</p>
+        <button className={primaryButtonClass} disabled={Boolean(busy) || !dashboard.storageReady}>{busy === "connection" ? "Testing connection…" : "Test and save connection"}</button>
+      </form> :
       <form onSubmit={(event) => { event.preventDefault(); void action("connection", async () => {
         await post("connection", { endpoint, apiKey }); setApiKey(""); await reload(); setConnectionOpen(false);
         setMessage("Connection verified and saved. The first query is refreshing.");
@@ -134,26 +173,62 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
         </label>
         <p className="text-sm text-zinc-500">Paste the encoded key only, without the “ApiKey” prefix. The key is encrypted when saved and is never returned to the browser. Grant read access only to the indices these queries need. The connection test runs the asset coverage query.</p>
         <button className={primaryButtonClass} disabled={Boolean(busy) || !dashboard.storageReady}>{busy === "connection" ? "Testing connection…" : "Test and save connection"}</button>
-      </form>
+      </form>}
     </PanelCard>}
 
-    {dashboard.canManage && draft && <PanelCard eyebrow={draft.id ? "Edit query" : "Add query"} description="Preview your ES|QL, then choose number cards, a table, or a chart.">
+    {dashboard.canManage && draft && <PanelCard eyebrow={draft.id ? "Edit query" : "Add query"} description="Choose a source, preview the results, then select a display.">
       <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void action("save", async () => {
-        await background("queries", draft); await reload(); setDraft(null); setPreview(null); setMessage("Query saved. It will refresh automatically.");
+        await background("queries", draft); await reload(); setDraft(null); setPreview(null); setMessage("Query saved.");
       }); }}>
+        <fieldset disabled={Boolean(busy)} className="space-y-4">
+        <label className="block text-sm text-zinc-300">Source
+          <select className={`${selectClass} mt-2 block`} value={draft.source ?? "elastic"} onChange={(event) => {
+            const replacement = event.target.value === "crowdstrike" ? crowdStrikeDraft() : newDraft();
+            setDraft({ ...replacement, id: draft.id, title: draft.title }); setPreview(null);
+          }}>
+            <option value="elastic">Elasticsearch · ES|QL</option><option value="crowdstrike">CrowdStrike · FQL</option>
+          </select>
+        </label>
+        {!sourceConnected(draft.source) && <p className="text-sm text-amber-300">Open Connection to connect this source before previewing or saving.</p>}
         <label className="block text-sm text-zinc-300">Title
           <input required maxLength={100} className={`${inputClass} mt-2`} value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="e.g. Critical vulnerabilities" />
         </label>
-        {!draft.id && <div className="space-y-2">
+        {!draft.id && draft.source !== "crowdstrike" && <div className="space-y-2">
           <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => {
             setDraft({ title: "Open vulnerabilities — daily trend", query: OPEN_VULN_TREND, display: "line", refreshMinutes: 1440, enabled: true });
             setPreview(null); setError(""); setMessage("");
           }}>Use daily open trend</button>
           <p className="text-xs text-zinc-500">Starts September 23. The query uses the last confirmed pull; advance report_end to the next UTC day after a successful import. Requires a complete starting state and status changes.</p>
         </div>}
-        <label className="block text-sm text-zinc-300">ES|QL
-          <textarea disabled={Boolean(busy)} required rows={8} maxLength={16000} value={draft.query} onChange={(event) => { setDraft({ ...draft, query: event.target.value, chart: undefined }); setPreview(null); }}
-            className="mt-2 w-full rounded-2xl border border-zinc-800 bg-[#0b0b0b] p-4 font-mono text-sm text-white outline-none focus:border-red-800" placeholder="FROM your-index-* | STATS count = COUNT(*)" spellCheck={false} />
+        {draft.source === "crowdstrike" && <div className="space-y-4">
+          <label className="block text-sm text-zinc-300">Dataset
+            <select className={`${selectClass} mt-2 block`} value="vulnerabilities" onChange={() => {}}><option value="vulnerabilities">Vulnerabilities · Spotlight</option></select>
+          </label>
+          <div className="flex flex-wrap gap-4">
+            <label className="text-sm text-zinc-300">Measure
+              <select className={`${selectClass} mt-2 block`} value={draft.crowdstrike?.measure} onChange={(event) => updateCrowdStrike({ measure: event.target.value as CrowdStrikeOptions["measure"] })}>
+                <option value="findings">Finding count</option><option value="cves">Unique CVEs</option><option value="hosts">Unique affected hosts</option>
+              </select>
+            </label>
+            <label className="text-sm text-zinc-300">Group by
+              <select disabled={draft.crowdstrike?.history} className={`${selectClass} mt-2 block`} value={draft.crowdstrike?.groupBy} onChange={(event) => updateCrowdStrike({ groupBy: event.target.value as CrowdStrikeOptions["groupBy"] })}>
+                <option value="none">None · total</option><option value="host">Host</option><option value="severity">Severity</option><option value="priority">GMI priority (P1/P2/P3)</option><option value="status">Status</option><option value="cve">CVE</option>
+              </select>
+            </label>
+            {draft.crowdstrike?.groupBy !== "none" && <label className="text-sm text-zinc-300">Top groups
+              <select className={`${selectClass} mt-2 block`} value={draft.crowdstrike?.top} onChange={(event) => updateCrowdStrike({ top: Number(event.target.value) })}>
+                {[10, 25, 50, 100].map((value) => <option key={value} value={value}>{value}</option>)}
+              </select>
+            </label>}
+          </div>
+          <label className="flex items-center gap-2 text-sm text-zinc-300"><input type="checkbox" checked={draft.crowdstrike?.history ?? false} onChange={(event) => updateCrowdStrike({ history: event.target.checked })} />Save daily history of the total</label>
+          <p className="text-xs text-zinc-500">FQL filters findings; the app calculates the measure across every returned page. History starts with the first saved collection and shows the latest successful count per UTC day. Each filter and measure has separate history. Missing days appear as gaps.</p>
+          {draft.crowdstrike?.groupBy === "priority" && <p className="text-xs text-zinc-500">Uses your GMI risk rules, including exploit status, KEV, ExPRT, CVSS, exploitability and severity. “Other” includes findings below P3; missing risk fields contribute no points.</p>}
+          <a className="text-sm text-red-300 underline" href="https://developer.crowdstrike.com/api-reference/collections/spotlight-vulnerabilities/" target="_blank" rel="noreferrer">Supported CrowdStrike FQL fields</a>
+        </div>}
+        <label className="block text-sm text-zinc-300">{draft.source === "crowdstrike" ? "FQL filter" : "ES|QL"}
+          <textarea disabled={Boolean(busy)} required rows={draft.source === "crowdstrike" ? 3 : 8} maxLength={draft.source === "crowdstrike" ? 4000 : 16000} value={draft.query} onChange={(event) => { setDraft({ ...draft, query: event.target.value, chart: undefined }); setPreview(null); }}
+            className="mt-2 w-full rounded-2xl border border-zinc-800 bg-[#0b0b0b] p-4 font-mono text-sm text-white outline-none focus:border-red-800" placeholder={draft.source === "crowdstrike" ? "status:['open','reopen']" : "FROM your-index-* | STATS count = COUNT(*)"} spellCheck={false} />
         </label>
         <div className="flex flex-wrap items-end gap-4">
           <label className="text-sm text-zinc-300">Display
@@ -187,27 +262,29 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
           </div> : <p className="text-sm text-amber-300">Click Preview results to load the available columns.</p>}
         </div>}
         <div className="flex flex-wrap gap-3">
-          <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || !draft.query.trim()} onClick={() => action("preview", async () => {
-            const data = await background("preview", { query: draft.query }); setPreview(data.result);
+          <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || !draft.query.trim() || !sourceConnected(draft.source)} onClick={() => action("preview", async () => {
+            const data = await background("preview", { id: draft.id, source: draft.source, query: draft.query, crowdstrike: draft.crowdstrike }); setPreview(data.result);
             setDraft((current) => current ? { ...current, chart: current.chart ?? suggestChart(data.result) } : current);
           })}>{busy === "preview" ? "Running query…" : "Preview results"}</button>
-          <button className={primaryButtonClass} disabled={Boolean(busy) || (isChartDisplay(draft.display) && (!draft.chart?.category || !draft.chart?.value))}>{busy === "save" ? "Validating and saving…" : "Save query"}</button>
+          <button className={primaryButtonClass} disabled={Boolean(busy) || !sourceConnected(draft.source) || (isChartDisplay(draft.display) && (!draft.chart?.category || !draft.chart?.value))}>{busy === "save" ? "Validating and saving…" : "Save query"}</button>
           <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => { setDraft(null); setPreview(null); }}>Cancel</button>
         </div>
-        {preview && <div className="border-t border-zinc-800 pt-4"><p className="mb-3 text-sm text-zinc-400">Preview</p><Results result={preview} display={draft.display} chart={draft.chart} /></div>}
+        {preview && <div className="border-t border-zinc-800 pt-4"><p className="mb-3 text-sm text-zinc-400">Preview</p><Results result={preview} display={draft.display} chart={draft.chart} />{preview.note && <p className="mt-3 text-xs text-zinc-500">{preview.note}</p>}</div>}
+        </fieldset>
       </form>
     </PanelCard>}
 
     {dashboard.queries.map((query) => {
       const stale = query.refreshedAt && now !== null && now - Date.parse(query.refreshedAt) > query.refreshMinutes * 2 * 60_000;
       return <PanelCard key={query.id} eyebrow={query.title}
-        description={query.enabled ? (query.refreshMinutes === 1440 ? "Refreshes daily" : `Refreshes every ${query.refreshMinutes} minutes`) : "Automatic refresh paused"}
-        actions={dashboard.canManage && <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || !dashboard.connected} onClick={() => edit(query)}><Pencil size={14} />Edit</button>}>
+        description={`${query.source === "crowdstrike" ? "CrowdStrike · Vulnerabilities" : "Elasticsearch"} · ${query.enabled ? (query.refreshMinutes === 1440 ? "Refreshes daily" : `Refreshes every ${query.refreshMinutes} minutes`) : "Automatic refresh paused"}`}
+        actions={dashboard.canManage && <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => edit(query)}><Pencil size={14} />Edit</button>}>
         {query.error && <p className="mb-4 text-sm text-amber-300">{query.error} {query.result ? "Showing the last successful result." : "No successful result yet."}</p>}
         {stale && !query.error && <p className="mb-4 text-sm text-amber-300">These results are older than two refresh intervals.</p>}
         {query.result ? <Results result={query.result} display={query.display} chart={query.chart} /> : <p className="py-5 text-zinc-400">Waiting for the first successful query.</p>}
+        {query.result?.note && <p className="mt-3 text-xs text-zinc-500">{query.result.note}</p>}
         <p className="mt-4 text-xs text-zinc-500">Last successful query: {query.refreshedAt ? new Date(query.refreshedAt).toISOString().replace("T", " ").replace("Z", " UTC") : "not yet available"}</p>
-        {query.id === "asset-coverage" && <p className="mt-2 text-xs text-zinc-500">Asset inventory coverage, not vulnerability counts. Records from the last 25 hours; assets last seen within seven days. IDs recorded as both managed and unmanaged can count in both categories.</p>}
+        {query.id === "asset-coverage" && query.source !== "crowdstrike" && <p className="mt-2 text-xs text-zinc-500">Asset inventory coverage, not vulnerability counts. Records from the last 25 hours; assets last seen within seven days. IDs recorded as both managed and unmanaged can count in both categories.</p>}
       </PanelCard>;
     })}
   </VulnShell>;
