@@ -12,6 +12,8 @@ export async function register(): Promise<void> {
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
   const { startElasticDashboardScheduler } = await import("@/lib/elastic-dashboard-store");
   startElasticDashboardScheduler();
+  const { startDashboardJobWorker } = await import("@/lib/elastic-dashboard-jobs");
+  startDashboardJobWorker();
   const { ensureHydrated } = await import("@/lib/store");
   void ensureHydrated().catch((err) => {
     console.error("[instrumentation] boot hydration failed:", err);

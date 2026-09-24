@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Database, Pencil, Plus, RefreshCw, Settings2 } from "lucide-react";
 import VulnShell from "@/components/VulnShell";
 import ElasticResultChart from "@/components/ElasticResultChart";
+import { OPEN_VULN_TREND } from "@/lib/elastic-query-templates";
 import { ghostButtonClass, inputClass, PanelCard, primaryButtonClass, selectClass, StatCard } from "@/components/ui";
 import { canShowMetrics, columnLabel, isChartDisplay, numericColumn, suggestChart, type DashboardQuery, type ElasticDashboard, type QueryDefinition, type QueryResult } from "@/lib/elastic-dashboard";
 
@@ -75,8 +76,22 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
 
   async function action(name: string, work: () => Promise<void>) {
     setBusy(name); setError(""); setMessage("");
-    try { await work(); } catch (err) { setError(err instanceof Error ? err.message : "The request failed."); }
+    try { await work(); } catch (err) { setMessage(""); setError(err instanceof Error ? err.message : "The request failed."); }
     finally { setBusy(""); }
+  }
+  async function background(path: "preview" | "queries", body: unknown) {
+    const job = await post(path, body);
+    if (!job.jobId) return job; // Also tolerates a fast response from an older deployment.
+    const deadline = Date.now() + 15 * 60_000;
+    while (Date.now() < deadline) {
+      setMessage("Query queued or running in the background. Execution can take up to five minutes; this page will update when it finishes.");
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      const response = await fetch(`/api/elastic-dashboard/jobs/${encodeURIComponent(job.jobId)}`, { cache: "no-store" });
+      const status = await response.json();
+      if (!response.ok || status.status === "failed") throw new Error(status.error || "The background query failed.");
+      if (status.status === "succeeded") { setMessage(""); return status; }
+    }
+    throw new Error("The query job expired. Reload the dashboard to check saved results, then retry if needed.");
   }
   function edit(query?: DashboardQuery) {
     setDraft(query ? { id: query.id, title: query.title, query: query.query, display: query.display,
@@ -124,11 +139,18 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
 
     {dashboard.canManage && draft && <PanelCard eyebrow={draft.id ? "Edit query" : "Add query"} description="Preview your ES|QL, then choose number cards, a table, or a chart.">
       <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void action("save", async () => {
-        await post("queries", draft); await reload(); setDraft(null); setPreview(null); setMessage("Query saved. It will refresh automatically.");
+        await background("queries", draft); await reload(); setDraft(null); setPreview(null); setMessage("Query saved. It will refresh automatically.");
       }); }}>
         <label className="block text-sm text-zinc-300">Title
           <input required maxLength={100} className={`${inputClass} mt-2`} value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="e.g. Critical vulnerabilities" />
         </label>
+        {!draft.id && <div className="space-y-2">
+          <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => {
+            setDraft({ title: "Open vulnerabilities — daily trend", query: OPEN_VULN_TREND, display: "line", refreshMinutes: 1440, enabled: true });
+            setPreview(null); setError(""); setMessage("");
+          }}>Use daily open trend</button>
+          <p className="text-xs text-zinc-500">Carries the last known status forward for 30 days. Requires complete retained status history and a stable finding ID. Today is partial.</p>
+        </div>}
         <label className="block text-sm text-zinc-300">ES|QL
           <textarea disabled={Boolean(busy)} required rows={8} maxLength={16000} value={draft.query} onChange={(event) => { setDraft({ ...draft, query: event.target.value, chart: undefined }); setPreview(null); }}
             className="mt-2 w-full rounded-2xl border border-zinc-800 bg-[#0b0b0b] p-4 font-mono text-sm text-white outline-none focus:border-red-800" placeholder="FROM your-index-* | STATS count = COUNT(*)" spellCheck={false} />
@@ -142,7 +164,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
           </label>
           <label className="text-sm text-zinc-300">Refresh every
             <select className={`${selectClass} mt-2 block`} value={draft.refreshMinutes} onChange={(event) => setDraft({ ...draft, refreshMinutes: Number(event.target.value) })}>
-              {[5, 15, 30, 60].map((minutes) => <option key={minutes} value={minutes}>{minutes} minutes</option>)}
+              {[5, 15, 30, 60, 1440].map((minutes) => <option key={minutes} value={minutes}>{minutes === 1440 ? "Daily" : `${minutes} minutes`}</option>)}
             </select>
           </label>
           <label className="flex h-[52px] items-center gap-2 text-sm text-zinc-300"><input type="checkbox" checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })} />Automatic refresh</label>
@@ -166,7 +188,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
         </div>}
         <div className="flex flex-wrap gap-3">
           <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || !draft.query.trim()} onClick={() => action("preview", async () => {
-            const data = await post("preview", { query: draft.query }); setPreview(data.result);
+            const data = await background("preview", { query: draft.query }); setPreview(data.result);
             setDraft((current) => current ? { ...current, chart: current.chart ?? suggestChart(data.result) } : current);
           })}>{busy === "preview" ? "Running query…" : "Preview results"}</button>
           <button className={primaryButtonClass} disabled={Boolean(busy) || (isChartDisplay(draft.display) && (!draft.chart?.category || !draft.chart?.value))}>{busy === "save" ? "Validating and saving…" : "Save query"}</button>
@@ -179,7 +201,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
     {dashboard.queries.map((query) => {
       const stale = query.refreshedAt && now !== null && now - Date.parse(query.refreshedAt) > query.refreshMinutes * 2 * 60_000;
       return <PanelCard key={query.id} eyebrow={query.title}
-        description={query.enabled ? `Refreshes every ${query.refreshMinutes} minutes` : "Automatic refresh paused"}
+        description={query.enabled ? (query.refreshMinutes === 1440 ? "Refreshes daily" : `Refreshes every ${query.refreshMinutes} minutes`) : "Automatic refresh paused"}
         actions={dashboard.canManage && <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || !dashboard.connected} onClick={() => edit(query)}><Pencil size={14} />Edit</button>}>
         {query.error && <p className="mb-4 text-sm text-amber-300">{query.error} {query.result ? "Showing the last successful result." : "No successful result yet."}</p>}
         {stale && !query.error && <p className="mb-4 text-sm text-amber-300">These results are older than two refresh intervals.</p>}

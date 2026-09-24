@@ -1,11 +1,9 @@
 import { dashboardAccess, dashboardBody, dashboardFailure, dashboardJson } from "@/lib/elastic-dashboard-http";
-import { previewQuery } from "@/lib/elastic-dashboard-store";
-import { validateQuery } from "@/lib/elastic-dashboard";
+import { enqueueDashboardJob } from "@/lib/elastic-dashboard-jobs";
 export const dynamic = "force-dynamic";
 export async function POST(request: Request) {
   try {
     const { actor } = await dashboardAccess(request, true);
-    const body = await dashboardBody(request) as { query?: unknown } | null;
-    return dashboardJson({ result: await previewQuery(validateQuery(body?.query), actor) });
+    return dashboardJson(await enqueueDashboardJob("preview", await dashboardBody(request), actor), 202);
   } catch (error) { return dashboardFailure(error); }
 }

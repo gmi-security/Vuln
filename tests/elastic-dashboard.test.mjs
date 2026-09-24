@@ -141,6 +141,48 @@ test("HTTP client rejects metadata and loopback endpoints before sending a key",
   }
 });
 
+test("async queries wait for completion, reject partial data, and clean up owned queries", async () => {
+  const calls = [];
+  let replies = [];
+  overrides.set("./elastic-query-client", { elasticJsonRequest: async (_connection, path, method, body) => {
+    calls.push({ path, method, body });
+    if (method === "DELETE") return { body: { acknowledged: true }, warning: false };
+    const reply = replies.shift();
+    if (reply instanceof Error) throw reply;
+    assert.ok(reply, "Unexpected Elastic request");
+    return { body: reply, warning: false };
+  } });
+  const module = await load("lib/elastic-async-client.ts");
+  await module.evaluate();
+  const execute = (budget) => module.namespace.executeEsqlAsync({ endpoint: "https://elastic.example.com", apiKey: "never-sent" }, "ROW x = 1", budget);
+  const complete = { columns: numeric.columns, values: numeric.rows, is_running: false };
+  replies = [complete];
+  assert.deepEqual(await execute(), numeric);
+  assert.match(calls[0].path, /_query\/async/);
+  assert.equal(calls[0].body.wait_for_completion_timeout, "1s");
+  assert.equal(calls[0].body.keep_alive, "10m");
+  replies = [{ id: "job/id", is_running: true, is_partial: true }, complete];
+  assert.deepEqual(await execute(), numeric);
+  assert.ok(calls.some((call) => call.method === "GET" && call.path.includes("job%2Fid")));
+  assert.equal(calls.at(-1).method, "DELETE");
+  replies = [{ ...complete, id: "partial", is_partial: true }];
+  await assert.rejects(execute, /incomplete results/);
+  assert.equal(calls.at(-1).method, "DELETE");
+  replies = [{ id: "timeout", is_running: true }];
+  await assert.rejects(() => execute(0), /five-minute/);
+  assert.equal(calls.at(-1).method, "DELETE");
+  replies = [{ is_running: true }];
+  await assert.rejects(execute, /query ID/);
+  overrides.delete("./elastic-query-client");
+});
+
+test("Elastic validation details exclude API keys and authorization tokens", () => {
+  const error = client.elasticFailure(400, { error: { reason: "Unknown column [bad_field]. secret-key ApiKey another-secret\nline 2" } }, "secret-key");
+  assert.match(error.message, /bad_field/);
+  assert.doesNotMatch(error.message, /secret-key|another-secret|\n/);
+  assert.doesNotMatch(client.elasticFailure(403, { error: { reason: "sensitive" } }, "key").message, /sensitive/);
+});
+
 test("Postgres integration: persistence, source isolation, stale-result retention and edit races", { skip: !process.env.ELASTIC_TEST_DATABASE_URL }, async () => {
   const url = new URL(process.env.ELASTIC_TEST_DATABASE_URL);
   assert.ok(["127.0.0.1", "localhost"].includes(url.hostname) && url.pathname === "/elastic_test", "Use the disposable local elastic_test database.");
@@ -151,13 +193,13 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
   let hold = null;
   overrides.set("./persist", { applicationDatabase: () => null });
   overrides.set("./elastic-vuln-server", { elasticVulnEnabled: () => true });
-  overrides.set("./elastic-query-client", { ...client,
-    executeEsql: async () => {
+  const fakeQuery = async () => {
       if (hold) { const wait = hold; hold = null; return await wait; }
       if (fail) throw new contract.DashboardError("Simulated Elastic outage.");
       return response;
-    },
-  });
+  };
+  overrides.set("./elastic-query-client", { ...client, executeEsql: fakeQuery });
+  overrides.set("./elastic-async-client", { executeEsqlAsync: fakeQuery });
   const storeModule = await load("lib/elastic-dashboard-store.ts");
   await storeModule.evaluate();
   const store = storeModule.namespace;
@@ -166,7 +208,7 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
     assert.fail("Timed out waiting for refresh.");
   }
   try {
-    await db.query("DROP TABLE IF EXISTS elastic_dashboard_audit, elastic_dashboard_queries, elastic_dashboard_connection");
+    await db.query("DROP TABLE IF EXISTS elastic_dashboard_jobs, elastic_dashboard_audit, elastic_dashboard_queries, elastic_dashboard_connection");
     await db.query("CREATE TABLE IF NOT EXISTS vuln_store (key TEXT PRIMARY KEY, data JSONB); INSERT INTO vuln_store VALUES ('sentinel', '{\"keep\":true}') ON CONFLICT DO NOTHING");
     const first = await store.readDashboard(true);
     assert.equal(first.storageReady, true);
@@ -217,6 +259,33 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
     assert.match(retainedChart.error, /missing/);
     await waitFor(() => !globalThis.__elasticDashboard.ticking);
     assert.deepEqual((await db.query("SELECT data FROM vuln_store WHERE key = 'sentinel'")).rows[0].data, { keep: true });
+    const jobsModule = await load("lib/elastic-dashboard-jobs.ts");
+    await jobsModule.evaluate();
+    const jobs = jobsModule.namespace;
+    response = numeric;
+    const previewJob = await jobs.enqueueDashboardJob("preview", { query: "ROW x = 1" }, "member-preview");
+    assert.equal(previewJob.status, "queued");
+    await waitFor(async () => (await jobs.readDashboardJob(previewJob.jobId, "member-preview")).status === "succeeded");
+    assert.deepEqual((await jobs.readDashboardJob(previewJob.jobId, "member-preview")).result, numeric);
+    await assert.rejects(() => jobs.readDashboardJob(previewJob.jobId, "different-member"), /not found/);
+    const saveJob = await jobs.enqueueDashboardJob("save", { ...contract.DEFAULT_COVERAGE, id: "queued-save" }, "member-save");
+    await waitFor(async () => (await jobs.readDashboardJob(saveJob.jobId, "member-save")).status === "succeeded");
+    assert.equal((await jobs.readDashboardJob(saveJob.jobId, "member-save")).saved, true);
+    assert.ok((await store.readDashboard(true)).queries.some((q) => q.id === "queued-save"));
+    await waitFor(() => !globalThis.__elasticJobs.working);
+    let finishJob;
+    hold = new Promise((resolve) => { finishJob = resolve; });
+    const conflictJob = await jobs.enqueueDashboardJob("save", { ...contract.DEFAULT_COVERAGE, id: "queued-save", title: "Outdated title" }, "member-conflict");
+    await waitFor(() => hold === null);
+    await store.saveQuery({ ...contract.DEFAULT_COVERAGE, id: "queued-save", title: "Newer edit" }, "newer-edit");
+    finishJob(numeric);
+    await waitFor(async () => (await jobs.readDashboardJob(conflictJob.jobId, "member-conflict")).status === "failed");
+    assert.equal((await store.readDashboard(true)).queries.find((q) => q.id === "queued-save").title, "Newer edit");
+    await waitFor(() => !globalThis.__elasticJobs.working);
+    await db.query("INSERT INTO elastic_dashboard_jobs (id, actor, kind, input, connection_revision, status, started_at) VALUES ('00000000-0000-0000-0000-000000000001', 'interrupted', 'preview', '{}', 1, 'running', now() - interval '8 minutes')");
+    jobs.triggerDashboardJobs();
+    await waitFor(async () => (await db.query("SELECT status FROM elastic_dashboard_jobs WHERE actor = 'interrupted'")).rows[0].status === "failed");
+    await waitFor(() => !globalThis.__elasticJobs.working);
     const oldSecret = process.env.NEXTAUTH_SECRET;
     process.env.NEXTAUTH_SECRET = randomBytes(32).toString("hex");
     assert.equal((await store.readDashboard(true)).storageReady, true, "Reconnect must remain available after secret rotation.");
