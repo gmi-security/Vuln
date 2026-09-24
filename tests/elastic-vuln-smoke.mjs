@@ -24,6 +24,11 @@ async function run(mode) {
     ELASTIC_VULN_SAMPLE_DATA: mode === "sample" ? "true" : "false", ELASTIC_VULN_INGEST_TOKEN: ingestToken });
   // Production release must work with the existing environment unchanged.
   if (mode === "empty") delete env.ELASTIC_VULN_ENABLED;
+  if (mode === "empty" && process.env.ELASTIC_TEST_DATABASE_URL) {
+    const testDb = new URL(process.env.ELASTIC_TEST_DATABASE_URL);
+    assert.ok(["127.0.0.1", "localhost"].includes(testDb.hostname) && testDb.pathname === "/elastic_test");
+    env.ELASTIC_VULN_DATABASE_URL = testDb.toString();
+  }
   const child = spawn(process.execPath, ["node_modules/next/dist/bin/next", "start", "-H", "127.0.0.1", "-p", String(port)],
     { env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
@@ -53,11 +58,11 @@ async function run(mode) {
     } else {
       assert.equal(result.status, 200);
       assert.match(result.headers.get("cache-control"), /no-store/);
-      assert.equal((await result.json()).mode, mode === "sample" ? "sample" : "unconfigured");
+      assert.equal((await result.json()).mode, mode === "sample" ? "sample" : env.ELASTIC_VULN_DATABASE_URL ? "empty" : "unconfigured");
       assert.equal(page.status, 200);
       const html = await page.text();
-      assert.match(html, /Managed assets/);
-      assert.match(html, mode === "sample" ? /figures are fictional/ : /No live results are available/);
+      assert.match(html, mode === "sample" ? /Managed assets/ : /Asset coverage/);
+      assert.match(html, mode === "sample" ? /figures are fictional/ : /No live results are available|Dashboard storage is not available/);
     }
     const url = `${base}/api/elastic-vulnerabilities/ingest`;
     assert.equal((await fetch(url, { method: "POST" })).status, mode === "disabled" ? 404 : 401);
@@ -69,10 +74,37 @@ async function run(mode) {
       assert.equal((await post("not-json")).status, 400);
       assert.equal((await post(JSON.stringify({ ...valid, queryId: "other" }))).status, 400);
       assert.equal((await post(" ".repeat(17000))).status, 413);
-      assert.equal((await post(JSON.stringify(valid))).status, 503);
+      assert.equal((await post(JSON.stringify(valid))).status, env.ELASTIC_VULN_DATABASE_URL ? 200 : 503);
       assert.equal((await fetch(url, { method: "POST", headers: { Authorization: `Bearer ${ingestToken}` }, body: "x" })).status, 415);
     }
-    console.log(`PASS: ${mode} mode — session gates, page/API, existing routes, ingestion guards`);
+    assert.equal((await fetch(`${base}/api/elastic-dashboard`)).status, 401);
+    const dashboard = await fetch(`${base}/api/elastic-dashboard`, { headers });
+    if (mode === "disabled") assert.equal(dashboard.status, 404);
+    else {
+      const model = await dashboard.json();
+      assert.equal(model.canManage, false);
+      assert.equal(model.endpoint, undefined);
+      assert.equal(model.connected, false);
+      const adminToken = await encode({ secret, token: { name: "Local admin", email: "admin@example.test", orgMember: true, orgRole: "ADMIN" }, maxAge: 120 });
+      const adminHeaders = { cookie: `next-auth.session-token=${adminToken}`, origin: base, "Content-Type": "application/json" };
+      const request = (route, body, requestHeaders = adminHeaders) => fetch(`${base}/api/elastic-dashboard/${route}`, { method: "POST", headers: requestHeaders, body: JSON.stringify(body) });
+      for (const route of ["connection", "queries", "preview", "refresh"]) {
+        assert.equal((await request(route, {}, { ...headers, origin: base, "Content-Type": "application/json" })).status, 403, `Members cannot mutate ${route}`);
+        assert.equal((await request(route, {}, { ...adminHeaders, origin: "https://untrusted.example" })).status, 403);
+      }
+      assert.equal((await request("connection", { endpoint: "http://localhost", apiKey: "test" })).status, 400);
+      assert.equal((await request("preview", { query: "" })).status, 400);
+      assert.equal((await request("preview", { query: "ROW x = 1" })).status, env.ELASTIC_VULN_DATABASE_URL ? 409 : 503);
+      assert.equal((await request("queries", { title: "x".repeat(34000) })).status, 413);
+      const adminModel = await (await fetch(`${base}/api/elastic-dashboard`, { headers: adminHeaders })).json();
+      assert.equal(adminModel.canManage, true);
+      if (mode === "empty") {
+        const html = await (await fetch(`${base}/elastic-vulnerabilities`, { headers: adminHeaders })).text();
+        assert.match(html, /Add query/);
+        assert.match(html, /Connection/);
+      }
+    }
+    console.log(`PASS: ${mode} mode — sessions, admin roles, CSRF, page/API, existing routes, ingestion guards`);
   } finally {
     child.kill();
     await once(child, "exit");

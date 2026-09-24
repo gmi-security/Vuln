@@ -126,10 +126,12 @@ export const authOptions: NextAuthOptions = {
           login?: string;
           avatar?: string;
           role?: string;
+          orgMember?: boolean;
         };
         user.login = token.login as string | undefined;
         user.avatar = token.avatar as string | undefined;
         user.role = token.orgRole as string | undefined;
+        user.orgMember = token.orgMember !== false;
       }
       return session;
     },

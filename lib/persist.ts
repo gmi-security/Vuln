@@ -218,6 +218,12 @@ export function persistenceEnabled(): boolean {
   return Boolean(process.env.DATABASE_URL);
 }
 
+// Independent modules may use the established pool for their own tables.
+// They must not modify the scanner snapshot tables or persistence bookkeeping.
+export function applicationDatabase(): Pool | null {
+  return getPool();
+}
+
 // Explicit connectivity probe: connect, run SELECT 1, return ok/error.
 export async function pingDb(): Promise<{ ok: boolean; error?: string; hint?: string }> {
   const url = process.env.DATABASE_URL ?? "";

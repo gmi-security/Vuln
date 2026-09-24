@@ -47,6 +47,6 @@ test("the inactive workflow preserves the supplied query and requests complete r
   const node = workflow.nodes.find((entry) => entry.name === "Query Elasticsearch");
   assert.match(node.parameters.url, /allow_partial_results=false/);
   assert.equal(JSON.parse(node.parameters.jsonBody).query,
-    (await readFile(new URL("../n8n/elastic/asset-coverage.esql", import.meta.url), "utf8")).trim());
+    (await readFile(new URL("../n8n/elastic/asset-coverage.esql", import.meta.url), "utf8")).replace(/\r\n/g, "\n").trim());
   assert.equal(workflow.nodes.some((entry) => entry.credentials), false);
 });
