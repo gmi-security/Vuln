@@ -187,3 +187,10 @@ responses; full response bodies and credentials are never logged. Connection tes
 still use the small synchronous coverage query. The native chart editor includes
 a 30-day last-known-open-status template and a Daily refresh option. Live external
 query performance and data accuracy require the checks in the trend setup guide.
+
+The user subsequently selected September 23, 2026 as the reporting start and
+confirmed it was the last successful pull. The template therefore starts on that
+date and uses September 24 midnight UTC as an exclusive cutoff. It initially
+shows one daily point, deduplicates stable finding IDs, and uses earlier records
+only for baseline state. Advance `report_end` after a verified later pull; the app
+does not currently receive an import-completion watermark. See the setup guide.

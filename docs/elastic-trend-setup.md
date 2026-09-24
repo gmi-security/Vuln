@@ -27,12 +27,29 @@ Open Elastic Dashboard, hard-refresh with Ctrl+Shift+R, then:
    after a successful daily import, or use manual Refresh after later imports.
 
 The copyable query is in `queries/elastic/open-vulnerabilities-history.esql`.
-It counts all severities, not only P1/P2/P3. It groups historical records into the
-last change per finding per UTC day, collapses older records into a starting state,
-and carries the last status forward. A finding closed and later reopened is counted
-on the appropriate days, provided both changes exist in the retained source.
-Today is measured as of query execution. Earlier points use the last state before
-the next UTC day. No start/end parameters from Kibana are needed.
+The user confirmed stable IDs, duplicate earlier pulls, a latest pull on September
+23, 2026, and a reporting start of September 23. The template therefore sets
+`report_start` to September 23 and `report_end` to September 24 **exclusive**, both
+at 00:00 UTC. Initially it produces one day, September 23. Duplicate copies of the
+same status record do not multiply the finding count. Older records are retained
+only to establish the starting state; their dates are not displayed.
+
+After the next completed pull, change `report_end` to midnight UTC on the next
+calendar day. For a September 24 pull, use `2026-09-25T00:00:00Z`. Keep
+`report_start` unchanged. The query displays up to 30 daily points ending before
+`report_end`, starting no earlier than September 23. It intentionally does not
+infer that a scheduled import succeeded from the current clock or absent diffs.
+Automatic query refresh does not advance this source-data cutoff. Automating that
+requires a trustworthy import-completion timestamp from the collector, which the
+app does not currently receive. The dated copy is also provided as
+`queries/elastic/open-vulnerabilities-through-2026-09-23.esql`.
+
+The query counts all severities, not only P1/P2/P3. It groups historical records
+into the last change per finding per UTC day, collapses older records into a
+starting state, and carries that state forward. A finding closed and later reopened
+is counted on the appropriate days if both changes exist in the retained source.
+The last pull is only an observation at the time it ran, not proof that the rest
+of that calendar day's changes were collected. No Kibana parameters are needed.
 
 The graph means **last known status in the retained data**. Daily polling cannot
 reconstruct intermediate transitions that happened between pulls and were never
@@ -119,13 +136,12 @@ last-seen retention rule that drops them merely because they have not changed.
 
 ### 4. Reconcile and tune
 
-After the daily import finishes, compare today's total with CrowdStrike using
+After the daily import finishes, advance report_end and compare that total with CrowdStrike using
 the same tenant scope, statuses, suppression rules, and finding identity. Compare
 several known closed/reopened findings across dates. The app build/tests verify
 execution mechanics, not the completeness of the external data.
 
-If the 30-day query exceeds five minutes, try a seven-day copy: change `29 days`
-to `6 days` and offsets to `[0,1,2,3,4,5,6]`. This reduces row expansion but still
+If the 30-day query exceeds five minutes, try a seven-day copy: change the offsets to `[1,2,3,4,5,6,7]`. This reduces row expansion but still
 reads the retained baseline. Never simply filter raw records to the last seven
 days; that loses unchanged older open findings.
 
