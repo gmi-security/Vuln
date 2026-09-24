@@ -30,6 +30,31 @@ Open **Elastic Dashboard** at `/elastic-vulnerabilities`. For daily diff history
    shared tile and its saved history, stops refreshes, and clears its cached
    results. Source findings and credentials are unaffected. **CSV** exports the
    displayed cached rows from any completed tile.
+7. Drag a tile by its grip to another tile's position. Move-up/down buttons work
+   with keyboard or touch; the grip also supports Up/Down arrow keys. Order saves
+   immediately for the shared dashboard. New tiles append after a saved layout;
+   editing or refreshing a tile preserves its position.
+
+Tables scroll vertically inside a maximum height of `min(28rem, 65vh)`, retain
+horizontal scrolling and use sticky headings. Short tables keep their natural
+height. The scroll area is focusable for keyboard use; CSV still exports all
+displayed result rows, regardless of which rows are currently visible.
+
+Ordering uses same-origin member POST `/api/elastic-dashboard/order` with an
+array of all active IDs. A transaction using the existing dashboard advisory lock
+writes the additive `display_order` column. Duplicates, unknown IDs, missing IDs
+and stale lists after add/delete are rejected without partial changes. Ordering
+does not modify query definitions, revisions, refresh timing or results. Polling
+cannot replace the optimistic layout during a drag/save; failed saves restore
+the previous local order. Concurrent valid reorders use the last committed order.
+
+Layout validation (September 24, 2026): all 28 tests passed without skips,
+including reorder persistence, edits/new/deleted tiles, rejected stale lists,
+unchanged results/revisions and client movement/rollback. Production build and
+HTTP smoke passed in disabled, sample and disposable-database modes, including
+authorization/CSRF on the order endpoint. Live authenticated drag/drop and visual
+interaction remain unverified. Two separate design previews use sample data;
+neither visual redesign is included in this functional release.
 
 Tile deletion uses authenticated, same-origin DELETE
 `/api/elastic-dashboard/queries/[id]`. A `deleted_at` tombstone prevents startup

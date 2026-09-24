@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Database, Download, Pencil, Plus, RefreshCw, Settings2, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Database, Download, GripVertical, Pencil, Plus, RefreshCw, Settings2, Trash2 } from "lucide-react";
+import { applyTileOrder, moveTileIds } from "@/lib/dashboard-layout";
 import { dashboardCsv } from "@/lib/dashboard-csv";
 import { dashboardRequest } from "@/lib/dashboard-browser-client";
 import VulnShell from "@/components/VulnShell";
@@ -31,14 +32,17 @@ function Results({ result, display, chart }: { result: QueryResult; display: Que
         value={formatValue(result.rows[0][index], column.name)} sublabel="Latest successful query" icon={<Database size={22} />} />)}
     </div>;
   }
-  return <div className="overflow-x-auto">
+  return <div>
+    <div role="region" aria-label="Scrollable query results" tabIndex={0} className="max-h-[min(28rem,65vh)] overflow-auto rounded-xl border border-zinc-800 focus-visible:outline-2 focus-visible:outline-red-500">
     <table className="w-full text-left text-sm">
       <caption className="sr-only">Dashboard query results</caption>
-      <thead><tr>{result.columns.map((column) => <th key={column.name} scope="col" className="border-b border-zinc-800 px-3 py-3 font-medium text-zinc-400">{columnLabel(column.name)}</th>)}</tr></thead>
+      <thead className="sticky top-0 z-10 bg-[#111111]"><tr>{result.columns.map((column) => <th key={column.name} scope="col" className="border-b border-zinc-800 px-3 py-3 font-medium text-zinc-400">{columnLabel(column.name)}</th>)}</tr></thead>
       <tbody>{result.rows.map((row, index) => <tr key={index} className="border-b border-zinc-900">
         {row.map((value, cell) => <td key={cell} className="max-w-md break-words px-3 py-3 text-zinc-200">{formatValue(value, result.columns[cell].name)}</td>)}
       </tr>)}</tbody>
     </table>
+    </div>
+    {result.rows.length > 0 && <p className="mt-2 text-xs text-zinc-500">{result.rows.length} rows · Scroll inside the table to see more.</p>}
     {!result.rows.length && <p className="py-6 text-zinc-400">The query returned no rows.</p>}
     {result.truncated && <p className="mt-3 text-sm text-amber-300">Showing the first 100 rows. Narrow or aggregate the query to show the full result.</p>}
   </div>;
@@ -61,6 +65,8 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
   const [clientSecret, setClientSecret] = useState("");
   const [draft, setDraft] = useState<Draft | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [draggedId, setDraggedId] = useState<string | null>(null);
+  const [dropId, setDropId] = useState<string | null>(null);
   const [preview, setPreview] = useState<QueryResult | null>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -70,8 +76,10 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
   const actionSequence = useRef(0);
   const dashboardVersion = useRef(0);
   const reloadInFlight = useRef(false);
+  const dragging = useRef<string | null>(null);
+  const reordering = useRef(false);
   const reload = useCallback(async () => {
-    if (reloadInFlight.current) return;
+    if (reloadInFlight.current || dragging.current || reordering.current) return;
     reloadInFlight.current = true;
     try {
       const version = dashboardVersion.current;
@@ -119,6 +127,23 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
       source: query.source, crowdstrike: query.crowdstrike,
       refreshMinutes: query.refreshMinutes, enabled: query.enabled, chart: query.chart } : dashboard.crowdstrike?.connected ? crowdStrikeDraft() : newDraft());
     setPreview(query?.result ?? null); setError(""); setMessage("");
+  }
+  function moveTile(from: string, to: string) {
+    if (busy || reordering.current || !dashboard.canManage) return;
+    const previous = dashboard.queries.map((query) => query.id), ids = moveTileIds(previous, from, to);
+    if (ids === previous) return;
+    reordering.current = true; dashboardVersion.current++;
+    setDashboard((current) => ({ ...current, queries: applyTileOrder(current.queries, ids) }));
+    void action("reorder", async () => {
+      try {
+        const result = await post("order", { ids });
+        if (!result.saved) throw new Error("The server did not confirm the tile order. Refresh to check it.");
+        setMessage("Tile order saved for everyone.");
+      } catch (error) {
+        setDashboard((current) => ({ ...current, queries: applyTileOrder(current.queries, previous) }));
+        throw error;
+      } finally { reordering.current = false; dashboardVersion.current++; }
+    });
   }
   function updateCrowdStrike(options: Partial<CrowdStrikeOptions>) {
     if (!draft) return;
@@ -330,9 +355,17 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
       </form>
     </PanelCard>}
 
-    {dashboard.queries.map((query) => {
+    {dashboard.canManage && dashboard.queries.length > 1 && <p id="tile-order-help" className="text-sm text-zinc-500">Drag a tile using its grip, or use the arrow buttons. Order is saved for everyone.</p>}
+    {dashboard.queries.map((query, index) => {
       const stale = query.refreshedAt && now !== null && now - Date.parse(query.refreshedAt) > query.refreshMinutes * 2 * 60_000;
-      return <PanelCard key={query.id} eyebrow={query.title}
+      return <div key={query.id} className={`min-w-0 rounded-[30px] ${draggedId === query.id ? "opacity-50" : ""} ${dropId === query.id && draggedId !== query.id ? "outline-2 outline-offset-4 outline-red-500" : ""}`}
+        onDragOver={(event) => { if (dragging.current && !busy) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; setDropId(query.id); } }}
+        onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropId((current) => current === query.id ? null : current); }}
+        onDrop={(event) => {
+          const from = dragging.current; if (!from) return;
+          event.preventDefault(); dragging.current = null; setDraggedId(null); setDropId(null); moveTile(from, query.id);
+        }}>
+      <PanelCard eyebrow={query.title} className="[&>div:first-child]:flex-wrap [&>div:first-child]:items-start"
         description={`${query.source === "crowdstrike" ? "CrowdStrike · Vulnerabilities" : "Elasticsearch"} · ${query.enabled ? (query.refreshMinutes === 1440 ? "Refreshes daily" : `Refreshes every ${query.refreshMinutes} minutes`) : "Automatic refresh paused"}`}
         actions={<div className="flex flex-wrap gap-2">
           {query.result && <button type="button" className={ghostButtonClass} onClick={() => {
@@ -341,6 +374,23 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
             link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
           }}><Download size={14} />CSV</button>}
           {dashboard.canManage && <>
+            {dashboard.queries.length > 1 && <>
+              <button type="button" className={`${ghostButtonClass} cursor-grab active:cursor-grabbing`} draggable={!busy}
+                disabled={Boolean(busy)} aria-label={`Drag to reorder ${query.title}`} aria-describedby="tile-order-help"
+                onDragStart={(event) => {
+                  dragging.current = query.id; dashboardVersion.current++; setDraggedId(query.id);
+                  event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", query.id);
+                }}
+                onDragEnd={() => { dragging.current = null; setDraggedId(null); setDropId(null); }}
+                onKeyDown={(event) => {
+                  if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+                    event.preventDefault(); const target = dashboard.queries[index + (event.key === "ArrowUp" ? -1 : 1)];
+                    if (target) moveTile(query.id, target.id);
+                  }
+                }}><GripVertical size={16} /></button>
+              <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || index === 0} aria-label={`Move ${query.title} up`} onClick={() => moveTile(query.id, dashboard.queries[index - 1].id)}><ArrowUp size={14} /></button>
+              <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || index === dashboard.queries.length - 1} aria-label={`Move ${query.title} down`} onClick={() => moveTile(query.id, dashboard.queries[index + 1].id)}><ArrowDown size={14} /></button>
+            </>}
             <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => edit(query)}><Pencil size={14} />Edit</button>
             <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => setDeleting(query.id)} aria-label={`Delete ${query.title}`}><Trash2 size={14} />Delete</button>
           </>}
@@ -365,7 +415,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
         {query.result?.note && <p className="mt-3 text-xs text-zinc-500">{query.result.note}</p>}
         <p className="mt-4 text-xs text-zinc-500">Last successful query: {query.refreshedAt ? new Date(query.refreshedAt).toISOString().replace("T", " ").replace("Z", " UTC") : "not yet available"}</p>
         {query.id === "asset-coverage" && query.source !== "crowdstrike" && <p className="mt-2 text-xs text-zinc-500">Asset inventory coverage, not vulnerability counts. Records from the last 25 hours; assets last seen within seven days. IDs recorded as both managed and unmanaged can count in both categories.</p>}
-      </PanelCard>;
+      </PanelCard></div>;
     })}
   </VulnShell>;
 }

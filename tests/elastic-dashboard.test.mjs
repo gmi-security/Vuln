@@ -431,6 +431,30 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
     } finally { finishNewFalcon(falconResult); }
     await waitFor(() => !globalThis.__elasticDashboard.ticking);
     assert.equal((await db.query("SELECT count(*)::int AS count FROM dashboard_daily_history WHERE query_id = 'immediate-falcon'")).rows[0].count, 1);
+    // Layout writes preserve cached data and query revisions, and reject stale lists.
+    const beforeOrder = (await store.readDashboard(true)).queries;
+    const reversedIds = beforeOrder.map((q) => q.id).reverse();
+    const beforeRevisions = (await db.query("SELECT id, revision FROM elastic_dashboard_queries ORDER BY id")).rows;
+    await store.reorderDashboardTiles({ ids: reversedIds }, "layout-member");
+    assert.deepEqual((await store.readDashboard(true)).queries.map((q) => q.id), reversedIds);
+    assert.deepEqual((await db.query("SELECT id, revision FROM elastic_dashboard_queries ORDER BY id")).rows, beforeRevisions, "Reordering must not invalidate active query work");
+    const cachedBeforeOrder = beforeOrder.find((q) => q.id === "extra").result;
+    assert.deepEqual((await store.readDashboard(true)).queries.find((q) => q.id === "extra").result, cachedBeforeOrder);
+    for (const ids of [[reversedIds[0], reversedIds[0]], ["bad/id"], Array(25).fill("a")]) {
+      await assert.rejects(() => store.reorderDashboardTiles({ ids }, "invalid-order"));
+    }
+    await assert.rejects(() => store.reorderDashboardTiles({ ids: reversedIds.slice(1) }, "stale-order"), /tiles changed/);
+    assert.deepEqual((await store.readDashboard(true)).queries.map((q) => q.id), reversedIds, "Invalid order is atomic");
+    globalThis.__elasticDashboard.running = 2;
+    try {
+      await store.addDashboardTile({ ...immediateDefinition, id: "new-after-order" }, "add-after-layout");
+      await waitFor(() => !globalThis.__elasticDashboard.ticking);
+      assert.equal((await store.readDashboard(true)).queries.at(-1).id, "new-after-order", "New tiles append after the saved layout");
+      await store.addDashboardTile({ ...immediateDefinition, title: "Edited without moving" }, "edit-after-layout");
+      await waitFor(() => !globalThis.__elasticDashboard.ticking);
+      assert.deepEqual((await store.readDashboard(true)).queries.slice(0, -1).map((q) => q.id), reversedIds);
+      await store.deleteDashboardTile("new-after-order", "cleanup-order-test");
+    } finally { globalThis.__elasticDashboard.running = 0; }
     // Deletion must win against both automatic refresh and legacy queued saves.
     let finishDeletedRefresh;
     hold = new Promise((resolve) => { finishDeletedRefresh = resolve; });
@@ -439,6 +463,7 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
       await waitFor(() => hold === null);
       await store.deleteDashboardTile("immediate", "delete-member");
       await store.deleteDashboardTile("immediate", "delete-member");
+      await assert.rejects(() => store.reorderDashboardTiles({ ids: reversedIds }, "deleted-order"), /tiles changed/);
       assert.ok(!(await store.readDashboard(true)).queries.some((q) => q.id === "immediate"));
       await assert.rejects(() => store.addDashboardTile(immediateDefinition, "stale-form"), /deleted/);
     } finally { finishDeletedRefresh(numeric); }

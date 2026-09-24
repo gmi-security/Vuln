@@ -55,6 +55,7 @@ export async function dashboardDatabase(): Promise<Pool> {
       ALTER TABLE elastic_dashboard_queries ADD COLUMN IF NOT EXISTS refresh_lease_until TIMESTAMPTZ;
       ALTER TABLE elastic_dashboard_queries ADD COLUMN IF NOT EXISTS refresh_requested BOOLEAN NOT NULL DEFAULT false;
       ALTER TABLE elastic_dashboard_queries ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+      ALTER TABLE elastic_dashboard_queries ADD COLUMN IF NOT EXISTS display_order INTEGER;
       CREATE TABLE IF NOT EXISTS dashboard_source_connections (
         source TEXT PRIMARY KEY, secret TEXT NOT NULL, revision INT NOT NULL DEFAULT 1,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -103,7 +104,7 @@ export async function readDashboard(canManage: boolean): Promise<ElasticDashboar
       if (error instanceof DashboardError) return null;
       throw error;
     });
-    const rows = await db.query("SELECT * FROM elastic_dashboard_queries WHERE deleted_at IS NULL ORDER BY id = 'asset-coverage' DESC, id");
+    const rows = await db.query("SELECT * FROM elastic_dashboard_queries WHERE deleted_at IS NULL ORDER BY display_order NULLS LAST, id = 'asset-coverage' DESC, id");
     return {
       canManage, storageReady: true, connected: Boolean(saved),
       ...(canManage && saved ? { endpoint: (saved.value as ElasticConnection).endpoint } : {}),
@@ -263,6 +264,28 @@ export async function addDashboardTile(value: unknown, actor: string): Promise<{
   } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
   triggerRefresh();
   return { saved: true, query: tile };
+}
+
+export async function reorderDashboardTiles(value: unknown, actor: string): Promise<void> {
+  const ids = (value as { ids?: unknown } | null)?.ids;
+  if (!Array.isArray(ids) || ids.length > 24 || ids.some((id) => typeof id !== "string" || !/^[a-zA-Z0-9-]{1,64}$/.test(id)) || new Set(ids).size !== ids.length) {
+    throw new DashboardError("Supply each tile ID once in the desired order.");
+  }
+  const db = await database(), client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(804201)");
+    const active = await client.query("SELECT id FROM elastic_dashboard_queries WHERE deleted_at IS NULL");
+    const expected = new Set(active.rows.map((row) => row.id));
+    if (ids.length !== expected.size || ids.some((id) => !expected.has(id))) {
+      throw new DashboardError("The tiles changed while you were arranging them. Refresh the dashboard and try again.", 409);
+    }
+    await client.query(`UPDATE elastic_dashboard_queries AS tile SET display_order = ordered.position::int
+      FROM unnest($1::text[]) WITH ORDINALITY AS ordered(id, position)
+      WHERE tile.id = ordered.id AND tile.deleted_at IS NULL`, [ids]);
+    await client.query("INSERT INTO elastic_dashboard_audit (actor, action) VALUES ($1, 'layout.reordered')", [actor]);
+    await client.query("COMMIT");
+  } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
 }
 
 export async function deleteDashboardTile(id: string, actor: string): Promise<void> {

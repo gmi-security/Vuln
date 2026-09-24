@@ -97,7 +97,7 @@ async function run(mode) {
       assert.equal((await remove({ ...memberHeaders, cookie: `next-auth.session-token=${removedToken}` })).status, 401);
       assert.equal((await remove({ ...memberHeaders, origin: "https://untrusted.example" })).status, 403);
       assert.equal((await remove(memberHeaders)).status, env.ELASTIC_VULN_DATABASE_URL ? 200 : 503);
-      for (const route of ["connection", "connections/crowdstrike", "queries", "preview", "refresh"]) {
+      for (const route of ["connection", "connections/crowdstrike", "queries", "preview", "refresh", "order"]) {
         assert.equal((await request(route, {}, { origin: base, "Content-Type": "application/json" })).status, 401, `Anonymous users cannot mutate ${route}`);
         assert.equal((await request(route, {}, { ...memberHeaders, cookie: `next-auth.session-token=${removedToken}` })).status, 401, `Removed members cannot mutate ${route}`);
         assert.equal((await request(route, {}, { ...memberHeaders, origin: "https://untrusted.example" })).status, 403);
@@ -110,6 +110,8 @@ async function run(mode) {
       assert.equal((await request("queries", { title: "x".repeat(34000) })).status, 413);
       assert.equal((await request("queries", { title: "Valid title", query: "ROW x = 1", display: "auto", refreshMinutes: 15, enabled: true })).status, env.ELASTIC_VULN_DATABASE_URL ? 409 : 503);
       assert.equal((await request("refresh", {})).status, 202);
+      assert.equal((await request("order", { ids: ["duplicate", "duplicate"] })).status, 400);
+      assert.equal((await request("order", { ids: model.queries.map((query) => query.id) })).status, env.ELASTIC_VULN_DATABASE_URL ? 200 : 503);
       const adminModel = await (await fetch(`${base}/api/elastic-dashboard`, { headers: adminHeaders })).json();
       assert.equal(adminModel.canManage, true);
       if (mode === "empty") {
