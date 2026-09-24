@@ -210,6 +210,14 @@ history written only after collection. The production build and local HTTP
 smoke checks passed in disabled, sample and database-backed modes. Authenticated
 production browser interaction and live query duration remain unverified.
 
+Release verification: production commit `f74046baf2c4d3ff49896d21edb6ec90dc16ae8e`
+became ACTIVE in DigitalOcean deployment
+`413e7947-d703-4231-a4d9-dee3345f521d` on September 24, 2026. Build and deploy
+steps succeeded. Live health returned `ok: true` and `dbReachable: true`;
+anonymous dashboard and private job APIs returned 401. The disposable test
+database container was removed. Next check: a signed-in member adds a tile
+without preview and observes its first live result or query error on the dashboard.
+
 Elastic validation errors now include a bounded, key-redacted reason in private
 responses; full response bodies and credentials are never logged. Connection tests
 still use the small synchronous coverage query. The native chart editor includes
