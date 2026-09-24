@@ -149,3 +149,10 @@ findings tile, then the full open-findings count and daily history.
 - No browser surface was available for interactive visual verification. No live
   CrowdStrike credentials were read, and account-specific collection remains to
   be verified after entering the API client in the connection form.
+- Production commit `6de5790626178bba3c83e114eb51a2b9429c4b06` deployed as
+  `beeba383-2510-4cda-b07a-e4dac4c742f5`; DigitalOcean build/deploy succeeded and
+  the release reached ACTIVE on 2026-09-24.
+- Post-deployment health returned `ok: true` and database reachable. Anonymous
+  dashboard access returned 307; dashboard/job APIs and the new connection POST
+  returned 401. Startup logs contained a ready marker and no dashboard worker
+  failure messages. The disposable test database container was removed.
