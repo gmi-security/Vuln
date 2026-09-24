@@ -92,6 +92,14 @@ and non-replayed mutations. The production build passed. Live authenticated
 reproduction remains unavailable; the clearer HTTP error enables follow-up if
 the interruption recurs.
 
+Release verification: commit `d809c8b4d42bab03be992f49133bad28c3ea744e` became
+ACTIVE in deployment `0006d9a7-b0cb-490e-9764-4c1ebfe7d441` on September 24,
+2026. Four focused tests, production build and no-database HTTP smoke in all
+three modes passed. Live health and database reachability were true; anonymous
+dashboard access returned 401. The original response status/restart cause and
+the user's authenticated save remain unverified. Next step: retry the edit with
+the new client and use its HTTP status if another interruption occurs.
+
 - One in-process timer checks saved queries every minute, independent of browser
   traffic. Authenticated dashboard polling also nudges due work. Saved queries
   refresh at 5, 15, 30, 60 minutes, or daily.
