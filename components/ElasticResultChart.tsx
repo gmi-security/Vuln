@@ -1,6 +1,6 @@
 "use client";
 
-import { useId } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { chartData, columnLabel, type QueryDefinition, type QueryResult } from "@/lib/elastic-dashboard";
 
 const colors = ["#f87171", "#fbbf24", "#38bdf8", "#a78bfa", "#34d399", "#fb923c", "#f472b6", "#a3e635"];
@@ -11,6 +11,17 @@ export default function ElasticResultChart({ result, definition }: {
   result: QueryResult; definition: Pick<QueryDefinition, "display" | "chart">;
 }) {
   const titleId = useId();
+  const container = useRef<HTMLDivElement>(null);
+  const [plotWidth, setPlotWidth] = useState(760);
+  useEffect(() => {
+    const element = container.current;
+    if (!element) return;
+    const resize = () => setPlotWidth(Math.max(560, Math.floor(element.clientWidth)));
+    resize();
+    const observer = new ResizeObserver(resize);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [result, definition.display]);
   let data: ReturnType<typeof chartData>;
   try { data = chartData(result, definition); }
   catch (error) { return <p role="alert" className="py-4 text-sm text-amber-300">{error instanceof Error ? error.message : "Unable to display this chart."}</p>; }
@@ -59,9 +70,9 @@ export default function ElasticResultChart({ result, definition }: {
         </ul>
       </div>;
   } else if (definition.display === "bar") {
-    const width = 760, left = 195, plot = 450, zero = left + fraction(0) * plot;
+    const width = plotWidth, left = 195, plot = width - left - 115, zero = left + fraction(0) * plot;
     chart = <div className="max-h-[520px] overflow-auto">
-      <svg viewBox={`0 0 ${width} ${points.length * 36 + 45}`} className="w-full min-w-[600px]" role="img" aria-labelledby={titleId}>
+      <svg viewBox={`0 0 ${width} ${points.length * 36 + 45}`} width={width} height={points.length * 36 + 45} className="block max-w-none" role="img" aria-labelledby={titleId}>
         <title id={titleId}>{`${description}. Bars start at zero.`}</title>
         <line x1={zero} x2={zero} y1="5" y2={points.length * 36} stroke="#71717a" />
         {points.map((point, index) => {
@@ -71,17 +82,34 @@ export default function ElasticResultChart({ result, definition }: {
             <title>{`${point.label}: ${point.value === null ? "No data" : format(point.value)}`}</title>
             <text x={left - 12} y={y + 18} textAnchor="end" fill="#d4d4d8" fontSize="13">{short(point.label)}</text>
             {point.value !== null && <rect x={Math.min(x, zero)} y={y} width={Math.abs(x - zero)} height="25" rx="3" fill={colors[index % colors.length]} />}
-            <text x="660" y={y + 18} fill="#fafafa" fontSize="13">{point.value === null ? "No data" : short(format(point.value), 13)}</text>
+            <text x={width - 100} y={y + 18} fill="#fafafa" fontSize="13">{point.value === null ? "No data" : short(format(point.value), 13)}</text>
           </g>;
         })}
         <text x={zero} y={points.length * 36 + 22} textAnchor="middle" fill="#a1a1aa" fontSize="12">0</text>
       </svg>
     </div>;
   } else {
-    const left = 85, top = 20, width = 615, height = 230;
+    const left = 100, top = 20, width = plotWidth - left - 40, height = 230;
     const firstX = points[0].x, lastX = points[points.length - 1].x;
     const x = (index: number) => left + (points.length === 1 ? 0.5 : scale === "category" || lastX === firstX ? index / (points.length - 1) : (points[index].x - firstX) / (lastX - firstX)) * width;
     const y = (n: number) => top + height * (1 - fraction(n));
+    const tickLabel = (index: number) => {
+      const label = points[index].label;
+      return scale === "time" && /^\d{4}-\d{2}-\d{2}T/.test(label)
+        ? label.replace("T", " ").slice(0, /T00:00:00/.test(label) ? 10 : 16)
+        : short(label, 22);
+    };
+    const ticks = new Set([0]);
+    const last = points.length - 1;
+    if (last > 0) ticks.add(last);
+    let previousX = x(0), previousRight = x(0) + tickLabel(0).length * 7;
+    const finalLeft = x(last) - tickLabel(last).length * 7;
+    for (let index = 1; index < last; index++) {
+      const half = tickLabel(index).length * 3.5;
+      if (x(index) - half >= previousRight + 12 && x(index) + half <= finalLeft - 12 && x(index) - previousX >= Math.max(120, width / 5)) {
+        ticks.add(index); previousX = x(index); previousRight = x(index) + half;
+      }
+    }
     let penDown = false;
     const path = points.map((point, index) => {
       if (point.value === null) { penDown = false; return ""; }
@@ -89,32 +117,32 @@ export default function ElasticResultChart({ result, definition }: {
       return `${command}${x(index)},${y(point.value)}`;
     }).join(" ");
     chart = <div className="overflow-x-auto">
-      <svg viewBox="0 0 760 335" className="w-full min-w-[560px]" role="img" aria-labelledby={titleId}>
+      <svg viewBox={`0 0 ${plotWidth} 335`} width={plotWidth} height="335" className="block max-w-none" role="img" aria-labelledby={titleId}>
         <title id={titleId}>{`${description}. Null values leave gaps in the line.`}</title>
         {[0, 0.25, 0.5, 0.75, 1].map((tick) => <g key={tick}>
           <line x1={left} x2={left + width} y1={top + height * tick} y2={top + height * tick} stroke="#27272a" />
-          <text x={left - 10} y={top + height * tick + 4} textAnchor="end" fill="#a1a1aa" fontSize="11">{short(format((high - tick * (high - low)) * unit), 12)}</text>
+          <text x={left - 10} y={top + height * tick + 4} textAnchor="end" fill="#d4d4d8" fontSize="12">{short(format((high - tick * (high - low)) * unit), 12)}</text>
         </g>)}
         <path d={path} fill="none" stroke="#38bdf8" strokeWidth="3" />
         {points.map((point, index) => <g key={index}>
           {point.value !== null && <circle cx={x(index)} cy={y(point.value)} r="4" fill="#38bdf8" stroke="#09090b" tabIndex={0}>
             <title>{`${point.label}: ${format(point.value)}`}</title>
           </circle>}
-          {(index % Math.max(1, Math.ceil(points.length / 5)) === 0 || index === points.length - 1) &&
-            <text x={x(index)} y="275" textAnchor={index === 0 ? "start" : index === points.length - 1 ? "end" : "middle"} fill="#a1a1aa" fontSize="11">
-              {short(point.label.replace("T", " ").replace(/:00\.000Z$/, " UTC"), 22)}
+          {ticks.has(index) &&
+            <text x={x(index)} y="275" textAnchor={index === 0 ? "start" : index === points.length - 1 ? "end" : "middle"} fill="#d4d4d8" fontSize="12">
+              {tickLabel(index)}
             </text>}
         </g>)}
-        <text x="390" y="320" textAnchor="middle" fill="#a1a1aa" fontSize="12">{columnLabel(category)}{scale === "time" ? " (UTC)" : ""}</text>
+        <text x={left + width / 2} y="320" textAnchor="middle" fill="#d4d4d8" fontSize="13">{columnLabel(category)}{scale === "time" ? " (UTC)" : ""}</text>
       </svg>
-      <p className="text-xs text-zinc-500">{scale === "category" ? "Categories follow query order. Use SORT in ES|QL to set the order." : "The horizontal axis is sorted and spaced by value."}</p>
     </div>;
   }
 
-  return <div>{subtitle}{chart}
+  return <div ref={container} className="min-w-0">{subtitle}{chart}
     {result.truncated && <p className="mt-3 text-sm text-amber-300">Partial chart: only the first 100 result rows are shown. Narrow or aggregate the query to include the full result.</p>}
-    <details className="mt-4 text-sm text-zinc-400">
+    <details className="mt-4 text-sm text-zinc-300">
       <summary className="cursor-pointer">View chart data</summary>
+      {definition.display === "line" && <p className="mt-2">{scale === "category" ? "Categories follow query order. Use SORT in ES|QL to set the order." : "The horizontal axis is sorted and spaced by value."}</p>}
       <div className="mt-3 max-h-80 overflow-auto"><table className="w-full text-left">
         <caption className="sr-only">{description}</caption>
         <thead><tr><th scope="col" className="p-2">{columnLabel(category)}</th><th scope="col" className="p-2">{columnLabel(value)}</th></tr></thead>

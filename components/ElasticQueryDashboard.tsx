@@ -406,8 +406,11 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
         {query.error && <p className="mb-4 text-sm text-amber-300">{query.error} {query.result ? "Showing the last successful result." : "No successful result yet."}</p>}
         {stale && !query.error && <p className="mb-4 text-sm text-amber-300">These results are older than two refresh intervals.</p>}
         {query.result ? <Results result={query.result} display={query.display} chart={query.chart} /> : !query.error && <p role="status" className="flex items-center gap-2 py-5 text-zinc-400"><RefreshCw size={16} className="animate-spin" />Loading results in the background…</p>}
-        {query.result?.note && <p className="mt-3 text-xs text-zinc-500">{query.result.note}</p>}
-        {query.id === "asset-coverage" && query.source !== "crowdstrike" && <p className="mt-2 text-xs text-zinc-500">Asset inventory coverage, not vulnerability counts. Records from the last 25 hours; assets last seen within seven days. IDs recorded as both managed and unmanaged can count in both categories.</p>}
+        {(query.result?.note || (query.id === "asset-coverage" && query.source !== "crowdstrike")) && <details className={styles.resultDetails}>
+          <summary>Result details</summary>
+          {query.result?.note && <p>{query.result.note}</p>}
+          {query.id === "asset-coverage" && query.source !== "crowdstrike" && <p>Asset inventory coverage, not vulnerability counts. Records from the last 25 hours; assets last seen within seven days. IDs recorded as both managed and unmanaged can count in both categories.</p>}
+        </details>}
       </div>
       <footer className={styles.tileFooter}><span>{query.refreshedAt ? `Updated ${new Date(query.refreshedAt).toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC")}` : "No successful result yet"}</span><span>{query.enabled ? (query.refreshMinutes === 1440 ? "Daily refresh" : `Every ${query.refreshMinutes} min`) : "Automatic refresh paused"}</span></footer>
       </section>;

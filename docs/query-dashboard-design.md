@@ -7,9 +7,10 @@ uses top navigation; other application pages retain their existing sidebar.
 - Compact metric strips replace nested number cards. Severity uses the existing
   app palette. Percentage bars appear only for a result composed of severity
   columns; they describe the returned findings, not a second live API total.
-- Metric and chart tiles use a responsive two-column grid. Tables and metric
+- Metric and chart tiles use responsive wrapping rows. Tables and metric
   strips with four or more columns span the full width. Existing saved order is
-  retained, and narrow screens stack tiles.
+  retained, and narrow screens stack tiles. Lone smaller tiles grow to fill a row
+  when the next tile spans the full width, avoiding empty half-rows.
 - Arrange tiles enters a draft layout. Drag handles and keyboard/touch arrow
   buttons change only this draft. Save layout sends one request to the existing
   order endpoint. Cancel sends no mutation. Failed saves keep the draft available
@@ -48,3 +49,18 @@ September 24 22:54:28 UTC refresh timestamp and no error.
 
 Interactive checks used the isolated local fixture; no production tile was
 reordered or otherwise mutated for testing.
+
+## Readability follow-up
+
+The user's screenshot exposed gaps from mixed half/full-width rows and small,
+low-contrast supporting text. Wrapping flex rows now fill these gaps without
+changing saved order. Titles are 16px, supporting labels/table text are 14px,
+and captions/footers are 13px with zinc-300 contrast. Longer informational notes
+move into a native Result details disclosure; stale/error/partial-result warnings
+remain visible. Line and bar charts measure their container width instead of
+scaling the entire SVG, keeping text readable and the line plot at 335px high.
+Time ticks use shorter labels with space reserved for the last tick.
+
+Chromium checks passed with a half-width/full-width alternating fixture: all rows
+fill the available width, the line chart stays 335px tall, footer text is at least
+13px, details expand, and desktop/mobile arrangement and tile actions still work.
