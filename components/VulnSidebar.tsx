@@ -4,7 +4,7 @@ import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import localFont from "next/font/local";
-import { PanelLeftClose, PanelLeftOpen, SlidersHorizontal } from "lucide-react";
+import { PanelLeftClose, PanelLeftOpen, ShieldCheck, SlidersHorizontal } from "lucide-react";
 import { baseNavItems, type VulnNavItem } from "@/lib/navigation";
 import type { Connector } from "@/lib/types";
 
@@ -12,8 +12,6 @@ import type { Connector } from "@/lib/types";
 const settingsNavItems: VulnNavItem[] = [
   { label: "Settings", icon: SlidersHorizontal, href: "/settings" },
 ];
-
-const navItems: VulnNavItem[] = [...baseNavItems, ...settingsNavItems];
 
 const vibrocentric = localFont({
   src: "../fonts/Vibrocentric Rg.otf",
@@ -40,11 +38,21 @@ export default function VulnSidebar({
 }) {
   const pathname = usePathname();
   const [connectors, setConnectors] = useState<Connector[]>([]);
+  const [elasticEnabled, setElasticEnabled] = useState(false);
+  const navItems: VulnNavItem[] = [
+    ...baseNavItems,
+    ...(elasticEnabled ? [{ label: "Elastic Coverage", icon: ShieldCheck, href: "/elastic-vulnerabilities" }] : []),
+    ...settingsNavItems,
+  ];
 
   useEffect(() => {
     fetch("/api/connectors")
       .then((r) => r.json())
       .then((d) => setConnectors(d.connectors ?? []))
+      .catch(() => {});
+    fetch("/api/elastic-vulnerabilities/status", { cache: "no-store" })
+      .then((response) => response.ok ? response.json() : null)
+      .then((data) => setElasticEnabled(data?.enabled === true))
       .catch(() => {});
   }, []);
 

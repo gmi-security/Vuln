@@ -22,6 +22,8 @@ async function run(mode) {
   Object.assign(env, { NODE_ENV: "production", NEXTAUTH_URL: base, NEXTAUTH_SECRET: secret,
     VULN_DISABLE_SCHEDULER: "true", ELASTIC_VULN_ENABLED: mode === "disabled" ? "false" : "true",
     ELASTIC_VULN_SAMPLE_DATA: mode === "sample" ? "true" : "false", ELASTIC_VULN_INGEST_TOKEN: ingestToken });
+  // Production release must work with the existing environment unchanged.
+  if (mode === "empty") delete env.ELASTIC_VULN_ENABLED;
   const child = spawn(process.execPath, ["node_modules/next/dist/bin/next", "start", "-H", "127.0.0.1", "-p", String(port)],
     { env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
@@ -37,6 +39,9 @@ async function run(mode) {
     const token = await encode({ secret, token: { name: "Local test", orgMember: true }, maxAge: 60 });
     const headers = { cookie: `next-auth.session-token=${token}` };
     assert.equal((await fetch(`${base}/api/elastic-vulnerabilities`)).status, 401);
+    assert.equal((await fetch(`${base}/api/elastic-vulnerabilities/status`)).status, 401);
+    assert.deepEqual(await (await fetch(`${base}/api/elastic-vulnerabilities/status`, { headers })).json(),
+      { enabled: mode !== "disabled" });
     assert.equal((await fetch(`${base}/elastic-vulnerabilities`, { redirect: "manual" })).status, 307);
     assert.equal((await fetch(`${base}/dashboard`, { headers })).status, 200);
     assert.equal((await fetch(`${base}/api/connectors`, { headers })).status, 200);

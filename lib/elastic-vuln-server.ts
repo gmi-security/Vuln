@@ -3,7 +3,9 @@ import { Pool } from "pg";
 import { parseAssetCoverage, type AssetCoverageSnapshot, type ElasticCoverageView } from "./elastic-vuln";
 
 export function elasticVulnEnabled(): boolean {
-  return process.env.ELASTIC_VULN_ENABLED === "true";
+  // Released read-only page is enabled by default; explicit false hides it.
+  // Ingestion still fails closed without its separately configured secret.
+  return (process.env.ELASTIC_VULN_ENABLED ?? "true") === "true";
 }
 
 export function elasticIngestAuthorized(request: Request): boolean {
