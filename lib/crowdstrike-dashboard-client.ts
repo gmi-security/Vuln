@@ -132,13 +132,33 @@ export async function executeCrowdStrike(connection: CrowdStrikeConnection, valu
       rows: [counts], truncated: false,
       note: "CrowdStrike CVSS severity counts for this filter, one finding per vulnerability instance. Counts are separate API observations collected during this refresh, not a single atomic snapshot. None and Unknown are retained; these are not GMI priorities or ExPRT ratings." };
   }
+  if (options.view === "cve-devices") {
+    const records = new Map<string, Vulnerability>();
+    // Severity is the primary ordering key. Finish each severity completely;
+    // lower severities cannot displace a full top-N from completed higher ones.
+    for (const severity of ["CRITICAL", "HIGH", "MEDIUM", "LOW", "NONE", "UNKNOWN"]) {
+      const batch = await collectRecords(auth, deadline, `(${input.query})+cve.severity:'${severity}'`, ["cve"], 1000);
+      for (const [id, row] of batch) {
+        if (row.severity !== severity || records.has(id)) throw new DashboardError("CrowdStrike findings changed severity during collection. Retry; no partial device counts were saved.");
+        records.set(id, row);
+      }
+      const result = dataset.summarize(records.values(), options);
+      if (result.rows.length >= options.top) return result;
+    }
+    return dataset.summarize(records.values(), options);
+  }
+  return dataset.summarize((await collectRecords(auth, deadline, input.query, dataset.facets, 500)).values(), options);
+}
+
+async function collectRecords(auth: Awaited<ReturnType<typeof session>>, deadline: number, filter: string, facets: string[], limit: number): Promise<Map<string, Vulnerability>> {
+  const dataset = CROWDSTRIKE_DATASETS.vulnerabilities;
   const records = new Map<string, Vulnerability>(), cursors = new Set<string>();
   let after = "", received = 0, expected = 0;
   for (let page = 0; page < 500; page++) {
     const url = new URL(`${auth.base}${dataset.path}`);
-    url.searchParams.set("filter", input.query); url.searchParams.set("limit", "500");
+    url.searchParams.set("filter", filter); url.searchParams.set("limit", String(limit));
     // The Spotlight API uses multi-value query encoding, not a comma-separated value.
-    for (const facet of dataset.facets) url.searchParams.append("facet", facet);
+    for (const facet of facets) url.searchParams.append("facet", facet);
     if (after) url.searchParams.set("after", after);
     const body = await jsonRequest(url, { headers: auth.headers }, deadline, auth.secrets);
     const pagination = body.meta?.pagination;
@@ -161,7 +181,7 @@ export async function executeCrowdStrike(connection: CrowdStrikeConnection, valu
     after = pagination.after || "";
     if (!after || records.size >= expected) {
       if (records.size < expected) throw new DashboardError("CrowdStrike pagination ended before all findings were received. Retry; no partial totals were saved.");
-      return dataset.summarize(records.values(), options);
+      return records;
     }
     if (!body.resources.length || cursors.has(after)) throw new DashboardError("CrowdStrike pagination did not advance. Retry; no partial totals were saved.");
     cursors.add(after);

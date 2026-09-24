@@ -152,10 +152,13 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
     if (crowdstrike.view === "patch-worklist" || crowdstrike.view === "severity-counts") {
       crowdstrike.history = false; crowdstrike.groupBy = "none"; crowdstrike.measure = "findings";
     }
+    if (crowdstrike.view === "cve-devices") {
+      crowdstrike.history = false; crowdstrike.groupBy = "cve"; crowdstrike.measure = "hosts";
+    }
     if (crowdstrike.history) crowdstrike.groupBy = "none";
     const category = crowdstrike.history ? "day" : crowdstrike.groupBy === "none" ? undefined : crowdstrike.groupBy;
     setDraft({ ...draft, crowdstrike, chart: category ? { category, value: crowdstrike.measure } : undefined,
-      display: crowdstrike.view === "patch-worklist" ? "table" : crowdstrike.view === "severity-counts" ? "metrics" : crowdstrike.history ? "line" : "auto" });
+      display: crowdstrike.view === "patch-worklist" || crowdstrike.view === "cve-devices" ? "table" : crowdstrike.view === "severity-counts" ? "metrics" : crowdstrike.history ? "line" : "auto" });
     setPreview(null);
   }
   const anyConnected = dashboard.connected || dashboard.crowdstrike?.connected;
@@ -276,10 +279,11 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
             <select className={`${selectClass} mt-2 block`} value={draft.crowdstrike?.view ?? "summary"} onChange={(event) => updateCrowdStrike({ view: event.target.value as CrowdStrikeOptions["view"] })}>
               <option value="summary">Summary / chart</option><option value="patch-worklist">Patch worklist</option>
               <option value="severity-counts">Severity counts</option>
+              <option value="cve-devices">Affected devices by CVE</option>
             </select>
           </label>
           <div className="flex flex-wrap gap-4">
-            {draft.crowdstrike?.view !== "patch-worklist" && draft.crowdstrike?.view !== "severity-counts" && <>
+            {(!draft.crowdstrike?.view || draft.crowdstrike.view === "summary") && <>
             <label className="text-sm text-zinc-300">Measure
               <select className={`${selectClass} mt-2 block`} value={draft.crowdstrike?.measure} onChange={(event) => updateCrowdStrike({ measure: event.target.value as CrowdStrikeOptions["measure"] })}>
                 <option value="findings">Finding count</option><option value="cves">Unique CVEs</option><option value="hosts">Unique affected hosts</option>
@@ -291,13 +295,13 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
               </select>
             </label>
             </>}
-            {(draft.crowdstrike?.view === "patch-worklist" || draft.crowdstrike?.groupBy !== "none") && <label className="text-sm text-zinc-300">{draft.crowdstrike?.view === "patch-worklist" ? "Top findings" : "Top groups"}
+            {(draft.crowdstrike?.view === "patch-worklist" || draft.crowdstrike?.groupBy !== "none") && <label className="text-sm text-zinc-300">{draft.crowdstrike?.view === "patch-worklist" ? "Top findings" : draft.crowdstrike?.view === "cve-devices" ? "Top CVEs" : "Top groups"}
               <select className={`${selectClass} mt-2 block`} value={draft.crowdstrike?.top} onChange={(event) => updateCrowdStrike({ top: Number(event.target.value) })}>
                 {[10, 25, 50, 100].map((value) => <option key={value} value={value}>{value}</option>)}
               </select>
             </label>}
           </div>
-          {draft.crowdstrike?.view === "severity-counts" ? <p className="text-xs text-zinc-500">Critical, High, Medium, Low, None and Unknown together. Uses CrowdStrike's CVSS severity totals without downloading every finding. Counts vulnerability instances, not unique CVEs. The preset includes open/reopened findings, including suppressed findings; add a suppression filter if needed.</p> : draft.crowdstrike?.view === "patch-worklist" ? <p className="text-xs text-zinc-500">Open P1–P3 findings, one row per finding and device. Sorted by GMI priority, risk score, then affected devices. The preset excludes suppressed findings. All matching pages are collected before choosing the top rows. Use Daily refresh for broad filters.</p> : <>
+          {draft.crowdstrike?.view === "cve-devices" ? <p className="text-xs text-zinc-500">One row per CVE. Counts unique affected devices across open/reopened findings. Sorted by CVSS severity, then affected devices. Each severity is collected completely before ranking; lower severities are skipped once higher severities fill the table.</p> : draft.crowdstrike?.view === "severity-counts" ? <p className="text-xs text-zinc-500">Critical, High, Medium, Low, None and Unknown together. Uses CrowdStrike's CVSS severity totals without downloading every finding. Counts vulnerability instances, not unique CVEs. The preset includes open/reopened findings, including suppressed findings; add a suppression filter if needed.</p> : draft.crowdstrike?.view === "patch-worklist" ? <p className="text-xs text-zinc-500">Open P1–P3 findings, one row per finding and device. Sorted by GMI priority, risk score, then affected devices. The preset excludes suppressed findings. All matching pages are collected before choosing the top rows. Use Daily refresh for broad filters.</p> : <>
             <label className="flex items-center gap-2 text-sm text-zinc-300"><input type="checkbox" checked={draft.crowdstrike?.history ?? false} onChange={(event) => updateCrowdStrike({ history: event.target.checked })} />Save daily history of the total</label>
             <p className="text-xs text-zinc-500">FQL filters findings; the app calculates the measure across every returned page. History starts with the first saved collection and shows the latest successful count per UTC day. Each filter and measure has separate history. Missing days appear as gaps.</p>
           </>}
@@ -310,7 +314,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
         </label>
         <div className="flex flex-wrap items-end gap-4">
           <label className="text-sm text-zinc-300">Display
-            <select disabled={draft.source === "crowdstrike" && draft.crowdstrike?.view === "patch-worklist"} className={`${selectClass} mt-2 block`} value={draft.display} onChange={(event) => setDraft({ ...draft, display: event.target.value as Draft["display"], chart: draft.chart ?? (preview ? suggestChart(preview) : undefined) })}>
+            <select disabled={draft.source === "crowdstrike" && ["patch-worklist", "cve-devices"].includes(draft.crowdstrike?.view ?? "")} className={`${selectClass} mt-2 block`} value={draft.display} onChange={(event) => setDraft({ ...draft, display: event.target.value as Draft["display"], chart: draft.chart ?? (preview ? suggestChart(preview) : undefined) })}>
               <option value="auto">Automatic</option><option value="metrics">Number cards</option><option value="table">Table</option>
               {draft.crowdstrike?.view !== "severity-counts" && <><option value="bar">Bar chart</option><option value="line">Line chart</option><option value="doughnut">Doughnut chart</option></>}
             </select>

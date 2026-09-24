@@ -74,6 +74,7 @@ export function patchWorklist(records: Iterable<Vulnerability>, top: number): Qu
 }
 
 export function summarizeVulnerabilities(records: Iterable<Vulnerability>, options: CrowdStrikeOptions): QueryResult {
+  if (options.view === "cve-devices") return cveDeviceTable(records, options.top);
   if (options.view === "patch-worklist") return patchWorklist(records, options.top);
   const groups = new Map<string, Set<string>>();
   const overall = new Set<string>();
@@ -93,6 +94,31 @@ export function summarizeVulnerabilities(records: Iterable<Vulnerability>, optio
   return { columns: [{ name: options.groupBy, type: "keyword" }, { name: options.measure, type: "long" }],
     rows: rows.slice(0, options.top), truncated: false,
     note: `Top ${Math.min(rows.length, options.top)} of ${rows.length} groups, calculated from all matching findings. Unique CVEs or hosts can appear in more than one group.` };
+}
+
+export function cveDeviceTable(records: Iterable<Vulnerability>, top: number): QueryResult {
+  const rank = (severity: string) => ({ CRITICAL: 5, HIGH: 4, MEDIUM: 3, LOW: 2, NONE: 1 }[severity] ?? 0);
+  const groups = new Map<string, { severity: string; devices: Set<string>; findings: Set<string>; cvss: number | null; kev: boolean | null }>();
+  let excluded = 0;
+  for (const row of records) {
+    if (!["open", "reopen"].includes(row.status)) continue;
+    if (!/^CVE-\d{4}-\d+$/i.test(row.cve)) { excluded++; continue; }
+    if (!row.hostId) throw new DashboardError("A CVE finding is missing its host ID. Complete affected-device counts cannot be calculated.");
+    const cve = row.cve.toUpperCase();
+    const group = groups.get(cve) ?? { severity: row.severity, devices: new Set<string>(), findings: new Set<string>(), cvss: null, kev: null };
+    group.devices.add(JSON.stringify([row.cid, row.hostId]));
+    group.findings.add(JSON.stringify([row.cid, row.id]));
+    if (rank(row.severity) > rank(group.severity)) group.severity = row.severity;
+    if (row.cvss !== null) group.cvss = Math.max(group.cvss ?? 0, row.cvss);
+    if (row.kev !== null) group.kev = group.kev === true || row.kev;
+    groups.set(cve, group);
+  }
+  const rows = [...groups].sort(([a, x], [b, y]) => rank(y.severity) - rank(x.severity) || y.devices.size - x.devices.size || a.localeCompare(b));
+  return { columns: [{ name: "cve", type: "keyword" }, { name: "severity", type: "keyword" },
+    { name: "affected_devices", type: "long" }, { name: "open_findings", type: "long" },
+    { name: "cvss", type: "double" }, { name: "cisa_kev", type: "boolean" }],
+    rows: rows.slice(0, top).map(([cve, row]) => [cve, row.severity, row.devices.size, row.findings.size, row.cvss, row.kev]), truncated: false,
+    note: `Top ${Math.min(top, rows.length)} CVEs by severity, then unique affected devices. Critical, High, Medium, Low, None, Unknown. Open/reopened findings only; each tenant/device counts once per CVE. ${excluded ? `${excluded} findings without a CVE identifier excluded. ` : ""}Counts reflect the matching population observed during collection.` };
 }
 
 // Dataset adapters own endpoint-specific pagination and normalization. Future

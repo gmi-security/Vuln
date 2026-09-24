@@ -36,8 +36,9 @@ async function mockHttp(replies, work) {
   const original = globalThis.fetch, calls = [];
   globalThis.fetch = async (url, init) => {
     if (new URL(url).pathname === "/spotlight/combined/vulnerabilities/v1") {
-      assert.deepEqual(new URL(url).searchParams.getAll("facet"), ["cve", "host_info"],
-        "CrowdStrike requires repeated facet parameters, not a comma-joined facet");
+      const facets = new URL(url).searchParams.getAll("facet");
+      assert.ok(JSON.stringify(facets) === '["cve","host_info"]' || JSON.stringify(facets) === '["cve"]',
+        "CrowdStrike requires separate facet parameters; CVE summaries omit host detail");
     }
     calls.push({ url: new URL(url), init });
     const reply = replies.shift(); assert.ok(reply, "Unexpected outbound request");
@@ -46,6 +47,57 @@ async function mockHttp(replies, work) {
   try { return await work(calls); } finally { globalThis.fetch = original; }
 }
 const auth = { access_token: "fake-access-token" };
+
+const cveOptions = { ...options, view: "cve-devices", measure: "hosts", groupBy: "cve", top: 10 };
+test("CVE device table deduplicates devices and sorts severity before prevalence", () => {
+  const items = [raw("a"), raw("b"), raw("c", { aid: "host-2" }), raw("d", { cid: "tenant-b" }),
+    raw("e", { cve: { id: "CVE-2026-2", severity: "CRITICAL", base_score: 9.8 } }),
+    raw("f", { cve: { id: "CVE-2026-3", severity: "LOW" } }),
+    raw("g", { status: "closed", cve: { id: "CVE-2026-4", severity: "CRITICAL" } }),
+    raw("h", { cve: {} }), raw("i", { cve: { id: "CVE-2026-5", severity: "MEDIUM" } })];
+  const result = adapter.summarizeVulnerabilities(items.map(adapter.normalizeVulnerability), cveOptions);
+  assert.deepEqual(result.rows.map(row => row.slice(0,4)), [
+    ["CVE-2026-2", "CRITICAL", 1, 1], ["CVE-2026-1", "HIGH", 3, 4],
+    ["CVE-2026-5", "MEDIUM", 1, 1], ["CVE-2026-3", "LOW", 1, 1]]);
+  assert.match(result.note, /1 findings without a CVE/);
+  assert.equal(result.rows[0][4], 9.8);
+  assert.equal(result.rows[0][5], null);
+  assert.throws(() => adapter.summarizeVulnerabilities([adapter.normalizeVulnerability(raw("missing", { aid: "" }))], cveOptions), /host ID/);
+  assert.equal(contract.parseQueryInput({ ...input, crowdstrike: cveOptions }).crowdstrike.view, "cve-devices");
+  assert.throws(() => contract.parseQueryInput({ ...input, crowdstrike: { ...cveOptions, measure: "findings" } }), /unique hosts/);
+});
+
+test("CVE ranking finishes the whole critical population before taking top rows", async () => {
+  const rows = Array.from({ length: 10 }, (_, i) => raw(`critical-${i}`, { cve: { id: `CVE-2026-${i+1}`, severity: "CRITICAL" } }));
+  const extra = raw("critical-extra", { aid: "host-2", cve: { id: "CVE-2026-10", severity: "CRITICAL" } });
+  await mockHttp([auth, page(rows, "second", 11), page([extra], "", 11)], async calls => {
+    const result = await client.executeCrowdStrike(connection, { ...input, crowdstrike: cveOptions });
+    assert.equal(result.rows.length, 10);
+    assert.equal(result.rows[0][0], "CVE-2026-10");
+    assert.equal(result.rows[0][2], 2);
+    assert.equal(calls.length, 3, "Lower severities cannot enter an already full critical-first top ten");
+    for (const call of calls.slice(1)) {
+      assert.equal(call.url.searchParams.get("filter"), "(status:['open','reopen'])+cve.severity:'CRITICAL'");
+      assert.deepEqual(call.url.searchParams.getAll("facet"), ["cve"]);
+    }
+  });
+});
+
+test("CVE collection visits lower severities only when needed and never returns partial groups", async () => {
+  const high = raw("high");
+  await mockHttp([auth, page([]), page([high]), page([]), page([]), page([]), page([])], async calls => {
+    const result = await client.executeCrowdStrike(connection, { ...input, crowdstrike: cveOptions });
+    assert.equal(result.rows.length, 1);
+    assert.equal(result.rows[0][1], "HIGH");
+    assert.equal(calls.length, 7);
+  });
+  await mockHttp([auth, page([high])], async () => {
+    await assert.rejects(client.executeCrowdStrike(connection, { ...input, crowdstrike: cveOptions }), /changed severity/);
+  });
+  await mockHttp([auth, page([], "", 5)], async () => {
+    await assert.rejects(client.executeCrowdStrike(connection, { ...input, crowdstrike: cveOptions }), /before all findings/);
+  });
+});
 
 test("severity count preset preserves its view and rejects incompatible options", () => {
   const preset = { ...input, crowdstrike: { ...options, view: "severity-counts" } };

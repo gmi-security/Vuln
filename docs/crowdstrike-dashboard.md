@@ -71,6 +71,31 @@ The user was asked for the exact tile status/error. Saved refreshes are serial,
 so long queries can delay later tiles; this is a possible contributor, not a
 confirmed diagnosis. No production saved queries or connection settings changed.
 
+## CVEs by affected devices (2026-09-24)
+
+The user requested a saved table directly, not another Add tile preset. The new
+`cve-devices` view supports one row per CVE with severity, unique affected devices,
+open finding count, CVSS and CISA KEV. Devices are keyed by tenant and host ID;
+multiple affected applications on a device count once for that CVE. Missing host
+IDs fail the result; records without CVE identifiers are excluded and disclosed.
+Rows sort Critical, High, Medium, Low, None, Unknown, then device count descending,
+then CVE ID. The requested tile uses the top 100, open/reopened findings including
+suppressed findings, and daily refresh. Existing internal scrolling and CSV apply.
+
+To avoid collecting over two million records for a severity-first top 100, the
+client completes one severity at a time with the CVE detail facet only. It stops
+after a completed severity fills the requested row count; lower severities cannot
+displace those rows. It never takes the first N findings as a CVE ranking. The
+existing complete-pagination checks, per-severity 250,000-record cap, five-minute
+budget and cached-result retention still apply. A finding moving between severity
+groups fails the refresh. API pages are observations, not an atomic snapshot.
+
+Live volume check: saved severity counts showed 74,912 Critical findings. A
+read-only sample of 1,500 Critical findings already contained 123 distinct CVEs;
+this confirms that a top-100 table is filled from the Critical group in that
+observation, but is not itself the complete ranking. No new preset button was
+added. A server-side edit option preserves the saved view during later edits.
+
 ## Patch worklist
 
 Add query > CrowdStrike > **Use patch worklist** > **Add to dashboard**. Preview
