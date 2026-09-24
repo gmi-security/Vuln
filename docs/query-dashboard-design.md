@@ -64,3 +64,8 @@ Time ticks use shorter labels with space reserved for the last tick.
 Chromium checks passed with a half-width/full-width alternating fixture: all rows
 fill the available width, the line chart stays 335px tall, footer text is at least
 13px, details expand, and desktop/mobile arrangement and tile actions still work.
+
+The final build/type check and all three HTTP smoke modes passed. Commit
+`f6e2110ee15862cdbb06a037ae15320587030d7b` is ACTIVE in deployment
+`92417e2f-9418-4c35-b1cb-aeb89acdb8d8`. Live application health and database
+reachability checks passed. No saved tile order or query was changed.
