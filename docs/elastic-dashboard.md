@@ -145,6 +145,14 @@ migration and retain their display behavior.
 - Validation includes SVG rendering, empty/null/negative/zero values, date order,
   duplicate/missing columns, and PostgreSQL persistence plus schema-change
   retention. Browser visual inspection was unavailable (no browser surface).
+- Production commit `e169c2e9bab6a299397cba812b57f52d0ccb9c4d` deployed as
+  `cd04b9cb-0e12-4ced-b760-bd92aed1a527` and reached ACTIVE on 2026-09-24.
+  All nine contract/render/database tests, the production build, and three HTTP
+  smoke modes passed. Live health returned 200 with database reachable; anonymous
+  dashboard access redirected to login and its API returned 401.
+- The disposable chart test database was removed. Automatic approval review
+  blocked removal of `.next-before-native-charts-20260924115417`; this untracked
+  local cache backup remains outside the release. No detailed reason was supplied.
 
 ## Production release evidence (2026-09-24)
 
