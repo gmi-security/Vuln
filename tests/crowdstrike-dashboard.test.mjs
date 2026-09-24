@@ -35,6 +35,10 @@ const page = (resources, after = "", total = resources.length) => ({ resources, 
 async function mockHttp(replies, work) {
   const original = globalThis.fetch, calls = [];
   globalThis.fetch = async (url, init) => {
+    if (new URL(url).pathname === "/spotlight/combined/vulnerabilities/v1") {
+      assert.deepEqual(new URL(url).searchParams.getAll("facet"), ["cve", "host_info"],
+        "CrowdStrike requires repeated facet parameters, not a comma-joined facet");
+    }
     calls.push({ url: new URL(url), init });
     const reply = replies.shift(); assert.ok(reply, "Unexpected outbound request");
     return new Response(JSON.stringify(reply.body ?? reply), { status: reply.status ?? 200, headers: reply.headers });
@@ -42,6 +46,14 @@ async function mockHttp(replies, work) {
   try { return await work(calls); } finally { globalThis.fetch = original; }
 }
 const auth = { access_token: "fake-access-token" };
+
+test("connection checks request the same detail facets as saved queries", async () => {
+  await mockHttp([auth, page([raw("connection-check")])], async (calls) => {
+    await client.testCrowdStrikeConnection(connection);
+    assert.equal(calls[1].url.searchParams.get("limit"), "1");
+    assert.equal(calls[1].url.searchParams.get("filter"), input.query);
+  });
+});
 
 test("source contracts reject unsupported datasets and ambiguous history", () => {
   assert.equal(contract.parseQueryInput(input).source, "crowdstrike");

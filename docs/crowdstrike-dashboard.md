@@ -123,7 +123,7 @@ successful saved collection. A daily chart initially has one point.
   distinct HKDF context derived from `NEXTAUTH_SECRET`.
 
 The first connector calls `GET /spotlight/combined/vulnerabilities/v1` with
-`facet=cve,host_info`, limit 500 and the returned `after` cursor. It fetches full
+`facet=cve&facet=host_info`, limit 500 and the returned `after` cursor. It fetches full
 matching current findings on each refresh, not daily diffs. No n8n is involved.
 It deduplicates by tenant + finding ID and picks the later update when ordered
 duplicates differ. Conflicting unordered duplicates fail rather than guessing.
@@ -161,6 +161,19 @@ adds 5/3/1. The sum is rounded to one decimal.
   contribute no points; an unknown severity remains UNKNOWN in severity grouping.
 
 ## Validation and rollout
+
+Facet encoding correction (September 24, 2026): production returned HTTP 400
+"Unknown facet" because the connector sent `cve,host_info` as one facet value.
+The connector now appends separate `facet=cve&facet=host_info` parameters on
+every page. The one-record connection check requests the same facets. This
+matches the `multi` collection format in the official
+[Go SDK request serializer](https://github.com/CrowdStrike/gofalcon/blob/main/falcon/client/spotlight_vulnerabilities/combined_query_vulnerabilities_parameters.go).
+The regression check failed before the fix; all 11 connector tests passed after
+it, including pagination and worklist collection. The production build and HTTP
+smoke passed in all three modes (no database configured for this smoke run).
+No stored query, credential, or schema changes are needed. Retry a failed saved
+tile with Refresh, or add the draft without preview. Authenticated live query
+execution remains unverified from the development environment.
 
 Patch worklist and tile deletion validation (September 24, 2026): all 21 tests
 passed without skips, including full-page ranking, duplicate device counting,

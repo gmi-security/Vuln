@@ -102,6 +102,7 @@ export async function testCrowdStrikeConnection(connection: CrowdStrikeConnectio
   const auth = await session(connection, deadline);
   const url = new URL(`${auth.base}${CROWDSTRIKE_DATASETS.vulnerabilities.path}`);
   url.searchParams.set("filter", "status:['open','reopen']"); url.searchParams.set("limit", "1");
+  for (const facet of CROWDSTRIKE_DATASETS.vulnerabilities.facets) url.searchParams.append("facet", facet);
   const result = await jsonRequest(url, { headers: auth.headers }, deadline, auth.secrets);
   if (!Array.isArray(result.resources)) throw new DashboardError("CrowdStrike did not return vulnerability data.");
 }
@@ -116,7 +117,8 @@ export async function executeCrowdStrike(connection: CrowdStrikeConnection, valu
   for (let page = 0; page < 500; page++) {
     const url = new URL(`${auth.base}${dataset.path}`);
     url.searchParams.set("filter", input.query); url.searchParams.set("limit", "500");
-    url.searchParams.set("facet", dataset.facets);
+    // The Spotlight API uses multi-value query encoding, not a comma-separated value.
+    for (const facet of dataset.facets) url.searchParams.append("facet", facet);
     if (after) url.searchParams.set("after", after);
     const body = await jsonRequest(url, { headers: auth.headers }, deadline, auth.secrets);
     const pagination = body.meta?.pagination;

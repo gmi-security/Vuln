@@ -98,5 +98,5 @@ export function summarizeVulnerabilities(records: Iterable<Vulnerability>, optio
 // Dataset adapters own endpoint-specific pagination and normalization. Future
 // Hosts/Discover datasets can implement the same interface without tile routes.
 export const CROWDSTRIKE_DATASETS = {
-  vulnerabilities: { path: "/spotlight/combined/vulnerabilities/v1", facets: "cve,host_info", normalize: normalizeVulnerability, summarize: summarizeVulnerabilities },
+  vulnerabilities: { path: "/spotlight/combined/vulnerabilities/v1", facets: ["cve", "host_info"], normalize: normalizeVulnerability, summarize: summarizeVulnerabilities },
 };
