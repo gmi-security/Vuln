@@ -11,7 +11,8 @@ export type QueryDefinition = {
   id: string;
   title: string;
   query: string;
-  display: "auto" | "metrics" | "table";
+  display: "auto" | "metrics" | "table" | "bar" | "line" | "doughnut";
+  chart?: { category: string; value: string };
   refreshMinutes: number;
   enabled: boolean;
 };
@@ -52,11 +53,20 @@ export function parseDefinition(value: unknown, id: string): QueryDefinition {
   const body = value as Record<string, unknown>;
   if (!/^[a-zA-Z0-9-]{1,64}$/.test(id)) throw new DashboardError("Invalid query ID.");
   if (typeof body.title !== "string" || !body.title.trim() || body.title.length > 100) throw new DashboardError("Enter a title of at most 100 characters.");
-  if (!["auto", "metrics", "table"].includes(String(body.display))) throw new DashboardError("Choose a display type.");
+  if (!["auto", "metrics", "table", "bar", "line", "doughnut"].includes(String(body.display))) throw new DashboardError("Choose a display type.");
+  let chart: QueryDefinition["chart"];
+  if (isChartDisplay(String(body.display))) {
+    const mapping = body.chart as QueryDefinition["chart"];
+    if (!mapping || typeof mapping.category !== "string" || typeof mapping.value !== "string" ||
+        !mapping.category || !mapping.value || mapping.category.length > 256 || mapping.value.length > 256 || mapping.category === mapping.value) {
+      throw new DashboardError("Preview the query and choose different category and numeric value columns.");
+    }
+    chart = { category: mapping.category, value: mapping.value };
+  }
   if (typeof body.refreshMinutes !== "number" || ![5, 15, 30, 60].includes(body.refreshMinutes)) throw new DashboardError("Choose a refresh interval: 5, 15, 30, or 60 minutes.");
   if (typeof body.enabled !== "boolean") throw new DashboardError("Invalid refresh setting.");
   return { id, title: body.title.trim(), query: validateQuery(body.query), display: body.display as QueryDefinition["display"],
-    refreshMinutes: body.refreshMinutes, enabled: body.enabled };
+    refreshMinutes: body.refreshMinutes, enabled: body.enabled, ...(chart ? { chart } : {}) };
 }
 
 export function parseQueryResult(value: unknown, warning = false): QueryResult {
@@ -94,4 +104,50 @@ export function canShowMetrics(result: QueryResult): boolean {
 
 export function columnLabel(name: string): string {
   return name.replace(/_pct$/i, " percentage").replace(/[_.]/g, " ").replace(/^./, (char) => char.toUpperCase());
+}
+
+export function isChartDisplay(display: string): display is "bar" | "line" | "doughnut" {
+  return ["bar", "line", "doughnut"].includes(display);
+}
+
+export function numericColumn(type: string): boolean {
+  return ["byte", "short", "integer", "long", "unsigned_long", "float", "half_float", "double", "scaled_float", "counter_long", "counter_double", "counter_integer"].includes(type);
+}
+
+export function suggestChart(result: QueryResult): QueryDefinition["chart"] {
+  const value = result.columns.find((column) => numericColumn(column.type));
+  const category = result.columns.find((column) => !numericColumn(column.type)) ?? result.columns.find((column) => column.name !== value?.name);
+  return value && category ? { category: category.name, value: value.name } : undefined;
+}
+
+export function chartData(result: QueryResult, definition: Pick<QueryDefinition, "display" | "chart">) {
+  const mapping = definition.chart;
+  if (!mapping || mapping.category === mapping.value) throw new DashboardError("Choose category and value columns to preview the chart.");
+  const categoryIndex = result.columns.findIndex((column) => column.name === mapping.category);
+  const valueIndex = result.columns.findIndex((column) => column.name === mapping.value);
+  if (categoryIndex < 0 || valueIndex < 0) throw new DashboardError("A selected chart column is missing. Edit the query and choose its columns again.");
+  if (!numericColumn(result.columns[valueIndex].type)) throw new DashboardError("The chart value column must be numeric.");
+  const categoryType = result.columns[categoryIndex].type;
+  const scale = numericColumn(categoryType) ? "number" : ["date", "datetime", "date_nanos"].includes(categoryType) ? "time" : "category";
+  const seen = new Set<string>();
+  const points = result.rows.map((row) => {
+    const raw = row[categoryIndex];
+    if (raw === null) throw new DashboardError("Chart categories cannot be null. Filter or name missing categories in ES|QL.");
+    const label = String(raw);
+    if (seen.has(label)) throw new DashboardError("Return one row per category. Aggregate duplicates with STATS ... BY before charting.");
+    seen.add(label);
+    const value = row[valueIndex];
+    if (value !== null && (typeof value !== "number" || !Number.isFinite(value))) throw new DashboardError("Chart values must be finite numbers or null.");
+    if (definition.display === "doughnut" && value !== null && value < 0) throw new DashboardError("Doughnut charts require non-negative values. Use a bar or line chart for negatives.");
+    const x = scale === "number" ? Number(raw) : scale === "time" ? Date.parse(label) : 0;
+    if (scale !== "category" && !Number.isFinite(x)) throw new DashboardError("The chart category contains an invalid number or date.");
+    return { label, value: value as number | null, x };
+  });
+  if (definition.display === "line" && scale !== "category") points.sort((a, b) => a.x - b.x);
+  return { points, scale, category: mapping.category, value: mapping.value };
+}
+
+export function validateDisplayResult(result: QueryResult, definition: Pick<QueryDefinition, "display" | "chart">): void {
+  if (definition.display === "metrics" && !canShowMetrics(result)) throw new DashboardError("Number cards require one row of numeric columns. Choose Table or Automatic.");
+  if (isChartDisplay(definition.display)) chartData(result, definition);
 }

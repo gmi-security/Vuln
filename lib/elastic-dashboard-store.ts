@@ -2,7 +2,7 @@ import { Pool } from "pg";
 import { randomUUID } from "node:crypto";
 import { applicationDatabase } from "./persist";
 import { elasticVulnEnabled } from "./elastic-vuln-server";
-import { DEFAULT_COVERAGE, DashboardError, canShowMetrics, parseDefinition,
+import { DEFAULT_COVERAGE, DashboardError, validateDisplayResult, parseDefinition,
   type DashboardQuery, type ElasticDashboard, type QueryResult } from "./elastic-dashboard";
 import { executeEsql, normalizeEndpoint, openConnection, sealConnection, type ElasticConnection } from "./elastic-query-client";
 
@@ -140,7 +140,7 @@ export async function saveQuery(value: unknown, actor: string): Promise<void> {
   if (!saved) throw new DashboardError("Connect Elasticsearch first.", 409);
   throttlePreview(actor);
   const result = await limitedQuery(saved.value, definition.query);
-  if (definition.display === "metrics" && !canShowMetrics(result)) throw new DashboardError("Number cards require one row of numeric columns. Choose Table or Automatic.");
+  validateDisplayResult(result, definition);
   const db = await database();
   const client = await db.connect();
   try {
@@ -183,7 +183,7 @@ async function refreshQueries(force = false): Promise<void> {
     let error: string | null = null;
     try {
       result = await limitedQuery(saved.value, definition.query);
-      if (definition.display === "metrics" && !canShowMetrics(result)) throw new DashboardError("Query no longer returns one numeric row.");
+      validateDisplayResult(result, definition);
     } catch (err) {
       result = null;
       error = err instanceof DashboardError ? err.message : "Elastic refresh failed. Check the connection and query, then retry.";

@@ -3,8 +3,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { Database, Pencil, Plus, RefreshCw, Settings2 } from "lucide-react";
 import VulnShell from "@/components/VulnShell";
+import ElasticResultChart from "@/components/ElasticResultChart";
 import { ghostButtonClass, inputClass, PanelCard, primaryButtonClass, selectClass, StatCard } from "@/components/ui";
-import { canShowMetrics, columnLabel, type DashboardQuery, type ElasticDashboard, type QueryDefinition, type QueryResult } from "@/lib/elastic-dashboard";
+import { canShowMetrics, columnLabel, isChartDisplay, numericColumn, suggestChart, type DashboardQuery, type ElasticDashboard, type QueryDefinition, type QueryResult } from "@/lib/elastic-dashboard";
 
 type Draft = Omit<QueryDefinition, "id"> & { id?: string };
 const newDraft = (): Draft => ({ title: "", query: "", display: "auto", refreshMinutes: 15, enabled: true });
@@ -18,7 +19,8 @@ function formatValue(value: string | number | boolean | null, column: string): s
   return String(value);
 }
 
-function Results({ result, display }: { result: QueryResult; display: QueryDefinition["display"] }) {
+function Results({ result, display, chart }: { result: QueryResult; display: QueryDefinition["display"]; chart?: QueryDefinition["chart"] }) {
+  if (isChartDisplay(display)) return <ElasticResultChart result={result} definition={{ display, chart }} />;
   if (display !== "table" && canShowMetrics(result)) {
     return <div className="grid gap-4 sm:grid-cols-2 2xl:grid-cols-3">
       {result.columns.map((column, index) => <StatCard key={column.name} label={columnLabel(column.name)}
@@ -78,8 +80,8 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
   }
   function edit(query?: DashboardQuery) {
     setDraft(query ? { id: query.id, title: query.title, query: query.query, display: query.display,
-      refreshMinutes: query.refreshMinutes, enabled: query.enabled } : newDraft());
-    setPreview(null); setError(""); setMessage("");
+      refreshMinutes: query.refreshMinutes, enabled: query.enabled, chart: query.chart } : newDraft());
+    setPreview(query?.result ?? null); setError(""); setMessage("");
   }
 
   return <VulnShell eyebrow="Elasticsearch" title="Elastic dashboard"
@@ -120,7 +122,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
       </form>
     </PanelCard>}
 
-    {dashboard.canManage && draft && <PanelCard eyebrow={draft.id ? "Edit query" : "Add query"} description="A single numeric result row becomes number cards automatically. Multiple rows become a table.">
+    {dashboard.canManage && draft && <PanelCard eyebrow={draft.id ? "Edit query" : "Add query"} description="Preview your ES|QL, then choose number cards, a table, or a chart.">
       <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void action("save", async () => {
         await post("queries", draft); await reload(); setDraft(null); setPreview(null); setMessage("Query saved. It will refresh automatically.");
       }); }}>
@@ -128,13 +130,14 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
           <input required maxLength={100} className={`${inputClass} mt-2`} value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="e.g. Critical vulnerabilities" />
         </label>
         <label className="block text-sm text-zinc-300">ES|QL
-          <textarea required rows={8} maxLength={16000} value={draft.query} onChange={(event) => { setDraft({ ...draft, query: event.target.value }); setPreview(null); }}
+          <textarea disabled={Boolean(busy)} required rows={8} maxLength={16000} value={draft.query} onChange={(event) => { setDraft({ ...draft, query: event.target.value, chart: undefined }); setPreview(null); }}
             className="mt-2 w-full rounded-2xl border border-zinc-800 bg-[#0b0b0b] p-4 font-mono text-sm text-white outline-none focus:border-red-800" placeholder="FROM your-index-* | STATS count = COUNT(*)" spellCheck={false} />
         </label>
         <div className="flex flex-wrap items-end gap-4">
           <label className="text-sm text-zinc-300">Display
-            <select className={`${selectClass} mt-2 block`} value={draft.display} onChange={(event) => setDraft({ ...draft, display: event.target.value as Draft["display"] })}>
+            <select className={`${selectClass} mt-2 block`} value={draft.display} onChange={(event) => setDraft({ ...draft, display: event.target.value as Draft["display"], chart: draft.chart ?? (preview ? suggestChart(preview) : undefined) })}>
               <option value="auto">Automatic</option><option value="metrics">Number cards</option><option value="table">Table</option>
+              <option value="bar">Bar chart</option><option value="line">Line chart</option><option value="doughnut">Doughnut chart</option>
             </select>
           </label>
           <label className="text-sm text-zinc-300">Refresh every
@@ -144,14 +147,32 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
           </label>
           <label className="flex h-[52px] items-center gap-2 text-sm text-zinc-300"><input type="checkbox" checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })} />Automatic refresh</label>
         </div>
+        {isChartDisplay(draft.display) && <div className="rounded-xl border border-zinc-800 p-4">
+          <p className="mb-3 text-sm text-zinc-400">Return one row per category and a numeric value, such as tier and findings. For trends, return a time bucket and a count.</p>
+          {preview ? <div className="flex flex-wrap gap-4">
+            <label className="text-sm text-zinc-300">Category / X axis
+              <select required className={`${selectClass} mt-2 block`} value={draft.chart?.category ?? ""} onChange={(event) => setDraft({ ...draft, chart: { category: event.target.value, value: draft.chart?.value ?? "" } })}>
+                <option value="">Choose a column</option>
+                {preview.columns.map((column) => <option key={column.name} value={column.name}>{column.name}</option>)}
+              </select>
+            </label>
+            <label className="text-sm text-zinc-300">Value / Y axis
+              <select required className={`${selectClass} mt-2 block`} value={draft.chart?.value ?? ""} onChange={(event) => setDraft({ ...draft, chart: { category: draft.chart?.category ?? "", value: event.target.value } })}>
+                <option value="">Choose a numeric column</option>
+                {preview.columns.filter((column) => numericColumn(column.type) && column.name !== draft.chart?.category).map((column) => <option key={column.name} value={column.name}>{column.name}</option>)}
+              </select>
+            </label>
+          </div> : <p className="text-sm text-amber-300">Click Preview results to load the available columns.</p>}
+        </div>}
         <div className="flex flex-wrap gap-3">
           <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || !draft.query.trim()} onClick={() => action("preview", async () => {
             const data = await post("preview", { query: draft.query }); setPreview(data.result);
+            setDraft((current) => current ? { ...current, chart: current.chart ?? suggestChart(data.result) } : current);
           })}>{busy === "preview" ? "Running query…" : "Preview results"}</button>
-          <button className={primaryButtonClass} disabled={Boolean(busy)}>{busy === "save" ? "Validating and saving…" : "Save query"}</button>
+          <button className={primaryButtonClass} disabled={Boolean(busy) || (isChartDisplay(draft.display) && (!draft.chart?.category || !draft.chart?.value))}>{busy === "save" ? "Validating and saving…" : "Save query"}</button>
           <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => { setDraft(null); setPreview(null); }}>Cancel</button>
         </div>
-        {preview && <div className="border-t border-zinc-800 pt-4"><p className="mb-3 text-sm text-zinc-400">Preview</p><Results result={preview} display={draft.display} /></div>}
+        {preview && <div className="border-t border-zinc-800 pt-4"><p className="mb-3 text-sm text-zinc-400">Preview</p><Results result={preview} display={draft.display} chart={draft.chart} /></div>}
       </form>
     </PanelCard>}
 
@@ -162,7 +183,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
         actions={dashboard.canManage && <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || !dashboard.connected} onClick={() => edit(query)}><Pencil size={14} />Edit</button>}>
         {query.error && <p className="mb-4 text-sm text-amber-300">{query.error} {query.result ? "Showing the last successful result." : "No successful result yet."}</p>}
         {stale && !query.error && <p className="mb-4 text-sm text-amber-300">These results are older than two refresh intervals.</p>}
-        {query.result ? <Results result={query.result} display={query.display} /> : <p className="py-5 text-zinc-400">Waiting for the first successful query.</p>}
+        {query.result ? <Results result={query.result} display={query.display} chart={query.chart} /> : <p className="py-5 text-zinc-400">Waiting for the first successful query.</p>}
         <p className="mt-4 text-xs text-zinc-500">Last successful query: {query.refreshedAt ? new Date(query.refreshedAt).toISOString().replace("T", " ").replace("Z", " UTC") : "not yet available"}</p>
         {query.id === "asset-coverage" && <p className="mt-2 text-xs text-zinc-500">Asset inventory coverage, not vulnerability counts. Records from the last 25 hours; assets last seen within seven days. IDs recorded as both managed and unmanaged can count in both categories.</p>}
       </PanelCard>;

@@ -10,6 +10,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import ts from "typescript";
 import pg from "pg";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
 const modules = new Map();
 const overrides = new Map();
@@ -17,10 +19,11 @@ async function load(path) {
   path = resolve(path);
   if (modules.has(path)) return modules.get(path);
   const source = await readFile(path, "utf8");
-  const js = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
+  const js = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext, jsx: ts.JsxEmit.ReactJSX } }).outputText;
   const module = new SourceTextModule(js, { identifier: path });
   modules.set(path, module);
   await module.link(async (specifier) => {
+    if (specifier === "@/lib/elastic-dashboard") return load("lib/elastic-dashboard.ts");
     if (overrides.has(specifier)) {
       const values = overrides.get(specifier);
       return new SyntheticModule(Object.keys(values), function () { for (const [key, value] of Object.entries(values)) this.setExport(key, value); });
@@ -58,6 +61,62 @@ test("result parsing supports numeric summaries, nulls, and bounded tables", () 
   assert.throws(() => contract.parseQueryResult({ columns: numeric.columns, values: [[120, 80]], is_partial: true }));
   assert.throws(() => contract.parseQueryResult({ columns: numeric.columns, values: [[120, 80]] }, true));
   assert.throws(() => contract.parseQueryResult({ columns: numeric.columns, values: [[NaN, 80]] }));
+});
+
+test("chart definitions preserve mappings and validate real result shapes", () => {
+  const result = { columns: [{ name: "tier", type: "keyword" }, { name: "findings", type: "long" }], rows: [["P1", 8], ["P2", 12], ["P3", null]], truncated: false };
+  const chart = { category: "tier", value: "findings" };
+  assert.deepEqual(contract.suggestChart(result), chart);
+  for (const display of ["bar", "line", "doughnut"]) {
+    const definition = contract.parseDefinition({ ...contract.DEFAULT_COVERAGE, display, chart }, "chart-test");
+    assert.deepEqual(definition.chart, chart);
+    contract.validateDisplayResult(result, definition);
+    assert.equal(contract.chartData(result, definition).points[2].value, null, "Missing values must not become zero");
+    assert.throws(() => contract.parseDefinition({ ...definition, chart: undefined }, "chart-test"));
+    assert.throws(() => contract.chartData({ ...result, rows: [["P1", 8], ["P1", 2]] }, definition), /one row per category/);
+    assert.throws(() => contract.chartData({ ...result, columns: [result.columns[0]] }, definition), /missing/);
+  }
+  const negative = { ...result, rows: [["P1", -8], ["P2", 0]] };
+  contract.validateDisplayResult(negative, { display: "bar", chart });
+  assert.throws(() => contract.validateDisplayResult(negative, { display: "doughnut", chart }), /non-negative/);
+  assert.throws(() => contract.chartData({ ...result, rows: [[null, 8]] }, { display: "bar", chart }), /cannot be null/);
+  assert.throws(() => contract.chartData({ ...result, rows: [["P1", "8"]] }, { display: "bar", chart }), /finite numbers/);
+  assert.throws(() => contract.chartData(result, { display: "bar", chart: { category: "findings", value: "tier" } }), /must be numeric/);
+  contract.validateDisplayResult({ ...result, rows: [] }, { display: "bar", chart });
+  assert.equal(contract.parseDefinition(contract.DEFAULT_COVERAGE, "asset-coverage").chart, undefined);
+});
+
+test("line charts sort and retain real time coordinates and missing points", () => {
+  const result = { columns: [{ name: "time", type: "date" }, { name: "count", type: "long" }],
+    rows: [["2026-09-24T03:00:00Z", 8], ["2026-09-24T00:00:00Z", 2], ["2026-09-24T01:00:00Z", null]], truncated: false };
+  const data = contract.chartData(result, { display: "line", chart: { category: "time", value: "count" } });
+  assert.equal(data.scale, "time");
+  assert.deepEqual(data.points.map((p) => p.value), [2, null, 8]);
+  assert.equal(data.points[2].x - data.points[1].x, 7200000);
+});
+
+test("native charts render valid SVG, accessible data, and explicit empty states", async () => {
+  const module = await load("components/ElasticResultChart.tsx");
+  await module.evaluate();
+  const chart = { category: "tier", value: "count" };
+  const base = { columns: [{ name: "tier", type: "keyword" }, { name: "count", type: "long" }], rows: [["P1", 8], ["P2", 12]], truncated: false };
+  const render = (display, result = base) => renderToStaticMarkup(createElement(module.namespace.default, { result, definition: { display, chart } }));
+  for (const display of ["bar", "line", "doughnut"]) {
+    const html = render(display);
+    assert.match(html, /<svg/);
+    assert.match(html, /View chart data/);
+    assert.match(html, /role="img"/);
+    assert.doesNotMatch(html, /NaN|Infinity/);
+    assert.match(render(display, { ...base, rows: [] }), /returned no rows/);
+    assert.match(render(display, { ...base, rows: [["P1", null]] }), /No numeric values/);
+    assert.match(render(display, { ...base, truncated: true }), /Partial chart/);
+    assert.doesNotMatch(render(display, { ...base, rows: [["P1", 8]] }), /NaN|Infinity/);
+  }
+  assert.match(render("doughnut", { ...base, rows: [["P1", 0]] }), /All values are zero/);
+  assert.match(render("doughnut", { ...base, rows: [["P1", -2]] }), /non-negative/);
+  assert.doesNotMatch(render("bar", { ...base, rows: [["P1", -2], ["P2", 0], ["P3", 8]] }), /NaN|Infinity/);
+  const gaps = render("line", { ...base, rows: [["P1", 2], ["P2", null], ["P3", 8]] });
+  assert.match(gaps, /d="M[^"]* M/);
 });
 test("only public HTTPS endpoints are supported; internal addresses are blocked", () => {
   for (const endpoint of ["http://example.com", "https://user:key@example.com", "https://localhost", "https://example.com?key=x", "https://deployment.kb.region.aws.found.io"]) {
@@ -144,6 +203,19 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
     await waitFor(() => !globalThis.__elasticDashboard.ticking);
     const edited = (await store.readDashboard(true)).queries.find((q) => q.id === "extra");
     assert.equal(edited.result.rows[0][0], 999, "Old in-flight results cannot overwrite an edit.");
+    const chartResult = { columns: [{ name: "tier", type: "keyword" }, { name: "findings", type: "long" }], rows: [["P1", 8], ["P2", 12]], truncated: false };
+    response = chartResult;
+    const chartDefinition = { ...contract.DEFAULT_COVERAGE, id: "priority-chart", display: "bar", chart: { category: "tier", value: "findings" } };
+    await store.saveQuery(chartDefinition, "chart-member");
+    assert.deepEqual((await store.readDashboard(true)).queries.find((q) => q.id === "priority-chart").chart, chartDefinition.chart);
+    response = numeric;
+    await db.query("UPDATE elastic_dashboard_queries SET next_attempt = now() - interval '1 hour' WHERE id = 'priority-chart'");
+    store.triggerRefresh();
+    await waitFor(async () => Boolean((await store.readDashboard(true)).queries.find((q) => q.id === "priority-chart").error));
+    const retainedChart = (await store.readDashboard(true)).queries.find((q) => q.id === "priority-chart");
+    assert.deepEqual(retainedChart.result, chartResult, "A changed result schema must retain the last valid chart");
+    assert.match(retainedChart.error, /missing/);
+    await waitFor(() => !globalThis.__elasticDashboard.ticking);
     assert.deepEqual((await db.query("SELECT data FROM vuln_store WHERE key = 'sentinel'")).rows[0].data, { keep: true });
     const oldSecret = process.env.NEXTAUTH_SECRET;
     process.env.NEXTAUTH_SECRET = randomBytes(32).toString("hex");

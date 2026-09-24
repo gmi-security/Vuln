@@ -15,10 +15,14 @@ Open **Elastic Dashboard** at `/elastic-vulnerabilities`.
 2. The supplied asset coverage query is already saved. Connection verification
    runs that query to check both authentication and access to its indices.
 3. Click **Add query**, enter a title and ES|QL, then **Preview results**.
-4. Choose **Automatic**, **Number cards**, or **Table**, select a refresh interval,
+4. Choose **Automatic**, **Number cards**, **Table**, **Bar chart**, **Line chart**,
+   or **Doughnut chart**, select a refresh interval,
    then save. Automatic turns a single numeric row into one number card per
    column; other shapes use a table. `_pct`, `_percent`, and `percentage` column
    suffixes render numeric values as percentages. Use ES|QL aliases for labels.
+   For charts, preview results and select **Category / X axis** and the numeric
+   **Value / Y axis**. Two suitable columns are suggested automatically. Editing
+   the query clears these mappings; preview again to choose its new columns.
 5. Each saved query has **Edit**. Disabling its automatic-refresh checkbox pauses
    background refresh and leaves the last result visible. Editing/saving always
    validates the new query once, including when automatic refresh is paused.
@@ -112,6 +116,35 @@ credentials, but authenticated Elastic results have not yet been verified.
 
 References: [ES|QL REST API](https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-esql-query),
 [Elastic API keys](https://www.elastic.co/docs/deploy-manage/api-keys/elasticsearch-api-keys).
+
+## Native charts (2026-09-24)
+
+Native SVG bar, line, and doughnut charts use the existing ES|QL connection and
+saved snapshots. No Kibana embedding or extra chart service is needed. Each query
+can plot one numeric column against one category column. The optional `chart`
+mapping is stored in the existing definition JSON; older cards/tables need no
+migration and retain their display behavior.
+
+- Return one row per category; duplicates and null category values are rejected.
+  Aggregate explicitly with ES|QL `STATS ... BY`. Charts do not silently aggregate.
+- Bar charts start at zero and support signed numbers. Line charts sort numeric
+  and date axes and use proportional spacing; text categories retain query order.
+  Null values remain missing and break lines. Doughnuts reject negative values
+  and explain all-zero results. They show shares of the returned non-null values.
+- Saved chart definitions and automatic refreshes validate the selected columns.
+  Schema changes or invalid data preserve the last successful result with an error.
+- Every chart includes an expandable data table, accessible SVG label, and point
+  titles. Oversized bar charts/legends scroll. Truncated results are explicitly
+  labeled as partial charts; the existing 100-row limit remains.
+- For the supplied latest-open-finding priority query, replace the final
+  P1-only aggregation with `STATS findings = COUNT(*) BY tier | SORT tier`, then
+  choose `tier` and `findings` for a bar or doughnut chart. This shows P1/P2/P3
+  because its preceding filter excludes Other. A single P1 count remains a card.
+- Trend queries must return time buckets. The app does not infer historical
+  open-finding totals from the latest snapshot or automatically store a trend.
+- Validation includes SVG rendering, empty/null/negative/zero values, date order,
+  duplicate/missing columns, and PostgreSQL persistence plus schema-change
+  retention. Browser visual inspection was unavailable (no browser surface).
 
 ## Production release evidence (2026-09-24)
 
