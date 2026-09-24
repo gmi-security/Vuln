@@ -40,6 +40,11 @@ horizontal scrolling and use sticky headings. Short tables keep their natural
 height. The scroll area is focusable for keyboard use; CSV still exports all
 displayed result rows, regardless of which rows are currently visible.
 
+Related counts can share one query tile: return one numeric row with separate
+ES|QL aggregate columns, such as `P1`, `P2`, and `P3`, and choose Number cards.
+One metric fills the tile, two use two columns from 640px, and three use a single
+row from 1280px (previously 1536px). Narrower screens wrap for readability.
+
 Ordering uses same-origin member POST `/api/elastic-dashboard/order` with an
 array of all active IDs. A transaction using the existing dashboard advisory lock
 writes the additive `display_order` column. Duplicates, unknown IDs, missing IDs

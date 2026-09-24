@@ -27,7 +27,8 @@ function formatValue(value: string | number | boolean | null, column: string): s
 function Results({ result, display, chart }: { result: QueryResult; display: QueryDefinition["display"]; chart?: QueryDefinition["chart"] }) {
   if (isChartDisplay(display)) return <ElasticResultChart result={result} definition={{ display, chart }} />;
   if (display !== "table" && canShowMetrics(result)) {
-    return <div className="grid gap-4 sm:grid-cols-2 2xl:grid-cols-3">
+    const columns = result.columns.length === 1 ? "" : result.columns.length === 2 ? "sm:grid-cols-2" : "sm:grid-cols-2 xl:grid-cols-3";
+    return <div className={`grid gap-4 ${columns}`}>
       {result.columns.map((column, index) => <StatCard key={column.name} label={columnLabel(column.name)}
         value={formatValue(result.rows[0][index], column.name)} sublabel="Latest successful query" icon={<Database size={22} />} />)}
     </div>;
