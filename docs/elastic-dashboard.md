@@ -111,3 +111,21 @@ credentials, but authenticated Elastic results have not yet been verified.
 
 References: [ES|QL REST API](https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-esql-query),
 [Elastic API keys](https://www.elastic.co/docs/deploy-manage/api-keys/elasticsearch-api-keys).
+
+## Production release evidence (2026-09-24)
+
+- Production commit: `88292583598fe32dcb90b33eaeaa0de92a1dfa85` on
+  `claude/vuln-site-design-vxswd6`; its tree matched the tested feature branch.
+- DigitalOcean deployment `62e3ea1e-74bc-4749-975f-207af95b78f4` reached ACTIVE,
+  with successful build and deploy steps.
+- Live `/api/health` returned HTTP 200, `ok: true`, persistence enabled, and
+  `dbReachable: true`. `/login` returned 200. The dashboard redirected anonymous
+  requests to login (307), and its read API and connection mutation rejected
+  anonymous requests (401).
+- No dashboard refresh initialization errors appeared in the deployment's
+  startup log. The disposable local test database container was removed.
+- Signed-in browser interaction and authenticated live ES|QL results remain
+  unverified. Next step: an organization admin enters the read-only API key in
+  Connection, tests/saves it, and compares the resulting coverage with Kibana.
+- To roll back this release, revert the production commit through Git. Its three
+  additive dashboard tables can remain; existing scanner tables were not migrated.
