@@ -94,7 +94,41 @@ Live volume check: saved severity counts showed 74,912 Critical findings. A
 read-only sample of 1,500 Critical findings already contained 123 distinct CVEs;
 this confirms that a top-100 table is filled from the Critical group in that
 observation, but is not itself the complete ranking. No new preset button was
-added. A server-side edit option preserves the saved view during later edits.
+added. The Edit form preserves the saved view during later edits.
+
+Release and live verification: the table change passed all 35 tests without
+skips, including disposable PostgreSQL integration, production build and all
+three HTTP smoke modes. Production commit
+`675cb5af7204ef152c949de222d85460219e41dc` deployed as
+`02496524-2740-4c21-8669-202b12cf252c`. The requested tile was then created directly
+in the live dashboard under ID `cs-cves-by-affected-devices`, with an audit entry
+attributed to the user's request. The insert used the normal advisory lock,
+connection/tile-limit checks and a transaction; existing tiles were untouched.
+
+Its first collection encountered a transient page timeout. The follow-up commit
+`1a49a707f35bb12ccc5c520045288530e6ec9c2b` adds at most two retries for read-only
+network/page timeouts within the existing collection budget. It passed all 19
+CrowdStrike tests (including recovery of the same page without recollecting prior
+pages) and the production build, then reached ACTIVE in deployment
+`ffd427f1-f732-4aa6-9f92-885777370b93`. The saved tile was explicitly requeued.
+
+At `2026-09-24T22:54:28.624Z` the live tile successfully published 100 rows with
+no error. Read-back checks confirmed unique CVEs, severity/device-count ordering,
+positive integer device counts and finding counts at least as large as device
+counts. All 100 selected CVEs were Critical; this is the expected severity-first
+top-100 result, not a claim that no High/Medium/Low findings exist. The result
+discloses excluded non-CVE findings. Daily refresh, internal table scrolling and
+CSV are enabled. Health and database reachability passed; authenticated browser
+visual inspection and reconciliation with the Falcon console remain unverified.
+The disposable test database was removed.
+
+Operational access: the documented DigitalOcean component exec WebSocket API
+worked despite the Windows `doctl apps console` terminal-size failure. Console
+operations used the existing service credentials in process without printing
+keys or changing database firewall rules. Direct public database access timed
+out. Local helpers in `output/` are not deployed or committed and contain no
+credential values. Future requested saved tiles should be created directly,
+following this user's instruction, instead of adding more preset buttons.
 
 ## Patch worklist
 
