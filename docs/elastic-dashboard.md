@@ -44,6 +44,11 @@ Related counts can share one query tile: return one numeric row with separate
 ES|QL aggregate columns, such as `P1`, `P2`, and `P3`, and choose Number cards.
 One metric fills the tile, two use two columns from 640px, and three use a single
 row from 1280px (previously 1536px). Narrower screens wrap for readability.
+The metric layout production build passed and commit
+`6f013ce9bf7b0153bbc0296be802d0798f792ec9` reached ACTIVE in deployment
+`10fd05a2-cd47-43b8-a4a3-3248d944018f` on September 24, 2026. Live health and
+database reachability passed. Signed-in visual interaction and execution of the
+combined priority query against live Elastic remain unverified.
 
 Ordering uses same-origin member POST `/api/elastic-dashboard/order` with an
 array of all active IDs. A transaction using the existing dashboard advisory lock
