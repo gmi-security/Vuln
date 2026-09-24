@@ -92,6 +92,11 @@ async function run(mode) {
       const memberHeaders = { ...headers, origin: base, "Content-Type": "application/json" };
       const removedToken = await encode({ secret, token: { name: "Removed member", orgMember: false, orgRole: "MEMBER" }, maxAge: 120 });
       const request = (route, body, requestHeaders = memberHeaders) => fetch(`${base}/api/elastic-dashboard/${route}`, { method: "POST", headers: requestHeaders, body: JSON.stringify(body) });
+      const remove = (requestHeaders) => fetch(`${base}/api/elastic-dashboard/queries/nonexistent-smoke-tile`, { method: "DELETE", headers: requestHeaders });
+      assert.equal((await remove({ origin: base })).status, 401);
+      assert.equal((await remove({ ...memberHeaders, cookie: `next-auth.session-token=${removedToken}` })).status, 401);
+      assert.equal((await remove({ ...memberHeaders, origin: "https://untrusted.example" })).status, 403);
+      assert.equal((await remove(memberHeaders)).status, env.ELASTIC_VULN_DATABASE_URL ? 200 : 503);
       for (const route of ["connection", "connections/crowdstrike", "queries", "preview", "refresh"]) {
         assert.equal((await request(route, {}, { origin: base, "Content-Type": "application/json" })).status, 401, `Anonymous users cannot mutate ${route}`);
         assert.equal((await request(route, {}, { ...memberHeaders, cookie: `next-auth.session-token=${removedToken}` })).status, 401, `Removed members cannot mutate ${route}`);

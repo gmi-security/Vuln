@@ -431,6 +431,37 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
     } finally { finishNewFalcon(falconResult); }
     await waitFor(() => !globalThis.__elasticDashboard.ticking);
     assert.equal((await db.query("SELECT count(*)::int AS count FROM dashboard_daily_history WHERE query_id = 'immediate-falcon'")).rows[0].count, 1);
+    // Deletion must win against both automatic refresh and legacy queued saves.
+    let finishDeletedRefresh;
+    hold = new Promise((resolve) => { finishDeletedRefresh = resolve; });
+    try {
+      await store.addDashboardTile(immediateDefinition, "refresh-before-delete");
+      await waitFor(() => hold === null);
+      await store.deleteDashboardTile("immediate", "delete-member");
+      await store.deleteDashboardTile("immediate", "delete-member");
+      assert.ok(!(await store.readDashboard(true)).queries.some((q) => q.id === "immediate"));
+      await assert.rejects(() => store.addDashboardTile(immediateDefinition, "stale-form"), /deleted/);
+    } finally { finishDeletedRefresh(numeric); }
+    await waitFor(() => !globalThis.__elasticDashboard.ticking);
+    assert.equal((await db.query("SELECT result FROM elastic_dashboard_queries WHERE id = 'immediate'")).rows[0].result, null);
+    assert.equal((await db.query("SELECT count(*)::int AS count FROM elastic_dashboard_audit WHERE query_id = 'immediate' AND action = 'query.deleted'")).rows[0].count, 1);
+    let finishDeletedSave;
+    falconHold = new Promise((resolve) => { finishDeletedSave = resolve; });
+    try {
+      const deletedJob = await jobs.enqueueDashboardJob("save", { ...falconDefinition, id: "immediate-falcon" }, "save-before-delete");
+      await waitFor(() => falconHold === null);
+      await store.deleteDashboardTile("immediate-falcon", "delete-member");
+      assert.equal((await jobs.readDashboardJob(deletedJob.jobId, "save-before-delete")).status, "failed");
+    } finally { finishDeletedSave(falconResult); }
+    await waitFor(() => !globalThis.__elasticJobs.working);
+    assert.ok(!(await store.readDashboard(true)).queries.some((q) => q.id === "immediate-falcon"));
+    assert.equal((await db.query("SELECT count(*)::int AS count FROM dashboard_daily_history WHERE query_id = 'immediate-falcon'")).rows[0].count, 0);
+    await store.deleteDashboardTile("asset-coverage", "delete-default");
+    await db.query("INSERT INTO elastic_dashboard_queries (id, definition) VALUES ($1, $2::jsonb) ON CONFLICT (id) DO NOTHING", [contract.DEFAULT_COVERAGE.id, JSON.stringify(contract.DEFAULT_COVERAGE)]);
+    assert.ok(!(await store.readDashboard(true)).queries.some((q) => q.id === "asset-coverage"), "Startup seeding must not recreate a deleted default tile");
+    assert.deepEqual((await db.query("SELECT data FROM vuln_store WHERE key = 'sentinel'")).rows[0].data, { keep: true });
+    // Let the next isolated HTTP smoke process seed its default tile.
+    await db.query("DELETE FROM elastic_dashboard_queries WHERE id = 'asset-coverage'");
     const oldSecret = process.env.NEXTAUTH_SECRET;
     process.env.NEXTAUTH_SECRET = randomBytes(32).toString("hex");
     assert.equal((await store.readDashboard(true)).storageReady, true, "Reconnect must remain available after secret rotation.");

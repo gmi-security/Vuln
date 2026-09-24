@@ -64,6 +64,49 @@ test("CrowdStrike credentials use authenticated encryption and fixed cloud origi
   }
 });
 
+test("patch worklist keeps existing contracts and requires a table without history", () => {
+  const patch = { ...input, crowdstrike: { ...options, view: "patch-worklist", top: 25 } };
+  assert.equal(contract.parseQueryInput(patch).crowdstrike.view, "patch-worklist");
+  for (const change of [{ view: "bad" }, { history: true }, { groupBy: "host" }, { measure: "hosts" }]) {
+    assert.throws(() => contract.parseQueryInput({ ...patch, crowdstrike: { ...patch.crowdstrike, ...change } }));
+  }
+  assert.throws(() => contract.parseDefinition({ ...patch, title: "Patch", display: "metrics", refreshMinutes: 1440, enabled: true }, "patch"), /Table/);
+});
+
+test("patch worklist ranks across pages, retains device identities and distinguishes findings from hosts", async () => {
+  const p1 = { id: "CVE-P1", severity: "LOW", exploit_status: 90 };
+  const first = Array.from({ length: 12 }, (_, i) => raw(`medium-${i}`, { aid: `host-${i}` }));
+  const second = [raw("p1", { cve: p1 }), raw("p1-other-app", { cve: p1 }),
+    raw("p1-other-tenant", { cve: p1, cid: "tenant-b" }),
+    raw("p2", { cve: { id: "CVE-P2", severity: "CRITICAL", base_score: 10, exprt_rating: "CRITICAL" } }),
+    raw("closed", { cve: p1, status: "closed" }), raw("low", { cve: { severity: "LOW" } })];
+  await mockHttp([auth, page(first, "next", first.length + second.length), page(second, "", first.length + second.length)], async (calls) => {
+    const result = await client.executeCrowdStrike(connection, { ...input, crowdstrike: { ...options, view: "patch-worklist", top: 10 } });
+    const rows = result.rows.map((row) => Object.fromEntries(result.columns.map((column, i) => [column.name, row[i]])));
+    assert.equal(calls.length, 3);
+    assert.equal(rows.length, 10);
+    assert.deepEqual(rows.slice(0, 3).map((row) => row.priority), Array(3).fill("P1 Exploited / KEV"));
+    assert.equal(rows[0].affected_devices_for_cve, 2, "Device count deduplicates apps and separates tenants");
+    assert.equal(rows[0].host_id, "host-1");
+    assert.ok(rows.every((row) => row.finding_id !== "closed" && row.finding_id !== "low"));
+    assert.match(result.note, /10 of 16/);
+    assert.equal(rows[0].cisa_kev, null, "Absent KEV is unknown, not false");
+  });
+  assert.deepEqual(adapter.patchWorklist([], 25).rows, []);
+  assert.throws(() => adapter.patchWorklist([adapter.normalizeVulnerability(raw("missing-device", { aid: "" }))], 25), /host ID/);
+  assert.equal(adapter.vulnerabilityRisk({ exploit_status: 90, is_cisa_kev: true, exprt_rating: "CRITICAL", base_score: 10, exploitability_score: 4, severity: "CRITICAL" }).risk, 100);
+});
+
+test("CSV exports quote data and neutralize spreadsheet formulas without changing numeric scores", async () => {
+  const module = await load("lib/dashboard-csv.ts"); await module.evaluate();
+  const csv = module.namespace.dashboardCsv({ columns: [{ name: "device", type: "keyword" }, { name: "score", type: "double" }],
+    rows: [["=cmd()", 90], ['host,"quoted"\nnext', null], [" \t@SUM(A1)", -2]], truncated: false });
+  assert.ok(csv.startsWith('\uFEFF"device","score"\r\n'));
+  assert.ok(csv.includes('"\'=cmd()","90"'));
+  assert.ok(csv.includes('"host,""quoted""\nnext",""'));
+  assert.ok(csv.includes('"\' \t@SUM(A1)","-2"'));
+});
+
 test("full pagination precedes aggregation; duplicate finding IDs do not inflate counts", async () => {
   await mockHttp([auth, page([raw("a"), raw("b")], "next", 3), page([raw("b"), raw("c", { aid: "host-2", cve: { id: "CVE-2026-2" } })], "", 3)], async (calls) => {
     const result = await client.executeCrowdStrike(connection, input);

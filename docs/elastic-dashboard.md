@@ -26,6 +26,18 @@ Open **Elastic Dashboard** at `/elastic-vulnerabilities`. For daily diff history
 5. Each saved query has **Edit**. Disabling its automatic-refresh checkbox pauses
    background refresh and leaves the last result visible. Editing/saving always
    requests one background run, including when automatic refresh is paused.
+6. **Delete** beside Edit opens an inline confirmation. Confirming removes the
+   shared tile and its saved history, stops refreshes, and clears its cached
+   results. Source findings and credentials are unaffected. **CSV** exports the
+   displayed cached rows from any completed tile.
+
+Tile deletion uses authenticated, same-origin DELETE
+`/api/elastic-dashboard/queries/[id]`. A `deleted_at` tombstone prevents startup
+seeding, stale forms and old jobs from recreating the tile. Deletion increments
+its revision, invalidates associated jobs and deletes daily history in one
+transaction. In-flight results cannot write over deletion. Deleted tiles do not
+count toward the 24-tile limit. This removes the tile; it does not delete upstream
+Elasticsearch/CrowdStrike data. There is no restore UI; add a new tile to replace it.
 
 The first query counts managed/unmanaged assets, not vulnerabilities. It preserves
 the user's exact 25-hour record window and seven-day last-seen filter. IDs observed

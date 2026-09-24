@@ -11,6 +11,7 @@ export class DashboardError extends Error {
 export type DashboardSource = "elastic" | "crowdstrike";
 export type CrowdStrikeOptions = {
   dataset: "vulnerabilities";
+  view?: "summary" | "patch-worklist";
   measure: "findings" | "cves" | "hosts";
   groupBy: "none" | "host" | "severity" | "priority" | "status" | "cve";
   top: number;
@@ -59,14 +60,19 @@ export function parseQueryInput(value: unknown): QueryInput {
   }
   const options = body.crowdstrike as CrowdStrikeOptions | undefined;
   if (!options || options.dataset !== "vulnerabilities") throw new DashboardError("Choose the Vulnerabilities dataset.");
+  if (options.view !== undefined && !["summary", "patch-worklist"].includes(options.view)) throw new DashboardError("Choose a supported vulnerability view.");
   if (!["findings", "cves", "hosts"].includes(options.measure) ||
       !["none", "host", "severity", "priority", "status", "cve"].includes(options.groupBy) ||
       ![10, 25, 50, 100].includes(options.top) || typeof options.history !== "boolean") {
     throw new DashboardError("Choose a valid measure, grouping, top limit, and history setting.");
   }
   if (options.history && options.groupBy !== "none") throw new DashboardError("Daily history requires no grouping. Use a separate tile for grouped results.");
+  if (options.view === "patch-worklist" && (options.history || options.groupBy !== "none" || options.measure !== "findings")) {
+    throw new DashboardError("Patch worklists use findings with no grouping or daily history.");
+  }
   return { source: "crowdstrike", query: body.query.trim(), crowdstrike: {
     dataset: options.dataset, measure: options.measure, groupBy: options.groupBy, top: options.top, history: options.history,
+    ...(options.view === "patch-worklist" ? { view: options.view } : {}),
   } };
 }
 
@@ -105,7 +111,9 @@ export function parseDefinition(value: unknown, id: string): QueryDefinition {
   }
   if (typeof body.refreshMinutes !== "number" || ![5, 15, 30, 60, 1440].includes(body.refreshMinutes)) throw new DashboardError("Choose a refresh interval: 5, 15, 30, 60 minutes, or daily.");
   if (typeof body.enabled !== "boolean") throw new DashboardError("Invalid refresh setting.");
-  return { id, title: body.title.trim(), ...parseQueryInput(body), display: body.display as QueryDefinition["display"],
+  const input = parseQueryInput(body);
+  if (input.crowdstrike?.view === "patch-worklist" && !["auto", "table"].includes(String(body.display))) throw new DashboardError("Use Table for a patch worklist.");
+  return { id, title: body.title.trim(), ...input, display: body.display as QueryDefinition["display"],
     refreshMinutes: body.refreshMinutes, enabled: body.enabled, ...(chart ? { chart } : {}) };
 }
 

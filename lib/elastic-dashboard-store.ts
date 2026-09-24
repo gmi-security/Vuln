@@ -54,6 +54,7 @@ export async function dashboardDatabase(): Promise<Pool> {
       );
       ALTER TABLE elastic_dashboard_queries ADD COLUMN IF NOT EXISTS refresh_lease_until TIMESTAMPTZ;
       ALTER TABLE elastic_dashboard_queries ADD COLUMN IF NOT EXISTS refresh_requested BOOLEAN NOT NULL DEFAULT false;
+      ALTER TABLE elastic_dashboard_queries ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
       CREATE TABLE IF NOT EXISTS dashboard_source_connections (
         source TEXT PRIMARY KEY, secret TEXT NOT NULL, revision INT NOT NULL DEFAULT 1,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -102,7 +103,7 @@ export async function readDashboard(canManage: boolean): Promise<ElasticDashboar
       if (error instanceof DashboardError) return null;
       throw error;
     });
-    const rows = await db.query("SELECT * FROM elastic_dashboard_queries ORDER BY id = 'asset-coverage' DESC, id");
+    const rows = await db.query("SELECT * FROM elastic_dashboard_queries WHERE deleted_at IS NULL ORDER BY id = 'asset-coverage' DESC, id");
     return {
       canManage, storageReady: true, connected: Boolean(saved),
       ...(canManage && saved ? { endpoint: (saved.value as ElasticConnection).endpoint } : {}),
@@ -240,8 +241,9 @@ export async function addDashboardTile(value: unknown, actor: string): Promise<{
     const connected = source === "elastic" ? await client.query("SELECT id FROM elastic_dashboard_connection WHERE id = 1") :
       await client.query("SELECT source FROM dashboard_source_connections WHERE source = $1", [source]);
     if (!connected.rowCount) throw new DashboardError(`Connect ${DASHBOARD_CONNECTORS[source].label} first.`, 409);
-    const previous = (await client.query("SELECT definition, result, refreshed_at FROM elastic_dashboard_queries WHERE id = $1", [id])).rows[0];
-    const count = await client.query("SELECT count(*)::int AS count FROM elastic_dashboard_queries WHERE id <> $1", [id]);
+    const previous = (await client.query("SELECT definition, result, refreshed_at, deleted_at FROM elastic_dashboard_queries WHERE id = $1", [id])).rows[0];
+    if (previous?.deleted_at) throw new DashboardError("This tile was deleted. Add a new tile instead.", 409);
+    const count = await client.query("SELECT count(*)::int AS count FROM elastic_dashboard_queries WHERE id <> $1 AND deleted_at IS NULL", [id]);
     if (count.rows[0].count >= 24) throw new DashboardError("This dashboard supports up to 24 saved queries.");
     let result: QueryResult | null = null, refreshedAt: string | null = null;
     if (previous?.result && JSON.stringify(parseQueryInput(previous.definition)) === JSON.stringify(parseQueryInput(definition))) {
@@ -263,6 +265,26 @@ export async function addDashboardTile(value: unknown, actor: string): Promise<{
   return { saved: true, query: tile };
 }
 
+export async function deleteDashboardTile(id: string, actor: string): Promise<void> {
+  if (!/^[a-zA-Z0-9-]{1,64}$/.test(id)) throw new DashboardError("Invalid tile ID.");
+  const db = await database(), client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(804201)");
+    // Keep a tombstone so stale forms/jobs and the default seed cannot recreate it.
+    const removed = await client.query(`UPDATE elastic_dashboard_queries SET deleted_at = now(),
+      revision = revision + 1, refresh_requested = false, refresh_lease_until = NULL,
+      result = NULL, refreshed_at = NULL, last_error = NULL WHERE id = $1 AND deleted_at IS NULL RETURNING id`, [id]);
+    if (removed.rowCount) {
+      await client.query("DELETE FROM dashboard_daily_history WHERE query_id = $1", [id]);
+      await client.query(`UPDATE elastic_dashboard_jobs SET status = 'failed', result = NULL,
+        error = 'This tile was deleted.' WHERE input->>'id' = $1`, [id]);
+      await client.query("INSERT INTO elastic_dashboard_audit (actor, action, query_id) VALUES ($1, 'query.deleted', $2)", [actor, id]);
+    }
+    await client.query("COMMIT");
+  } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
+}
+
 export async function saveQuery(value: unknown, actor: string, job?: { id: string; connectionRevision: number; queryRevision: number | null }): Promise<void> {
   const body = value as Record<string, unknown>;
   const id = typeof body?.id === "string" ? body.id : randomUUID();
@@ -279,6 +301,8 @@ export async function saveQuery(value: unknown, actor: string, job?: { id: strin
     const current = source === "elastic" ? await client.query("SELECT revision FROM elastic_dashboard_connection WHERE id = 1") :
       await client.query("SELECT revision FROM dashboard_source_connections WHERE source = $1", [source]);
     if (current.rows[0]?.revision !== saved.revision) throw new DashboardError("The connection changed. Preview and save again.", 409);
+    const existing = (await client.query("SELECT deleted_at FROM elastic_dashboard_queries WHERE id = $1", [id])).rows[0];
+    if (existing?.deleted_at) throw new DashboardError("This tile was deleted. Add a new tile instead.", 409);
     if (job) {
       const activeJob = await client.query("SELECT id FROM elastic_dashboard_jobs WHERE id = $1 AND status = 'running' AND started_at > now() - interval '7 minutes'", [job.id]);
       const query = await client.query("SELECT revision FROM elastic_dashboard_queries WHERE id = $1", [id]);
@@ -286,7 +310,7 @@ export async function saveQuery(value: unknown, actor: string, job?: { id: strin
         throw new DashboardError("The query or connection changed while this save was running. Reload and save again.", 409);
       }
     }
-    const count = await client.query("SELECT count(*)::int AS count FROM elastic_dashboard_queries WHERE id <> $1", [id]);
+    const count = await client.query("SELECT count(*)::int AS count FROM elastic_dashboard_queries WHERE id <> $1 AND deleted_at IS NULL", [id]);
     if (count.rows[0].count >= 24) throw new DashboardError("This dashboard supports up to 24 saved queries.");
     const result = await historyResult(client, definition, id, saved.revision, rawResult, true);
     validateDisplayResult(result, definition);
@@ -306,7 +330,7 @@ async function refreshQueries(force = false): Promise<void> {
   if (!elasticVulnEnabled()) return;
   const db = await database();
   const due = await db.query(`SELECT id, definition, revision FROM elastic_dashboard_queries
-    WHERE ((definition->>'enabled')::boolean = true OR refresh_requested = true OR $1)
+    WHERE deleted_at IS NULL AND ((definition->>'enabled')::boolean = true OR refresh_requested = true OR $1)
     AND (refresh_lease_until IS NULL OR refresh_lease_until <= now())
     AND (next_attempt <= now() OR ($1 AND (attempted_at IS NULL OR attempted_at < now() - interval '30 seconds')))
     ORDER BY next_attempt LIMIT 24`, [force]);

@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Database, Pencil, Plus, RefreshCw, Settings2 } from "lucide-react";
+import { Database, Download, Pencil, Plus, RefreshCw, Settings2, Trash2 } from "lucide-react";
+import { dashboardCsv } from "@/lib/dashboard-csv";
 import VulnShell from "@/components/VulnShell";
 import ElasticResultChart from "@/components/ElasticResultChart";
 import { OPEN_VULN_TREND } from "@/lib/elastic-query-templates";
@@ -61,6 +62,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
   const [draft, setDraft] = useState<Draft | null>(null);
+  const [deleting, setDeleting] = useState<string | null>(null);
   const [preview, setPreview] = useState<QueryResult | null>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -120,9 +122,13 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
   function updateCrowdStrike(options: Partial<CrowdStrikeOptions>) {
     if (!draft) return;
     const crowdstrike = { ...DEFAULT_CROWDSTRIKE, ...draft.crowdstrike, ...options };
+    if (crowdstrike.view === "patch-worklist") {
+      crowdstrike.history = false; crowdstrike.groupBy = "none"; crowdstrike.measure = "findings";
+    }
     if (crowdstrike.history) crowdstrike.groupBy = "none";
     const category = crowdstrike.history ? "day" : crowdstrike.groupBy === "none" ? undefined : crowdstrike.groupBy;
-    setDraft({ ...draft, crowdstrike, chart: category ? { category, value: crowdstrike.measure } : undefined, display: crowdstrike.history ? "line" : "auto" });
+    setDraft({ ...draft, crowdstrike, chart: category ? { category, value: crowdstrike.measure } : undefined,
+      display: crowdstrike.view === "patch-worklist" ? "table" : crowdstrike.history ? "line" : "auto" });
     setPreview(null);
   }
   const anyConnected = dashboard.connected || dashboard.crowdstrike?.connected;
@@ -223,10 +229,22 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
           <p className="text-xs text-zinc-500">Starts September 23. The query uses the last confirmed pull; advance report_end to the next UTC day after a successful import. Requires a complete starting state and status changes.</p>
         </div>}
         {draft.source === "crowdstrike" && <div className="space-y-4">
+          {!draft.id && <button type="button" className={ghostButtonClass} onClick={() => {
+            setDraft({ ...crowdStrikeDraft(), title: "Patch worklist — highest risk first",
+              query: "status:['open','reopen']+suppression_info.is_suppressed:false",
+              crowdstrike: { ...DEFAULT_CROWDSTRIKE, view: "patch-worklist", top: 25 }, display: "table" });
+            setPreview(null); setError(""); setMessage("");
+          }}>Use patch worklist</button>}
           <label className="block text-sm text-zinc-300">Dataset
             <select className={`${selectClass} mt-2 block`} value="vulnerabilities" onChange={() => {}}><option value="vulnerabilities">Vulnerabilities · Spotlight</option></select>
           </label>
+          <label className="block text-sm text-zinc-300">View
+            <select className={`${selectClass} mt-2 block`} value={draft.crowdstrike?.view ?? "summary"} onChange={(event) => updateCrowdStrike({ view: event.target.value as CrowdStrikeOptions["view"] })}>
+              <option value="summary">Summary / chart</option><option value="patch-worklist">Patch worklist</option>
+            </select>
+          </label>
           <div className="flex flex-wrap gap-4">
+            {draft.crowdstrike?.view !== "patch-worklist" && <>
             <label className="text-sm text-zinc-300">Measure
               <select className={`${selectClass} mt-2 block`} value={draft.crowdstrike?.measure} onChange={(event) => updateCrowdStrike({ measure: event.target.value as CrowdStrikeOptions["measure"] })}>
                 <option value="findings">Finding count</option><option value="cves">Unique CVEs</option><option value="hosts">Unique affected hosts</option>
@@ -237,14 +255,17 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
                 <option value="none">None · total</option><option value="host">Host</option><option value="severity">Severity</option><option value="priority">GMI priority (P1/P2/P3)</option><option value="status">Status</option><option value="cve">CVE</option>
               </select>
             </label>
-            {draft.crowdstrike?.groupBy !== "none" && <label className="text-sm text-zinc-300">Top groups
+            </>}
+            {(draft.crowdstrike?.view === "patch-worklist" || draft.crowdstrike?.groupBy !== "none") && <label className="text-sm text-zinc-300">{draft.crowdstrike?.view === "patch-worklist" ? "Top findings" : "Top groups"}
               <select className={`${selectClass} mt-2 block`} value={draft.crowdstrike?.top} onChange={(event) => updateCrowdStrike({ top: Number(event.target.value) })}>
                 {[10, 25, 50, 100].map((value) => <option key={value} value={value}>{value}</option>)}
               </select>
             </label>}
           </div>
-          <label className="flex items-center gap-2 text-sm text-zinc-300"><input type="checkbox" checked={draft.crowdstrike?.history ?? false} onChange={(event) => updateCrowdStrike({ history: event.target.checked })} />Save daily history of the total</label>
-          <p className="text-xs text-zinc-500">FQL filters findings; the app calculates the measure across every returned page. History starts with the first saved collection and shows the latest successful count per UTC day. Each filter and measure has separate history. Missing days appear as gaps.</p>
+          {draft.crowdstrike?.view === "patch-worklist" ? <p className="text-xs text-zinc-500">Open P1–P3 findings, one row per finding and device. Sorted by GMI priority, risk score, then affected devices. The preset excludes suppressed findings. All matching pages are collected before choosing the top rows. Use Daily refresh for broad filters.</p> : <>
+            <label className="flex items-center gap-2 text-sm text-zinc-300"><input type="checkbox" checked={draft.crowdstrike?.history ?? false} onChange={(event) => updateCrowdStrike({ history: event.target.checked })} />Save daily history of the total</label>
+            <p className="text-xs text-zinc-500">FQL filters findings; the app calculates the measure across every returned page. History starts with the first saved collection and shows the latest successful count per UTC day. Each filter and measure has separate history. Missing days appear as gaps.</p>
+          </>}
           {draft.crowdstrike?.groupBy === "priority" && <p className="text-xs text-zinc-500">Uses your GMI risk rules, including exploit status, KEV, ExPRT, CVSS, exploitability and severity. “Other” includes findings below P3; missing risk fields contribute no points.</p>}
           <a className="text-sm text-red-300 underline" href="https://developer.crowdstrike.com/api-reference/collections/spotlight-vulnerabilities/" target="_blank" rel="noreferrer">Supported CrowdStrike FQL fields</a>
         </div>}
@@ -254,7 +275,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
         </label>
         <div className="flex flex-wrap items-end gap-4">
           <label className="text-sm text-zinc-300">Display
-            <select className={`${selectClass} mt-2 block`} value={draft.display} onChange={(event) => setDraft({ ...draft, display: event.target.value as Draft["display"], chart: draft.chart ?? (preview ? suggestChart(preview) : undefined) })}>
+            <select disabled={draft.source === "crowdstrike" && draft.crowdstrike?.view === "patch-worklist"} className={`${selectClass} mt-2 block`} value={draft.display} onChange={(event) => setDraft({ ...draft, display: event.target.value as Draft["display"], chart: draft.chart ?? (preview ? suggestChart(preview) : undefined) })}>
               <option value="auto">Automatic</option><option value="metrics">Number cards</option><option value="table">Table</option>
               <option value="bar">Bar chart</option><option value="line">Line chart</option><option value="doughnut">Doughnut chart</option>
             </select>
@@ -310,7 +331,31 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
       const stale = query.refreshedAt && now !== null && now - Date.parse(query.refreshedAt) > query.refreshMinutes * 2 * 60_000;
       return <PanelCard key={query.id} eyebrow={query.title}
         description={`${query.source === "crowdstrike" ? "CrowdStrike · Vulnerabilities" : "Elasticsearch"} · ${query.enabled ? (query.refreshMinutes === 1440 ? "Refreshes daily" : `Refreshes every ${query.refreshMinutes} minutes`) : "Automatic refresh paused"}`}
-        actions={dashboard.canManage && <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => edit(query)}><Pencil size={14} />Edit</button>}>
+        actions={<div className="flex flex-wrap gap-2">
+          {query.result && <button type="button" className={ghostButtonClass} onClick={() => {
+            const url = URL.createObjectURL(new Blob([dashboardCsv(query.result!)], { type: "text/csv;charset=utf-8" }));
+            const link = document.createElement("a"); link.href = url; link.download = `${query.title.replace(/[^a-z0-9-]/gi, "-").slice(0, 80) || "dashboard-tile"}.csv`;
+            link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+          }}><Download size={14} />CSV</button>}
+          {dashboard.canManage && <>
+            <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => edit(query)}><Pencil size={14} />Edit</button>
+            <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => setDeleting(query.id)} aria-label={`Delete ${query.title}`}><Trash2 size={14} />Delete</button>
+          </>}
+        </div>}>
+        {deleting === query.id && <div role="alert" className="mb-4 rounded-xl border border-red-900 p-4 text-sm text-zinc-300">
+          <p>Delete this shared dashboard tile and its saved history? Source findings are unaffected.</p>
+          <div className="mt-3 flex gap-2">
+            <button type="button" className={primaryButtonClass} disabled={Boolean(busy)} onClick={() => action("delete", async () => {
+              const response = await fetch(`/api/elastic-dashboard/queries/${encodeURIComponent(query.id)}`, { method: "DELETE" });
+              const data = await response.json(); if (!response.ok) throw new Error(data.error || "Unable to delete this tile.");
+              dashboardVersion.current++;
+              setDashboard((current) => ({ ...current, queries: current.queries.filter((tile) => tile.id !== query.id) }));
+              if (draft?.id === query.id) { setDraft(null); setPreview(null); }
+              setDeleting(null); setMessage("Tile deleted.");
+            })}>{busy === "delete" ? "Deleting…" : "Delete tile"}</button>
+            <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => setDeleting(null)}>Cancel</button>
+          </div>
+        </div>}
         {query.error && <p className="mb-4 text-sm text-amber-300">{query.error} {query.result ? "Showing the last successful result." : "No successful result yet."}</p>}
         {stale && !query.error && <p className="mb-4 text-sm text-amber-300">These results are older than two refresh intervals.</p>}
         {query.result ? <Results result={query.result} display={query.display} chart={query.chart} /> : !query.error && <p role="status" className="flex items-center gap-2 py-5 text-zinc-400"><RefreshCw size={16} className="animate-spin" />Loading results in the background…</p>}

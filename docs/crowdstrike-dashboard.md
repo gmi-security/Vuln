@@ -30,6 +30,46 @@ Example tiles:
 | Open priority distribution | Finding count | GMI priority | Bar, priority/findings |
 | Open findings over time | Finding count, Save daily history | None | Line, day/findings |
 
+## Patch worklist
+
+Add query > CrowdStrike > **Use patch worklist** > **Add to dashboard**. Preview
+is optional. The preset uses Table, top 25 findings, daily refresh, and this FQL:
+
+```text
+status:['open','reopen']+suppression_info.is_suppressed:false
+```
+
+The app applies the existing GMI P1/P2/P3 policy after collecting every matching
+page. It orders open/reopened P1–P3 findings by priority, descending GMI risk
+score, then descending affected devices for the CVE, with stable ID tie breaks.
+Top 10/25/50/100 selects rows after ranking; it does not limit collection to an
+arbitrary first page. Each row is a finding on a device, not a patch package or
+a unique CVE. A single patch may resolve several rows.
+
+Columns include priority, risk score, CVE, device, affected devices for the CVE,
+severity, ExPRT, CVSS, KEV, exploit status, status, source update time, host ID,
+tenant ID and finding ID. Device counts cover the eligible P1–P3 population in
+the chosen filter, deduplicate multiple findings on a host, and distinguish
+tenants. Missing KEV/CVSS/exploit values remain null. Missing host IDs fail the
+worklist instead of producing ambiguous patch targets. Lower-priority and
+closed findings are excluded by the worklist view even with a broader FQL.
+
+Suppression exclusion is explicit in the preset FQL; editing it changes that
+scope. No updated-time filter is imposed, so older open findings stay eligible.
+The risk policy is GMI's policy, not a native CrowdStrike score. This view does
+not fetch patch commands or remediation entities; use the CVE/finding ID to
+check vendor remediation in Falcon. The existing API permissions suffice.
+
+Use **CSV** on a completed tile to export its displayed rows for the patching
+team. Exports contain the cached result and the same top-row limit, not the
+entire matching population. Formula-like source strings are escaped for
+spreadsheet safety. Broad filters still use complete pagination and the existing
+five-minute collection budget; the tile saves immediately while collection runs.
+
+The query fields and status values are documented in the official
+[Spotlight API reference](https://developer.crowdstrike.com/api-reference/collections/spotlight-vulnerabilities/)
+and [FalconPy filter guide](https://github.com/CrowdStrike/falconpy/wiki/Spotlight-Vulnerabilities).
+
 FQL selects the records; the app aggregates the selected population. Counting
 findings, CVEs and hosts gives different answers. All statuses returned by the
 filter count; include open/reopen in the FQL when building open-finding tiles.
@@ -120,6 +160,15 @@ adds 5/3/1. The sum is rounded to one decimal.
   contribute no points; an unknown severity remains UNKNOWN in severity grouping.
 
 ## Validation and rollout
+
+Patch worklist and tile deletion validation (September 24, 2026): all 21 tests
+passed without skips, including full-page ranking, duplicate device counting,
+tenant separation, missing fields, unchanged risk boundaries, CSV escaping,
+delete-versus-refresh/save races, history cleanup and deleted default seeding.
+The production build and local HTTP smoke passed in disabled, sample and
+database-backed modes, including member authorization and same-origin deletion.
+Live authenticated CrowdStrike execution and signed-in browser interaction
+remain unverified; compare the first worklist with Falcon using the same filter.
 
 Mocked API tests cover filter validation, fixed origins, credential encryption,
 pagination, deduplication, counts, tenant separation, policy boundaries, incomplete

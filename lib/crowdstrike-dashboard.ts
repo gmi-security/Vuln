@@ -11,6 +11,7 @@ export type CrowdStrikeConnection = { region: FalconRegion; clientId: string; cl
 export type Vulnerability = {
   id: string; cid: string; hostId: string; hostname: string; cve: string; severity: string;
   status: string; priority: string; updated: string;
+  risk: number; exprt: string; cvss: number | null; kev: boolean | null; exploit: number | null;
 };
 type Json = Record<string, any>;
 const string = (value: unknown): string => typeof value === "string" ? value : "";
@@ -18,7 +19,7 @@ const number = (value: unknown): number => value === null || value === undefined
 
 // Version 1 mirrors the priority rules supplied for the Elastic tiles. It is a
 // GMI policy, not CrowdStrike's own prioritization classification.
-export function vulnerabilityPriority(cve: Json): string {
+export function vulnerabilityRisk(cve: Json): { priority: string; risk: number } {
   const severity = string(cve.severity).toUpperCase();
   const exprt = string(cve.exprt_rating).toUpperCase();
   const rank = (label: string) => ({ CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1 }[label] ?? 0);
@@ -29,21 +30,51 @@ export function vulnerabilityPriority(cve: Json): string {
     (er === 4 ? 20 : er === 3 ? 15 : er === 2 ? 7 : er === 1 ? 2 : 0) +
     Math.min(Math.max(cvss, 0), 10) * 1.5 + Math.min(Math.max(x, 0), 4) * 2.5 +
     (sr === 4 ? 5 : sr === 3 ? 3 : sr === 2 ? 1 : 0)) * 10) / 10;
-  if (e >= 90 || kev) return "P1 Exploited / KEV";
-  if (er === 4 || sr === 4 || cvss >= 9 || (e >= 60 && (sr >= 3 || cvss >= 7)) || risk >= 65) return "P2 Critical risk";
-  if (er === 3 || sr === 3 || cvss >= 7 || (e >= 30 && x >= 3) || risk >= 40) return "P3 High risk";
-  return "Other";
+  const priority = e >= 90 || kev ? "P1 Exploited / KEV"
+    : er === 4 || sr === 4 || cvss >= 9 || (e >= 60 && (sr >= 3 || cvss >= 7)) || risk >= 65 ? "P2 Critical risk"
+    : er === 3 || sr === 3 || cvss >= 7 || (e >= 30 && x >= 3) || risk >= 40 ? "P3 High risk" : "Other";
+  return { priority, risk };
 }
+export function vulnerabilityPriority(cve: Json): string { return vulnerabilityRisk(cve).priority; }
 
 export function normalizeVulnerability(raw: Json): Vulnerability {
   if (!raw || typeof raw !== "object" || !string(raw.id)) throw new DashboardError("CrowdStrike returned a finding without its stable ID. No totals were saved.");
   const cve = raw.cve ?? {};
+  const assessment = vulnerabilityRisk(cve), cvss = number(cve.base_score), exploit = number(cve.exploit_status);
+  const kev = cve.cisa_info?.is_cisa_kev ?? cve.is_cisa_kev;
   return { id: raw.id, cid: string(raw.cid), hostId: string(raw.aid), hostname: string(raw.host_info?.hostname),
     cve: string(cve.id), severity: string(cve.severity).toUpperCase() || "UNKNOWN",
-    status: string(raw.status).toLowerCase() || "unknown", priority: vulnerabilityPriority(cve), updated: string(raw.updated_timestamp) };
+    status: string(raw.status).toLowerCase() || "unknown", ...assessment, updated: string(raw.updated_timestamp),
+    exprt: string(cve.exprt_rating).toUpperCase() || "UNKNOWN", cvss: cvss >= 0 ? cvss : null,
+    kev: typeof kev === "boolean" ? kev : null, exploit: exploit >= 0 ? exploit : null };
+}
+
+export function patchWorklist(records: Iterable<Vulnerability>, top: number): QueryResult {
+  const eligible = [...records].filter((row) => ["open", "reopen"].includes(row.status) && row.priority !== "Other");
+  const hosts = new Map<string, Set<string>>();
+  for (const row of eligible) {
+    if (!row.hostId) throw new DashboardError("A finding is missing its host ID. The patch worklist cannot reliably identify its device.");
+    if (row.cve) {
+      const members = hosts.get(row.cve) ?? new Set<string>();
+      members.add(JSON.stringify([row.cid, row.hostId])); hosts.set(row.cve, members);
+    }
+  }
+  eligible.sort((a, b) => a.priority.localeCompare(b.priority) || b.risk - a.risk ||
+    (hosts.get(b.cve)?.size ?? 0) - (hosts.get(a.cve)?.size ?? 0) || a.cve.localeCompare(b.cve) || a.cid.localeCompare(b.cid) || a.id.localeCompare(b.id));
+  const names = ["priority", "risk_score", "cve", "device", "affected_devices_for_cve", "severity", "exprt", "cvss", "cisa_kev", "exploit_status", "status", "source_updated_at", "host_id", "tenant_id", "finding_id"];
+  return {
+    columns: names.map((name) => ({ name, type: ["risk_score", "cvss"].includes(name) ? "double"
+      : ["affected_devices_for_cve", "exploit_status"].includes(name) ? "long" : name === "cisa_kev" ? "boolean" : name === "source_updated_at" ? "date" : "keyword" })),
+    rows: eligible.slice(0, top).map((row) => [row.priority, row.risk, row.cve || null, row.hostname.slice(0, 2000) || "Unknown host",
+      hosts.get(row.cve)?.size ?? null, row.severity, row.exprt, row.cvss, row.kev, row.exploit, row.status,
+      row.updated || null, row.hostId, row.cid || null, row.id]),
+    truncated: false,
+    note: `Top ${Math.min(top, eligible.length)} of ${eligible.length} open P1–P3 findings in this filter. Ordered by GMI priority, risk score, then affected devices. Device counts cover the matching P1–P3 population. One row is a finding on a device; a patch may resolve multiple findings. Use the CVE and finding ID to check remediation in Falcon.`,
+  };
 }
 
 export function summarizeVulnerabilities(records: Iterable<Vulnerability>, options: CrowdStrikeOptions): QueryResult {
+  if (options.view === "patch-worklist") return patchWorklist(records, options.top);
   const groups = new Map<string, Set<string>>();
   const overall = new Set<string>();
   for (const row of records) {
