@@ -194,3 +194,21 @@ date and uses September 24 midnight UTC as an exclusive cutoff. It initially
 shows one daily point, deduplicates stable finding IDs, and uses earlier records
 only for baseline state. Advance `report_end` after a verified later pull; the app
 does not currently receive an import-completion watermark. See the setup guide.
+
+### Background query release verification
+
+- Async execution production commit `8a3d6a6cb057482306baa7e4cc0f7196e4b69a05`
+  deployed as `39a06b65-2937-4f46-81c7-2ba738137c4d` and reached ACTIVE.
+- September 23 template production commit
+  `e7940f1e3f10aed7c20251e812bdb7a1f816d3c0` deployed as
+  `7da3f039-f1b2-4bb2-898d-f505f74a8a99`; build and deployment succeeded and
+  the deployment reached ACTIVE on 2026-09-24.
+- All 11 contract, mocked Elastic protocol, and real PostgreSQL tests passed
+  without skips. The production build and local HTTP smoke checks passed.
+- After the final deployment, live health returned `ok: true` with the database
+  reachable. Anonymous dashboard access returned 307; dashboard and private job
+  APIs returned 401. The disposable test database was removed.
+- Authenticated live ES|QL execution, source field compatibility, query duration,
+  and reconciliation against CrowdStrike remain unverified. No signed-in browser
+  surface was available. Complete the checks in `elastic-trend-setup.md` before
+  treating the chart as an authoritative count.
