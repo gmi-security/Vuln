@@ -73,6 +73,25 @@ UPDATE rights. The existing app database transport configuration is inherited.
 
 ## Execution and safeguards
 
+- Browser API requests check response type before parsing JSON. HTML gateway
+  pages, invalid JSON and login redirects produce readable recovery messages;
+  HTML content is never shown. Background GET requests retry network/502/503/504
+  failures once, with a 20-second deadline per attempt. Mutations are not replayed
+  automatically because the server may already have committed them. Failed saves
+  keep the editor open. Polling does not overlap, retains previous results on
+  failure, and clears its own error after recovery without clearing a save error.
+
+Response-handling investigation (September 24, 2026): the user saw an HTML
+DOCTYPE parsed as JSON while editing a tile. Production logs showed process
+startup at 21:11:10 UTC on the existing active deployment; live health and database
+reachability were healthy. Restarted logs were empty, so neither the original
+HTTP status nor the restart cause was established. A temporary proxy response
+is consistent with this evidence, not confirmed. Four focused browser-client
+tests cover HTML/malformed responses, session redirects, bounded GET retries
+and non-replayed mutations. The production build passed. Live authenticated
+reproduction remains unavailable; the clearer HTTP error enables follow-up if
+the interruption recurs.
+
 - One in-process timer checks saved queries every minute, independent of browser
   traffic. Authenticated dashboard polling also nudges due work. Saved queries
   refresh at 5, 15, 30, 60 minutes, or daily.

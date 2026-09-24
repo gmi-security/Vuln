@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Database, Download, Pencil, Plus, RefreshCw, Settings2, Trash2 } from "lucide-react";
 import { dashboardCsv } from "@/lib/dashboard-csv";
+import { dashboardRequest } from "@/lib/dashboard-browser-client";
 import VulnShell from "@/components/VulnShell";
 import ElasticResultChart from "@/components/ElasticResultChart";
 import { OPEN_VULN_TREND } from "@/lib/elastic-query-templates";
@@ -44,12 +45,9 @@ function Results({ result, display, chart }: { result: QueryResult; display: Que
 }
 
 async function post(path: string, body?: unknown) {
-  const response = await fetch(`/api/elastic-dashboard/${path}`, {
+  return dashboardRequest(path, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body ?? {}),
   });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || "The request failed.");
-  return data;
 }
 
 export default function ElasticQueryDashboard({ initial }: { initial: ElasticDashboard }) {
@@ -66,23 +64,27 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
   const [preview, setPreview] = useState<QueryResult | null>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [loadError, setLoadError] = useState("");
   const [message, setMessage] = useState("");
   const [now, setNow] = useState<number | null>(null);
   const actionSequence = useRef(0);
   const dashboardVersion = useRef(0);
+  const reloadInFlight = useRef(false);
   const reload = useCallback(async () => {
-    const version = dashboardVersion.current;
-    const response = await fetch("/api/elastic-dashboard", { cache: "no-store" });
-    if (!response.ok) throw new Error(response.status === 401 ? "Your session expired. Sign in again." : "Unable to load results. Previously loaded results are still shown.");
-    const data: ElasticDashboard = await response.json();
-    if (version !== dashboardVersion.current) return;
-    if (!data.storageReady) throw new Error("Dashboard storage is unavailable. Previously loaded results are still shown.");
-    setDashboard(data);
-    setNow(Date.now());
+    if (reloadInFlight.current) return;
+    reloadInFlight.current = true;
+    try {
+      const version = dashboardVersion.current;
+      const data = await dashboardRequest<ElasticDashboard>("");
+      if (version !== dashboardVersion.current) return;
+      if (!data.storageReady) throw new Error("Dashboard storage is unavailable. Previously loaded results are still shown.");
+      setDashboard(data); setLoadError("");
+      setNow(Date.now());
+    } finally { reloadInFlight.current = false; }
   }, []);
   const pending = dashboard.queries.some((query) => !query.result && !query.error);
   useEffect(() => {
-    const timer = setInterval(() => { setNow(Date.now()); void reload().catch((err) => setError(err.message)); }, pending ? 3000 : 15_000);
+    const timer = setInterval(() => { setNow(Date.now()); void reload().catch((err) => setLoadError(err.message)); }, pending ? 3000 : 15_000);
     return () => clearInterval(timer);
   }, [reload, pending]);
 
@@ -105,10 +107,9 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
       setMessage("Query queued or running in the background. Execution can take up to five minutes; this page will update when it finishes.");
       await new Promise((resolve) => setTimeout(resolve, 3000));
       if (sequence !== actionSequence.current) return null;
-      const response = await fetch(`/api/elastic-dashboard/jobs/${encodeURIComponent(job.jobId)}`, { cache: "no-store" });
-      const status = await response.json();
+      const status = await dashboardRequest(`jobs/${encodeURIComponent(job.jobId)}`);
       if (sequence !== actionSequence.current) return null;
-      if (!response.ok || status.status === "failed") throw new Error(status.error || "The background query failed.");
+      if (status.status === "failed") throw new Error(status.error || "The background query failed.");
       if (status.status === "succeeded") { setMessage(""); return status; }
     }
     throw new Error("The query job expired. Reload the dashboard to check saved results, then retry if needed.");
@@ -149,6 +150,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
       </>}
     </div>}>
     {error && <p role="alert" className="rounded-xl border border-red-900 bg-red-950/20 p-4 text-sm text-red-300">{error}</p>}
+    {loadError && !error && <p role="alert" className="rounded-xl border border-amber-900 bg-amber-950/20 p-4 text-sm text-amber-300">{loadError}</p>}
     {message && <p role="status" className="rounded-xl border border-emerald-900 bg-emerald-950/20 p-4 text-sm text-emerald-300">{message}</p>}
     {busy === "preview" && <button type="button" className={ghostButtonClass} onClick={() => {
       actionSequence.current++; setBusy(""); setMessage("You can add the tile now. The optional preview may finish in the background.");
@@ -202,6 +204,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
     {dashboard.canManage && draft && <PanelCard eyebrow={draft.id ? "Edit tile" : "Add tile"} description="Add the tile immediately. Its results load on the dashboard. Preview is optional.">
       <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void action("save", async () => {
         const response = await post("queries", draft);
+        if (!response.saved || !response.query?.id) throw new Error("The server did not confirm the saved tile. Your form has been kept; check the dashboard before retrying.");
         const tile: DashboardQuery = response.query;
         dashboardVersion.current++;
         setDashboard((current) => ({ ...current, queries: current.queries.some((query) => query.id === tile.id)
@@ -346,8 +349,8 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
           <p>Delete this shared dashboard tile and its saved history? Source findings are unaffected.</p>
           <div className="mt-3 flex gap-2">
             <button type="button" className={primaryButtonClass} disabled={Boolean(busy)} onClick={() => action("delete", async () => {
-              const response = await fetch(`/api/elastic-dashboard/queries/${encodeURIComponent(query.id)}`, { method: "DELETE" });
-              const data = await response.json(); if (!response.ok) throw new Error(data.error || "Unable to delete this tile.");
+              const data = await dashboardRequest(`queries/${encodeURIComponent(query.id)}`, { method: "DELETE" });
+              if (!data.deleted) throw new Error("The server did not confirm deletion. Check the dashboard before retrying.");
               dashboardVersion.current++;
               setDashboard((current) => ({ ...current, queries: current.queries.filter((tile) => tile.id !== query.id) }));
               if (draft?.id === query.id) { setDraft(null); setPreview(null); }
