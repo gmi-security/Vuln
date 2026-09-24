@@ -56,6 +56,14 @@ authorization/CSRF on the order endpoint. Live authenticated drag/drop and visua
 interaction remain unverified. Two separate design previews use sample data;
 neither visual redesign is included in this functional release.
 
+Layout release verification: commit `0efbded73f4b59392c4f30ea0dfb981fb4b9ad4d`
+reached ACTIVE in DigitalOcean deployment
+`f5ac0b7e-077e-4cef-b506-6b8e93ceb2c1` on September 24, 2026. Build and deploy
+steps succeeded; live health returned `ok: true` and `dbReachable: true`.
+Anonymous POST to the new order endpoint returned 401. The disposable layout
+test database container was removed. Signed-in live drag/drop remains unverified;
+next check is to move a tile, reload, and scroll a long patch worklist.
+
 Tile deletion uses authenticated, same-origin DELETE
 `/api/elastic-dashboard/queries/[id]`. A `deleted_at` tombstone prevents startup
 seeding, stale forms and old jobs from recreating the tile. Deletion increments
