@@ -14,18 +14,18 @@ Open **Elastic Dashboard** at `/elastic-vulnerabilities`. For daily diff history
    A Kibana `.kb.` address cannot be used as the Elasticsearch API address.
 2. The supplied asset coverage query is already saved. Connection verification
    runs that query to check both authentication and access to its indices.
-3. Click **Add query**, enter a title and ES|QL, then **Preview results**.
+3. Click **Add query**, enter a title and ES|QL. **Preview (optional)** can check results before saving.
 4. Choose **Automatic**, **Number cards**, **Table**, **Bar chart**, **Line chart**,
    or **Doughnut chart**, select a refresh interval,
-   then save. Automatic turns a single numeric row into one number card per
+   then **Add to dashboard**. The tile appears immediately and loads results in the background. Automatic turns a single numeric row into one number card per
    column; other shapes use a table. `_pct`, `_percent`, and `percentage` column
    suffixes render numeric values as percentages. Use ES|QL aliases for labels.
-   For charts, preview results and select **Category / X axis** and the numeric
-   **Value / Y axis**. Two suitable columns are suggested automatically. Editing
-   the query clears these mappings; preview again to choose its new columns.
+   For charts, enter the category and numeric column names, or preview to select
+   them from the results. Two suitable columns are suggested after a preview.
+   Editing the query clears mappings; enter its new columns or preview again.
 5. Each saved query has **Edit**. Disabling its automatic-refresh checkbox pauses
    background refresh and leaves the last result visible. Editing/saving always
-   validates the new query once, including when automatic refresh is paused.
+   requests one background run, including when automatic refresh is paused.
 
 The first query counts managed/unmanaged assets, not vulnerabilities. It preserves
 the user's exact 25-hour record window and seven-day last-seen filter. IDs observed
@@ -62,16 +62,18 @@ UPDATE rights. The existing app database transport configuration is inherited.
 ## Execution and safeguards
 
 - One in-process timer checks saved queries every minute, independent of browser
-  traffic. Saved queries refresh at 5, 15, 30, 60 minutes, or daily.
+  traffic. Authenticated dashboard polling also nudges due work. Saved queries
+  refresh at 5, 15, 30, 60 minutes, or daily.
 - Claims are atomic in Postgres to avoid duplicate work across app instances.
   Connection/query revisions prevent stale in-flight results from overwriting
   edits. Failed refreshes preserve the last successful result and timestamp.
 - Two outbound queries at a time per process; up to 24 saved queries. Member
-  previews/saves have a two-second throttle; forced refresh has a 30-second
-  cooldown per query. Preview and save each execute the query.
+  previews have a two-second throttle; forced refresh has a 30-second cooldown
+  per query. Saving persists the definition immediately, independent of the
+  preview job queue. A background refresh executes the saved query afterward.
 - ES|QL source is limited to 16,000 characters. A final `LIMIT 101` bounds returned
   rows; the UI shows at most 100 and labels truncation. There is a 32-column limit,
-  a 2 MiB response cap, and a 20-second HTTP request deadline. Preview/save jobs and scheduled refresh use async ES|QL with a five-minute execution budget; browser requests poll a private job record instead of holding a connection open. Large aggregations
+  a 2 MiB response cap, and a 20-second HTTP request deadline. Preview jobs and scheduled refresh use async ES|QL with a five-minute execution budget; preview requests poll a private job record instead of holding a connection open. Large aggregations
   can still be expensive; use sensible index/time filters and Elastic-side limits.
 - Warning-bearing or partial responses are rejected, preserving prior data.
   Table cell text is limited to 2,000 characters.
@@ -174,13 +176,39 @@ migration and retain their display behavior.
 
 ## Background query jobs (2026-09-24)
 
-Preview/save return 202 with an app job ID. GET `/api/elastic-dashboard/jobs/[id]`
+Preview returns 202 with an app job ID. GET `/api/elastic-dashboard/jobs/[id]`
 requires the same organization member identity. Two active jobs maximum; jobs
 expire after 15 minutes. Interrupted running jobs fail after seven minutes rather
 than silently replaying a save. Queued jobs are picked up by a 15-second worker.
 Connection and query revision checks prevent an older background save replacing
 a newer edit. Refresh leases prevent overlapping automatic refreshes across app
 instances. Completed results retain the existing last-success behavior.
+
+### Immediate tile saving (2026-09-24)
+
+POST `/api/elastic-dashboard/queries` now returns 201 with `{ saved: true, query }`
+after the definition is committed. It does not execute a remote query or enqueue
+a save job. Existing queued save jobs remain supported during deployment.
+The form closes and the tile appears immediately; missing results show a loading
+state, then data or a remote query error. Polling runs every three seconds while
+new tiles await results and every 15 seconds otherwise.
+
+Preview is optional, including for charts with manually entered column mappings.
+**Stop waiting for preview** detaches UI polling; the bounded server preview may
+still finish. It lets the user save without waiting for that preview. A saved tile
+gets one initial background run even with automatic refresh off. Busy execution
+slots leave the tile pending instead of reporting a query failure. Cosmetic edits
+retain compatible cached results; query/population changes clear them. Revision
+checks discard results from superseded definitions. Source connections and
+existing dashboard tiles remain supported.
+
+Validation: all 18 contract, mocked connector and disposable PostgreSQL tests
+passed without skips. Added cases hold remote execution open while saving,
+verify no save job is created, cover a paused tile's first run, busy execution
+slots, cached cosmetic edits, superseded results, remote errors and CrowdStrike
+history written only after collection. The production build and local HTTP
+smoke checks passed in disabled, sample and database-backed modes. Authenticated
+production browser interaction and live query duration remain unverified.
 
 Elastic validation errors now include a bounded, key-redacted reason in private
 responses; full response bodies and credentials are never logged. Connection tests

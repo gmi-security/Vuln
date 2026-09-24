@@ -53,6 +53,7 @@ export async function dashboardDatabase(): Promise<Pool> {
         expires_at TIMESTAMPTZ NOT NULL DEFAULT now() + interval '15 minutes'
       );
       ALTER TABLE elastic_dashboard_queries ADD COLUMN IF NOT EXISTS refresh_lease_until TIMESTAMPTZ;
+      ALTER TABLE elastic_dashboard_queries ADD COLUMN IF NOT EXISTS refresh_requested BOOLEAN NOT NULL DEFAULT false;
       CREATE TABLE IF NOT EXISTS dashboard_source_connections (
         source TEXT PRIMARY KEY, secret TEXT NOT NULL, revision INT NOT NULL DEFAULT 1,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -225,6 +226,43 @@ export async function saveCrowdStrikeConnection(value: unknown, actor: string): 
   triggerRefresh();
 }
 
+// Save settings first. Remote validation and execution belong to the refresh
+// worker, so adding a tile never waits for Elastic/CrowdStrike or the job queue.
+export async function addDashboardTile(value: unknown, actor: string): Promise<{ saved: true; query: DashboardQuery }> {
+  const body = value as Record<string, unknown>;
+  const id = typeof body?.id === "string" ? body.id : randomUUID();
+  const definition = parseDefinition(body, id), source = querySource(definition);
+  const db = await database(), client = await db.connect();
+  let tile: DashboardQuery;
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(804201)");
+    const connected = source === "elastic" ? await client.query("SELECT id FROM elastic_dashboard_connection WHERE id = 1") :
+      await client.query("SELECT source FROM dashboard_source_connections WHERE source = $1", [source]);
+    if (!connected.rowCount) throw new DashboardError(`Connect ${DASHBOARD_CONNECTORS[source].label} first.`, 409);
+    const previous = (await client.query("SELECT definition, result, refreshed_at FROM elastic_dashboard_queries WHERE id = $1", [id])).rows[0];
+    const count = await client.query("SELECT count(*)::int AS count FROM elastic_dashboard_queries WHERE id <> $1", [id]);
+    if (count.rows[0].count >= 24) throw new DashboardError("This dashboard supports up to 24 saved queries.");
+    let result: QueryResult | null = null, refreshedAt: string | null = null;
+    if (previous?.result && JSON.stringify(parseQueryInput(previous.definition)) === JSON.stringify(parseQueryInput(definition))) {
+      try { validateDisplayResult(previous.result, definition); result = previous.result; refreshedAt = previous.refreshed_at?.toISOString() ?? null; }
+      catch { /* A new display can wait for its first valid result. */ }
+    }
+    await client.query(`INSERT INTO elastic_dashboard_queries
+      (id, definition, result, refreshed_at, next_attempt, refresh_requested)
+      VALUES ($1, $2::jsonb, $3::jsonb, $4::timestamptz, now(), true)
+      ON CONFLICT (id) DO UPDATE SET definition = EXCLUDED.definition, result = EXCLUDED.result,
+      refreshed_at = EXCLUDED.refreshed_at, revision = elastic_dashboard_queries.revision + 1,
+      attempted_at = NULL, last_error = NULL, next_attempt = now(), refresh_lease_until = NULL, refresh_requested = true`,
+      [id, JSON.stringify(definition), result ? JSON.stringify(result) : null, refreshedAt]);
+    await client.query("INSERT INTO elastic_dashboard_audit (actor, action, query_id) VALUES ($1, 'query.saved', $2)", [actor, id]);
+    await client.query("COMMIT");
+    tile = { ...definition, result, refreshedAt, attemptedAt: null, error: null };
+  } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
+  triggerRefresh();
+  return { saved: true, query: tile };
+}
+
 export async function saveQuery(value: unknown, actor: string, job?: { id: string; connectionRevision: number; queryRevision: number | null }): Promise<void> {
   const body = value as Record<string, unknown>;
   const id = typeof body?.id === "string" ? body.id : randomUUID();
@@ -268,24 +306,27 @@ async function refreshQueries(force = false): Promise<void> {
   if (!elasticVulnEnabled()) return;
   const db = await database();
   const due = await db.query(`SELECT id, definition, revision FROM elastic_dashboard_queries
-    WHERE (definition->>'enabled')::boolean = true
+    WHERE ((definition->>'enabled')::boolean = true OR refresh_requested = true OR $1)
     AND (refresh_lease_until IS NULL OR refresh_lease_until <= now())
     AND (next_attempt <= now() OR ($1 AND (attempted_at IS NULL OR attempted_at < now() - interval '30 seconds')))
     ORDER BY next_attempt LIMIT 24`, [force]);
   for (const row of due.rows) {
+    // Leave pending tiles due while previews occupy the execution slots.
+    if (state.running >= 2) break;
     const definition = parseDefinition(row.definition, row.id);
     let saved;
     try { saved = await connection(querySource(definition)); }
     catch (error) {
       if (!(error instanceof DashboardError)) throw error;
-      await db.query(`UPDATE elastic_dashboard_queries SET last_error = $3, attempted_at = now(),
+      await db.query(`UPDATE elastic_dashboard_queries SET last_error = $3, attempted_at = now(), refresh_requested = false,
         next_attempt = now() + $4 * interval '1 minute' WHERE id = $1 AND revision = $2`,
         [row.id, row.revision, error.message, definition.refreshMinutes]);
       continue;
     }
     if (!saved) continue;
+    if (state.running >= 2) break;
     // Atomic claim across app instances. A refresh never erases the last success.
-    const claim = await db.query(`UPDATE elastic_dashboard_queries SET attempted_at = now(),
+    const claim = await db.query(`UPDATE elastic_dashboard_queries SET attempted_at = now(), refresh_requested = false,
       next_attempt = now() + $3 * interval '1 minute', refresh_lease_until = now() + interval '7 minutes'
       WHERE id = $1 AND revision = $2 AND (refresh_lease_until IS NULL OR refresh_lease_until <= now()) AND (next_attempt <= now() OR
       ($4 AND (attempted_at IS NULL OR attempted_at < now() - interval '30 seconds'))) RETURNING id`,
@@ -296,6 +337,11 @@ async function refreshQueries(force = false): Promise<void> {
     try {
       result = await limitedQuery(saved.value, definition);
     } catch (err) {
+      if (err instanceof DashboardError && err.status === 429 && state.running >= 2) {
+        await db.query(`UPDATE elastic_dashboard_queries SET refresh_requested = true,
+          refresh_lease_until = NULL, next_attempt = now() WHERE id = $1 AND revision = $2`, [row.id, row.revision]);
+        break;
+      }
       result = null;
       error = err instanceof DashboardError ? err.message : "Query refresh failed. Check the connection and query, then retry.";
     }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Database, Pencil, Plus, RefreshCw, Settings2 } from "lucide-react";
 import VulnShell from "@/components/VulnShell";
 import ElasticResultChart from "@/components/ElasticResultChart";
@@ -66,33 +66,46 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [now, setNow] = useState<number | null>(null);
+  const actionSequence = useRef(0);
+  const dashboardVersion = useRef(0);
   const reload = useCallback(async () => {
+    const version = dashboardVersion.current;
     const response = await fetch("/api/elastic-dashboard", { cache: "no-store" });
     if (!response.ok) throw new Error(response.status === 401 ? "Your session expired. Sign in again." : "Unable to load results. Previously loaded results are still shown.");
     const data: ElasticDashboard = await response.json();
+    if (version !== dashboardVersion.current) return;
     if (!data.storageReady) throw new Error("Dashboard storage is unavailable. Previously loaded results are still shown.");
     setDashboard(data);
     setNow(Date.now());
   }, []);
+  const pending = dashboard.queries.some((query) => !query.result && !query.error);
   useEffect(() => {
-    const timer = setInterval(() => { setNow(Date.now()); void reload().catch((err) => setError(err.message)); }, 15_000);
+    const timer = setInterval(() => { setNow(Date.now()); void reload().catch((err) => setError(err.message)); }, pending ? 3000 : 15_000);
     return () => clearInterval(timer);
-  }, [reload]);
+  }, [reload, pending]);
 
   async function action(name: string, work: () => Promise<void>) {
+    const sequence = ++actionSequence.current;
     setBusy(name); setError(""); setMessage("");
-    try { await work(); } catch (err) { setMessage(""); setError(err instanceof Error ? err.message : "The request failed."); }
-    finally { setBusy(""); }
+    try { await work(); } catch (err) {
+      if (sequence === actionSequence.current) { setMessage(""); setError(err instanceof Error ? err.message : "The request failed."); }
+    }
+    finally { if (sequence === actionSequence.current) setBusy(""); }
   }
-  async function background(path: "preview" | "queries", body: unknown) {
+  async function background(path: "preview", body: unknown) {
+    const sequence = actionSequence.current;
     const job = await post(path, body);
+    if (sequence !== actionSequence.current) return null;
     if (!job.jobId) return job; // Also tolerates a fast response from an older deployment.
     const deadline = Date.now() + 15 * 60_000;
     while (Date.now() < deadline) {
+      if (sequence !== actionSequence.current) return null;
       setMessage("Query queued or running in the background. Execution can take up to five minutes; this page will update when it finishes.");
       await new Promise((resolve) => setTimeout(resolve, 3000));
+      if (sequence !== actionSequence.current) return null;
       const response = await fetch(`/api/elastic-dashboard/jobs/${encodeURIComponent(job.jobId)}`, { cache: "no-store" });
       const status = await response.json();
+      if (sequence !== actionSequence.current) return null;
       if (!response.ok || status.status === "failed") throw new Error(status.error || "The background query failed.");
       if (status.status === "succeeded") { setMessage(""); return status; }
     }
@@ -108,7 +121,8 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
     if (!draft) return;
     const crowdstrike = { ...DEFAULT_CROWDSTRIKE, ...draft.crowdstrike, ...options };
     if (crowdstrike.history) crowdstrike.groupBy = "none";
-    setDraft({ ...draft, crowdstrike, chart: undefined, display: crowdstrike.history ? "line" : "auto" });
+    const category = crowdstrike.history ? "day" : crowdstrike.groupBy === "none" ? undefined : crowdstrike.groupBy;
+    setDraft({ ...draft, crowdstrike, chart: category ? { category, value: crowdstrike.measure } : undefined, display: crowdstrike.history ? "line" : "auto" });
     setPreview(null);
   }
   const anyConnected = dashboard.connected || dashboard.crowdstrike?.connected;
@@ -130,6 +144,9 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
     </div>}>
     {error && <p role="alert" className="rounded-xl border border-red-900 bg-red-950/20 p-4 text-sm text-red-300">{error}</p>}
     {message && <p role="status" className="rounded-xl border border-emerald-900 bg-emerald-950/20 p-4 text-sm text-emerald-300">{message}</p>}
+    {busy === "preview" && <button type="button" className={ghostButtonClass} onClick={() => {
+      actionSequence.current++; setBusy(""); setMessage("You can add the tile now. The optional preview may finish in the background.");
+    }}>Stop waiting for preview</button>}
     {!anyConnected && <div role="status" className="rounded-2xl border border-amber-600/30 bg-amber-950/20 p-4 text-sm text-amber-200">
       {dashboard.storageReady ? "Awaiting the data connection. No live results are available yet." : "Dashboard storage is not available yet."}
       <p className="mt-2">{dashboard.canManage ? "Open Connection to connect CrowdStrike or Elasticsearch." : "Sign in as an organization member to connect a source and manage saved queries."}</p>
@@ -176,9 +193,14 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
       </form>}
     </PanelCard>}
 
-    {dashboard.canManage && draft && <PanelCard eyebrow={draft.id ? "Edit query" : "Add query"} description="Choose a source, preview the results, then select a display.">
+    {dashboard.canManage && draft && <PanelCard eyebrow={draft.id ? "Edit tile" : "Add tile"} description="Add the tile immediately. Its results load on the dashboard. Preview is optional.">
       <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void action("save", async () => {
-        await background("queries", draft); await reload(); setDraft(null); setPreview(null); setMessage("Query saved.");
+        const response = await post("queries", draft);
+        const tile: DashboardQuery = response.query;
+        dashboardVersion.current++;
+        setDashboard((current) => ({ ...current, queries: current.queries.some((query) => query.id === tile.id)
+          ? current.queries.map((query) => query.id === tile.id ? tile : query) : [...current.queries, tile] }));
+        setDraft(null); setPreview(null); setMessage("Tile saved to the dashboard. Results load in the background.");
       }); }}>
         <fieldset disabled={Boolean(busy)} className="space-y-4">
         <label className="block text-sm text-zinc-300">Source
@@ -195,7 +217,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
         </label>
         {!draft.id && draft.source !== "crowdstrike" && <div className="space-y-2">
           <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => {
-            setDraft({ title: "Open vulnerabilities — daily trend", query: OPEN_VULN_TREND, display: "line", refreshMinutes: 1440, enabled: true });
+            setDraft({ title: "Open vulnerabilities — daily trend", query: OPEN_VULN_TREND, display: "line", chart: { category: "day", value: "open_vulns" }, refreshMinutes: 1440, enabled: true });
             setPreview(null); setError(""); setMessage("");
           }}>Use daily open trend</button>
           <p className="text-xs text-zinc-500">Starts September 23. The query uses the last confirmed pull; advance report_end to the next UTC day after a successful import. Requires a complete starting state and status changes.</p>
@@ -259,14 +281,24 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
                 {preview.columns.filter((column) => numericColumn(column.type) && column.name !== draft.chart?.category).map((column) => <option key={column.name} value={column.name}>{column.name}</option>)}
               </select>
             </label>
-          </div> : <p className="text-sm text-amber-300">Click Preview results to load the available columns.</p>}
+          </div> : <div className="flex flex-wrap gap-4">
+            <label className="text-sm text-zinc-300">Category / X column
+              <input required className={`${inputClass} mt-2 block`} placeholder="e.g. host or day" value={draft.chart?.category ?? ""} onChange={(event) => setDraft({ ...draft, chart: { category: event.target.value, value: draft.chart?.value ?? "" } })} />
+            </label>
+            <label className="text-sm text-zinc-300">Numeric / Y column
+              <input required className={`${inputClass} mt-2 block`} placeholder="e.g. findings" value={draft.chart?.value ?? ""} onChange={(event) => setDraft({ ...draft, chart: { category: draft.chart?.category ?? "", value: event.target.value } })} />
+            </label>
+            <p className="w-full text-xs text-zinc-500">Enter the column names, or optionally preview to choose from the results.</p>
+          </div>}
         </div>}
         <div className="flex flex-wrap gap-3">
           <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || !draft.query.trim() || !sourceConnected(draft.source)} onClick={() => action("preview", async () => {
-            const data = await background("preview", { id: draft.id, source: draft.source, query: draft.query, crowdstrike: draft.crowdstrike }); setPreview(data.result);
+            const data = await background("preview", { id: draft.id, source: draft.source, query: draft.query, crowdstrike: draft.crowdstrike });
+            if (!data) return;
+            setPreview(data.result);
             setDraft((current) => current ? { ...current, chart: current.chart ?? suggestChart(data.result) } : current);
-          })}>{busy === "preview" ? "Running query…" : "Preview results"}</button>
-          <button className={primaryButtonClass} disabled={Boolean(busy) || !sourceConnected(draft.source) || (isChartDisplay(draft.display) && (!draft.chart?.category || !draft.chart?.value))}>{busy === "save" ? "Validating and saving…" : "Save query"}</button>
+          })}>{busy === "preview" ? "Loading preview…" : "Preview (optional)"}</button>
+          <button className={primaryButtonClass} disabled={Boolean(busy) || !sourceConnected(draft.source) || (isChartDisplay(draft.display) && (!draft.chart?.category || !draft.chart?.value))}>{busy === "save" ? "Saving tile…" : draft.id ? "Save changes" : "Add to dashboard"}</button>
           <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => { setDraft(null); setPreview(null); }}>Cancel</button>
         </div>
         {preview && <div className="border-t border-zinc-800 pt-4"><p className="mb-3 text-sm text-zinc-400">Preview</p><Results result={preview} display={draft.display} chart={draft.chart} />{preview.note && <p className="mt-3 text-xs text-zinc-500">{preview.note}</p>}</div>}
@@ -281,7 +313,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
         actions={dashboard.canManage && <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => edit(query)}><Pencil size={14} />Edit</button>}>
         {query.error && <p className="mb-4 text-sm text-amber-300">{query.error} {query.result ? "Showing the last successful result." : "No successful result yet."}</p>}
         {stale && !query.error && <p className="mb-4 text-sm text-amber-300">These results are older than two refresh intervals.</p>}
-        {query.result ? <Results result={query.result} display={query.display} chart={query.chart} /> : <p className="py-5 text-zinc-400">Waiting for the first successful query.</p>}
+        {query.result ? <Results result={query.result} display={query.display} chart={query.chart} /> : !query.error && <p role="status" className="flex items-center gap-2 py-5 text-zinc-400"><RefreshCw size={16} className="animate-spin" />Loading results in the background…</p>}
         {query.result?.note && <p className="mt-3 text-xs text-zinc-500">{query.result.note}</p>}
         <p className="mt-4 text-xs text-zinc-500">Last successful query: {query.refreshedAt ? new Date(query.refreshedAt).toISOString().replace("T", " ").replace("Z", " UTC") : "not yet available"}</p>
         {query.id === "asset-coverage" && query.source !== "crowdstrike" && <p className="mt-2 text-xs text-zinc-500">Asset inventory coverage, not vulnerability counts. Records from the last 25 hours; assets last seen within seven days. IDs recorded as both managed and unmanaged can count in both categories.</p>}

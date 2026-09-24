@@ -15,7 +15,9 @@ is **Query Dashboard**. Existing scanner connectors are independent.
    verify access. Credentials are encrypted and never returned by the dashboard.
 3. Add query. Select CrowdStrike and the Vulnerabilities dataset.
 4. Enter a one-line FQL filter, such as `status:['open','reopen']`.
-5. Choose a measure, grouping and display, then Preview results and Save query.
+5. Choose a measure, grouping and display, then **Add to dashboard**. The tile is
+   saved immediately and results load in the background. Preview is optional;
+   charts accept column names without waiting for a preview.
 
 Example tiles:
 
@@ -41,7 +43,7 @@ shows. There is no raw-finding browser or arbitrary endpoint field in this relea
 ## Daily history
 
 Enable **Save daily history of the total** for an ungrouped measure. First preview
-shows a candidate point but writes nothing. Save and subsequent successful
+shows a candidate point but writes nothing. The first successful background run and subsequent successful
 refreshes upsert the last observation per UTC day. The chart shows up to 90 days;
 stored snapshots older than 365 days are pruned on a successful history write.
 Missing days are null gaps, never zeros. Empty, fully collected result sets are
@@ -93,7 +95,9 @@ responses retry up to twice with bounded waits (honoring Retry-After up to 30
 seconds). Rate limits or larger populations require a narrower filter or a future
 shared collection service. Each tile currently collects independently, so start
 with Daily refresh and avoid many broad filters every five minutes. Opening the
-dashboard reads cached results. Two jobs can be queued/running at once.
+dashboard reads cached results and nudges due refreshes. Two preview jobs can be
+queued/running at once; adding a tile does not wait for that queue. Remote failures
+appear on the saved tile. Query execution itself can still take up to five minutes.
 
 This version uses one shared CrowdStrike credential context. It does not enumerate
 Flight Control child tenants or impersonate a member CID. Multi-tenant delegation

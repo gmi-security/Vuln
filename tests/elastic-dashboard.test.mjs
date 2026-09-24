@@ -359,6 +359,78 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
     assert.match(recoveredView.queries.find((q) => q.id === falconDefinition.id).error, /cannot be opened/);
     assert.equal(recoveredView.queries.find((q) => q.id === "extra").result.rows[0][0], 321, "A broken source must not block other source refreshes");
     await db.query("UPDATE dashboard_source_connections SET secret = $1 WHERE source = 'crowdstrike'", [recoverSecret]);
+    // Adding a tile persists immediately, even while the remote request is held.
+    await waitFor(() => !globalThis.__elasticDashboard.ticking);
+    await db.query("UPDATE elastic_dashboard_queries SET next_attempt = now() + interval '1 day'");
+    const jobCount = (await db.query("SELECT count(*)::int AS count FROM elastic_dashboard_jobs")).rows[0].count;
+    let finishInitial;
+    hold = new Promise((resolve) => { finishInitial = resolve; });
+    const immediateDefinition = { ...contract.DEFAULT_COVERAGE, id: "immediate", title: "Immediate tile", enabled: false };
+    try {
+      const saved = await Promise.race([
+        store.addDashboardTile(immediateDefinition, "immediate-save"),
+        delay(2000).then(() => { throw new Error("Saving waited for remote execution."); }),
+      ]);
+      assert.equal(saved.saved, true);
+      assert.equal(saved.query.id, "immediate");
+      assert.equal(saved.query.result, null);
+      assert.ok((await store.readDashboard(true)).queries.some((q) => q.id === "immediate"));
+      assert.equal((await db.query("SELECT count(*)::int AS count FROM elastic_dashboard_jobs")).rows[0].count, jobCount, "Adding does not enqueue a save job");
+      await waitFor(() => hold === null);
+    } finally { finishInitial(numeric); }
+    await waitFor(() => !globalThis.__elasticDashboard.ticking);
+    const firstImmediate = (await store.readDashboard(true)).queries.find((q) => q.id === "immediate");
+    assert.deepEqual(firstImmediate.result, numeric, "Auto-refresh off still gets an initial result");
+    await db.query("UPDATE elastic_dashboard_queries SET next_attempt = now() - interval '1 hour' WHERE id = 'immediate'");
+    response = { ...numeric, rows: [[777, 95]] };
+    store.triggerRefresh();
+    await waitFor(() => !globalThis.__elasticDashboard.ticking);
+    assert.deepEqual((await store.readDashboard(true)).queries.find((q) => q.id === "immediate").result, numeric, "Paused tiles do not refresh automatically after the initial load");
+
+    // Capacity delays execution, never saving and never a false tile error.
+    globalThis.__elasticDashboard.running = 2;
+    try {
+      await store.addDashboardTile({ ...immediateDefinition, title: "Renamed immediately" }, "rename-tile");
+      await waitFor(() => !globalThis.__elasticDashboard.ticking);
+      const pending = (await db.query("SELECT result, last_error, refresh_requested FROM elastic_dashboard_queries WHERE id = 'immediate'")).rows[0];
+      assert.deepEqual(pending.result, numeric, "Cosmetic edits keep the last good result");
+      assert.equal(pending.last_error, null);
+      assert.equal(pending.refresh_requested, true);
+    } finally { globalThis.__elasticDashboard.running = 0; }
+    store.triggerRefresh();
+    await waitFor(() => !globalThis.__elasticDashboard.ticking);
+    assert.equal((await store.readDashboard(true)).queries.find((q) => q.id === "immediate").result.rows[0][0], 777);
+
+    // An edited definition cannot be overwritten by its previous in-flight run.
+    let finishOld;
+    hold = new Promise((resolve) => { finishOld = resolve; });
+    try {
+      await store.addDashboardTile({ ...immediateDefinition, query: "ROW count = 1" }, "old-definition");
+      await waitFor(() => hold === null);
+      const updated = await store.addDashboardTile({ ...immediateDefinition, query: "ROW count = 2" }, "new-definition");
+      assert.equal(updated.query.result, null, "A changed query clears the old population");
+    } finally { finishOld(numeric); }
+    await waitFor(() => !globalThis.__elasticDashboard.ticking);
+    assert.equal((await store.readDashboard(true)).queries.find((q) => q.id === "immediate").result, null, "Stale execution cannot overwrite the edit");
+    fail = true;
+    store.triggerRefresh();
+    await waitFor(() => !globalThis.__elasticDashboard.ticking);
+    const failedTile = (await store.readDashboard(true)).queries.find((q) => q.id === "immediate");
+    assert.equal(failedTile.query, "ROW count = 2");
+    assert.match(failedTile.error, /Simulated Elastic outage/, "Remote failure appears on the saved tile");
+    fail = false;
+
+    // CrowdStrike history begins on the background collection, not the save.
+    let finishNewFalcon;
+    falconHold = new Promise((resolve) => { finishNewFalcon = resolve; });
+    try {
+      const immediateFalcon = await store.addDashboardTile({ ...falconDefinition, id: "immediate-falcon" }, "immediate-falcon");
+      assert.equal(immediateFalcon.query.result, null);
+      assert.equal((await db.query("SELECT count(*)::int AS count FROM dashboard_daily_history WHERE query_id = 'immediate-falcon'")).rows[0].count, 0);
+      await waitFor(() => falconHold === null);
+    } finally { finishNewFalcon(falconResult); }
+    await waitFor(() => !globalThis.__elasticDashboard.ticking);
+    assert.equal((await db.query("SELECT count(*)::int AS count FROM dashboard_daily_history WHERE query_id = 'immediate-falcon'")).rows[0].count, 1);
     const oldSecret = process.env.NEXTAUTH_SECRET;
     process.env.NEXTAUTH_SECRET = randomBytes(32).toString("hex");
     assert.equal((await store.readDashboard(true)).storageReady, true, "Reconnect must remain available after secret rotation.");

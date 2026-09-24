@@ -2,13 +2,15 @@
 
 ## What is ready in GMI Vuln
 
-Preview and Save enqueue background jobs and return immediately. The UI polls
-their status every three seconds. Elasticsearch runs ES|QL through `/_query/async`
+**Add to dashboard** saves the tile immediately and closes the form. Results load
+on the dashboard in the background; preview is optional. Preview still uses a
+private job polled every three seconds. Elasticsearch runs ES|QL through `/_query/async`
 for up to five minutes; individual HTTP requests still have a 20-second limit.
 Automatic refresh uses the same async client and keeps the previous successful
 snapshot on failure. No n8n workflow or DigitalOcean environment change is needed.
 
-The app retains at most two active preview/save jobs, with one worker per process.
+The app retains at most two active preview jobs, with one worker per process.
+New saves do not use this queue; existing queued saves can finish during rollout.
 Job records expire after 15 minutes. Interrupted running jobs fail after seven
 minutes and can be retried; they are not silently resubmitted. Queued jobs resume
 on the next worker tick after restart. Elasticsearch jobs are deleted on completion
@@ -18,7 +20,7 @@ Connection testing remains a synchronous execution of the small coverage query.
 Open Elastic Dashboard, hard-refresh with Ctrl+Shift+R, then:
 
 1. Add query > **Use daily open trend**.
-2. Preview results and wait for the background query to finish.
+2. Optionally preview results; you can skip this step.
 3. Set Line chart, category `day`, and numeric value `open_vulns`.
 4. Check the result table: investigate any nonzero `unknown_status` before treating
    the open count as complete. Unknown status is not assumed to mean closed.
