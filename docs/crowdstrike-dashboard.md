@@ -56,6 +56,21 @@ and [FalconPy response guide](https://developer.crowdstrike.com/sdks/python/resp
 Live account response compatibility and totals require verification after adding
 the preset. No authenticated production browser was available for this release.
 
+Validation: all 32 tests passed without skips, including real disposable
+PostgreSQL checks, malformed/missing totals, a failed severity request, preserved
+FQL OR grouping, zero counts and counts above 250,000. Production build and the
+disabled/sample/database-backed HTTP smoke checks passed. Commit
+`215d5f1278d8ad4c289cf19bb07f9ae0bc06cce6` reached ACTIVE in DigitalOcean deployment
+`82ab2394-b3eb-4ad7-a6ee-312de89d9b21` on September 24, 2026. Live health and
+database reachability passed. The disposable test container was removed.
+
+The simultaneously reported Elastic tile loading issue remains unconfirmed:
+startup logs show no refresh errors, health is good, but no signed-in browser
+was available and the native CLI console could not obtain a terminal size.
+The user was asked for the exact tile status/error. Saved refreshes are serial,
+so long queries can delay later tiles; this is a possible contributor, not a
+confirmed diagnosis. No production saved queries or connection settings changed.
+
 ## Patch worklist
 
 Add query > CrowdStrike > **Use patch worklist** > **Add to dashboard**. Preview
