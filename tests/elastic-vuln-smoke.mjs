@@ -92,12 +92,14 @@ async function run(mode) {
       const memberHeaders = { ...headers, origin: base, "Content-Type": "application/json" };
       const removedToken = await encode({ secret, token: { name: "Removed member", orgMember: false, orgRole: "MEMBER" }, maxAge: 120 });
       const request = (route, body, requestHeaders = memberHeaders) => fetch(`${base}/api/elastic-dashboard/${route}`, { method: "POST", headers: requestHeaders, body: JSON.stringify(body) });
-      for (const route of ["connection", "queries", "preview", "refresh"]) {
+      for (const route of ["connection", "connections/crowdstrike", "queries", "preview", "refresh"]) {
         assert.equal((await request(route, {}, { origin: base, "Content-Type": "application/json" })).status, 401, `Anonymous users cannot mutate ${route}`);
         assert.equal((await request(route, {}, { ...memberHeaders, cookie: `next-auth.session-token=${removedToken}` })).status, 401, `Removed members cannot mutate ${route}`);
         assert.equal((await request(route, {}, { ...memberHeaders, origin: "https://untrusted.example" })).status, 403);
       }
       assert.equal((await request("connection", { endpoint: "http://localhost", apiKey: "test" })).status, 400);
+      assert.equal((await request("connections/crowdstrike", { region: "https://untrusted.example", clientId: "test", clientSecret: "test" })).status, 400);
+      assert.equal((await request("preview", { source: "crowdstrike", query: "status:'open'", crowdstrike: { dataset: "unsupported" } })).status, 400);
       assert.equal((await request("preview", { query: "" })).status, 400);
       assert.equal((await request("preview", { query: "ROW x = 1" })).status, env.ELASTIC_VULN_DATABASE_URL ? 409 : 503);
       assert.equal((await request("queries", { title: "x".repeat(34000) })).status, 413);

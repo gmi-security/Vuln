@@ -212,3 +212,24 @@ does not currently receive an import-completion watermark. See the setup guide.
   and reconciliation against CrowdStrike remain unverified. No signed-in browser
   surface was available. Complete the checks in `elastic-trend-setup.md` before
   treating the chart as an authoritative count.
+
+## Modular query sources (2026-09-24)
+
+The sidebar and page are now named Query Dashboard. The existing URL and Elastic
+API routes remain compatible. A source registry dispatches Elastic ES|QL and
+CrowdStrike FQL through the same jobs, saved tiles, refresh scheduler and charts.
+Legacy definitions default to Elastic; CrowdStrike connection changes clear only
+CrowdStrike caches, and Elastic connection changes clear only Elastic caches.
+
+The first CrowdStrike dataset is Vulnerabilities. It supports finding counts,
+unique CVEs, unique hosts, top groups and daily ungrouped history. See
+[CrowdStrike setup and architecture](crowdstrike-dashboard.md) for scopes,
+configuration, collection limits, priority rules, history semantics and validation.
+The existing `ELASTIC_VULN_ENABLED` flag gates the combined dashboard; no production
+environment change is required.
+
+Rollback should preserve the source registry or hide CrowdStrike controls while
+keeping its worker support. An older Elastic-only release cannot execute saved FQL
+definitions. If a full code rollback is necessary, first back up and remove the
+CrowdStrike query definitions/jobs from active dashboard tables, retaining their
+snapshots and encrypted connection table for recovery. Do not feed FQL to Elastic.

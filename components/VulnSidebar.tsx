@@ -41,7 +41,7 @@ export default function VulnSidebar({
   const [elasticEnabled, setElasticEnabled] = useState(false);
   const navItems: VulnNavItem[] = [
     ...baseNavItems,
-    ...(elasticEnabled ? [{ label: "Elastic Dashboard", icon: ShieldCheck, href: "/elastic-vulnerabilities" }] : []),
+    ...(elasticEnabled ? [{ label: "Query Dashboard", icon: ShieldCheck, href: "/elastic-vulnerabilities" }] : []),
     ...settingsNavItems,
   ];
 

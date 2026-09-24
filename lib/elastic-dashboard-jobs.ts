@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { DashboardError, parseDefinition, validateQuery } from "./elastic-dashboard";
+import { DashboardError, parseDefinition, parseQueryInput, querySource } from "./elastic-dashboard";
 import { elasticVulnEnabled } from "./elastic-vuln-server";
 import { dashboardDatabase, dashboardConnectionRevision, previewQuery, saveQuery, throttlePreview } from "./elastic-dashboard-store";
 
@@ -8,9 +8,9 @@ const state = global.__elasticJobs ??= {};
 
 export async function enqueueDashboardJob(kind: "preview" | "save", value: unknown, actor: string) {
   const body = value as Record<string, unknown> | null;
-  const input = kind === "preview" ? { query: validateQuery(body?.query) } : parseDefinition(value, typeof body?.id === "string" ? body.id : randomUUID());
-  const revision = await dashboardConnectionRevision();
-  if (revision === null) throw new DashboardError("Connect Elasticsearch first.", 409);
+  const input = kind === "preview" ? { ...parseQueryInput(body), ...(typeof body?.id === "string" && /^[a-zA-Z0-9-]{1,64}$/.test(body.id) ? { id: body.id } : {}) } : parseDefinition(value, typeof body?.id === "string" ? body.id : randomUUID());
+  const revision = await dashboardConnectionRevision(querySource(input));
+  if (revision === null) throw new DashboardError(`Connect ${querySource(input) === "elastic" ? "Elasticsearch" : "CrowdStrike"} first.`, 409);
   throttlePreview(actor);
   const db = await dashboardDatabase();
   const client = await db.connect();
@@ -33,9 +33,9 @@ export async function readDashboardJob(id: string, actor: string) {
   if (!/^[a-f0-9-]{36}$/i.test(id)) throw new DashboardError("Query job not found.", 404);
   const db = await dashboardDatabase();
   // These jobs are private to the requesting member. No Elastic IDs or keys are returned.
-  const row = (await db.query("SELECT id, status, result, error, connection_revision FROM elastic_dashboard_jobs WHERE id = $1 AND actor = $2 AND expires_at > now()", [id, actor])).rows[0];
+  const row = (await db.query("SELECT id, status, result, error, input, connection_revision FROM elastic_dashboard_jobs WHERE id = $1 AND actor = $2 AND expires_at > now()", [id, actor])).rows[0];
   if (!row) throw new DashboardError("Query job expired or was not found. Preview again.", 404);
-  if (row.connection_revision !== await dashboardConnectionRevision()) throw new DashboardError("The connection changed. Preview again.", 409);
+  if (row.connection_revision !== await dashboardConnectionRevision(querySource(row.input))) throw new DashboardError("The connection changed. Preview again.", 409);
   triggerDashboardJobs();
   return { jobId: row.id, status: row.status, ...(row.result ?? {}), ...(row.error ? { error: row.error } : {}) };
 }
@@ -64,15 +64,15 @@ async function work() {
     } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
     if (!job) return;
     try {
-      if (job.connection_revision !== await dashboardConnectionRevision()) throw new DashboardError("The connection changed. Preview and save again.", 409);
+      if (job.connection_revision !== await dashboardConnectionRevision(querySource(job.input))) throw new DashboardError("The connection changed. Preview and save again.", 409);
       let result;
       if (job.kind === "save") {
         await saveQuery(job.input, job.actor, { id: job.id, connectionRevision: job.connection_revision, queryRevision: job.query_revision });
         result = { saved: true };
       } else {
-        result = { result: await previewQuery(job.input.query, job.actor, true) };
+        result = { result: await previewQuery(job.input, job.actor, true, job.input.id) };
       }
-      if (job.connection_revision !== await dashboardConnectionRevision()) throw new DashboardError("The connection changed. Preview again.", 409);
+      if (job.connection_revision !== await dashboardConnectionRevision(querySource(job.input))) throw new DashboardError("The connection changed. Preview again.", 409);
       await db.query("UPDATE elastic_dashboard_jobs SET status = 'succeeded', result = $2::jsonb WHERE id = $1 AND status = 'running'", [job.id, JSON.stringify(result)]);
     } catch (error) {
       const message = error instanceof DashboardError ? error.message : "Background query failed. Check the connection and retry.";

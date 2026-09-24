@@ -2,12 +2,25 @@ export type QueryResult = {
   columns: { name: string; type: string }[];
   rows: (string | number | boolean | null)[][];
   truncated: boolean;
+  note?: string;
 };
 
 export class DashboardError extends Error {
   constructor(message: string, public status = 400) { super(message); }
 }
-export type QueryDefinition = {
+export type DashboardSource = "elastic" | "crowdstrike";
+export type CrowdStrikeOptions = {
+  dataset: "vulnerabilities";
+  measure: "findings" | "cves" | "hosts";
+  groupBy: "none" | "host" | "severity" | "priority" | "status" | "cve";
+  top: number;
+  history: boolean;
+};
+export const DEFAULT_CROWDSTRIKE: CrowdStrikeOptions = {
+  dataset: "vulnerabilities", measure: "findings", groupBy: "none", top: 10, history: false,
+};
+export type QueryInput = { query: string; source?: DashboardSource; crowdstrike?: CrowdStrikeOptions };
+export type QueryDefinition = QueryInput & {
   id: string;
   title: string;
   query: string;
@@ -27,8 +40,35 @@ export type ElasticDashboard = {
   storageReady: boolean;
   connected: boolean;
   endpoint?: string;
+  crowdstrike?: { connected: boolean; region?: string };
   queries: DashboardQuery[];
 };
+
+export function querySource(value: { source?: unknown }): DashboardSource {
+  if (value.source === undefined || value.source === "elastic") return "elastic";
+  if (value.source === "crowdstrike") return "crowdstrike";
+  throw new DashboardError("Choose a supported dashboard source.");
+}
+
+export function parseQueryInput(value: unknown): QueryInput {
+  if (!value || typeof value !== "object") throw new DashboardError("Invalid query input.");
+  const body = value as Record<string, unknown>;
+  if (querySource(body) === "elastic") return { query: validateQuery(body.query) };
+  if (typeof body.query !== "string" || !body.query.trim() || body.query.length > 4000 || /[\x00-\x1f\x7f]/.test(body.query)) {
+    throw new DashboardError("Enter an FQL filter on one line, up to 4,000 characters.");
+  }
+  const options = body.crowdstrike as CrowdStrikeOptions | undefined;
+  if (!options || options.dataset !== "vulnerabilities") throw new DashboardError("Choose the Vulnerabilities dataset.");
+  if (!["findings", "cves", "hosts"].includes(options.measure) ||
+      !["none", "host", "severity", "priority", "status", "cve"].includes(options.groupBy) ||
+      ![10, 25, 50, 100].includes(options.top) || typeof options.history !== "boolean") {
+    throw new DashboardError("Choose a valid measure, grouping, top limit, and history setting.");
+  }
+  if (options.history && options.groupBy !== "none") throw new DashboardError("Daily history requires no grouping. Use a separate tile for grouped results.");
+  return { source: "crowdstrike", query: body.query.trim(), crowdstrike: {
+    dataset: options.dataset, measure: options.measure, groupBy: options.groupBy, top: options.top, history: options.history,
+  } };
+}
 
 export const DEFAULT_COVERAGE: QueryDefinition = {
   id: "asset-coverage", title: "Asset coverage", display: "auto", refreshMinutes: 15, enabled: true,
@@ -65,7 +105,7 @@ export function parseDefinition(value: unknown, id: string): QueryDefinition {
   }
   if (typeof body.refreshMinutes !== "number" || ![5, 15, 30, 60, 1440].includes(body.refreshMinutes)) throw new DashboardError("Choose a refresh interval: 5, 15, 30, 60 minutes, or daily.");
   if (typeof body.enabled !== "boolean") throw new DashboardError("Invalid refresh setting.");
-  return { id, title: body.title.trim(), query: validateQuery(body.query), display: body.display as QueryDefinition["display"],
+  return { id, title: body.title.trim(), ...parseQueryInput(body), display: body.display as QueryDefinition["display"],
     refreshMinutes: body.refreshMinutes, enabled: body.enabled, ...(chart ? { chart } : {}) };
 }
 
