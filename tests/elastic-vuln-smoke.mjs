@@ -78,10 +78,12 @@ async function run(mode) {
       assert.equal((await fetch(url, { method: "POST", headers: { Authorization: `Bearer ${ingestToken}` }, body: "x" })).status, 415);
     }
     assert.equal((await fetch(`${base}/api/elastic-dashboard`)).status, 401);
+    assert.equal((await fetch(`${base}/api/elastic-dashboard/jobs/00000000-0000-0000-0000-000000000001`)).status, 401);
     const dashboard = await fetch(`${base}/api/elastic-dashboard`, { headers });
     if (mode === "disabled") assert.equal(dashboard.status, 404);
     else {
       const model = await dashboard.json();
+      assert.equal((await fetch(`${base}/api/elastic-dashboard/jobs/invalid-id`, { headers })).status, 404);
       assert.equal(model.canManage, true);
       assert.equal(model.endpoint, undefined);
       assert.equal(model.connected, false);

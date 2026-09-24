@@ -63,7 +63,7 @@ export function parseDefinition(value: unknown, id: string): QueryDefinition {
     }
     chart = { category: mapping.category, value: mapping.value };
   }
-  if (typeof body.refreshMinutes !== "number" || ![5, 15, 30, 60].includes(body.refreshMinutes)) throw new DashboardError("Choose a refresh interval: 5, 15, 30, or 60 minutes.");
+  if (typeof body.refreshMinutes !== "number" || ![5, 15, 30, 60, 1440].includes(body.refreshMinutes)) throw new DashboardError("Choose a refresh interval: 5, 15, 30, 60 minutes, or daily.");
   if (typeof body.enabled !== "boolean") throw new DashboardError("Invalid refresh setting.");
   return { id, title: body.title.trim(), query: validateQuery(body.query), display: body.display as QueryDefinition["display"],
     refreshMinutes: body.refreshMinutes, enabled: body.enabled, ...(chart ? { chart } : {}) };

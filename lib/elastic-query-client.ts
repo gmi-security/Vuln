@@ -53,29 +53,33 @@ export function openConnection(value: string): ElasticConnection {
   } catch { throw new DashboardError("The saved connection cannot be opened. An administrator must reconnect Elasticsearch."); }
 }
 
-export async function executeEsql(connection: ElasticConnection, query: string): Promise<QueryResult> {
+export function elasticFailure(status: number, body: unknown, apiKey: string): DashboardError {
+  if (status === 401 || status === 403) return new DashboardError("Elastic rejected the API key or its index permissions.");
+  let reason = "";
+  if (body && typeof body === "object") {
+    const error = (body as { error?: { reason?: unknown; type?: unknown } }).error;
+    if (typeof error?.reason === "string") reason = error.reason;
+  }
+  reason = reason.split(apiKey).join("[redacted]").replace(/(?:ApiKey|Bearer)\s+\S+/gi, "[redacted]")
+    .replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 1200);
+  return new DashboardError(`Elastic rejected the query (HTTP ${status}). ${reason || "Check the ES|QL syntax, index access, and Elasticsearch version."}`);
+}
+
+export async function elasticJsonRequest(connection: ElasticConnection, path: string, method: "POST" | "GET" | "DELETE", body?: unknown): Promise<{ body: Record<string, unknown>; warning: boolean }> {
   const endpoint = normalizeEndpoint(connection.endpoint);
-  const validated = validateQuery(query);
-  const url = new URL(`${endpoint}/_query?format=json&allow_partial_results=false`);
+  const url = new URL(`${endpoint}${path}`);
   const resolved = await Promise.race([
     lookup(url.hostname, { family: 4 }),
     new Promise<never>((_, reject) => { const timer = setTimeout(() => reject(new DashboardError("Elastic DNS lookup timed out.")), 5000); timer.unref(); }),
   ]);
   if (!isPublicIPv4(resolved.address)) throw new DashboardError("This connection requires a public Elasticsearch HTTPS endpoint.");
-  const payload = JSON.stringify({ query: `${validated}\n| LIMIT 101`, columnar: false });
+  const payload = body === undefined ? "" : JSON.stringify(body);
   return new Promise((resolve, reject) => {
     const req = request(url, {
-      method: "POST", family: 4,
+      method, family: 4,
       lookup: (_hostname, _options, callback) => callback(null, resolved.address, 4),
       headers: { Authorization: `ApiKey ${connection.apiKey}`, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) },
     }, (response) => {
-      if (response.statusCode !== 200) {
-        response.destroy();
-        reject(new DashboardError(response.statusCode === 401 || response.statusCode === 403
-          ? "Elastic rejected the API key or its index permissions."
-          : `Elastic rejected the query (HTTP ${response.statusCode}). Check the endpoint and ES|QL syntax.`));
-        return;
-      }
       let size = 0;
       const chunks: Buffer[] = [];
       response.on("data", (chunk: Buffer) => {
@@ -85,13 +89,27 @@ export async function executeEsql(connection: ElasticConnection, query: string):
       });
       response.on("error", () => reject(new DashboardError("Elastic response was interrupted.")));
       response.on("end", () => {
-        try { resolve(parseQueryResult(JSON.parse(Buffer.concat(chunks).toString("utf8")), Boolean(response.headers.warning))); }
+        try {
+          let parsed: Record<string, unknown>;
+          try { parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
+          catch { if (response.statusCode !== 200) throw elasticFailure(response.statusCode ?? 502, null, connection.apiKey); throw new DashboardError("Elastic returned invalid JSON."); }
+          if (response.statusCode !== 200) throw elasticFailure(response.statusCode ?? 502, parsed, connection.apiKey);
+          if (!parsed || typeof parsed !== "object") throw new DashboardError("Elastic returned an invalid response.");
+          resolve({ body: parsed, warning: Boolean(response.headers.warning) });
+        }
         catch (error) { reject(error instanceof SyntaxError ? new DashboardError("Elastic returned invalid JSON.") : error); }
       });
     });
-    const timeout = setTimeout(() => req.destroy(new DashboardError("Elastic query timed out after 20 seconds.")), 20_000);
+    const timeout = setTimeout(() => req.destroy(new DashboardError("Elastic HTTP request timed out after 20 seconds.")), 20_000);
     req.on("close", () => clearTimeout(timeout));
     req.on("error", (error) => reject(new DashboardError(error.message.startsWith("Elastic ") ? error.message : "Could not reach Elasticsearch over verified HTTPS.")));
     req.end(payload);
   });
+}
+
+export async function executeEsql(connection: ElasticConnection, query: string): Promise<QueryResult> {
+  const reply = await elasticJsonRequest(connection, "/_query?format=json&allow_partial_results=false", "POST", {
+    query: `${validateQuery(query)}\n| LIMIT 101`, columnar: false,
+  });
+  return parseQueryResult(reply.body, reply.warning);
 }

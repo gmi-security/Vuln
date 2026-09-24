@@ -7,7 +7,7 @@ direct-deployment workflow.
 
 ## Using the dashboard
 
-Open **Elastic Dashboard** at `/elastic-vulnerabilities`.
+Open **Elastic Dashboard** at `/elastic-vulnerabilities`. For daily diff history and background queries, see [the trend setup guide](elastic-trend-setup.md).
 
 1. A signed-in organization member opens **Connection**, enters the Elasticsearch HTTPS
    endpoint and encoded read-only API key, and clicks **Test and save connection**.
@@ -51,8 +51,8 @@ records, or logs. Rotating NEXTAUTH_SECRET requires re-entering the connection.
 Changing the endpoint requires re-entering its key; the app will not forward a
 stored key to a different endpoint.
 
-The dashboard uses three new tables only: `elastic_dashboard_connection`,
-`elastic_dashboard_queries`, and `elastic_dashboard_audit`. They use
+The dashboard uses four dashboard tables: `elastic_dashboard_connection`,
+`elastic_dashboard_queries`, `elastic_dashboard_audit`, and `elastic_dashboard_jobs`. They use
 `ELASTIC_VULN_DATABASE_URL` when set, otherwise the existing application database
 pool. Scanner snapshot tables, existing settings, and connector data are not
 changed. Tables are initialized automatically, with the default coverage query
@@ -62,7 +62,7 @@ UPDATE rights. The existing app database transport configuration is inherited.
 ## Execution and safeguards
 
 - One in-process timer checks saved queries every minute, independent of browser
-  traffic. Saved queries refresh at 5, 15, 30, or 60 minutes.
+  traffic. Saved queries refresh at 5, 15, 30, 60 minutes, or daily.
 - Claims are atomic in Postgres to avoid duplicate work across app instances.
   Connection/query revisions prevent stale in-flight results from overwriting
   edits. Failed refreshes preserve the last successful result and timestamp.
@@ -71,7 +71,7 @@ UPDATE rights. The existing app database transport configuration is inherited.
   cooldown per query. Preview and save each execute the query.
 - ES|QL source is limited to 16,000 characters. A final `LIMIT 101` bounds returned
   rows; the UI shows at most 100 and labels truncation. There is a 32-column limit,
-  a 2 MiB response cap, and a 20-second HTTP request deadline. Large aggregations
+  a 2 MiB response cap, and a 20-second HTTP request deadline. Preview/save jobs and scheduled refresh use async ES|QL with a five-minute execution budget; browser requests poll a private job record instead of holding a connection open. Large aggregations
   can still be expensive; use sensible index/time filters and Elastic-side limits.
 - Warning-bearing or partial responses are rejected, preserving prior data.
   Table cell text is limited to 2,000 characters.
@@ -171,3 +171,19 @@ migration and retain their display behavior.
   Connection, tests/saves it, and compares the resulting coverage with Kibana.
 - To roll back this release, revert the production commit through Git. Its three
   additive dashboard tables can remain; existing scanner tables were not migrated.
+
+## Background query jobs (2026-09-24)
+
+Preview/save return 202 with an app job ID. GET `/api/elastic-dashboard/jobs/[id]`
+requires the same organization member identity. Two active jobs maximum; jobs
+expire after 15 minutes. Interrupted running jobs fail after seven minutes rather
+than silently replaying a save. Queued jobs are picked up by a 15-second worker.
+Connection and query revision checks prevent an older background save replacing
+a newer edit. Refresh leases prevent overlapping automatic refreshes across app
+instances. Completed results retain the existing last-success behavior.
+
+Elastic validation errors now include a bounded, key-redacted reason in private
+responses; full response bodies and credentials are never logged. Connection tests
+still use the small synchronous coverage query. The native chart editor includes
+a 30-day last-known-open-status template and a Daily refresh option. Live external
+query performance and data accuracy require the checks in the trend setup guide.

@@ -7,7 +7,7 @@ import { elasticVulnEnabled } from "./elastic-vuln-server";
 export async function dashboardAccess(request?: Request, mutation = false) {
   if (!elasticVulnEnabled()) throw new DashboardError("Not found", 404);
   const session = await getServerSession(authOptions);
-  const user = session?.user as { email?: string; name?: string; orgMember?: boolean } | undefined;
+  const user = session?.user as { login?: string; email?: string; name?: string; orgMember?: boolean } | undefined;
   if (!user || user.orgMember === false) throw new DashboardError("Unauthorized", 401);
   // All signed-in organization members can manage this shared dashboard.
   const canManage = true;
@@ -15,7 +15,7 @@ export async function dashboardAccess(request?: Request, mutation = false) {
     const expected = new URL(process.env.NEXTAUTH_URL || request.url).origin;
     if (request.headers.get("origin") !== expected) throw new DashboardError("Invalid request origin.", 403);
   }
-  return { canManage, actor: user.email || user.name || "organization-member" };
+  return { canManage, actor: user.login || user.email || user.name || "organization-member" };
 }
 
 export async function dashboardBody(request: Request): Promise<unknown> {
