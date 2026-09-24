@@ -15,12 +15,14 @@ export default function VulnShell({
   subtitle,
   actions,
   children,
+  variant = "default",
 }: {
   eyebrow: string;
   title: string;
   subtitle: string;
   actions?: React.ReactNode;
   children: React.ReactNode;
+  variant?: "default" | "dashboard";
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -44,23 +46,24 @@ export default function VulnShell({
 
   return (
     <div className="flex min-h-screen bg-[radial-gradient(circle_at_18%_22%,rgba(179,14,20,0.08),transparent_26%),linear-gradient(180deg,#000_0%,#020202_100%)] text-white">
-      <VulnSidebar
+      {variant === "default" && <VulnSidebar
         collapsed={collapsed}
         onToggle={() => setCollapsed((prev) => !prev)}
-      />
+      />}
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="border-b border-[rgba(179,14,20,0.12)] bg-black px-6 py-6 lg:px-8">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <header className={variant === "dashboard" ? "border-b border-zinc-800 bg-[radial-gradient(ellipse_at_55%_0%,rgba(179,14,20,0.16),transparent_68%)] px-4 py-5 sm:px-8" : "border-b border-[rgba(179,14,20,0.12)] bg-black px-6 py-6 lg:px-8"}>
+          {variant === "dashboard" && <nav aria-label="Main navigation" className="mb-7 flex flex-wrap items-center gap-6 text-xs text-zinc-400"><Link href="/" className="text-lg font-semibold tracking-widest text-[#b30e14]">GMI VULN</Link><Link href="/" className="hover:text-white">Overview</Link><Link href="/elastic-vulnerabilities" aria-current="page" className="border-b border-[#b30e14] pb-1 text-white">Query dashboard</Link><Link href="/settings" className="hover:text-white">Settings</Link></nav>}
+          <div className={variant === "dashboard" ? "flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between" : "flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between"}>
             <div>
               <div className="text-[13px] uppercase tracking-[0.35em] text-[#b30e14]">
                 {eyebrow}
               </div>
-              <h1 className="mt-2 text-4xl font-semibold text-white">{title}</h1>
+              <h1 className={variant === "dashboard" ? "mt-2 bg-gradient-to-b from-white to-zinc-400 bg-clip-text text-3xl font-medium tracking-tight text-transparent sm:text-4xl" : "mt-2 text-4xl font-semibold text-white"}>{title}</h1>
               <p className="mt-2 max-w-3xl text-zinc-400">{subtitle}</p>
             </div>
 
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center gap-3">
               {actions}
               <div ref={menuRef} className="relative">
                 <button
@@ -137,7 +140,7 @@ export default function VulnShell({
           </div>
         </header>
 
-        <main className="flex-1 space-y-6 px-6 py-8 lg:px-8">{children}</main>
+        <main className={variant === "dashboard" ? "flex-1 space-y-5 px-4 py-6 sm:px-8" : "flex-1 space-y-6 px-6 py-8 lg:px-8"}>{children}</main>
       </div>
     </div>
   );

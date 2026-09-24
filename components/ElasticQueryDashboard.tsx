@@ -1,53 +1,22 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Database, Download, GripVertical, Pencil, Plus, RefreshCw, Settings2, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Download, GripVertical, LayoutGrid, Pencil, Plus, RadioTower, RefreshCw, Settings2, Trash2 } from "lucide-react";
 import { applyTileOrder, moveTileIds } from "@/lib/dashboard-layout";
 import { dashboardCsv } from "@/lib/dashboard-csv";
 import { dashboardRequest } from "@/lib/dashboard-browser-client";
 import VulnShell from "@/components/VulnShell";
-import ElasticResultChart from "@/components/ElasticResultChart";
+import Results from "@/components/QueryDashboardResults";
+import styles from "./QueryDashboard.module.css";
 import { OPEN_VULN_TREND } from "@/lib/elastic-query-templates";
-import { ghostButtonClass, inputClass, PanelCard, primaryButtonClass, selectClass, StatCard } from "@/components/ui";
-import { DEFAULT_CROWDSTRIKE, canShowMetrics, columnLabel, isChartDisplay, numericColumn, suggestChart, type CrowdStrikeOptions, type DashboardSource, type DashboardQuery, type ElasticDashboard, type QueryDefinition, type QueryResult } from "@/lib/elastic-dashboard";
+import { inputClass, PanelCard, selectClass } from "@/components/ui";
+import { DEFAULT_CROWDSTRIKE, canShowMetrics, isChartDisplay, numericColumn, suggestChart, type CrowdStrikeOptions, type DashboardSource, type DashboardQuery, type ElasticDashboard, type QueryDefinition, type QueryResult } from "@/lib/elastic-dashboard";
 
 type Draft = Omit<QueryDefinition, "id"> & { id?: string };
 const newDraft = (): Draft => ({ title: "", query: "", display: "auto", refreshMinutes: 15, enabled: true });
 const crowdStrikeDraft = (): Draft => ({ ...newDraft(), source: "crowdstrike", query: "status:['open','reopen']", crowdstrike: { ...DEFAULT_CROWDSTRIKE }, refreshMinutes: 1440 });
-
-function formatValue(value: string | number | boolean | null, column: string): string {
-  if (value === null) return "—";
-  if (typeof value === "number") {
-    const formatted = value.toLocaleString("en-US", { maximumFractionDigits: 2 });
-    return /(?:_pct|_percent|percentage)$/i.test(column) ? `${formatted}%` : formatted;
-  }
-  return String(value);
-}
-
-function Results({ result, display, chart }: { result: QueryResult; display: QueryDefinition["display"]; chart?: QueryDefinition["chart"] }) {
-  if (isChartDisplay(display)) return <ElasticResultChart result={result} definition={{ display, chart }} />;
-  if (display !== "table" && canShowMetrics(result)) {
-    const columns = result.columns.length === 1 ? "" : result.columns.length === 2 ? "sm:grid-cols-2" : "sm:grid-cols-2 xl:grid-cols-3";
-    return <div className={`grid gap-4 ${columns}`}>
-      {result.columns.map((column, index) => <StatCard key={column.name} label={columnLabel(column.name)}
-        value={formatValue(result.rows[0][index], column.name)} sublabel="Latest successful query" icon={<Database size={22} />} />)}
-    </div>;
-  }
-  return <div>
-    <div role="region" aria-label="Scrollable query results" tabIndex={0} className="max-h-[min(28rem,65vh)] overflow-auto rounded-xl border border-zinc-800 focus-visible:outline-2 focus-visible:outline-red-500">
-    <table className="w-full text-left text-sm">
-      <caption className="sr-only">Dashboard query results</caption>
-      <thead className="sticky top-0 z-10 bg-[#111111]"><tr>{result.columns.map((column) => <th key={column.name} scope="col" className="border-b border-zinc-800 px-3 py-3 font-medium text-zinc-400">{columnLabel(column.name)}</th>)}</tr></thead>
-      <tbody>{result.rows.map((row, index) => <tr key={index} className="border-b border-zinc-900">
-        {row.map((value, cell) => <td key={cell} className="max-w-md break-words px-3 py-3 text-zinc-200">{formatValue(value, result.columns[cell].name)}</td>)}
-      </tr>)}</tbody>
-    </table>
-    </div>
-    {result.rows.length > 0 && <p className="mt-2 text-xs text-zinc-500">{result.rows.length} rows · Scroll inside the table to see more.</p>}
-    {!result.rows.length && <p className="py-6 text-zinc-400">The query returned no rows.</p>}
-    {result.truncated && <p className="mt-3 text-sm text-amber-300">Showing the first 100 rows. Narrow or aggregate the query to show the full result.</p>}
-  </div>;
-}
+const ghostButtonClass = styles.button;
+const primaryButtonClass = styles.primaryButton;
 
 async function post(path: string, body?: unknown) {
   return dashboardRequest(path, {
@@ -68,6 +37,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
   const [deleting, setDeleting] = useState<string | null>(null);
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const [dropId, setDropId] = useState<string | null>(null);
+  const [layoutIds, setLayoutIds] = useState<string[] | null>(null);
   const [preview, setPreview] = useState<QueryResult | null>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -130,15 +100,20 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
     setPreview(query?.result ?? null); setError(""); setMessage("");
   }
   function moveTile(from: string, to: string) {
-    if (busy || reordering.current || !dashboard.canManage) return;
-    const previous = dashboard.queries.map((query) => query.id), ids = moveTileIds(previous, from, to);
-    if (ids === previous) return;
+    if (busy || reordering.current || !dashboard.canManage || !layoutIds) return;
+    setLayoutIds(moveTileIds(applyTileOrder(dashboard.queries, layoutIds).map((query) => query.id), from, to));
+  }
+  function saveLayout() {
+    if (busy || reordering.current || !dashboard.canManage || !layoutIds) return;
+    const previous = dashboard.queries.map((query) => query.id);
+    const ids = applyTileOrder(dashboard.queries, layoutIds).map((query) => query.id);
     reordering.current = true; dashboardVersion.current++;
     setDashboard((current) => ({ ...current, queries: applyTileOrder(current.queries, ids) }));
     void action("reorder", async () => {
       try {
         const result = await post("order", { ids });
         if (!result.saved) throw new Error("The server did not confirm the tile order. Refresh to check it.");
+        setLayoutIds(null);
         setMessage("Tile order saved for everyone.");
       } catch (error) {
         setDashboard((current) => ({ ...current, queries: applyTileOrder(current.queries, previous) }));
@@ -163,21 +138,32 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
   }
   const anyConnected = dashboard.connected || dashboard.crowdstrike?.connected;
   const sourceConnected = (source?: DashboardSource) => source === "crowdstrike" ? dashboard.crowdstrike?.connected : dashboard.connected;
+  const visibleQueries = layoutIds ? applyTileOrder(dashboard.queries, layoutIds) : dashboard.queries;
 
-  return <VulnShell eyebrow="Elastic · CrowdStrike" title="Query dashboard"
-    subtitle="Build tiles from Elastic ES|QL or CrowdStrike FQL. Results refresh automatically in the app."
+  return <VulnShell variant="dashboard" eyebrow="Exposure / Overview" title="Vulnerability intelligence"
+    subtitle="Understand exposure. Prioritize the next patch."
     actions={<div className="flex flex-wrap gap-2">
-      <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => action("refresh", async () => {
+      <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || Boolean(layoutIds)} onClick={() => action("refresh", async () => {
         if (dashboard.canManage && anyConnected) {
           await post("refresh"); setMessage("Refresh requested. Results will update here as queries finish.");
         }
         await reload();
       })}><RefreshCw size={16} className={busy === "refresh" ? "animate-spin" : ""} />Refresh</button>
       {dashboard.canManage && <>
-        <button type="button" className={ghostButtonClass} onClick={() => setConnectionOpen((open) => !open)}><Settings2 size={16} />Connection</button>
-        <button type="button" className={primaryButtonClass} disabled={!anyConnected || Boolean(busy)} onClick={() => edit()}><Plus size={16} />Add query</button>
+        {layoutIds ? <>
+          <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => { setLayoutIds(null); setMessage("Layout changes canceled."); }}>Cancel</button>
+          <button type="button" className={primaryButtonClass} disabled={Boolean(busy)} onClick={saveLayout}>{busy === "reorder" ? "Saving layout…" : "Save layout"}</button>
+        </> : <>
+          <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || dashboard.queries.length < 2 || Boolean(draft)} onClick={() => { setLayoutIds(dashboard.queries.map((query) => query.id)); setConnectionOpen(false); setDeleting(null); setMessage(""); setError(""); }}><LayoutGrid size={16} />Arrange tiles</button>
+          <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => setConnectionOpen((open) => !open)}><Settings2 size={16} />Connections</button>
+          <button type="button" className={primaryButtonClass} disabled={!anyConnected || Boolean(busy)} onClick={() => edit()}><Plus size={16} />Add tile</button>
+        </>}
       </>}
     </div>}>
+    <div className={styles.connections}>
+      {[{ name: "CrowdStrike", connected: dashboard.crowdstrike?.connected }, { name: "Elasticsearch", connected: dashboard.connected }].map((source) => <span key={source.name} className={styles.connection}><span className={styles.dot} style={{ background: source.connected ? "#34d399" : "#71717a" }} />{source.name} · {source.connected ? "Configured" : "Not connected"}</span>)}
+      <span className={styles.tileCount}>{dashboard.queries.length} saved tiles · Shared dashboard</span>
+    </div>
     {error && <p role="alert" className="rounded-xl border border-red-900 bg-red-950/20 p-4 text-sm text-red-300">{error}</p>}
     {loadError && !error && <p role="alert" className="rounded-xl border border-amber-900 bg-amber-950/20 p-4 text-sm text-amber-300">{loadError}</p>}
     {message && <p role="status" className="rounded-xl border border-emerald-900 bg-emerald-950/20 p-4 text-sm text-emerald-300">{message}</p>}
@@ -366,46 +352,43 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
       </form>
     </PanelCard>}
 
-    {dashboard.canManage && dashboard.queries.length > 1 && <p id="tile-order-help" className="text-sm text-zinc-500">Drag a tile using its grip, or use the arrow buttons. Order is saved for everyone.</p>}
-    {dashboard.queries.map((query, index) => {
+    {layoutIds && <p id="tile-order-help" className={styles.arrangeHelp}><GripVertical size={16} />Drag tiles by their handles or use the arrows. Save layout applies the order for everyone.</p>}
+    {!dashboard.queries.length && <div className="rounded-xl border border-zinc-800 p-8 text-center text-zinc-400">No saved tiles yet. {dashboard.canManage && "Choose Add tile to create your first view."}</div>}
+    <div className={`${styles.board} ${layoutIds ? styles.arranging : ""}`}>
+    {visibleQueries.map((query, index) => {
       const stale = query.refreshedAt && now !== null && now - Date.parse(query.refreshedAt) > query.refreshMinutes * 2 * 60_000;
-      return <div key={query.id} className={`min-w-0 rounded-[30px] ${draggedId === query.id ? "opacity-50" : ""} ${dropId === query.id && draggedId !== query.id ? "outline-2 outline-offset-4 outline-red-500" : ""}`}
-        onDragOver={(event) => { if (dragging.current && !busy) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; setDropId(query.id); } }}
+      const metrics = query.result && query.display !== "table" && !isChartDisplay(query.display) && canShowMetrics(query.result);
+      const wide = query.display === "table" || query.crowdstrike?.view === "cve-devices" || query.crowdstrike?.view === "patch-worklist" || (query.result && (metrics ? query.result.columns.length >= 4 : !isChartDisplay(query.display)));
+      return <section key={query.id} aria-label={query.title} className={`${styles.tile} ${wide ? styles.wide : ""} ${draggedId === query.id ? styles.dragging : ""} ${dropId === query.id && draggedId !== query.id ? styles.drop : ""}`}
+        onDragOver={(event) => { if (layoutIds && dragging.current && !busy) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; setDropId(query.id); } }}
         onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropId((current) => current === query.id ? null : current); }}
         onDrop={(event) => {
           const from = dragging.current; if (!from) return;
           event.preventDefault(); dragging.current = null; setDraggedId(null); setDropId(null); moveTile(from, query.id);
         }}>
-      <PanelCard eyebrow={query.title} className="[&>div:first-child]:flex-wrap [&>div:first-child]:items-start"
-        description={`${query.source === "crowdstrike" ? "CrowdStrike · Vulnerabilities" : "Elasticsearch"} · ${query.enabled ? (query.refreshMinutes === 1440 ? "Refreshes daily" : `Refreshes every ${query.refreshMinutes} minutes`) : "Automatic refresh paused"}`}
-        actions={<div className="flex flex-wrap gap-2">
+      {layoutIds && <div className={styles.movebar}>
+        <button type="button" className={`${ghostButtonClass} ${styles.grip}`} draggable={!busy} disabled={Boolean(busy)} aria-label={`Drag to reorder ${query.title}`} aria-describedby="tile-order-help"
+          onDragStart={(event) => { dragging.current = query.id; dashboardVersion.current++; setDraggedId(query.id); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", query.id); }}
+          onDragEnd={() => { dragging.current = null; setDraggedId(null); setDropId(null); }}
+          onKeyDown={(event) => { if (event.key === "ArrowUp" || event.key === "ArrowDown") { event.preventDefault(); const target = visibleQueries[index + (event.key === "ArrowUp" ? -1 : 1)]; if (target) moveTile(query.id, target.id); } }}><GripVertical size={16} />Move tile</button>
+        <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || index === 0} aria-label={`Move ${query.title} earlier`} onClick={() => moveTile(query.id, visibleQueries[index - 1].id)}><ArrowUp size={14} />Earlier</button>
+        <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || index === visibleQueries.length - 1} aria-label={`Move ${query.title} later`} onClick={() => moveTile(query.id, visibleQueries[index + 1].id)}><ArrowDown size={14} />Later</button>
+      </div>}
+      <header className={styles.tileHeader}>
+        <div className={styles.tileHeading}><h2>{query.title}</h2><p className={styles.source}><RadioTower size={12} />{query.source === "crowdstrike" ? "CrowdStrike · Vulnerabilities" : "Elasticsearch"}</p></div>
+        <div className={styles.tileActions}>
           {query.result && <button type="button" className={ghostButtonClass} onClick={() => {
             const url = URL.createObjectURL(new Blob([dashboardCsv(query.result!)], { type: "text/csv;charset=utf-8" }));
             const link = document.createElement("a"); link.href = url; link.download = `${query.title.replace(/[^a-z0-9-]/gi, "-").slice(0, 80) || "dashboard-tile"}.csv`;
             link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
           }}><Download size={14} />CSV</button>}
-          {dashboard.canManage && <>
-            {dashboard.queries.length > 1 && <>
-              <button type="button" className={`${ghostButtonClass} cursor-grab active:cursor-grabbing`} draggable={!busy}
-                disabled={Boolean(busy)} aria-label={`Drag to reorder ${query.title}`} aria-describedby="tile-order-help"
-                onDragStart={(event) => {
-                  dragging.current = query.id; dashboardVersion.current++; setDraggedId(query.id);
-                  event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", query.id);
-                }}
-                onDragEnd={() => { dragging.current = null; setDraggedId(null); setDropId(null); }}
-                onKeyDown={(event) => {
-                  if (event.key === "ArrowUp" || event.key === "ArrowDown") {
-                    event.preventDefault(); const target = dashboard.queries[index + (event.key === "ArrowUp" ? -1 : 1)];
-                    if (target) moveTile(query.id, target.id);
-                  }
-                }}><GripVertical size={16} /></button>
-              <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || index === 0} aria-label={`Move ${query.title} up`} onClick={() => moveTile(query.id, dashboard.queries[index - 1].id)}><ArrowUp size={14} /></button>
-              <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || index === dashboard.queries.length - 1} aria-label={`Move ${query.title} down`} onClick={() => moveTile(query.id, dashboard.queries[index + 1].id)}><ArrowDown size={14} /></button>
-            </>}
+          {dashboard.canManage && !layoutIds && <>
             <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => edit(query)}><Pencil size={14} />Edit</button>
             <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => setDeleting(query.id)} aria-label={`Delete ${query.title}`}><Trash2 size={14} />Delete</button>
           </>}
-        </div>}>
+        </div>
+      </header>
+      <div className={styles.tileContent}>
         {deleting === query.id && <div role="alert" className="mb-4 rounded-xl border border-red-900 p-4 text-sm text-zinc-300">
           <p>Delete this shared dashboard tile and its saved history? Source findings are unaffected.</p>
           <div className="mt-3 flex gap-2">
@@ -424,9 +407,11 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
         {stale && !query.error && <p className="mb-4 text-sm text-amber-300">These results are older than two refresh intervals.</p>}
         {query.result ? <Results result={query.result} display={query.display} chart={query.chart} /> : !query.error && <p role="status" className="flex items-center gap-2 py-5 text-zinc-400"><RefreshCw size={16} className="animate-spin" />Loading results in the background…</p>}
         {query.result?.note && <p className="mt-3 text-xs text-zinc-500">{query.result.note}</p>}
-        <p className="mt-4 text-xs text-zinc-500">Last successful query: {query.refreshedAt ? new Date(query.refreshedAt).toISOString().replace("T", " ").replace("Z", " UTC") : "not yet available"}</p>
         {query.id === "asset-coverage" && query.source !== "crowdstrike" && <p className="mt-2 text-xs text-zinc-500">Asset inventory coverage, not vulnerability counts. Records from the last 25 hours; assets last seen within seven days. IDs recorded as both managed and unmanaged can count in both categories.</p>}
-      </PanelCard></div>;
+      </div>
+      <footer className={styles.tileFooter}><span>{query.refreshedAt ? `Updated ${new Date(query.refreshedAt).toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC")}` : "No successful result yet"}</span><span>{query.enabled ? (query.refreshMinutes === 1440 ? "Daily refresh" : `Every ${query.refreshMinutes} min`) : "Automatic refresh paused"}</span></footer>
+      </section>;
     })}
+    </div>
   </VulnShell>;
 }

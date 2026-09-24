@@ -116,7 +116,7 @@ async function run(mode) {
       assert.equal(adminModel.canManage, true);
       if (mode === "empty") {
         const html = await (await fetch(`${base}/elastic-vulnerabilities`, { headers: memberHeaders })).text();
-        assert.match(html, /Add query/);
+        assert.match(html, /Add tile/);
         assert.match(html, /Connection/);
       }
     }
