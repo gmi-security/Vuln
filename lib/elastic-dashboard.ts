@@ -11,7 +11,7 @@ export class DashboardError extends Error {
 export type DashboardSource = "elastic" | "crowdstrike";
 export type CrowdStrikeOptions = {
   dataset: "vulnerabilities";
-  view?: "summary" | "patch-worklist";
+  view?: "summary" | "patch-worklist" | "severity-counts";
   measure: "findings" | "cves" | "hosts";
   groupBy: "none" | "host" | "severity" | "priority" | "status" | "cve";
   top: number;
@@ -60,7 +60,7 @@ export function parseQueryInput(value: unknown): QueryInput {
   }
   const options = body.crowdstrike as CrowdStrikeOptions | undefined;
   if (!options || options.dataset !== "vulnerabilities") throw new DashboardError("Choose the Vulnerabilities dataset.");
-  if (options.view !== undefined && !["summary", "patch-worklist"].includes(options.view)) throw new DashboardError("Choose a supported vulnerability view.");
+  if (options.view !== undefined && !["summary", "patch-worklist", "severity-counts"].includes(options.view)) throw new DashboardError("Choose a supported vulnerability view.");
   if (!["findings", "cves", "hosts"].includes(options.measure) ||
       !["none", "host", "severity", "priority", "status", "cve"].includes(options.groupBy) ||
       ![10, 25, 50, 100].includes(options.top) || typeof options.history !== "boolean") {
@@ -70,9 +70,12 @@ export function parseQueryInput(value: unknown): QueryInput {
   if (options.view === "patch-worklist" && (options.history || options.groupBy !== "none" || options.measure !== "findings")) {
     throw new DashboardError("Patch worklists use findings with no grouping or daily history.");
   }
+  if (options.view === "severity-counts" && (options.history || options.groupBy !== "none" || options.measure !== "findings")) {
+    throw new DashboardError("Severity counts use finding totals with no additional grouping or daily history.");
+  }
   return { source: "crowdstrike", query: body.query.trim(), crowdstrike: {
     dataset: options.dataset, measure: options.measure, groupBy: options.groupBy, top: options.top, history: options.history,
-    ...(options.view === "patch-worklist" ? { view: options.view } : {}),
+    ...(options.view && options.view !== "summary" ? { view: options.view } : {}),
   } };
 }
 
@@ -113,6 +116,7 @@ export function parseDefinition(value: unknown, id: string): QueryDefinition {
   if (typeof body.enabled !== "boolean") throw new DashboardError("Invalid refresh setting.");
   const input = parseQueryInput(body);
   if (input.crowdstrike?.view === "patch-worklist" && !["auto", "table"].includes(String(body.display))) throw new DashboardError("Use Table for a patch worklist.");
+  if (input.crowdstrike?.view === "severity-counts" && !["auto", "metrics", "table"].includes(String(body.display))) throw new DashboardError("Use Number cards or Table for severity counts.");
   return { id, title: body.title.trim(), ...input, display: body.display as QueryDefinition["display"],
     refreshMinutes: body.refreshMinutes, enabled: body.enabled, ...(chart ? { chart } : {}) };
 }

@@ -30,6 +30,32 @@ Example tiles:
 | Open priority distribution | Finding count | GMI priority | Bar, priority/findings |
 | Open findings over time | Finding count, Save daily history | None | Line, day/findings |
 
+## Severity count cards (2026-09-24)
+
+Add tile > CrowdStrike > **Use severity counts** > Add to dashboard. The preset
+uses `status:['open','reopen']`, Number cards and Daily refresh. It displays
+Critical, High, Medium, Low, None and Unknown together using CrowdStrike CVSS
+severity (`cve.severity`), not ExPRT or the custom GMI priority rules. It counts
+vulnerability instances, not unique CVEs. Suppressed findings are included unless
+the user adds `+suppression_info.is_suppressed:false` to the filter.
+
+The `severity-counts` view calls `/spotlight/queries/vulnerabilities/v1` once per
+documented severity, with `limit=1` and the user filter parenthesized before ANDing
+the severity predicate. Each card uses `meta.pagination.total`; returned IDs are
+not collected or counted. This avoids the local 250,000-record collection limit.
+Each total must be a nonnegative safe integer. Missing metadata or any API failure
+rejects the complete refresh and preserves the last successful result. The six
+requests are separate observations during the refresh, not an atomic snapshot.
+No grouped/history/unique-CVE/host options are supported in this view. Summary
+charts and patch worklists continue to use complete collection and its limits.
+
+The endpoint, scope, severity enum and pagination total are described by the
+[Spotlight API reference](https://developer.crowdstrike.com/api-reference/collections/spotlight-vulnerabilities/),
+[FalconPy filter guide](https://github.com/CrowdStrike/falconpy/wiki/Spotlight-Vulnerabilities)
+and [FalconPy response guide](https://developer.crowdstrike.com/sdks/python/responses/).
+Live account response compatibility and totals require verification after adding
+the preset. No authenticated production browser was available for this release.
+
 ## Patch worklist
 
 Add query > CrowdStrike > **Use patch worklist** > **Add to dashboard**. Preview

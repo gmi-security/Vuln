@@ -149,13 +149,13 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
   function updateCrowdStrike(options: Partial<CrowdStrikeOptions>) {
     if (!draft) return;
     const crowdstrike = { ...DEFAULT_CROWDSTRIKE, ...draft.crowdstrike, ...options };
-    if (crowdstrike.view === "patch-worklist") {
+    if (crowdstrike.view === "patch-worklist" || crowdstrike.view === "severity-counts") {
       crowdstrike.history = false; crowdstrike.groupBy = "none"; crowdstrike.measure = "findings";
     }
     if (crowdstrike.history) crowdstrike.groupBy = "none";
     const category = crowdstrike.history ? "day" : crowdstrike.groupBy === "none" ? undefined : crowdstrike.groupBy;
     setDraft({ ...draft, crowdstrike, chart: category ? { category, value: crowdstrike.measure } : undefined,
-      display: crowdstrike.view === "patch-worklist" ? "table" : crowdstrike.history ? "line" : "auto" });
+      display: crowdstrike.view === "patch-worklist" ? "table" : crowdstrike.view === "severity-counts" ? "metrics" : crowdstrike.history ? "line" : "auto" });
     setPreview(null);
   }
   const anyConnected = dashboard.connected || dashboard.crowdstrike?.connected;
@@ -264,16 +264,22 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
               crowdstrike: { ...DEFAULT_CROWDSTRIKE, view: "patch-worklist", top: 25 }, display: "table" });
             setPreview(null); setError(""); setMessage("");
           }}>Use patch worklist</button>}
+          {!draft.id && <button type="button" className={`${ghostButtonClass} ml-2`} onClick={() => {
+            setDraft({ ...crowdStrikeDraft(), title: "Open vulnerabilities by severity",
+              crowdstrike: { ...DEFAULT_CROWDSTRIKE, view: "severity-counts" }, display: "metrics" });
+            setPreview(null); setError(""); setMessage("");
+          }}>Use severity counts</button>}
           <label className="block text-sm text-zinc-300">Dataset
             <select className={`${selectClass} mt-2 block`} value="vulnerabilities" onChange={() => {}}><option value="vulnerabilities">Vulnerabilities · Spotlight</option></select>
           </label>
           <label className="block text-sm text-zinc-300">View
             <select className={`${selectClass} mt-2 block`} value={draft.crowdstrike?.view ?? "summary"} onChange={(event) => updateCrowdStrike({ view: event.target.value as CrowdStrikeOptions["view"] })}>
               <option value="summary">Summary / chart</option><option value="patch-worklist">Patch worklist</option>
+              <option value="severity-counts">Severity counts</option>
             </select>
           </label>
           <div className="flex flex-wrap gap-4">
-            {draft.crowdstrike?.view !== "patch-worklist" && <>
+            {draft.crowdstrike?.view !== "patch-worklist" && draft.crowdstrike?.view !== "severity-counts" && <>
             <label className="text-sm text-zinc-300">Measure
               <select className={`${selectClass} mt-2 block`} value={draft.crowdstrike?.measure} onChange={(event) => updateCrowdStrike({ measure: event.target.value as CrowdStrikeOptions["measure"] })}>
                 <option value="findings">Finding count</option><option value="cves">Unique CVEs</option><option value="hosts">Unique affected hosts</option>
@@ -291,7 +297,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
               </select>
             </label>}
           </div>
-          {draft.crowdstrike?.view === "patch-worklist" ? <p className="text-xs text-zinc-500">Open P1–P3 findings, one row per finding and device. Sorted by GMI priority, risk score, then affected devices. The preset excludes suppressed findings. All matching pages are collected before choosing the top rows. Use Daily refresh for broad filters.</p> : <>
+          {draft.crowdstrike?.view === "severity-counts" ? <p className="text-xs text-zinc-500">Critical, High, Medium, Low, None and Unknown together. Uses CrowdStrike's CVSS severity totals without downloading every finding. Counts vulnerability instances, not unique CVEs. The preset includes open/reopened findings, including suppressed findings; add a suppression filter if needed.</p> : draft.crowdstrike?.view === "patch-worklist" ? <p className="text-xs text-zinc-500">Open P1–P3 findings, one row per finding and device. Sorted by GMI priority, risk score, then affected devices. The preset excludes suppressed findings. All matching pages are collected before choosing the top rows. Use Daily refresh for broad filters.</p> : <>
             <label className="flex items-center gap-2 text-sm text-zinc-300"><input type="checkbox" checked={draft.crowdstrike?.history ?? false} onChange={(event) => updateCrowdStrike({ history: event.target.checked })} />Save daily history of the total</label>
             <p className="text-xs text-zinc-500">FQL filters findings; the app calculates the measure across every returned page. History starts with the first saved collection and shows the latest successful count per UTC day. Each filter and measure has separate history. Missing days appear as gaps.</p>
           </>}
@@ -306,7 +312,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
           <label className="text-sm text-zinc-300">Display
             <select disabled={draft.source === "crowdstrike" && draft.crowdstrike?.view === "patch-worklist"} className={`${selectClass} mt-2 block`} value={draft.display} onChange={(event) => setDraft({ ...draft, display: event.target.value as Draft["display"], chart: draft.chart ?? (preview ? suggestChart(preview) : undefined) })}>
               <option value="auto">Automatic</option><option value="metrics">Number cards</option><option value="table">Table</option>
-              <option value="bar">Bar chart</option><option value="line">Line chart</option><option value="doughnut">Doughnut chart</option>
+              {draft.crowdstrike?.view !== "severity-counts" && <><option value="bar">Bar chart</option><option value="line">Line chart</option><option value="doughnut">Doughnut chart</option></>}
             </select>
           </label>
           <label className="text-sm text-zinc-300">Refresh every

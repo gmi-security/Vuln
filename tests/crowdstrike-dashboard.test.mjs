@@ -47,6 +47,52 @@ async function mockHttp(replies, work) {
 }
 const auth = { access_token: "fake-access-token" };
 
+test("severity count preset preserves its view and rejects incompatible options", () => {
+  const preset = { ...input, crowdstrike: { ...options, view: "severity-counts" } };
+  assert.equal(contract.parseQueryInput(preset).crowdstrike.view, "severity-counts");
+  for (const change of [{ measure: "cves" }, { groupBy: "severity" }, { history: true }]) {
+    assert.throws(() => contract.parseQueryInput({ ...preset, crowdstrike: { ...preset.crowdstrike, ...change } }), /Severity counts/);
+  }
+  const definition = { ...preset, title: "Severity", display: "metrics", refreshMinutes: 1440, enabled: true };
+  assert.equal(contract.parseDefinition(definition, "severity").display, "metrics");
+  assert.throws(() => contract.parseDefinition({ ...definition, display: "bar", chart: { category: "severity", value: "findings" } }, "severity"), /Number cards or Table/);
+});
+
+test("severity counts use six bounded metadata requests even above the collection cap", async () => {
+  const counts = [312345, 400000, 1234, 7, 0, 12];
+  const filter = "status:'open',status:'reopen'";
+  await mockHttp([auth, ...counts.map(total => page(total ? ["finding-id"] : [], "unused-next-page", total))], async (calls) => {
+    const result = await client.executeCrowdStrike(connection, { ...input, query: filter, crowdstrike: { ...options, view: "severity-counts" } });
+    assert.deepEqual(result.columns.map(column => column.name), ["critical", "high", "medium", "low", "none", "unknown"]);
+    assert.deepEqual(result.rows, [counts]);
+    assert.equal(result.truncated, false);
+    assert.match(result.note, /not a single atomic snapshot/);
+    contract.validateDisplayResult(result, { display: "metrics" });
+    assert.equal(calls.length, 7);
+    for (const [index, call] of calls.slice(1).entries()) {
+      assert.equal(call.url.pathname, "/spotlight/queries/vulnerabilities/v1");
+      assert.equal(call.url.searchParams.get("limit"), "1");
+      assert.equal(call.url.searchParams.get("after"), null);
+      assert.equal(call.url.searchParams.get("facet"), null);
+      assert.equal(call.url.searchParams.get("filter"), `(${filter})+cve.severity:'${result.columns[index].name.toUpperCase()}'`);
+    }
+  });
+});
+
+test("severity counts never turn missing or invalid API totals into zero", async () => {
+  for (const total of [undefined, null, -1, "12", 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    await mockHttp([auth, { resources: ["id"], meta: { pagination: { total } } }], async () => {
+      await assert.rejects(client.executeCrowdStrike(connection, { ...input, crowdstrike: { ...options, view: "severity-counts" } }), /valid severity total/);
+    });
+  }
+});
+
+test("one failed severity request rejects the whole result", async () => {
+  await mockHttp([auth, page(["id"], "", 100), { status: 400, body: { errors: [{ message: "Bad filter" }] } }], async () => {
+    await assert.rejects(client.executeCrowdStrike(connection, { ...input, crowdstrike: { ...options, view: "severity-counts" } }), /Bad filter/);
+  });
+});
+
 test("connection checks request the same detail facets as saved queries", async () => {
   await mockHttp([auth, page([raw("connection-check")])], async (calls) => {
     await client.testCrowdStrikeConnection(connection);

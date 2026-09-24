@@ -112,6 +112,26 @@ export async function executeCrowdStrike(connection: CrowdStrikeConnection, valu
   if (!options) throw new DashboardError("Choose a CrowdStrike dataset.");
   const dataset = CROWDSTRIKE_DATASETS[options.dataset];
   const deadline = Date.now() + budgetMs, auth = await session(connection, deadline);
+  if (options.view === "severity-counts") {
+    // Read the API's matching population total, not the length of the first page.
+    // No entity collection or local 250,000-record cap is needed for these counts.
+    const severities = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "NONE", "UNKNOWN"];
+    const counts: number[] = [];
+    for (const severity of severities) {
+      const url = new URL(`${auth.base}/spotlight/queries/vulnerabilities/v1`);
+      url.searchParams.set("filter", `(${input.query})+cve.severity:'${severity}'`);
+      url.searchParams.set("limit", "1");
+      const body = await jsonRequest(url, { headers: auth.headers }, deadline, auth.secrets);
+      const total = body.meta?.pagination?.total;
+      if (!Array.isArray(body.resources) || !Number.isSafeInteger(total) || total < 0) {
+        throw new DashboardError("CrowdStrike did not return a valid severity total. No partial totals were saved.");
+      }
+      counts.push(total);
+    }
+    return { columns: severities.map((name) => ({ name: name.toLowerCase(), type: "long" })),
+      rows: [counts], truncated: false,
+      note: "CrowdStrike CVSS severity counts for this filter, one finding per vulnerability instance. Counts are separate API observations collected during this refresh, not a single atomic snapshot. None and Unknown are retained; these are not GMI priorities or ExPRT ratings." };
+  }
   const records = new Map<string, Vulnerability>(), cursors = new Set<string>();
   let after = "", received = 0, expected = 0;
   for (let page = 0; page < 500; page++) {
