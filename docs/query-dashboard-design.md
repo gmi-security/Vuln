@@ -38,4 +38,13 @@ uses top navigation; other application pages retain their existing sidebar.
   sample and empty modes, including session guards and existing routes; no test
   database was configured for this UI-only release.
 
-Live release verification is recorded below after deployment.
+## Live release
+
+Commit `c33191fbfc5a71707550b4ecb0a69860151db450` is ACTIVE in DigitalOcean
+deployment `9100517a-4b34-4f09-a653-158b47723d1c`. Live application health and
+database reachability are true. A read-only database check confirms all seven
+saved tiles still have results. The CVE device tile retains its 100 rows,
+September 24 22:54:28 UTC refresh timestamp and no error.
+
+Interactive checks used the isolated local fixture; no production tile was
+reordered or otherwise mutated for testing.
