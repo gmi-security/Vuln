@@ -78,7 +78,8 @@ by tenant and host ID; labels include the hostname and IDs to distinguish device
 with the same name. Unique CVEs and hosts can occur in multiple groups, so grouped
 unique counts must not be added to obtain the global unique count. Top-N is applied
 after complete collection and aggregation, and the tile labels how many groups it
-shows. There is no raw-finding browser or arbitrary endpoint field in this release.
+shows. The Patch worklist view adds ranked finding rows; arbitrary API endpoint
+entry is not supported.
 
 ## Daily history
 
@@ -169,6 +170,14 @@ The production build and local HTTP smoke passed in disabled, sample and
 database-backed modes, including member authorization and same-origin deletion.
 Live authenticated CrowdStrike execution and signed-in browser interaction
 remain unverified; compare the first worklist with Falcon using the same filter.
+
+Production commit `dcfe04d4a18f3d9cf79ba2b9519b0d0fb486fc74` became ACTIVE on
+September 24, 2026 in DigitalOcean deployment
+`77e39579-8d94-4fa4-99ba-3cce6bf53e54`. Build and deploy steps succeeded; live
+health and database reachability were true. Anonymous dashboard GET and tile
+DELETE requests returned 401. The disposable test database was removed. Next
+step: create the preset in the signed-in dashboard and reconcile with Falcon;
+the release does not create or delete any production tile automatically.
 
 Mocked API tests cover filter validation, fixed origins, credential encryption,
 pagination, deduplication, counts, tenant separation, policy boundaries, incomplete
