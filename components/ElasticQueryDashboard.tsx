@@ -149,7 +149,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
             setDraft({ title: "Open vulnerabilities — daily trend", query: OPEN_VULN_TREND, display: "line", refreshMinutes: 1440, enabled: true });
             setPreview(null); setError(""); setMessage("");
           }}>Use daily open trend</button>
-          <p className="text-xs text-zinc-500">Carries the last known status forward for 30 days. Requires complete retained status history and a stable finding ID. Today is partial.</p>
+          <p className="text-xs text-zinc-500">Starts September 23. The query uses the last confirmed pull; advance report_end to the next UTC day after a successful import. Requires a complete starting state and status changes.</p>
         </div>}
         <label className="block text-sm text-zinc-300">ES|QL
           <textarea disabled={Boolean(busy)} required rows={8} maxLength={16000} value={draft.query} onChange={(event) => { setDraft({ ...draft, query: event.target.value, chart: undefined }); setPreview(null); }}
