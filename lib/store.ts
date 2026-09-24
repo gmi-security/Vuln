@@ -557,6 +557,9 @@ function todayUtc(): string {
 }
 
 function startScheduler(): void {
+  // Isolated previews must not launch scheduled scans, syncs, or reports.
+  // Unset preserves the existing production behavior.
+  if (process.env.VULN_DISABLE_SCHEDULER === "true") return;
   if (persistGlobal.__vulnScheduler) return;
   persistGlobal.__vulnScheduler = setInterval(() => {
     if (persistGlobal.__vulnSchedulerTick) return; // previous tick still running

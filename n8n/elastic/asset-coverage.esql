@@ -1,0 +1,7 @@
+FROM logs-crowdstrike.discover_asset-*
+| WHERE @timestamp >= NOW() - 25 hours
+| EVAL last_seen = TO_DATETIME(last_seen_timestamp), age_days = DATE_DIFF("day", TO_DATETIME(last_seen_timestamp), NOW())
+| WHERE last_seen >= NOW() - 7 days AND last_seen <= NOW()
+| STATS managed = COUNT_DISTINCT(id) WHERE entity_type == "managed",
+        unmanaged = COUNT_DISTINCT(id) WHERE entity_type == "unmanaged"
+| EVAL coverage_pct = CASE(managed + unmanaged > 0, ROUND(managed * 100.0 / (managed + unmanaged), 1), null)

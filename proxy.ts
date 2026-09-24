@@ -32,7 +32,9 @@ export async function proxy(request: NextRequest) {
     // reachable without the login redirect.
     pathname === "/api/admin/resync" ||
     pathname === "/api/admin/purge-demo" ||
-    pathname === "/api/grc/assessment"
+    pathname === "/api/grc/assessment" ||
+    // Exact endpoint: dedicated ingestion token and feature gate in the handler.
+    pathname === "/api/elastic-vulnerabilities/ingest"
   ) {
     return NextResponse.next();
   }
