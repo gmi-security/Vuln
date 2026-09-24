@@ -1,0 +1,57 @@
+# Separate preview app. Do not apply this spec to the production app ID.
+# Before creating: publish the feature branch and configure staging-only OAuth
+# credentials/session secret. No production database or integrations are copied.
+name: gmi-vuln-staging
+region: nyc
+databases:
+  - name: staging-db
+    engine: PG
+    production: false
+services:
+  - name: web
+    environment_slug: node-js
+    github:
+      repo: gmi-security/Vuln
+      branch: feat/crowdstrike-vulnerability-module
+      deploy_on_push: false
+    build_command: npm run build
+    run_command: npm start
+    http_port: 3000
+    instance_count: 1
+    instance_size_slug: basic-xxs
+    health_check:
+      http_path: /api/health
+    envs:
+      - key: DATABASE_URL
+        scope: RUN_TIME
+        value: ${staging-db.DATABASE_URL}
+      - key: ELASTIC_VULN_DATABASE_URL
+        scope: RUN_TIME
+        value: ${staging-db.DATABASE_URL}
+      - key: ELASTIC_VULN_INGEST_TOKEN
+        scope: RUN_TIME
+        type: SECRET
+      - key: ELASTIC_VULN_ENABLED
+        scope: RUN_TIME
+        value: "true"
+      - key: ELASTIC_VULN_SAMPLE_DATA
+        scope: RUN_TIME
+        value: "true"
+      - key: VULN_DISABLE_SCHEDULER
+        scope: RUN_TIME
+        value: "true"
+      - key: GMI_ALLOWED_ORG
+        scope: RUN_TIME
+        value: gmi-security
+      - key: NEXTAUTH_URL
+        scope: RUN_TIME
+        value: ${APP_URL}
+      - key: GITHUB_CLIENT_ID
+        scope: RUN_TIME
+        type: SECRET
+      - key: GITHUB_CLIENT_SECRET
+        scope: RUN_TIME
+        type: SECRET
+      - key: NEXTAUTH_SECRET
+        scope: RUN_TIME
+        type: SECRET

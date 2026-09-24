@@ -1,0 +1,177 @@
+{
+  "name": "GMI Vuln - Elastic asset coverage (staging)",
+  "active": false,
+  "nodes": [
+    {
+      "id": "manual",
+      "name": "Manual test",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "schedule",
+      "name": "Every 15 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        180
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "start",
+      "name": "Start query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "jsCode": "return [{ json: { collectedAt: new Date().toISOString() } }];"
+      }
+    },
+    {
+      "id": "query",
+      "name": "Query Elasticsearch",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://elasticsearch.example.invalid/_query?allow_partial_results=false",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"query\":\"FROM logs-crowdstrike.discover_asset-*\\n| WHERE @timestamp >= NOW() - 25 hours\\n| EVAL last_seen = TO_DATETIME(last_seen_timestamp), age_days = DATE_DIFF(\\\"day\\\", TO_DATETIME(last_seen_timestamp), NOW())\\n| WHERE last_seen >= NOW() - 7 days AND last_seen <= NOW()\\n| STATS managed = COUNT_DISTINCT(id) WHERE entity_type == \\\"managed\\\",\\n        unmanaged = COUNT_DISTINCT(id) WHERE entity_type == \\\"unmanaged\\\"\\n| EVAL coverage_pct = CASE(managed + unmanaged > 0, ROUND(managed * 100.0 / (managed + unmanaged), 1), null)\",\"columnar\":false}",
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "normalize",
+      "name": "Validate coverage",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const response = $json.body ?? $json;\nif ($json.headers?.warning || response.is_partial === true || response.is_running === true || response.error) {\n  throw new Error('ES|QL returned warnings, errors, or incomplete results; retaining the previous snapshot.');\n}\nif (!Array.isArray(response.columns) || !Array.isArray(response.values) || response.values.length !== 1) {\n  throw new Error('Expected exactly one ES|QL result row.');\n}\nconst row = response.values[0];\nconst results = {};\nfor (const name of ['managed', 'unmanaged', 'coverage_pct']) {\n  const matches = response.columns.map((column, index) => column.name === name ? index : -1).filter(index => index >= 0);\n  if (matches.length !== 1 || !Array.isArray(row) || row.length !== response.columns.length) throw new Error('Unexpected ES|QL columns.');\n  results[name] = row[matches[0]];\n}\nconst { managed, unmanaged, coverage_pct } = results;\nif (!Number.isSafeInteger(managed) || managed < 0 || !Number.isSafeInteger(unmanaged) || unmanaged < 0 || !Number.isSafeInteger(managed + unmanaged)) {\n  throw new Error('Invalid asset counts.');\n}\nconst expected = managed + unmanaged === 0 ? null : Math.round(managed * 1000 / (managed + unmanaged)) / 10;\nif (expected === null ? coverage_pct !== null : typeof coverage_pct !== 'number' || !Number.isFinite(coverage_pct) || Math.abs(coverage_pct - expected) > 0.000001) {\n  throw new Error('Coverage percentage does not match the counts.');\n}\nreturn [{ json: { queryId: 'asset-coverage', collectedAt: $('Start query').first().json.collectedAt, results } }];"
+      }
+    },
+    {
+      "id": "deliver",
+      "name": "Save staging snapshot",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        960,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "parameters": {
+        "method": "POST",
+        "url": "https://staging.example.invalid/api/elastic-vulnerabilities/ingest",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "timeout": 15000
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Manual test": {
+      "main": [
+        [
+          {
+            "node": "Start query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every 15 minutes": {
+      "main": [
+        [
+          {
+            "node": "Start query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start query": {
+      "main": [
+        [
+          {
+            "node": "Query Elasticsearch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query Elasticsearch": {
+      "main": [
+        [
+          {
+            "node": "Validate coverage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate coverage": {
+      "main": [
+        [
+          {
+            "node": "Save staging snapshot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "UTC"
+  }
+}
