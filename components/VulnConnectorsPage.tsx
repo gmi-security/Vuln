@@ -521,22 +521,41 @@ function IntegrationCard({ card }: { card: CardData }) {
           : null;
   const supportsCsv = uploadSpec !== null;
   const [health, setHealth] = useState<
-    { reachable: boolean; message: string } | null | undefined
+    | {
+        reachable: boolean;
+        message: string;
+        tenants?: { label: string; reachable: boolean; status: string; message: string }[];
+      }
+    | null
+    | undefined
   >(healthUrl && card.configured ? undefined : null);
 
   useEffect(() => {
     if (!healthUrl || !card.configured) return;
     let alive = true;
-    void fetch(healthUrl, { cache: "no-store" })
-      .then((r) => r.json())
-      .then((j) => {
-        if (alive) setHealth({ reachable: Boolean(j.reachable), message: j.message ?? "" });
-      })
-      .catch(() => {
-        if (alive) setHealth({ reachable: false, message: "unreachable" });
-      });
+    const poll = () =>
+      fetch(healthUrl, { cache: "no-store" })
+        .then((r) => r.json())
+        .then((j) => {
+          if (alive) {
+            setHealth({
+              reachable: Boolean(j.reachable),
+              message: j.message ?? "",
+              tenants: Array.isArray(j.tenants) ? j.tenants : undefined,
+            });
+          }
+        })
+        .catch(() => {
+          if (alive) setHealth({ reachable: false, message: "unreachable" });
+        });
+    void poll();
+    // Live reachability, not just a one-shot check — the server's own cache
+    // (30-60s per route) bounds how often this actually hits the real
+    // appliance, so polling here doesn't add external load beyond that.
+    const id = setInterval(poll, 20_000);
     return () => {
       alive = false;
+      clearInterval(id);
     };
   }, [healthUrl, card.configured]);
 
@@ -664,7 +683,14 @@ function IntegrationCard({ card }: { card: CardData }) {
           <Icon size={26} />
         </div>
         <div className="min-w-0">
-          <h2 className="text-xl font-semibold text-white">{card.name}</h2>
+          <h2 className="flex flex-wrap items-center gap-2 text-xl font-semibold text-white">
+            {card.name}
+            {isCrowdstrike && health?.tenants && health.tenants.length > 1 ? (
+              <span className="rounded-full border border-[rgba(179,14,20,0.35)] bg-[rgba(179,14,20,0.1)] px-2 py-0.5 text-[11px] font-medium text-[#ff8a8a]">
+                {health.tenants.length} tenants
+              </span>
+            ) : null}
+          </h2>
           <div className="mt-1 text-sm text-zinc-500">{card.kind}</div>
           <p className="mt-3 text-sm leading-relaxed text-zinc-400">
             {card.description}
@@ -716,6 +742,27 @@ function IntegrationCard({ card }: { card: CardData }) {
             </span>
           ) : null}
         </div>
+        {isCrowdstrike && health?.tenants && health.tenants.length > 1 ? (
+          <div className="mt-3 space-y-1.5 border-t border-zinc-900 pt-3">
+            {health.tenants.map((t) => (
+              <div
+                key={t.label}
+                title={t.message}
+                className="flex items-center justify-between gap-3 text-xs"
+              >
+                <span className="flex items-center gap-1.5 text-zinc-300">
+                  <span
+                    className={`h-1.5 w-1.5 rounded-full ${t.reachable ? "bg-emerald-400" : "bg-[#ff4d57]"}`}
+                  />
+                  {t.label === "primary" ? "GMI (own estate)" : t.label}
+                </span>
+                <span className={t.reachable ? "text-emerald-300" : "text-[#ff8a8a]"}>
+                  {t.status}
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : null}
         <div className="mt-3 space-y-2">
           {card.envVars.map((envVar) => (
             <div key={envVar} className="flex items-center justify-between gap-4">

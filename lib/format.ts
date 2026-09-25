@@ -11,6 +11,30 @@ export function formatDateTime(iso: string | null): string {
   });
 }
 
+// CrowdStrike Spotlight's cve.description is an AI-generated composite blob
+// with no real line breaks — its own fixed section headers ("Summary",
+// "Threat intelligence", "Exploitability", and "Exploit status:"/"Exploit
+// code:"/"Exploit details:" within that last section) run directly into the
+// preceding sentence with just a space. Insert a break before each known
+// header so the text reads as separate sections instead of one paragraph.
+const CVE_DESCRIPTION_HEADERS = [
+  "Summary",
+  "Threat intelligence",
+  "Exploitability",
+  "Exploit status:",
+  "Exploit code:",
+  "Exploit details:",
+];
+
+export function formatCveDescription(text: string): string {
+  let out = text;
+  for (const header of CVE_DESCRIPTION_HEADERS) {
+    // Word-boundary match, skip a match at position 0 (already the start).
+    out = out.replace(new RegExp(`(?<!^)\\b${header.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "g"), `\n\n${header}`);
+  }
+  return out.trim();
+}
+
 export function formatAge(iso: string): string {
   const ms = Date.now() - new Date(iso).getTime();
   const days = Math.floor(ms / 86_400_000);

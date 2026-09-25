@@ -39,6 +39,7 @@ export default function VulnSidebar({
   const pathname = usePathname();
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [elasticEnabled, setElasticEnabled] = useState(false);
+  const [syncAll, setSyncAll] = useState<{ running: boolean; startedAt: number } | null>(null);
   const navItems: VulnNavItem[] = [
     ...baseNavItems,
     ...(elasticEnabled ? [{ label: "Query Dashboard", icon: ShieldCheck, href: "/elastic-vulnerabilities" }] : []),
@@ -46,14 +47,34 @@ export default function VulnSidebar({
   ];
 
   useEffect(() => {
-    fetch("/api/connectors")
-      .then((r) => r.json())
-      .then((d) => setConnectors(d.connectors ?? []))
-      .catch(() => {});
+    let alive = true;
+    // Config state only (env-var presence, no external calls) — safe to
+    // poll from every page without adding load against real appliances.
+    const pollConnectors = () =>
+      fetch("/api/connectors", { cache: "no-store" })
+        .then((r) => r.json())
+        .then((d) => alive && setConnectors(d.connectors ?? []))
+        .catch(() => {});
+    // In-memory job state, also cheap — this is what makes the panel feel
+    // "live" (a sync-all kicked off from any tab shows here within ~5s).
+    const pollSyncAll = () =>
+      fetch("/api/connectors/sync-all", { cache: "no-store" })
+        .then((r) => r.json())
+        .then((d) => alive && setSyncAll(d.status ?? null))
+        .catch(() => {});
+    void pollConnectors();
+    void pollSyncAll();
     fetch("/api/elastic-vulnerabilities/status", { cache: "no-store" })
       .then((response) => response.ok ? response.json() : null)
-      .then((data) => setElasticEnabled(data?.enabled === true))
+      .then((data) => alive && setElasticEnabled(data?.enabled === true))
       .catch(() => {});
+    const connectorsId = setInterval(pollConnectors, 20_000);
+    const syncAllId = setInterval(pollSyncAll, 5_000);
+    return () => {
+      alive = false;
+      clearInterval(connectorsId);
+      clearInterval(syncAllId);
+    };
   }, []);
 
   return (
@@ -152,8 +173,20 @@ export default function VulnSidebar({
       <div className="mt-auto px-6 pb-8">
         {!collapsed && connectors.length > 0 ? (
           <div className="rounded-2xl border border-[rgba(179,14,20,0.14)] bg-[#080808] p-4">
-            <div className="text-[11px] uppercase tracking-[0.24em] text-zinc-500">
-              Scan Engines
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-[11px] uppercase tracking-[0.24em] text-zinc-500">
+                Scan Engines
+              </div>
+              {syncAll?.running ? (
+                <Link
+                  href="/connectors"
+                  title="A sync-all is running — see progress on Connectors"
+                  className="flex items-center gap-1.5 text-[11px] text-[#ff8a8a]"
+                >
+                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#ff4d57]" />
+                  Syncing…
+                </Link>
+              ) : null}
             </div>
             <div className="mt-3 space-y-2 text-[13px] text-zinc-300">
               {connectors.map((c) => (
