@@ -326,18 +326,21 @@ test("patch export collects beyond top 100, deduplicates findings and tenant-sco
   });
 });
 
-test("patch export resolves missing remediation IDs and preserves application mapping", async () => {
+test("patch export resolves only recommended IDs and keeps all application recommendations in the ticket", async () => {
   const row = patchRaw("a", { apps: [
     { product_name_normalized: "Alpha", remediation: { ids: ["patch-1"] }, remediation_info: { recommended_id: "patch-2", minimum_id: "patch-1" } },
-    { product_name_normalized: "Beta", remediation: { ids: ["patch-3"] } }
+    { product_name_normalized: "Beta", remediation: { ids: ["patch-3"] }, remediation_info: { recommended_id: "patch-3" } }
   ], remediation: { entities: [remedy()] } });
   await mockHttp([auth, page([row]), { resources: [remedy("patch-2"), remedy("patch-3")] }], async calls => {
     const packet = await client.executePatchRequest(connection, { cve: patchCve });
-    assert.equal(packet.csvRows, 3); assert.equal(packet.hostCount, 1);
+    assert.equal(packet.csvRows, 2); assert.equal(packet.hostCount, 1);
     const last = calls.at(-1).url;
     assert.equal(last.pathname, "/spotlight/entities/remediations/v2");
     assert.deepEqual(last.searchParams.getAll("ids"), ["patch-2", "patch-3"]);
-    assert.match(packet.csv, /"Alpha","","patch-1"/);
+    assert.doesNotMatch(packet.csv, /patch-1|minimum_remediation_id/);
+    assert.doesNotMatch(packet.body, /patch-1/);
+    assert.match(packet.body, /patch-2/);
+    assert.match(packet.body, /patch-3/);
     assert.match(packet.csv, /"Alpha","","patch-2"/);
     assert.match(packet.csv, /"Beta","","patch-3"/);
     assert.doesNotMatch(packet.csv, /"Beta","","patch-1"/);
@@ -370,7 +373,38 @@ test("patch output escapes CSV formulas and reports suppressed and missing detai
   assert.match(packet.body, /CVSS base score\(s\): Not supplied/);
   assert.match(packet.body, /CISA KEV: Not supplied/);
   assert.ok(packet.warnings.some(w => /Suppressed/.test(w)));
-  assert.ok(packet.warnings.some(w => /actionable remediation/.test(w)));
-  assert.match(packet.csv, /No application remediation supplied/);
+  assert.ok(packet.warnings.some(w => /actionable recommended remediation/.test(w)));
+  assert.match(packet.csv, /No recommended remediation supplied/);
   assert.doesNotMatch(packet.csv, /"Unmapped application","","patch-1"/);
+});
+
+
+test("recommendations exclude minimum-only alternatives, preserve missing hosts, and respect app mapping", () => {
+  const rows = [patchRaw("first", { apps: [
+    { product_name_normalized: "Explicit", remediation_info: { recommended_id: "rec-a", minimum_id: "min-a" } },
+    { product_name_normalized: "Tagged", remediation: { ids: ["rec-b", "min-a"] } },
+    { product_name_normalized: "No recommendation", remediation: { ids: ["min-a"] } }
+  ], remediation: { entities: [
+    { ...remedy("rec-a"), recommendation_type: "minimum" },
+    { ...remedy("rec-b"), recommendation_type: "recommended" },
+    { ...remedy("min-a"), recommendation_type: "minimum" },
+    { ...remedy("unrelated-rec"), recommendation_type: "recommended" }
+  ] } }), patchRaw("second", { aid: "host-without-recommendation", apps: [], remediation: { entities: [{ ...remedy("min-only"), recommendation_type: "minimum" }] } })];
+  const packet = patchModel.buildPatchRequest(patchCve, rows.map(r => patchModel.normalizePatchFinding(r, patchCve)), "us-1", "start", "end");
+  assert.equal(packet.hostCount, 2); assert.equal(packet.findingCount, 2); assert.equal(packet.csvRows, 4);
+  assert.match(packet.csv, /"Explicit","","rec-a"/); assert.match(packet.csv, /"Tagged","","rec-b"/);
+  assert.doesNotMatch(packet.csv, /min-a|min-only|unrelated-rec|minimum_remediation_id/);
+  assert.doesNotMatch(packet.body, /min-a|min-only|unrelated-rec/);
+  assert.match(packet.body, /rec-a/); assert.match(packet.body, /rec-b/);
+  assert.match(packet.body, /host-without-recommendation/);
+  assert.match(packet.csv, /No recommended remediation supplied/);
+  assert.equal(packet.warnings.length, 1);
+});
+
+test("finding-level recommendations work without applications and same recommended/minimum ID emits once", () => {
+  const rows = [patchRaw("a", { apps: [], remediation: { entities: [{ ...remedy("rec-a"), recommendation_type: "recommended" }, { ...remedy("min-a"), recommendation_type: "minimum" }] } }),
+    patchRaw("b", { apps: [{ remediation_info: { recommended_id: "patch-1", minimum_id: "patch-1" } }] })];
+  const packet = patchModel.buildPatchRequest(patchCve, rows.map(r => patchModel.normalizePatchFinding(r, patchCve)), "us-1", "start", "end");
+  assert.equal(packet.csvRows, 2); assert.equal(packet.hostCount, 1);
+  assert.match(packet.csv, /Recommended finding-level remediation/); assert.doesNotMatch(packet.csv, /min-a/);
 });

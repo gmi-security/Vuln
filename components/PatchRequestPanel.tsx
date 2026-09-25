@@ -55,7 +55,7 @@ export default function PatchRequestPanel({ cve }: { cve: string }) {
     {message && <p role="status" className={styles.resultNote}>{message}</p>}
     {error && <p role="alert" className={styles.patchError}>{error}</p>}
     {packet && <>
-      <p className={styles.resultNote}><strong>{packet.hostCount.toLocaleString()} hosts · {packet.findingCount.toLocaleString()} findings</strong><br />Collected {packet.collectedAt}. {packet.csvRows.toLocaleString()} CSV rows; applications and patch alternatives may produce multiple rows per host.</p>
+      <p className={styles.resultNote}><strong>{packet.hostCount.toLocaleString()} hosts · {packet.findingCount.toLocaleString()} findings</strong><br />Collected {packet.collectedAt}. {packet.csvRows.toLocaleString()} CSV rows with recommended remediations only; multiple affected applications may produce multiple rows per host.</p>
       {packet.warnings.length > 0 && <ul className={styles.patchWarnings}>{packet.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>}
       <div className={styles.patchActions}>
         <button type="button" className={styles.button} onClick={() => download(packet.csv, "csv", "text/csv;charset=utf-8")}>Download CSV</button>
