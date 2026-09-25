@@ -26,7 +26,7 @@ import {
   type TidalProgress,
 } from "@/lib/tidal";
 import { intuneConfig, intuneListAssets } from "@/lib/intune";
-import { falconConfig, falconListAssets, spotlightListFindings } from "@/lib/crowdstrike";
+import { falconConfigs, falconListAssets, spotlightListFindings } from "@/lib/crowdstrike";
 import { defenderConfig, defenderListFindings } from "@/lib/defender";
 import { burpConfig, burpListIssues, type BurpFinding } from "@/lib/burp";
 import {
@@ -4186,7 +4186,7 @@ export async function syncAllConnectors(): Promise<SyncAllEntry[]> {
     // Results appear on the next manual sync or page refresh.
     {
       connector: "CrowdStrike Devices",
-      ready: Boolean(falconConfig()),
+      ready: falconConfigs().length > 0,
       run: async () => {
         const r = startCsDevicesSync();
         if (!r.started) return { error: r.error ?? "Could not start sync." };
@@ -4195,7 +4195,7 @@ export async function syncAllConnectors(): Promise<SyncAllEntry[]> {
     },
     {
       connector: "CrowdStrike Spotlight",
-      ready: Boolean(falconConfig()),
+      ready: falconConfigs().length > 0,
       run: async () => {
         const r = startCsSpotlightSync();
         if (!r.started) return { error: r.error ?? "Could not start sync." };
@@ -4717,7 +4717,7 @@ export function getCsDevicesSyncStatus(): CsSyncStatus { return csDevicesSync();
 export function getCsSpotlightSyncStatus(): CsSyncStatus { return csSpotlightSync(); }
 
 export function startCsDevicesSync(): { started: boolean; error?: string } {
-  if (!falconConfig()) return { started: false, error: "CrowdStrike is not configured." };
+  if (!falconConfigs().length) return { started: false, error: "CrowdStrike is not configured." };
   if (csDevicesSync().running) return { started: false, error: "Devices sync already running." };
   syncJobGlobal.__vulnCsDevicesSync = { running: true, phase: "Syncing", startedAt: Date.now(), finishedAt: null, result: null, error: null };
   void (async () => {
@@ -4736,7 +4736,7 @@ export function startCsDevicesSync(): { started: boolean; error?: string } {
 }
 
 export function startCsSpotlightSync(): { started: boolean; error?: string } {
-  if (!falconConfig()) return { started: false, error: "CrowdStrike is not configured." };
+  if (!falconConfigs().length) return { started: false, error: "CrowdStrike is not configured." };
   if (csSpotlightSync().running) return { started: false, error: "Spotlight sync already running." };
   syncJobGlobal.__vulnCsSpotlightSync = { running: true, phase: "Syncing", startedAt: Date.now(), finishedAt: null, result: null, error: null };
   void (async () => {
@@ -4869,6 +4869,10 @@ export type EndpointImportResult = {
   findingsRescored: number;
   company: string;
   autoScan?: AutoScanResult;
+  // Per-tenant breakdown when more than one CrowdStrike tenant is configured
+  // (an MSSP client with their own separate CID gets synced separately from
+  // GMI's own devices). Absent/single-entry for the common one-tenant case.
+  tenants?: { label: string; company: string; assetsUpserted: number; error?: string }[];
 };
 
 // Shared endpoint-inventory upsert for Intune / CrowdStrike device sources.
@@ -4951,22 +4955,47 @@ async function importEndpoints(
 export async function importFromCrowdstrike(): Promise<
   EndpointImportResult | { error: string }
 > {
-  if (!falconConfig()) {
+  const configs = falconConfigs();
+  if (!configs.length) {
     return {
       error:
         "CrowdStrike is not configured. Set FALCON_CLIENT_ID, FALCON_CLIENT_SECRET, and FALCON_CLOUD to sync host inventory.",
     };
   }
   const s = store();
-  const customer = process.env.FALCON_CUSTOMER?.trim() || undefined;
-  try {
-    const devices = await falconListAssets();
-    return await importEndpoints(s, devices, "crowdstrike", customer);
-  } catch (err) {
-    return {
-      error: err instanceof Error ? err.message : "Failed to reach the CrowdStrike API.",
-    };
+  const tenants: { label: string; company: string; assetsUpserted: number; error?: string }[] = [];
+  let assetsUpserted = 0;
+  let findingsRescored = 0;
+  let autoScan: AutoScanResult | undefined;
+  for (const config of configs) {
+    try {
+      const devices = await falconListAssets(config);
+      const r = await importEndpoints(s, devices, "crowdstrike", config.customerName);
+      assetsUpserted += r.assetsUpserted;
+      findingsRescored += r.findingsRescored;
+      if (r.autoScan) autoScan = r.autoScan;
+      tenants.push({ label: config.label, company: r.company, assetsUpserted: r.assetsUpserted });
+    } catch (err) {
+      tenants.push({
+        label: config.label,
+        company: config.customerName ?? "(internal)",
+        assetsUpserted: 0,
+        error: err instanceof Error ? err.message : "Failed to reach the CrowdStrike API.",
+      });
+    }
   }
+  // Every tenant failed — surface as a top-level error rather than a silent
+  // "0 assets synced" result.
+  if (tenants.length && tenants.every((t) => t.error)) {
+    return { error: tenants.map((t) => `${t.label}: ${t.error}`).join("; ") };
+  }
+  return {
+    assetsUpserted,
+    findingsRescored,
+    company: tenants.map((t) => t.company).join(", "),
+    autoScan,
+    tenants: tenants.length > 1 ? tenants : undefined,
+  };
 }
 
 export type SpotlightImportResult = {
@@ -4981,26 +5010,20 @@ export type SpotlightImportResult = {
 export async function importFromCrowdstrikeSpotlight(): Promise<
   SpotlightImportResult | { error: string }
 > {
-  if (!falconConfig()) {
+  const configs = falconConfigs();
+  if (!configs.length) {
     return {
       error:
         "CrowdStrike is not configured. Set FALCON_CLIENT_ID, FALCON_CLIENT_SECRET, and FALCON_CLOUD.",
     };
   }
   const s = store();
-  let items;
-  try {
-    items = await spotlightListFindings();
-  } catch (err) {
-    return { error: err instanceof Error ? err.message : "Failed to reach the CrowdStrike Spotlight API." };
-  }
 
   const nowIso = new Date().toISOString();
   let findingsImported = 0;
   let skipped = 0;
   const hosts = new Set<string>();
   const scanByCompany = new Map<string, InternalScan>();
-  const falconCustomer = process.env.FALCON_CUSTOMER?.trim() || "";
 
   // Build a dedupe index once — O(n) — instead of scanning all findings per
   // item. Keys are company-scoped so customers sharing asset strings never
@@ -5020,113 +5043,131 @@ export async function importFromCrowdstrikeSpotlight(): Promise<
     }
   }
 
-  for (const item of items) {
-    const assetKey = item.hostname || item.localIp;
-    if (!assetKey) { skipped += 1; continue; }
-
-    // Match to a company via existing asset, then company-name fuzzy match.
-    // Customer segmentation: FALCON_CUSTOMER pins all Spotlight findings to a
-    // named client company. Without it, findings match via Tidal asset lookup
-    // then hostname tokens, then fall back to the internal org — only when no
-    // FALCON_CUSTOMER is set (own-estate deployment). Inventory attribution
-    // only counts when every matching asset agrees on a single owner —
-    // hostnames/IPs shared across customers are inconclusive.
-    const owners = assetOwners(s, item.hostname, item.localIp);
-    let companyId: string | null | undefined =
-      owners.size === 1 ? owners.values().next().value : undefined;
-    if (!companyId && falconCustomer) {
-      // Pin to the named customer company; create it if first encounter.
-      let c = Array.from(s.companies.values()).find(
-        (co) => co.name.toLowerCase() === falconCustomer.toLowerCase(),
+  const tenantErrors: string[] = [];
+  for (const config of configs) {
+    let items: Awaited<ReturnType<typeof spotlightListFindings>>;
+    try {
+      items = await spotlightListFindings(config);
+    } catch (err) {
+      tenantErrors.push(
+        `${config.label}: ${err instanceof Error ? err.message : "Failed to reach the CrowdStrike Spotlight API."}`,
       );
-      if (!c) {
-        const cr = createCompany({ name: falconCustomer });
-        if (!("error" in cr)) c = s.companies.get(cr.id);
+      continue;
+    }
+
+    for (const item of items) {
+      const assetKey = item.hostname || item.localIp;
+      if (!assetKey) { skipped += 1; continue; }
+
+      // Customer segmentation: a named tenant (its own separate CrowdStrike
+      // CID, e.g. an MSSP client distinct from GMI's own estate) pins
+      // directly to that company — no fuzzy matching, since the tenant
+      // itself already tells us unambiguously whose data this is. Only the
+      // unnamed primary tenant (GMI's own shared estate) uses the looser
+      // asset-owner / hostname-match / internal-org fallback chain.
+      let companyId: string | null | undefined;
+      if (config.customerName) {
+        let c = Array.from(s.companies.values()).find(
+          (co) => co.name.toLowerCase() === config.customerName!.toLowerCase(),
+        );
+        if (!c) {
+          const cr = createCompany({ name: config.customerName });
+          if (!("error" in cr)) c = s.companies.get(cr.id);
+        }
+        companyId = c?.id;
+      } else {
+        const owners = assetOwners(s, item.hostname, item.localIp);
+        companyId = owners.size === 1 ? owners.values().next().value : undefined;
+        if (!companyId) companyId = matchCompanyForScan(s, item.hostname, item.localIp);
+        if (!companyId) {
+          companyId = Array.from(s.companies.values()).find((c) => c.kind === "internal")?.id;
+        }
       }
-      companyId = c?.id;
-    }
-    if (!companyId) companyId = matchCompanyForScan(s, item.hostname, item.localIp);
-    if (!companyId && !falconCustomer) {
-      // Own-estate fallback only when no FALCON_CUSTOMER is set.
-      companyId = Array.from(s.companies.values()).find((c) => c.kind === "internal")?.id;
-    }
-    if (!companyId) { skipped += 1; continue; }
-    hosts.add(assetKey);
+      if (!companyId) { skipped += 1; continue; }
+      hosts.add(assetKey);
 
-    // Reuse an existing scan for this company rather than creating a new one each sync.
-    let scan = scanByCompany.get(companyId) ?? existingScanByCompany.get(companyId);
-    if (!scan) {
-      const company = s.companies.get(companyId)!;
-      const folder = ensureFolder(s, companyId, "Spotlight");
-      const scanId = nextId(s, "SCAN");
-      scan = {
-        id: scanId,
-        name: `CrowdStrike Spotlight — ${company.name}`,
-        companyId: company.id,
-        companyName: company.name,
-        folderId: folder.id,
-        folderName: folder.name,
-        connector: "crowdstrike",
-        profile: "agent-sync",
-        targets: [assetKey],
-        status: "Completed",
-        createdAt: nowIso,
-        startedAt: nowIso,
-        completedAt: nowIso,
-        findingsCount: 0,
-        severityCounts: emptySeverityCounts(),
-        hostsScanned: 0,
-        requestedBy: "imported@crowdstrike-spotlight",
-        durationMs: 1,
-        progressFrozenAt: 100,
-        seed: hashSeed(scanId),
-        vendor: null,
-        externalRef: `spotlight:${companyId}`,
-      };
-      s.scans.set(scanId, scan);
-    }
-    scan.completedAt = nowIso;
-    scanByCompany.set(companyId, scan);
+      // Reuse an existing scan for this company rather than creating a new one each sync.
+      let scan = scanByCompany.get(companyId) ?? existingScanByCompany.get(companyId);
+      if (!scan) {
+        const company = s.companies.get(companyId)!;
+        const folder = ensureFolder(s, companyId, "Spotlight");
+        const scanId = nextId(s, "SCAN");
+        scan = {
+          id: scanId,
+          name: `CrowdStrike Spotlight — ${company.name}`,
+          companyId: company.id,
+          companyName: company.name,
+          folderId: folder.id,
+          folderName: folder.name,
+          connector: "crowdstrike",
+          profile: "agent-sync",
+          targets: [assetKey],
+          status: "Completed",
+          createdAt: nowIso,
+          startedAt: nowIso,
+          completedAt: nowIso,
+          findingsCount: 0,
+          severityCounts: emptySeverityCounts(),
+          hostsScanned: 0,
+          requestedBy: "imported@crowdstrike-spotlight",
+          durationMs: 1,
+          progressFrozenAt: 100,
+          seed: hashSeed(scanId),
+          vendor: null,
+          externalRef: `spotlight:${companyId}`,
+        };
+        s.scans.set(scanId, scan);
+      }
+      scan.completedAt = nowIso;
+      scanByCompany.set(companyId, scan);
 
-    const dedupeKey = `${companyId}::${item.cve}::${assetKey}`;
-    const existingFinding = existingFindingByKey.get(dedupeKey);
-    if (existingFinding) { existingFinding.lastSeen = nowIso; continue; }
+      const dedupeKey = `${companyId}::${item.cve}::${assetKey}`;
+      const existingFinding = existingFindingByKey.get(dedupeKey);
+      if (existingFinding) { existingFinding.lastSeen = nowIso; continue; }
 
-    s.findings.set(`VLN-${(s.counter += 1)}`, {
-      id: `VLN-${s.counter}`,
-      scanId: scan.id,
-      companyId: scan.companyId,
-      companyName: scan.companyName,
-      connector: "crowdstrike",
-      cve: item.cve,
-      title: item.title,
-      severity: item.severity,
-      cvss: item.cvss,
-      cvssV3: item.cvss,
-      cvssV2: 0,
-      vpr: 0,
-      epss: 0,
-      asset: item.hostname || item.localIp,
-      port: "N/A",
-      category: "Endpoint",
-      description: `${item.description}${item.exprRating ? `\n\nExPRT Rating: ${item.exprRating}` : ""}`,
-      remediation: item.remediation,
-      status: "Open",
-      assignee: null,
-      firstSeen: nowIso,
-      lastSeen: nowIso,
-      resolvedAt: null,
-      exploitAvailable: item.exploitAvailable,
-      ...riskFields(s, {
-        cve: item.cve,
-        cvss: item.cvss,
-        epss: 0,
-        exploitAvailable: item.exploitAvailable,
-        asset: item.hostname || item.localIp,
+      s.findings.set(`VLN-${(s.counter += 1)}`, {
+        id: `VLN-${s.counter}`,
+        scanId: scan.id,
         companyId: scan.companyId,
-      }),
-    });
-    findingsImported += 1;
+        companyName: scan.companyName,
+        connector: "crowdstrike",
+        cve: item.cve,
+        title: item.title,
+        severity: item.severity,
+        cvss: item.cvss,
+        cvssV3: item.cvss,
+        cvssV2: 0,
+        vpr: 0,
+        epss: 0,
+        asset: item.hostname || item.localIp,
+        port: "N/A",
+        category: "Endpoint",
+        description: `${item.description}${item.exprRating ? `\n\nExPRT Rating: ${item.exprRating}` : ""}`,
+        remediation: item.remediation,
+        status: "Open",
+        assignee: null,
+        firstSeen: nowIso,
+        lastSeen: nowIso,
+        resolvedAt: null,
+        exploitAvailable: item.exploitAvailable,
+        ...riskFields(s, {
+          cve: item.cve,
+          cvss: item.cvss,
+          epss: 0,
+          exploitAvailable: item.exploitAvailable,
+          asset: item.hostname || item.localIp,
+          companyId: scan.companyId,
+        }),
+      });
+      findingsImported += 1;
+    }
+  }
+
+  // Every tenant failed — surface as a top-level error rather than a silent
+  // "0 findings" result. A partial failure (some tenants ok) still returns
+  // normally; that tenant's sync simply contributed nothing this round.
+  if (tenantErrors.length === configs.length) {
+    return { error: tenantErrors.join("; ") };
   }
 
   for (const scan of scanByCompany.values()) {

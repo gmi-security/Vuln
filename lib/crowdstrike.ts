@@ -36,6 +36,52 @@ export function falconConfig(): FalconConfig | null {
   };
 }
 
+// A CrowdStrike Falcon tenant to sync, plus which company its devices and
+// findings attach to. `customerName` is optional only for the first
+// (unsuffixed) tenant — omitted, it falls back to the internal GMI org, the
+// same "own-estate" default this connector has always had. Every additional
+// tenant (an MSSP client with their own separate CrowdStrike CID, distinct
+// from GMI's own) requires a customer name: there can only be one unnamed
+// "default" tenant.
+export type FalconTenant = FalconConfig & { customerName?: string; label: string };
+
+// Reads the base (unsuffixed) tenant plus any FALCON_CLIENT_ID_2,
+// FALCON_CLIENT_ID_3, ... tenants, each with its own FALCON_CLIENT_SECRET_N /
+// FALCON_CLOUD_N / FALCON_CUSTOMER_N. Stops at the first missing numbered
+// tenant, so gaps in the numbering aren't supported (keep them sequential).
+export function falconConfigs(): FalconTenant[] {
+  const tenants: FalconTenant[] = [];
+  const base = falconConfig();
+  if (base) {
+    tenants.push({
+      ...base,
+      customerName: process.env.FALCON_CUSTOMER?.trim() || undefined,
+      label: "primary",
+    });
+  }
+  for (let n = 2; ; n++) {
+    const clientId = process.env[`FALCON_CLIENT_ID_${n}`];
+    const clientSecret = process.env[`FALCON_CLIENT_SECRET_${n}`];
+    if (!clientId || !clientSecret) break;
+    const customerName = process.env[`FALCON_CUSTOMER_${n}`]?.trim();
+    if (!customerName) {
+      console.error(
+        `[crowdstrike] FALCON_CLIENT_ID_${n} is set without FALCON_CUSTOMER_${n} — skipping tenant ${n} (every additional tenant must be pinned to a named client company).`,
+      );
+      continue;
+    }
+    const cloud = (process.env[`FALCON_CLOUD_${n}`] ?? "us-1").toLowerCase();
+    tenants.push({
+      clientId,
+      clientSecret,
+      baseUrl: CLOUD_HOSTS[cloud] ?? "https://api.crowdstrike.com",
+      customerName,
+      label: customerName,
+    });
+  }
+  return tenants;
+}
+
 export type FalconAsset = {
   externalId: string;
   hostname: string;
@@ -139,9 +185,7 @@ const EXPRT_SEV: Record<string, Severity> = {
 
 // CrowdStrike Spotlight API: query open vuln ids, hydrate in batches of 400.
 // Requires scope: spotlight-vulnerabilities:read.
-export async function spotlightListFindings(): Promise<SpotlightFinding[]> {
-  const config = falconConfig();
-  if (!config) throw new Error("CrowdStrike is not configured.");
+export async function spotlightListFindings(config: FalconConfig): Promise<SpotlightFinding[]> {
   const token = await falconToken(config);
   const authHeader = { Authorization: `Bearer ${token}`, Accept: "application/json" };
 
@@ -213,9 +257,7 @@ export async function spotlightListFindings(): Promise<SpotlightFinding[]> {
 // --- Falcon host inventory ---------------------------------------------------
 // List Falcon hosts: query device ids (first page gives total → remaining pages
 // fire in parallel), then hydrate all ID batches in parallel.
-export async function falconListAssets(): Promise<FalconAsset[]> {
-  const config = falconConfig();
-  if (!config) throw new Error("CrowdStrike is not configured.");
+export async function falconListAssets(config: FalconConfig): Promise<FalconAsset[]> {
   const token = await falconToken(config);
   const authHeader = { Authorization: `Bearer ${token}`, Accept: "application/json" };
 
