@@ -1271,12 +1271,12 @@ function companyCoverage(
   s: StoreShape,
   companyId: string,
 ): { known: number; scanned: number } {
-  const known = Array.from(s.assets.values()).filter((a) => a.companyId === companyId);
-  const findingAssets = new Set(
-    Array.from(s.findings.values())
-      .filter((f) => f.companyId === companyId)
-      .map((f) => f.asset.trim().toLowerCase()),
-  );
+  const known: InternalAsset[] = [];
+  for (const a of s.assets.values()) if (a.companyId === companyId) known.push(a);
+  const findingAssets = new Set<string>();
+  for (const f of s.findings.values()) {
+    if (f.companyId === companyId) findingAssets.add(f.asset.trim().toLowerCase());
+  }
   let scanned = 0;
   for (const a of known) {
     const keys = [a.identifier, a.hostname, ...a.ipAddresses].map((k) =>
@@ -1288,16 +1288,22 @@ function companyCoverage(
 }
 
 function companyRollup(s: StoreShape, companyId: string) {
-  const scans = Array.from(s.scans.values()).filter((sc) => sc.companyId === companyId);
-  const findings = Array.from(s.findings.values()).filter((f) => f.companyId === companyId);
+  // Single pass per collection instead of Array.from(map.values()).filter(...)
+  // — with tens of thousands of findings in production, materializing a full
+  // array just to discard almost all of it (this company's slice is always a
+  // small fraction) burns real CPU and garbage-collector pressure on every
+  // company view, and this runs once per company on the Companies list.
+  const scans: InternalScan[] = [];
+  for (const sc of s.scans.values()) if (sc.companyId === companyId) scans.push(sc);
+  const findings: Finding[] = [];
+  for (const f of s.findings.values()) if (f.companyId === companyId) findings.push(f);
   // Two stories per customer: vulnerability posture (CVE-based scan findings)
   // and attack-surface exposure (OSINT). The security-posture rollup is
   // vuln-based; exposure is counted alongside it, not blended in.
   const open = findings.filter((f) => isOpen(f) && isRemediationFinding(f));
   const openExposure = findings.filter((f) => isOpen(f) && isOsintFinding(f)).length;
-  const inventoryAssets = Array.from(s.assets.values()).filter(
-    (a) => a.companyId === companyId,
-  ).length;
+  let inventoryAssets = 0;
+  for (const a of s.assets.values()) if (a.companyId === companyId) inventoryAssets += 1;
   const withInventory = open.filter(
     (f) => f.assetSource === "tidal" || f.assetSource === "manual",
   ).length;
@@ -1305,9 +1311,10 @@ function companyRollup(s: StoreShape, companyId: string) {
     open,
     inventoryAssets > 0 ? companyCoverage(s, companyId) : null,
   );
+  let folderCount = 0;
+  for (const f of s.folders.values()) if (f.companyId === companyId) folderCount += 1;
   return {
-    folderCount: Array.from(s.folders.values()).filter((f) => f.companyId === companyId)
-      .length,
+    folderCount,
     scanCount: scans.length,
     activeScans: scans.filter(
       (sc) => sc.status === "Running" || sc.status === "Paused" || sc.status === "Queued",
@@ -3255,6 +3262,32 @@ function rescoreFinding(s: StoreShape, f: Finding): void {
   );
 }
 
+// Rescore every finding in the store. This is O(total findings) — tens of
+// thousands in production — and each rescore is real work (risk-field
+// recomputation), so running it as a single unyielding synchronous loop
+// blocks Node's event loop for the entire pass: no other request on this
+// single-instance app can be served until it finishes. Yielding periodically
+// keeps the app responsive during a full rescore instead of appearing to
+// hang. `matchesSource` flags which findings count toward the caller's
+// "findings rescored because of this import" total (real-risk change OR
+// belongs to the source being imported), matching the two call sites this
+// replaced.
+async function rescoreAllFindings(
+  s: StoreShape,
+  matchesSource: (f: Finding) => boolean,
+): Promise<number> {
+  let rescored = 0;
+  let i = 0;
+  for (const f of s.findings.values()) {
+    const before = f.realRisk;
+    rescoreFinding(s, f);
+    if (f.realRisk !== before || matchesSource(f)) rescored += 1;
+    i += 1;
+    if (i % 500 === 0) await new Promise((resolve) => setImmediate(resolve));
+  }
+  return rescored;
+}
+
 function upsertAsset(
   s: StoreShape,
   input: Omit<InternalAsset, "id" | "lastSynced"> & { id?: string },
@@ -4537,12 +4570,7 @@ export async function importTidalInventory(
     assetsUpserted += 1;
   }
 
-  let findingsRescored = 0;
-  for (const f of s.findings.values()) {
-    const before = f.realRisk;
-    rescoreFinding(s, f);
-    if (f.realRisk !== before || f.assetSource === "tidal") findingsRescored += 1;
-  }
+  const findingsRescored = await rescoreAllFindings(s, (f) => f.assetSource === "tidal");
 
   // If auto-scan is enabled, scan any newly-known assets that have no
   // coverage yet.
@@ -4935,12 +4963,7 @@ async function importEndpoints(
     assetsUpserted += 1;
   }
 
-  let findingsRescored = 0;
-  for (const f of s.findings.values()) {
-    const before = f.realRisk;
-    rescoreFinding(s, f);
-    if (f.realRisk !== before || f.assetSource === source) findingsRescored += 1;
-  }
+  const findingsRescored = await rescoreAllFindings(s, (f) => f.assetSource === source);
 
   let autoScan: AutoScanResult | undefined;
   if (s.settings.autoScanNewAssets) autoScan = await autoScanGaps();
