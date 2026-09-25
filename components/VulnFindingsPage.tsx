@@ -30,6 +30,7 @@ import {
   exposureClass,
   findingStatusClass,
   formatAge,
+  formatCveDescription,
   formatDateTime,
   riskColor,
   riskPriorityClass,
@@ -866,7 +867,9 @@ export default function VulnFindingsPage() {
                 Description
               </div>
               <p className="mt-2 whitespace-pre-line text-sm leading-relaxed text-zinc-300">
-                {focus.description}
+                {focus.connector === "crowdstrike"
+                  ? formatCveDescription(focus.description)
+                  : focus.description}
               </p>
             </div>
 
