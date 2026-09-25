@@ -2,6 +2,10 @@
 
 On Vulnerability intelligence, open **Connections**, select **ConnectWise · Patch tickets**, and enter:
 
+The default authentication method for new connections is **CW_AUTH (encoded authorization)**. Enter the API address, Client ID, and the Base64 value from `CW_AUTH`. A `Basic ` prefix is accepted; omit the `CW_AUTH=` assignment itself. The server validates and extracts `companyID+publicKey:privateKey`, then encrypts the credentials using the same storage and sends the same Basic authorization header as separate-key mode. Saved settings never return the encoded value or keys. Leaving CW_AUTH blank preserves saved credentials only if the API address and Client ID are unchanged. Switching to this method does not change the API member's permissions or resolve a permission-denied 403.
+
+**Company ID and separate API keys** remains available for existing connections. In that mode, enter:
+
 - ConnectWise PSA API address (for example the appropriate regional API base ending in `/v4_6_release/apis/3.0`).
 - Login company ID, identifying the ConnectWise account.
 - ConnectWise integration Client ID.

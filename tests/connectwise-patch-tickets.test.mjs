@@ -54,6 +54,18 @@ test('credentials encrypt, reject tampering, support private key punctuation and
   assert.equal(client.normalizeCWEndpoint('https://na.myconnectwise.net'), connection.endpoint);
   assert.throws(() => client.normalizeCWEndpoint('http://localhost'), /HTTPS/);
 });
+test('CW_AUTH accepts raw or Basic-prefixed Base64 and rejects malformed or unsafe values without echoing secrets', () => {
+  const raw = `${connection.companyId}+${connection.publicKey}:${connection.privateKey}`;
+  const encoded = Buffer.from(raw).toString('base64');
+  const expected = { companyId: connection.companyId, publicKey: connection.publicKey, privateKey: connection.privateKey };
+  for (const value of [encoded, ` Basic ${encoded} `, encoded.replace(/=+$/, '')]) assert.deepEqual(client.parseCWAuth(value), expected);
+  for (const value of ['', 'Test', `CW_AUTH=${encoded}`, 'Bearer '+encoded, encoded+'!', 123, Buffer.from('company:key').toString('base64'), Buffer.from('company+key:').toString('base64'), Buffer.from('company+key:secret\r\n').toString('base64')]) {
+    assert.throws(() => client.parseCWAuth(value), error => !error.message.includes(encoded) && /CW_AUTH/.test(error.message));
+  }
+  const saved = client.parseCWConnection({ ...connection, ...client.parseCWAuth(encoded), authMode: 'encoded' });
+  assert.equal(client.openCWConnection(client.sealCWConnection(saved)).authMode, 'encoded');
+  assert.ok(!client.cwFailure(403, { message: encoded }, saved).message.includes(encoded));
+});
 test('real list names, selected values past page one, board status filtering and reference identity', async () => {
   calls = []; replies = [{ body: Array.from({ length: 100 }, (_, i) => ({ id: i + 1, name: `Real board ${i + 1}` })) }, { body: { id: 500, name: 'Actual patch board' } }];
   const result = await client.cwOptions(connection, 'boards', undefined, 1, '', 500);
@@ -167,6 +179,19 @@ test('durable ticket lifecycle and duplicate protection in PostgreSQL', { skip: 
       await store.saveCWSettings({ ...connection, companyId: 'other-account' }, 'member');
       await assert.rejects(store.patchTicketAction(linked.id, 'check-status', 'member'), /original ConnectWise account/);
       assert.equal((await store.readCWSettings()).revision, 2);
+    });
+    await t.test('encoded settings derive the company, omit secrets, preserve blank auth and require re-entry for address changes', async () => {
+      const encoded = Buffer.from(`${connection.companyId}+${connection.publicKey}:${connection.privateKey}`).toString('base64');
+      const body = { endpoint: connection.endpoint, clientId: connection.clientId, authMode: 'encoded', cwAuth: encoded, companyId: 'ignored-input' };
+      const saved = await store.saveCWSettings(body, 'member');
+      assert.equal(saved.authMode, 'encoded'); assert.equal(saved.companyId, connection.companyId);
+      assert.ok(!JSON.stringify(saved).includes(encoded)); assert.ok(!('cwAuth' in saved)); assert.ok(!('privateKey' in saved));
+      await store.saveCWSettings({ ...body, cwAuth: '' }, 'member');
+      assert.equal((await store.readCWSettings()).companyId, connection.companyId);
+      await assert.rejects(store.saveCWSettings({ ...body, endpoint: 'https://api-eu.myconnectwise.net/v4_6_release/apis/3.0', cwAuth: '' }, 'member'), /CW_AUTH again/);
+      await assert.rejects(store.saveCWSettings({ ...body, cwAuth: 'bad-auth' }, 'member'), /valid CW_AUTH/);
+      await assert.rejects(store.saveCWSettings({ ...body, cwAuth: 123 }, 'member'), /as text/);
+      assert.equal((await store.readCWSettings()).revision, 4);
     });
   } finally { await db.end(); }
 });

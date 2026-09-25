@@ -4,7 +4,7 @@ import { request } from "node:https";
 import { DashboardError } from "./elastic-dashboard";
 import { isPublicIPv4 } from "./elastic-query-client";
 
-export type ConnectWiseConnection = { endpoint: string; companyId: string; clientId: string; publicKey: string; privateKey: string };
+export type ConnectWiseConnection = { endpoint: string; companyId: string; clientId: string; publicKey: string; privateKey: string; authMode?: "encoded" };
 export type CWOption = { id: number; name: string; identifier?: string };
 export type TicketRouting = { companyId: number; boardId: number; statusId: number; priorityId: number; teamId?: number };
 export type CWDefaults = Omit<Partial<TicketRouting>, "companyId">;
@@ -24,6 +24,20 @@ export function normalizeCWEndpoint(value: unknown): string {
   return url.toString().replace(/\/+$/, "");
 }
 
+export function parseCWAuth(value: unknown): Pick<ConnectWiseConnection, "companyId" | "publicKey" | "privateKey"> {
+  const fail = () => new DashboardError("Enter a valid CW_AUTH value containing Base64-encoded companyID+publicKey:privateKey.");
+  if (typeof value !== "string" || value.length > 20000) throw fail();
+  const encoded = value.trim().replace(/^Basic\s+/i, "");
+  if (!encoded || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded) || encoded.length % 4 === 1) throw fail();
+  const bytes = Buffer.from(encoded, "base64");
+  if (bytes.toString("base64").replace(/=+$/, "") !== encoded.replace(/=+$/, "")) throw fail();
+  const decoded = bytes.toString("utf8");
+  if (!Buffer.from(decoded).equals(bytes) || /[\s\x00-\x1f\x7f]/.test(decoded)) throw fail();
+  const plus = decoded.indexOf("+"), colon = decoded.indexOf(":", plus + 1);
+  if (plus < 1 || colon <= plus + 1 || colon === decoded.length - 1 || decoded.slice(0, plus).includes(":")) throw fail();
+  return { companyId: decoded.slice(0, plus), publicKey: decoded.slice(plus + 1, colon), privateKey: decoded.slice(colon + 1) };
+}
+
 export function parseCWConnection(value: unknown): ConnectWiseConnection {
   const body = value as Record<string, unknown> | null;
   if (!body) throw new DashboardError("Enter your ConnectWise connection settings.");
@@ -33,6 +47,7 @@ export function parseCWConnection(value: unknown): ConnectWiseConnection {
     if (typeof v !== "string" || !v.trim() || v.length > 4096 || /[\s\x00-\x1f\x7f]/.test(v.trim()) || (["companyId", "publicKey"].includes(field) && /[:+]/.test(v))) throw new DashboardError(`Enter a valid ConnectWise ${field === "companyId" ? "login company ID" : field === "clientId" ? "Client ID" : field === "publicKey" ? "public key" : "private key"}.`);
     result[field] = v.trim();
   }
+  if (body.authMode === "encoded") result.authMode = "encoded";
   return result;
 }
 function key() {

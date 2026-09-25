@@ -4,7 +4,7 @@ import { dashboardDatabase } from "./elastic-dashboard-store";
 import { parsePatchInput, type PatchRequest } from "./patch-request";
 import { automatedTicketBody, type PatchTicketSummary } from "./patch-ticket-types";
 import { cwId, cwOptions, cwRequest, cwTarget, CWRequestError, findCWRequest, normalizeCWEndpoint, openCWConnection, parseCWConnection, parseRouting,
-  sealCWConnection, ticketUrl, uploadPatchCsv, validateCWRouting, type ConnectWiseConnection, type CWDefaults, type CWRecord, type TicketRouting } from "./connectwise-client";
+  sealCWConnection, ticketUrl, uploadPatchCsv, validateCWRouting, parseCWAuth, type ConnectWiseConnection, type CWDefaults, type CWRecord, type TicketRouting } from "./connectwise-client";
 
 let ready: Promise<void> | undefined;
 export async function patchTicketDatabase() {
@@ -51,7 +51,7 @@ export async function readCWSettings() {
   if (!row) return { configured: false, defaults: {} };
   try {
     const connection = openCWConnection(row.secret);
-    return { configured: true, endpoint: connection.endpoint, companyId: connection.companyId, clientId: connection.clientId, revision: row.revision, defaults: row.defaults };
+    return { configured: true, endpoint: connection.endpoint, companyId: connection.companyId, clientId: connection.clientId, authMode: connection.authMode ?? "separate", revision: row.revision, defaults: row.defaults };
   } catch { return { configured: false, defaults: {}, error: "Re-enter your ConnectWise keys to restore the connection." }; }
 }
 export async function saveCWSettings(value: unknown, actor: string) {
@@ -60,7 +60,15 @@ export async function saveCWSettings(value: unknown, actor: string) {
   const existing = (await db.query("SELECT * FROM patch_connectwise_connection WHERE id=1")).rows[0];
   const endpoint = normalizeCWEndpoint(body.endpoint);
   let candidate: CWRecord = { ...body, endpoint };
-  if ((!body.publicKey || !body.privateKey) && existing) {
+  if (body.authMode === "encoded") {
+    if (body.cwAuth !== undefined && typeof body.cwAuth !== "string") throw new DashboardError("Enter your CW_AUTH value as text.");
+    if (typeof body.cwAuth === "string" && body.cwAuth.trim()) candidate = { endpoint, clientId: body.clientId, authMode: "encoded", ...parseCWAuth(body.cwAuth) };
+    else if (existing) {
+      const old = openCWConnection(existing.secret);
+      if (old.endpoint !== endpoint || old.clientId !== body.clientId?.trim()) throw new DashboardError("Enter CW_AUTH again when changing the ConnectWise address or Client ID.");
+      candidate = { ...old, authMode: "encoded" };
+    } else throw new DashboardError("Enter your CW_AUTH value.");
+  } else if ((!body.publicKey || !body.privateKey) && existing) {
     const old = openCWConnection(existing.secret);
     if (old.endpoint !== endpoint || old.companyId !== body.companyId?.trim() || old.clientId !== body.clientId?.trim()) throw new DashboardError("Enter both keys when changing the ConnectWise address, company ID, or Client ID.");
     candidate = { ...candidate, publicKey: body.publicKey || old.publicKey, privateKey: body.privateKey || old.privateKey };

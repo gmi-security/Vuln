@@ -5,7 +5,7 @@ import type { CWDefaults, CWOption } from "@/lib/connectwise-client";
 import { inputClass, selectClass } from "@/components/ui";
 import styles from "./QueryDashboard.module.css";
 
-export type CWSettings = { configured: boolean; endpoint?: string; companyId?: string; clientId?: string; revision?: number; defaults: CWDefaults; error?: string };
+export type CWSettings = { configured: boolean; endpoint?: string; companyId?: string; clientId?: string; authMode?: "encoded" | "separate"; revision?: number; defaults: CWDefaults; error?: string };
 type Lookup = { options: CWOption[]; more: boolean; page: number; revision: number };
 export function ConnectWiseSelect({ label, kind, value, onChange, boardId, revision, optional = false, disabled = false }: {
   label: string; kind: string; value?: number; onChange: (id: number | undefined) => void; boardId?: number; revision?: number; optional?: boolean; disabled?: boolean;
