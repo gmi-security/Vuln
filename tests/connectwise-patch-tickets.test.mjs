@@ -70,12 +70,23 @@ test('real list names, selected values past page one, board status filtering and
   calls = []; replies = [{ body: Array.from({ length: 100 }, (_, i) => ({ id: i + 1, name: `Real board ${i + 1}` })) }, { body: { id: 500, name: 'Actual patch board' } }];
   const result = await client.cwOptions(connection, 'boards', undefined, 1, '', 500);
   assert.equal(result.options.at(-1).name, 'Actual patch board'); assert.equal(result.more, true);
-  assert.match(calls[1].url.pathname, /boards\/500$/);
+  assert.match(calls[0].url.pathname, /\/service\/info\/boards$/);
+  assert.match(calls[1].url.pathname, /\/service\/info\/boards\/500$/);
   replies = [{ body: [{ id: 1, name: 'Closed', closedStatus: true }, { id: 2, name: 'Ready to patch' }] }];
   assert.deepEqual((await client.cwOptions(connection, 'statuses', 500)).options, [{ id: 2, name: 'Ready to patch' }]);
   await assert.rejects(client.cwOptions(connection, '__proto__'), /Invalid/);
   replies = Array.from({ length: 3 }, () => ({ body: { id: 999, name: 'Wrong reference' } }));
   await assert.rejects(client.validateCWRouting(connection, { boardId: 1, statusId: 2, priorityId: 3 }), /unavailable/);
+});
+test('routing validates BoardInfo without reading board setup or attempting ticket creation', async () => {
+  calls = []; replies = [{ body: { id: 10, name: 'Patch board' } }, { body: { id: 11, name: 'Ready' } }, { body: { id: 12, name: 'High' } }];
+  const labels = await client.validateCWRouting(connection, { boardId: 10, statusId: 11, priorityId: 12 });
+  assert.equal(labels.board.name, 'Patch board');
+  assert.deepEqual(calls.map(c => c.url.pathname.replace('/v4_6_release/apis/3.0', '')), ['/service/info/boards/10', '/service/boards/10/statuses/11', '/service/priorities/12']);
+  assert.ok(calls.every(c => c.options.method === 'GET'));
+  calls = []; replies = [{ status: 403, body: { message: 'You do not have security permission to perform this action.' } }];
+  await assert.rejects(client.cwOptions(connection, 'boards'), /HTTP 403/);
+  assert.equal(calls.length, 1, 'No fallback to the more privileged setup endpoint and no trial ticket');
 });
 test('HTTP transport pins public DNS, sends authentication, rejects redirects, never retries POST', async () => {
   calls = []; replies = [{ status: 502, body: { message: 'Unavailable' } }];

@@ -130,7 +130,8 @@ export function parseRouting(value: unknown): TicketRouting {
   return { companyId: body.companyId, boardId: body.boardId, statusId: body.statusId, priorityId: body.priorityId, ...(body.teamId ? { teamId: body.teamId } : {}) };
 }
 export async function cwOptions(connection: ConnectWiseConnection, kind: string, boardId?: number, page = 1, search = "", selectedId?: number) {
-  const paths: Record<string, string> = { boards: "/service/boards", priorities: "/service/priorities", companies: "/company/companies" };
+  // BoardInfo uses ticket inquiry access rather than the board setup-table API.
+  const paths: Record<string, string> = { boards: "/service/info/boards", priorities: "/service/priorities", companies: "/company/companies" };
   let path = Object.hasOwn(paths, kind) ? paths[kind] : "";
   if (["statuses", "teams"].includes(kind) && cwId(boardId)) path = `/service/boards/${boardId}/${kind}`;
   if (!path || !Number.isInteger(page) || page < 1 || page > 10000 || search.length > 100 || /["\\\x00-\x1f]/.test(search)) throw new DashboardError("Invalid ConnectWise lookup.");
@@ -156,7 +157,7 @@ export async function cwOptions(connection: ConnectWiseConnection, kind: string,
   return { options, more, page };
 }
 export async function validateCWRouting(connection: ConnectWiseConnection, routing: TicketRouting | Omit<TicketRouting, "companyId">) {
-  const refs = { ...("companyId" in routing ? { company: `/company/companies/${routing.companyId}` } : {}), board: `/service/boards/${routing.boardId}`,
+  const refs = { ...("companyId" in routing ? { company: `/company/companies/${routing.companyId}` } : {}), board: `/service/info/boards/${routing.boardId}`,
     status: `/service/boards/${routing.boardId}/statuses/${routing.statusId}`, priority: `/service/priorities/${routing.priorityId}`,
     ...(routing.teamId ? { team: `/service/boards/${routing.boardId}/teams/${routing.teamId}` } : {}) };
   const entries = await Promise.all(Object.entries(refs).map(async ([name, path]) => {

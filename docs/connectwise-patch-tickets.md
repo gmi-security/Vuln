@@ -15,6 +15,8 @@ The default authentication method for new connections is **CW_AUTH (encoded auth
 
 The API member needs access to read companies, service boards, board statuses and teams, and priorities; read/create service tickets; and read/upload ticket documents. Configure the member's security role in ConnectWise. This deployment has not been validated against a customer's ConnectWise account until credentials are entered and tested.
 
+Connection testing, board lists, saved board selections, and pre-creation board validation use `GET /service/info/boards` and `GET /service/info/boards/{id}` (ticket inquiry access). They do not use the board setup endpoint. Statuses, teams, and priorities still use their existing routing endpoints and may need setup-table inquiry access. A successful connection test verifies board reads only; it does not prove ticket creation or document-upload permission, and a failed board read does not prove ticket creation is forbidden. No test ticket is sent.
+
 Choose routing defaults from lists fetched from ConnectWise. No board names or IDs are hardcoded. Lists support pagination, company search, and loading saved selections outside the first page. Changing a board clears its status/team. Closed or inactive selections cannot be used. Customer company is explicitly selected during each ticket review; it is distinct from the login company ID.
 
 ## Workflow
