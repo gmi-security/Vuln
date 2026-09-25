@@ -8,7 +8,7 @@ export function StatCard({
   sublabel,
   icon,
 }: {
-  label: string;
+  label: React.ReactNode;
   value: React.ReactNode;
   sublabel: React.ReactNode;
   icon: React.ReactNode;

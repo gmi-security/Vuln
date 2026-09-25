@@ -11,6 +11,7 @@ import {
 } from "@tabler/icons-react";
 import VulnShell from "@/components/VulnShell";
 import TrendChart, { type TrendSnapshot } from "@/components/TrendChart";
+import CompositeScoreInfo from "@/components/CompositeScoreInfo";
 import { PanelCard, Pill, StatCard, primaryButtonClass } from "@/components/ui";
 import {
   compositeColor,
@@ -20,7 +21,7 @@ import {
   severityBarColor,
   severityClass,
 } from "@/lib/format";
-import type { QuantifyMetrics, Scan, Severity } from "@/lib/types";
+import type { Connector, QuantifyMetrics, Scan, Severity } from "@/lib/types";
 
 const SEVERITIES: Severity[] = ["Critical", "High", "Medium", "Low", "Info"];
 
@@ -72,6 +73,14 @@ export default function VulnDashboardPage() {
   });
   // null = still loading; [] = loaded but no snapshots yet (cold start).
   const [snapshots, setSnapshots] = useState<TrendSnapshot[] | null>(null);
+  // Connector config summary for the System health panel — config state
+  // only (env-var presence), no live external reachability calls. Full
+  // per-connector live health stays on the Connectors page.
+  const [connectorSummary, setConnectorSummary] = useState<{
+    id: string;
+    name: string;
+    status: Connector["status"];
+  }[] | null>(null);
 
   // Monotonic request id — a slow older response must never overwrite a newer one.
   const loadSeq = useRef(0);
@@ -108,6 +117,21 @@ export default function VulnDashboardPage() {
       .catch(() =>
         setDbStatus({ reachable: false, error: "Health check failed.", persistBlocked: false }),
       );
+  }, []);
+
+  // Connector config summary — once on mount, config-only (no live probes).
+  useEffect(() => {
+    void Promise.all([
+      fetch("/api/connectors", { cache: "no-store" }).then((r) => r.json()),
+      fetch("/api/integrations", { cache: "no-store" }).then((r) => r.json()),
+    ])
+      .then(([connJson, intJson]) => {
+        const all = [...(connJson.connectors ?? []), ...(intJson.integrations ?? [])];
+        setConnectorSummary(
+          all.map((c: any) => ({ id: c.id, name: c.name, status: c.status })),
+        );
+      })
+      .catch(() => undefined);
   }, []);
 
   // 90-day global history for the trend panel. Snapshots accrue daily, so a
@@ -206,7 +230,12 @@ export default function VulnDashboardPage() {
           icon={<IconRadar size={26} />}
         />
         <StatCard
-          label="Composite risk"
+          label={
+            <span className="inline-flex items-center gap-1.5">
+              Composite risk
+              <CompositeScoreInfo />
+            </span>
+          }
           value={
             metrics ? (
               <span style={{ color: compositeColor(metrics.composite.score) }}>
@@ -331,6 +360,86 @@ export default function VulnDashboardPage() {
         </PanelCard>
 
         <div className="space-y-5">
+          <PanelCard
+            eyebrow="System health"
+            description="Database persistence and connector configuration"
+            actions={
+              <Link
+                href="/connectors"
+                className="text-sm text-[#ff4d57] transition hover:text-white"
+              >
+                Connectors →
+              </Link>
+            }
+          >
+            <div className="space-y-3">
+              <div className="flex items-center justify-between gap-3 rounded-2xl border border-zinc-900 bg-[#090909] px-4 py-3">
+                <span className="flex items-center gap-2 text-sm text-zinc-300">
+                  <span
+                    className={`h-2 w-2 rounded-full ${
+                      dbStatus.persistBlocked
+                        ? "bg-[#ff4d57]"
+                        : dbStatus.reachable === false
+                          ? "bg-amber-400"
+                          : dbStatus.reachable === true
+                            ? "bg-emerald-400"
+                            : "animate-pulse bg-zinc-600"
+                    }`}
+                  />
+                  Database persistence
+                </span>
+                <span
+                  className={`text-xs ${
+                    dbStatus.persistBlocked
+                      ? "text-[#ff8a8a]"
+                      : dbStatus.reachable === false
+                        ? "text-amber-300"
+                        : dbStatus.reachable === true
+                          ? "text-emerald-300"
+                          : "text-zinc-500"
+                  }`}
+                >
+                  {dbStatus.persistBlocked
+                    ? "Writes disabled"
+                    : dbStatus.reachable === false
+                      ? "Unreachable"
+                      : dbStatus.reachable === true
+                        ? "Connected"
+                        : "Checking…"}
+                </span>
+              </div>
+              {connectorSummary === null ? (
+                <div className="px-1 py-2 text-sm text-zinc-500">Checking connectors…</div>
+              ) : (
+                <div className="grid grid-cols-2 gap-3">
+                  {(
+                    [
+                      { status: "Connected" as const, label: "Live", dot: "bg-emerald-400", text: "text-emerald-300" },
+                      { status: "Demo Mode" as const, label: "Demo mode", dot: "bg-amber-400", text: "text-amber-300" },
+                      { status: "Not Configured" as const, label: "Not configured", dot: "bg-zinc-600", text: "text-zinc-400" },
+                      { status: "Planned" as const, label: "Planned", dot: "bg-zinc-700", text: "text-zinc-500" },
+                    ]
+                  ).map(({ status, label, dot, text }) => {
+                    const count = connectorSummary.filter((c) => c.status === status).length;
+                    if (count === 0) return null;
+                    return (
+                      <div
+                        key={status}
+                        className="rounded-2xl border border-zinc-900 bg-[#090909] px-4 py-3"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
+                          <span className={`text-xs ${text}`}>{label}</span>
+                        </div>
+                        <div className="mt-1 text-xl font-semibold text-white">{count}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </PanelCard>
+
           <PanelCard
             eyebrow="Open by severity"
             description="Current open findings"
