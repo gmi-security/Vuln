@@ -183,17 +183,28 @@ const EXPRT_SEV: Record<string, Severity> = {
   LOW: "Low",
 };
 
+export type SpotlightListResult = { findings: SpotlightFinding[]; truncated: boolean };
+
 // CrowdStrike Spotlight API: query open vuln ids, hydrate in batches of 400.
 // Requires scope: spotlight-vulnerabilities:read.
-export async function spotlightListFindings(config: FalconConfig): Promise<SpotlightFinding[]> {
+export async function spotlightListFindings(config: FalconTenant): Promise<SpotlightListResult> {
   const token = await falconToken(config);
   const authHeader = { Authorization: `Bearer ${token}`, Accept: "application/json" };
 
   // Cursor-based ID pagination — must be sequential (each page depends on prior cursor).
+  // The guard exists only to stop a genuinely infinite loop (a misbehaving
+  // API endlessly handing back an `after` cursor) — it must NOT be low
+  // enough to double as a real-world result cap. It used to be 200 (200 x
+  // 400/page = exactly 80,000), which silently truncated a large tenant's
+  // real vulnerability count at that suspiciously round number instead of
+  // ever reaching the natural end of data. 5,000 pages = 2,000,000
+  // findings, far past any real Spotlight estate, while still bounding
+  // worst-case runtime.
   const ids: string[] = [];
   let after = "";
   let guard = 0;
-  while (guard < 200) {
+  let truncated = false;
+  while (guard < 5000) {
     guard += 1;
     const url = new URL(`${config.baseUrl}/spotlight/queries/vulnerabilities/v1`);
     url.searchParams.set("filter", "status:'open',status:'reopen'");
@@ -208,9 +219,17 @@ export async function spotlightListFindings(config: FalconConfig): Promise<Spotl
     ids.push(...batch);
     after = j?.meta?.pagination?.after ?? "";
     if (!after || !batch.length) break;
+    if (guard >= 5000) {
+      truncated = true;
+      console.error(
+        `[crowdstrike] Spotlight pagination guard hit for ${config.label} (${config.customerName ?? "GMI"}) ` +
+          `after ${ids.length} findings — more data exists past this point but was not fetched. ` +
+          "This should not happen under normal use; investigate before trusting this tenant's finding count.",
+      );
+    }
   }
 
-  if (!ids.length) return [];
+  if (!ids.length) return { findings: [], truncated };
 
   // Build entity-fetch tasks for all 400-ID batches, then run them in parallel.
   const batches: string[][] = [];
@@ -251,7 +270,7 @@ export async function spotlightListFindings(config: FalconConfig): Promise<Spotl
       return (j?.resources ?? []).map(parseResource) as SpotlightFinding[];
     }),
   );
-  return results.flat();
+  return { findings: results.flat(), truncated };
 }
 
 // --- Falcon host inventory ---------------------------------------------------

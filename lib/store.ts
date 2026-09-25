@@ -5358,6 +5358,10 @@ export type SpotlightImportResult = {
   findingsImported: number;
   hostsAffected: number;
   skipped: number;
+  // Set when CrowdStrike had more open vulnerabilities than this sync
+  // fetched (the pagination safety guard was hit) — the finding count above
+  // is a floor, not the real total, for at least one of these tenants.
+  truncatedTenants?: string[];
 };
 
 // Import CrowdStrike Spotlight vulnerabilities as vuln-class findings.
@@ -5400,10 +5404,11 @@ export async function importFromCrowdstrikeSpotlight(): Promise<
   }
 
   const tenantErrors: string[] = [];
+  const truncatedTenants: string[] = [];
   // Fetch every tenant's Spotlight findings concurrently. Each tenant's own
   // pagination must stay sequential internally (cursor-based, each page
   // depends on the last — enforced inside spotlightListFindings), but
-  // there's no reason one tenant's up-to-200-page walk should block another
+  // there's no reason one tenant's up-to-5000-page walk should block another
   // tenant's walk from even starting: a large primary estate (tens of
   // thousands of findings) was serializing behind every additional tenant,
   // and vice versa, turning what should be independent fetches into one
@@ -5411,22 +5416,25 @@ export async function importFromCrowdstrikeSpotlight(): Promise<
   const fetched = await Promise.all(
     configs.map(async (config) => {
       try {
-        return { config, items: await spotlightListFindings(config), error: null as string | null };
+        const { findings, truncated } = await spotlightListFindings(config);
+        return { config, items: findings, truncated, error: null as string | null };
       } catch (err) {
         return {
           config,
           items: null,
+          truncated: false,
           error: err instanceof Error ? err.message : "Failed to reach the CrowdStrike Spotlight API.",
         };
       }
     }),
   );
 
-  for (const { config, items, error } of fetched) {
+  for (const { config, items, truncated, error } of fetched) {
     if (error || !items) {
       tenantErrors.push(`${config.label}: ${error ?? "Failed to reach the CrowdStrike Spotlight API."}`);
       continue;
     }
+    if (truncated) truncatedTenants.push(config.label);
 
     for (const item of items) {
       const assetKey = item.hostname || item.localIp;
@@ -5553,7 +5561,12 @@ export async function importFromCrowdstrikeSpotlight(): Promise<
   }
 
   await flushNow();
-  return { findingsImported, hostsAffected: hosts.size, skipped };
+  return {
+    findingsImported,
+    hostsAffected: hosts.size,
+    skipped,
+    ...(truncatedTenants.length ? { truncatedTenants } : {}),
+  };
 }
 
 export type DefenderImportResult = {

@@ -20,18 +20,20 @@ export async function GET() {
   const probes = await Promise.all(
     configs.map(async (config) => {
       try {
-        const [assets, findings] = await Promise.all([
+        const [assets, spotlight] = await Promise.all([
           falconListAssets(config).catch((e: unknown) => ({ error: e instanceof Error ? e.message : String(e) })),
           spotlightListFindings(config).catch((e: unknown) => ({ error: e instanceof Error ? e.message : String(e) })),
         ]);
+        const spotlightOk = "findings" in spotlight;
         return {
           label: config.label,
           customerName: config.customerName ?? "(internal — GMI's own estate)",
           baseUrl: config.baseUrl,
           hostsReturned: Array.isArray(assets) ? assets.length : null,
           hostsError: !Array.isArray(assets) ? (assets as any).error : null,
-          spotlightFindingsReturned: Array.isArray(findings) ? findings.length : null,
-          spotlightError: !Array.isArray(findings) ? (findings as any).error : null,
+          spotlightFindingsReturned: spotlightOk ? spotlight.findings.length : null,
+          spotlightTruncated: spotlightOk ? spotlight.truncated : null,
+          spotlightError: !spotlightOk ? (spotlight as any).error : null,
           sampleHost: Array.isArray(assets) && assets.length ? assets[0] : null,
         };
       } catch (err) {

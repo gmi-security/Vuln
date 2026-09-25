@@ -124,7 +124,23 @@ function summarizeSync(result: any): string {
   if (n(result.exploitsFound)) parts.push(`${result.exploitsFound} with exploits`);
   const skipped = Array.isArray(result.skipped) ? result.skipped.length : (typeof result.skipped === "number" ? result.skipped : 0);
   if (skipped) parts.push(`${skipped} skipped`);
-  return parts.length ? `Synced — ${parts.join(", ")}.` : "Sync complete.";
+  const summary = parts.length ? `Synced — ${parts.join(", ")}.` : "Sync complete.";
+  if (Array.isArray(result.truncatedTenants) && result.truncatedTenants.length) {
+    return (
+      `${summary} ⚠ Hit the pagination safety limit for ${result.truncatedTenants.join(", ")} — ` +
+      "there are more open findings than this sync fetched. The count above is a floor, not the real total. " +
+      "This should not happen under normal use; investigate before trusting this tenant's numbers."
+    );
+  }
+  return summary;
+}
+
+// A sync result carries a truncation warning worth flagging as attention-
+// needed (ok: false) even though data did import — presenting a silently
+// incomplete count as a clean success is exactly the bug this is guarding
+// against.
+function syncOk(result: any): boolean {
+  return !(result && Array.isArray(result.truncatedTenants) && result.truncatedTenants.length);
 }
 
 function summarizeOsint(result: any): string {
@@ -584,7 +600,8 @@ function IntegrationCard({ card }: { card: CardData }) {
         setCsProgress(json.status ?? null);
         await pollCrowdstrike();
       } else {
-        setSyncMsg({ ok: true, text: summarizeSync(json.result ?? json) });
+        const result = json.result ?? json;
+        setSyncMsg({ ok: syncOk(result), text: summarizeSync(result) });
         setSyncing(false);
       }
     } catch (err) {
@@ -612,7 +629,7 @@ function IntegrationCard({ card }: { card: CardData }) {
       if (!st.running) {
         finished = true;
         if (st.error) setSyncMsg({ ok: false, text: st.error });
-        else if (st.result) setSyncMsg({ ok: true, text: summarizeSync(st.result) });
+        else if (st.result) setSyncMsg({ ok: syncOk(st.result), text: summarizeSync(st.result) });
         else setSyncMsg({ ok: true, text: "Sync complete." });
         break;
       }
