@@ -35,6 +35,17 @@ export function normalizeRemediation(raw: Json): Remediation {
     reference: text(raw.reference), recommendationType: text(raw.recommendation_type), published: text(raw.patch_publication_date) };
 }
 
+// The application's explicit recommendation takes precedence over entity tags.
+// Without it, accept only explicitly recommended entities mapped to this app.
+export function recommendedRemediationIds(app: PatchApp | undefined, remediations: Remediation[]): string[] {
+  if (app?.recommended) return [app.recommended];
+  return [...new Set(remediations.filter(r => r.recommendationType.toLowerCase() === "recommended" && (!app || app.ids.includes(r.id))).map(r => r.id))];
+}
+
+export function patchRecommendationIds(row: PatchFinding): string[] {
+  return [...new Set(row.apps.length ? row.apps.flatMap(app => recommendedRemediationIds(app, row.remediations)) : recommendedRemediationIds(undefined, row.remediations))];
+}
+
 export function normalizePatchFinding(raw: Json, cve: string): PatchFinding {
   const row = normalizeVulnerability(raw);
   if (row.cve.toUpperCase() !== cve || !["open", "reopen"].includes(row.status)) throw new DashboardError("CrowdStrike returned a finding outside the requested CVE/open scope. Retry the request.");
@@ -58,14 +69,16 @@ export function buildPatchRequest(cve: string, records: PatchFinding[], region: 
   const warnings = new Set<string>(), csvRows: QueryResult["rows"] = [];
   const names = ["cve", "tenant_id", "host_id", "hostname", "local_ip", "operating_system", "host_criticality", "internet_exposure", "finding_id", "status", "suppressed",
     "severity", "cvss_base_score", "cvss_vector", "exprt_rating", "exploit_status", "exploitability_score", "impact_score", "cisa_kev", "gmi_priority", "gmi_risk_score",
-    "application_vendor", "application_product", "application_version", "remediation_id", "remediation_mapping", "recommended_remediation_id", "minimum_remediation_id",
+    "application_vendor", "application_product", "application_version", "remediation_id", "remediation_mapping", "recommended_remediation_id",
     "remediation_title", "remediation_action", "remediation_reference", "remediation_url", "vendor_url", "recommendation_type", "patch_published_at", "finding_updated_at", "collected_at"];
   const ordered = [...records].sort((a, b) => a.cid.localeCompare(b.cid) || a.hostname.localeCompare(b.hostname) || a.hostId.localeCompare(b.hostId) || a.id.localeCompare(b.id));
   for (const row of ordered) {
     const hostKey = JSON.stringify([row.cid, row.hostId]), previousHost = hosts.get(hostKey);
     if (!previousHost || Date.parse(row.updated) > Date.parse(previousHost.updated)) hosts.set(hostKey, row);
     const localRemedies = new Map(row.remediations.map((r) => [r.id, r]));
-    for (const remediation of row.remediations) {
+    for (const id of patchRecommendationIds(row)) {
+      const remediation = localRemedies.get(id);
+      if (!remediation) continue;
       const key = JSON.stringify([row.cid, remediation.id]);
       const old = remedies.get(key);
       if (old && JSON.stringify(old) !== JSON.stringify(remediation)) throw new DashboardError("Remediation details changed during collection. Retry to prepare a consistent request.");
@@ -76,16 +89,17 @@ export function buildPatchRequest(cve: string, records: PatchFinding[], region: 
     if (row.suppressed === null) warnings.add("Suppression status was not supplied for some findings; review those entries in Falcon.");
     const apps: PatchApp[] = row.apps.length ? row.apps : [{ vendor: "", product: "", version: "", ids: row.remediations.map((r) => r.id), recommended: "", minimum: "" }];
     for (const app of apps) {
-      const ids = app.ids.length ? app.ids : [""];
+      const recommendations = recommendedRemediationIds(row.apps.length ? app : undefined, row.remediations);
+      const ids = recommendations.length ? recommendations : [""];
       for (const id of ids) {
         const remediation = localRemedies.get(id);
-        if (!id || !remediation?.action) warnings.add("CrowdStrike did not supply an actionable remediation for some application entries. These are marked in the CSV; review them in Falcon before patching.");
-        const mapping = !id ? "No application remediation supplied" : row.apps.length ? "Application remediation" : "Finding-level remediation (application not supplied)";
+        if (!id || !remediation?.action) warnings.add("CrowdStrike did not supply an actionable recommended remediation for some application entries. These are marked in the CSV; review them in Falcon before patching.");
+        const mapping = !id ? "No recommended remediation supplied" : row.apps.length ? "Recommended application remediation" : "Recommended finding-level remediation (application not supplied)";
         csvRows.push([row.cve, row.cid, row.hostId, row.hostname || null, row.ip || null, row.os || null, row.hostCriticality || null, row.exposure || null, row.id, row.status, row.suppressed,
           row.severity, row.cvss, row.vector || null, row.exprt, row.exploit, row.exploitability, row.impact, row.kev, row.priority, row.risk,
-          app.vendor || null, app.product || null, app.version || null, id || null, mapping, app.recommended || null, app.minimum || null,
+          app.vendor || null, app.product || null, app.version || null, id || null, mapping, id || null,
           remediation?.title || null, remediation?.action || null, remediation?.reference || null, remediation?.link || null, remediation?.vendorUrl || null,
-          remediation?.recommendationType || null, remediation?.published || null, row.updated || null, collectedAt]);
+          id ? "recommended" : null, remediation?.published || null, row.updated || null, collectedAt]);
       }
     }
   }
@@ -95,7 +109,7 @@ export function buildPatchRequest(cve: string, records: PatchFinding[], region: 
   const title = `Patch request: ${cve} | ${severities} | ${hosts.size} affected hosts`;
   const remediationText = [...remedies].map(([key, r]) => {
     const [cid] = JSON.parse(key);
-    return [`- ${r.id} — ${shown(r.title)} (tenant ${cid})`, `  Action: ${shown(r.action)}`, `  Type: ${shown(r.recommendationType)}; reference: ${shown(r.reference)}`,
+    return [`- ${r.id} — ${shown(r.title)} (tenant ${cid})`, `  Action: ${shown(r.action)}`, `  Type: Recommended; reference: ${shown(r.reference)}`,
       `  Source: ${shown(r.link)}; vendor: ${shown(r.vendorUrl)}`, `  Patch published: ${shown(r.published)}`].join("\n");
   });
   const hostText = [...hosts.values()].map((h) => `- ${line(h.hostname || "Hostname not supplied")} | Tenant: ${line(h.cid)} | Host ID: ${line(h.hostId)} | IP: ${line(shown(h.ip))} | OS: ${line(shown(h.os))} | Criticality: ${line(shown(h.hostCriticality))}`);
@@ -109,10 +123,10 @@ export function buildPatchRequest(cve: string, records: PatchFinding[], region: 
     `CISA KEV: ${values((r) => r.kev)}`, `GMI custom priority: ${values((r) => r.priority)}`, `Maximum GMI custom risk score: ${shown(max((r) => r.risk))} / 100 (GMI policy, not a CrowdStrike score)`,
     "", "DESCRIPTION", descriptions.join("\n\n") || "Not supplied by CrowdStrike.", "", "PATCH TEAM ACTIONS",
     "1. Review each host/application entry in the attached CSV and confirm ownership and the maintenance window.",
-    "2. Apply the CrowdStrike remediation mapped to that application. Recommended and minimum remediation IDs identify alternatives; do not blindly apply every listed alternative.",
+    "2. Apply the recommended CrowdStrike remediation mapped to each application in the CSV. The ticket lists all applicable recommendations; minimum-only alternatives are excluded.",
     "3. Review suppressed findings and entries with missing remediation before scheduling work.",
     "4. After patching and any required restart, verify the findings are closed in Falcon and record the outcome in this ticket.",
-    "", "REMEDIATIONS FROM CROWDSTRIKE", remediationText.join("\n\n") || "No remediation was supplied. Manual investigation is required.",
+    "", "RECOMMENDED REMEDIATIONS FROM CROWDSTRIKE", remediationText.join("\n\n") || "No recommended remediation was supplied. Manual investigation is required.",
     "", "ALL AFFECTED HOSTS", ...hostText, "", "SOURCE REFERENCES", references.join("\n") || "Not supplied.",
     "", "COLLECTION NOTES", "All matching pages were collected. This is a paginated observation, not an atomic CrowdStrike snapshot. Counts can differ from the cached dashboard.",
     ...warnings, `Attach ${cve}-patch-request.csv. No ticket has been sent to ConnectWise.`].join("\n");

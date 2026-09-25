@@ -2,7 +2,7 @@ import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:cr
 import { setTimeout as delay } from "node:timers/promises";
 import { DashboardError, parseQueryInput, type QueryInput, type QueryResult } from "./elastic-dashboard";
 import { CROWDSTRIKE_DATASETS, FALCON_REGIONS, type CrowdStrikeConnection, type Vulnerability } from "./crowdstrike-dashboard";
-import { buildPatchRequest, normalizePatchFinding, normalizeRemediation, parsePatchInput, type PatchFinding, type PatchRequest } from "./patch-request";
+import { buildPatchRequest, normalizePatchFinding, normalizeRemediation, parsePatchInput, patchRecommendationIds, type PatchFinding, type PatchRequest } from "./patch-request";
 
 export function parseCrowdStrikeConnection(value: unknown): CrowdStrikeConnection {
   const body = value as CrowdStrikeConnection | null;
@@ -237,7 +237,7 @@ export async function executePatchRequest(connection: CrowdStrikeConnection, val
   const missing = new Set<string>();
   for (const row of records.values()) {
     const known = new Map(row.remediations.map((r) => [r.id, r]));
-    for (const id of new Set([...row.apps.flatMap((app) => app.ids), ...known.keys()])) if (!known.get(id)?.action) missing.add(id);
+    for (const id of patchRecommendationIds(row)) if (!known.get(id)?.action) missing.add(id);
   }
   const hydrated = new Map<string, ReturnType<typeof normalizeRemediation>>();
   const ids = [...missing];
@@ -255,7 +255,7 @@ export async function executePatchRequest(connection: CrowdStrikeConnection, val
   }
   for (const row of records.values()) {
     const known = new Map(row.remediations.map((r) => [r.id, r]));
-    for (const id of new Set([...row.apps.flatMap((app) => app.ids), ...known.keys()])) {
+    for (const id of patchRecommendationIds(row)) {
       if (!known.get(id)?.action && hydrated.has(id)) known.set(id, hydrated.get(id)!);
     }
     row.remediations = [...known.values()];
