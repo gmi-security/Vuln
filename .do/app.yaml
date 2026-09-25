@@ -16,6 +16,16 @@ services:
     instance_count: 1
     instance_size_slug: basic-xxs
     envs:
+      # Node's V8 heap defaults to ~2-4GB regardless of the container's actual
+      # RAM — on a large in-memory store (tens of thousands of findings, plus
+      # large API responses held in memory during sync) that default ceiling
+      # causes long GC pauses that look like the app hanging. Raises the heap
+      # ceiling to make real use of a bigger instance; ~75% of the container's
+      # RAM, leaving headroom for the OS and non-heap Node overhead. Update
+      # this if the instance size changes.
+      - key: NODE_OPTIONS
+        scope: RUN_TIME
+        value: "--max-old-space-size=24576"
       - key: GITHUB_CLIENT_ID
         scope: RUN_TIME
         type: SECRET
