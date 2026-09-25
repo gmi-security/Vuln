@@ -52,6 +52,8 @@ test("queries retain the original ES|QL and reject invalid definitions", async (
   assert.throws(() => contract.parseDefinition({ ...parsed, refreshMinutes: 0 }, parsed.id));
   assert.throws(() => contract.parseDefinition({ ...parsed, query: "x".repeat(16001) }, parsed.id));
   assert.throws(() => contract.parseDefinition({ ...parsed, title: "" }, parsed.id));
+  assert.equal(contract.parseDefinition({ ...parsed, description: " Imported CVE counts. " }, parsed.id).description, "Imported CVE counts.");
+  assert.throws(() => contract.parseDefinition({ ...parsed, description: "x".repeat(601) }, parsed.id));
 });
 test("result parsing supports numeric summaries, nulls, and bounded tables", () => {
   const summary = contract.parseQueryResult({ columns: numeric.columns, values: [[120, null]] });
@@ -119,6 +121,13 @@ test("native charts render valid SVG, accessible data, and explicit empty states
   assert.doesNotMatch(render("bar", { ...base, rows: [["P1", -2], ["P2", 0], ["P3", 8]] }), /NaN|Infinity/);
   const gaps = render("line", { ...base, rows: [["P1", 2], ["P2", null], ["P3", 8]] });
   assert.match(gaps, /d="M[^"]* M/);
+  const severityChart = renderToStaticMarkup(createElement(module.namespace.default, {
+    result: { columns: [{ name: "severity", type: "keyword" }, { name: "unique_cves", type: "long" }], rows: [["Critical", 3], ["High", 5], ["Medium", 2], ["Low", 1], ["None", 0], ["Unknown", 0]], truncated: false },
+    definition: { display: "doughnut", chart: { category: "severity", value: "unique_cves" } },
+  }));
+  assert.match(severityChart, /Unique CVEs/);
+  for (const color of ["#b30e14", "#f97316", "#f5a623", "#4aa3ff"]) assert.ok(severityChart.includes(color));
+  assert.doesNotMatch(severityChart, /NaN|Infinity/);
 });
 test("only public HTTPS endpoints are supported; internal addresses are blocked", () => {
   for (const endpoint of ["http://example.com", "https://user:key@example.com", "https://localhost", "https://example.com?key=x", "https://deployment.kb.region.aws.found.io"]) {
