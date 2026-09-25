@@ -9,6 +9,7 @@ import {
   IconDatabaseCog,
   IconDeviceLaptop,
   IconPackage,
+  IconPlugConnected,
   IconRadar,
   IconShieldSearch,
   IconSpider,
@@ -68,6 +69,7 @@ const cardIcon: Record<string, React.ElementType> = {
   intune: IconDeviceLaptop,
   "crowdstrike-devices": IconShieldSearch,
   grc: IconClipboardCheck,
+  n8n: IconPlugConnected,
 };
 
 // Connectors with a reachability probe get a live health dot.
@@ -81,6 +83,7 @@ const HEALTH_ENDPOINTS: Record<string, string> = {
   nmap: "/api/nmap/health",
   zap: "/api/zap/health",
   vulners: "/api/vulners-bridge-health",
+  n8n: "/api/n8n/health",
   "resend-email": "/api/alerts/health?channel=email",
   "slack-alerts": "/api/alerts/health?channel=slack",
 };

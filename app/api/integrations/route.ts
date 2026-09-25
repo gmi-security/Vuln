@@ -4,6 +4,7 @@ import { intuneConfig } from "@/lib/intune";
 import { falconConfig } from "@/lib/crowdstrike";
 import { grcConfig } from "@/lib/grc";
 import { emailConfigured, slackConfigured } from "@/lib/alerts";
+import { n8nConfig } from "@/lib/n8n";
 
 export const dynamic = "force-dynamic";
 
@@ -14,6 +15,7 @@ export async function GET() {
   const intune = intuneConfig();
   const falcon = falconConfig();
   const grc = grcConfig();
+  const n8n = n8nConfig();
   return NextResponse.json({
     integrations: [
       {
@@ -88,6 +90,19 @@ export async function GET() {
         configured: Boolean(grc),
         status: grc ? "Connected" : "Demo Mode",
         docsUrl: `${(process.env.GRC_API_URL ?? "").replace(/\/+$/, "") || "https://www.opengrc.com"}/app/dashboard`,
+      },
+      {
+        id: "n8n",
+        name: "n8n",
+        vendor: "n8n",
+        kind: "Workflow Automation (alternative data source)",
+        description:
+          "General-purpose pipe into a workflow on the GMI n8n instance, for data sources without a dedicated connector of their own. Runs alongside the existing scanners — nothing is wired to it yet, so it's reachability-only until a specific workflow and data shape are decided.",
+        capabilities: ["Reachability probe", "Generic workflow call", "Supplemental source"],
+        envVars: ["N8N_WEBHOOK_URL"],
+        configured: Boolean(n8n),
+        status: n8n ? "Connected" : "Not Configured",
+        docsUrl: "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.webhook/",
       },
       {
         id: "resend-email",

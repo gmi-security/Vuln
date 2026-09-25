@@ -27,6 +27,7 @@ export async function proxy(request: NextRequest) {
     pathname === "/api/zap/health" ||
     pathname === "/api/vulners-bridge-health" ||
     pathname === "/api/crowdstrike/health" ||
+    pathname === "/api/n8n/health" ||
     pathname === "/api/health" ||
     // Independently protected by ADMIN_TOKEN (not a session), so they must stay
     // reachable without the login redirect.
