@@ -11,10 +11,13 @@ import Link from "next/link";
 import {
   ArrowLeft,
   Bug,
+  ChevronLeft,
+  ChevronRight,
   Folder as FolderIcon,
   FolderPlus,
   Mail,
   Play,
+  Search,
 } from "lucide-react";
 import { IconAlertTriangle, IconBug, IconGauge, IconRadar } from "@tabler/icons-react";
 import VulnShell from "@/components/VulnShell";
@@ -82,6 +85,11 @@ export default function VulnCompanyDetailPage({
     kind: "sent" | "skipped" | "error";
     message: string;
   } | null>(null);
+  // Asset inventory table: a large customer can have 1,000+ assets — search
+  // + client-side pagination instead of rendering every row at once.
+  const [assetSearch, setAssetSearch] = useState("");
+  const [assetPage, setAssetPage] = useState(0);
+  const ASSET_PAGE_SIZE = 50;
   // Monotonic request id — invalidated on company change so an in-flight load
   // for company A can never land on company B.
   const loadSeq = useRef(0);
@@ -99,6 +107,8 @@ export default function VulnCompanyDetailPage({
     setActionError(null);
     setEmailPhase("idle");
     setEmailResult(null);
+    setAssetSearch("");
+    setAssetPage(0);
   }, [companyId]);
 
   const load = useCallback(async () => {
@@ -156,6 +166,24 @@ export default function VulnCompanyDetailPage({
     }
     return map;
   }, [folders, scans]);
+
+  const filteredAssets = useMemo(() => {
+    const q = assetSearch.trim().toLowerCase();
+    if (!q) return assets;
+    return assets.filter(
+      (a) =>
+        a.identifier.toLowerCase().includes(q) ||
+        a.hostname.toLowerCase().includes(q) ||
+        a.ipAddresses.some((ip) => ip.toLowerCase().includes(q)) ||
+        a.owner.toLowerCase().includes(q),
+    );
+  }, [assets, assetSearch]);
+  const assetPageCount = Math.max(1, Math.ceil(filteredAssets.length / ASSET_PAGE_SIZE));
+  const clampedAssetPage = Math.min(assetPage, assetPageCount - 1);
+  const pagedAssets = filteredAssets.slice(
+    clampedAssetPage * ASSET_PAGE_SIZE,
+    (clampedAssetPage + 1) * ASSET_PAGE_SIZE,
+  );
 
   async function addFolder(event: React.FormEvent) {
     event.preventDefault();
@@ -417,7 +445,9 @@ export default function VulnCompanyDetailPage({
         description="Environmental context for real-risk scoring — synced from Tidal.io or entered manually"
         actions={
           <span className="text-sm text-zinc-500">
-            {assets.length} asset{assets.length === 1 ? "" : "s"}
+            {filteredAssets.length !== assets.length
+              ? `${filteredAssets.length} of ${assets.length} asset${assets.length === 1 ? "" : "s"}`
+              : `${assets.length} asset${assets.length === 1 ? "" : "s"}`}
             {company && company.inventoryCoverage >= 0
               ? ` · ${company.inventoryCoverage}% of open findings covered`
               : ""}
@@ -439,51 +469,101 @@ export default function VulnCompanyDetailPage({
             asset exposure and criticality.
           </div>
         ) : (
-          <div className="overflow-hidden rounded-[24px] border border-[rgba(179,14,20,0.12)] bg-[#040404]">
-            <div className="grid grid-cols-[1.6fr_150px_140px_1fr_110px_90px] gap-4 border-b border-zinc-900 px-5 py-3 text-xs uppercase tracking-[0.2em] text-zinc-500">
-              <div>Asset</div>
-              <div>Exposure</div>
-              <div>Criticality</div>
-              <div>Owner / OS</div>
-              <div>Source</div>
-              <div>Open</div>
+          <>
+            <div className="relative mb-4">
+              <Search
+                size={15}
+                className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-600"
+              />
+              <input
+                value={assetSearch}
+                onChange={(e) => {
+                  setAssetSearch(e.target.value);
+                  setAssetPage(0);
+                }}
+                placeholder="Search by hostname, IP, or owner…"
+                className={`${inputClass} pl-9`}
+              />
             </div>
-            {assets.map((asset) => (
-              <div
-                key={asset.id}
-                className="grid grid-cols-[1.6fr_150px_140px_1fr_110px_90px] items-center gap-4 border-b border-zinc-900/70 px-5 py-3 last:border-b-0"
-              >
-                <div className="min-w-0">
-                  <div className="truncate font-medium text-white">
-                    {asset.identifier}
-                  </div>
-                  {asset.ipAddresses.length ? (
-                    <div className="mt-1 truncate text-xs text-zinc-500">
-                      {asset.ipAddresses.join(", ")}
-                    </div>
-                  ) : null}
-                </div>
-                <div
-                  className={`text-sm ${exposureClass[asset.exposure] ?? "text-zinc-300"}`}
-                >
-                  {asset.exposure}
-                </div>
-                <div className="text-sm text-zinc-300">{asset.criticality}</div>
-                <div className="min-w-0 text-sm text-zinc-400">
-                  <div className="truncate">{asset.owner || "—"}</div>
-                  <div className="truncate text-xs text-zinc-600">
-                    {asset.os || ""}
-                  </div>
-                </div>
-                <div>
-                  <Pill className={assetSourceClass[asset.source]}>
-                    {assetSourceLabel[asset.source]}
-                  </Pill>
-                </div>
-                <div className="text-sm text-zinc-300">{asset.openFindings}</div>
+            {filteredAssets.length === 0 ? (
+              <div className="rounded-2xl border border-dashed border-zinc-800 bg-[#080808] px-5 py-8 text-center text-sm text-zinc-500">
+                No assets match "{assetSearch}".
               </div>
-            ))}
-          </div>
+            ) : (
+              <div className="overflow-hidden rounded-[24px] border border-[rgba(179,14,20,0.12)] bg-[#040404]">
+                <div className="grid grid-cols-[1.6fr_150px_140px_1fr_110px_90px] gap-4 border-b border-zinc-900 px-5 py-3 text-xs uppercase tracking-[0.2em] text-zinc-500">
+                  <div>Asset</div>
+                  <div>Exposure</div>
+                  <div>Criticality</div>
+                  <div>Owner / OS</div>
+                  <div>Source</div>
+                  <div>Open</div>
+                </div>
+                {pagedAssets.map((asset) => (
+                  <div
+                    key={asset.id}
+                    className="grid grid-cols-[1.6fr_150px_140px_1fr_110px_90px] items-center gap-4 border-b border-zinc-900/70 px-5 py-3 transition-colors last:border-b-0 hover:bg-[rgba(179,14,20,0.04)]"
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate font-medium text-white">
+                        {asset.identifier}
+                      </div>
+                      {asset.ipAddresses.length ? (
+                        <div className="mt-1 truncate text-xs text-zinc-500">
+                          {asset.ipAddresses.join(", ")}
+                        </div>
+                      ) : null}
+                    </div>
+                    <div
+                      className={`text-sm ${exposureClass[asset.exposure] ?? "text-zinc-300"}`}
+                    >
+                      {asset.exposure}
+                    </div>
+                    <div className="text-sm text-zinc-300">{asset.criticality}</div>
+                    <div className="min-w-0 text-sm text-zinc-400">
+                      <div className="truncate">{asset.owner || "—"}</div>
+                      <div className="truncate text-xs text-zinc-600">
+                        {asset.os || ""}
+                      </div>
+                    </div>
+                    <div>
+                      <Pill className={assetSourceClass[asset.source]}>
+                        {assetSourceLabel[asset.source]}
+                      </Pill>
+                    </div>
+                    <div className="text-sm text-zinc-300">{asset.openFindings}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {assetPageCount > 1 ? (
+              <div className="mt-4 flex items-center justify-between gap-3">
+                <span className="text-xs text-zinc-500">
+                  Page {clampedAssetPage + 1} of {assetPageCount}
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setAssetPage((p) => Math.max(0, p - 1))}
+                    disabled={clampedAssetPage === 0}
+                    className={`${ghostButtonClass} disabled:cursor-not-allowed disabled:opacity-40`}
+                  >
+                    <ChevronLeft size={14} />
+                    Prev
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAssetPage((p) => Math.min(assetPageCount - 1, p + 1))}
+                    disabled={clampedAssetPage >= assetPageCount - 1}
+                    className={`${ghostButtonClass} disabled:cursor-not-allowed disabled:opacity-40`}
+                  >
+                    Next
+                    <ChevronRight size={14} />
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </>
         )}
       </PanelCard>
 
