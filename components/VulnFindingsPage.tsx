@@ -865,7 +865,7 @@ export default function VulnFindingsPage() {
               <div className="text-xs uppercase tracking-[0.24em] text-zinc-500">
                 Description
               </div>
-              <p className="mt-2 text-sm leading-relaxed text-zinc-300">
+              <p className="mt-2 whitespace-pre-line text-sm leading-relaxed text-zinc-300">
                 {focus.description}
               </p>
             </div>
@@ -874,7 +874,7 @@ export default function VulnFindingsPage() {
               <div className="text-xs uppercase tracking-[0.24em] text-zinc-500">
                 Remediation
               </div>
-              <p className="mt-2 text-sm leading-relaxed text-zinc-300">
+              <p className="mt-2 whitespace-pre-line text-sm leading-relaxed text-zinc-300">
                 {focus.remediation}
               </p>
             </div>
