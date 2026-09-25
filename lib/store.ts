@@ -2668,22 +2668,25 @@ export function computeRemediationSla(): RemediationSlaResult {
     (f) => !demo.has(f.companyId) && isRemediationFinding(f),
   );
 
-  // 30-day burndown: open backlog vs resolved-per-day.
+  // 30-day burndown: open backlog vs resolved-per-day. Same fix as
+  // computeMetrics's trend loop — precompute each finding's timestamps once
+  // instead of re-parsing date strings on every one of the 30 iterations
+  // (up to ~4 new Date(...).getTime() calls per finding per day otherwise).
+  const firstSeenMs = all.map((f) => new Date(f.firstSeen).getTime());
+  const resolvedAtMs = all.map((f) => (f.resolvedAt ? new Date(f.resolvedAt).getTime() : null));
   const burndown: { date: string; open: number; resolved: number }[] = [];
   for (let d = 29; d >= 0; d--) {
     const dayEnd = now - d * DAY;
+    const dayStart = dayEnd - DAY;
     const date = new Date(dayEnd).toISOString().slice(0, 10);
-    const open = all.filter(
-      (f) =>
-        new Date(f.firstSeen).getTime() <= dayEnd &&
-        !(f.resolvedAt && new Date(f.resolvedAt).getTime() <= dayEnd),
-    ).length;
-    const resolved = all.filter(
-      (f) =>
-        f.resolvedAt &&
-        new Date(f.resolvedAt).getTime() > dayEnd - DAY &&
-        new Date(f.resolvedAt).getTime() <= dayEnd,
-    ).length;
+    let open = 0;
+    let resolved = 0;
+    for (let i = 0; i < all.length; i++) {
+      const r = resolvedAtMs[i];
+      const resolvedBefore = r !== null && r <= dayEnd;
+      if (firstSeenMs[i] <= dayEnd && !resolvedBefore) open += 1;
+      if (r !== null && r > dayStart && r <= dayEnd) resolved += 1;
+    }
     burndown.push({ date, open, resolved });
   }
 
@@ -2799,12 +2802,28 @@ export function computeCompliance(filter?: {
     filter?.companyId ? c.id === filter.companyId : !demo.has(c.id),
   );
 
+  // Grouping once here (O(store size)) instead of re-scanning the whole
+  // findings/scans store inside companies.map() (O(companies x store size))
+  // matters most on the portfolio-wide call (no companyId filter) that the
+  // Compliance page uses by default — with ~12 companies that used to be 12
+  // full rescans of both collections on every uncached load.
+  const findingsByCompany = new Map<string, Finding[]>();
+  for (const f of s.findings.values()) {
+    if (f.status !== "Open" && f.status !== "In Remediation") continue;
+    const list = findingsByCompany.get(f.companyId);
+    if (list) list.push(f);
+    else findingsByCompany.set(f.companyId, [f]);
+  }
+  const scansByCompany = new Map<string, InternalScan[]>();
+  for (const sc of s.scans.values()) {
+    if (!sc.completedAt) continue;
+    const list = scansByCompany.get(sc.companyId);
+    if (list) list.push(sc);
+    else scansByCompany.set(sc.companyId, [sc]);
+  }
+
   const postures: CompliancePosture[] = companies.map((company) => {
-    const open = Array.from(s.findings.values()).filter(
-      (f) =>
-        f.companyId === company.id &&
-        (f.status === "Open" || f.status === "In Remediation"),
-    );
+    const open = findingsByCompany.get(company.id) ?? [];
     // External ASV: internet-facing findings with CVSS >= 4.0 fail an ASV scan.
     const external = open.filter((f) => f.assetExposure === "Internet-facing");
     const asvFailing = external.filter((f) => cvssOf(f) >= 4.0);
@@ -2818,9 +2837,7 @@ export function computeCompliance(filter?: {
       (f) => (now - new Date(f.firstSeen).getTime()) / DAY > 30,
     );
 
-    const companyScans = Array.from(s.scans.values()).filter(
-      (sc) => sc.companyId === company.id && sc.completedAt,
-    );
+    const companyScans = scansByCompany.get(company.id) ?? [];
     const lastScanDaysAgo = companyScans.length
       ? Math.floor(
           Math.min(
@@ -4300,6 +4317,27 @@ export function osintTargetsForCompany(s: StoreShape, companyId: string): string
   return Array.from(domains).sort();
 }
 
+// Bulk form for callers that need every client company's domains — the
+// previous pattern (osintTargetsForCompany() once per company) rescanned the
+// ENTIRE store's findings and assets on every company, O(companies x store
+// size). One pass over each collection, grouped, is O(store size) total.
+function buildDomainsByCompany(s: StoreShape): Map<string, string[]> {
+  const byCompany = new Map<string, Set<string>>();
+  const add = (companyId: string, domain: string | null) => {
+    if (!domain) return;
+    const set = byCompany.get(companyId);
+    if (set) set.add(domain);
+    else byCompany.set(companyId, new Set([domain]));
+  };
+  for (const f of s.findings.values()) add(f.companyId, registrableDomain(f.asset));
+  for (const a of s.assets.values()) {
+    add(a.companyId, registrableDomain(a.hostname || a.identifier || ""));
+  }
+  const out = new Map<string, string[]>();
+  for (const [companyId, set] of byCompany) out.set(companyId, Array.from(set).sort());
+  return out;
+}
+
 export type SyncAllEntry = {
   connector: string;
   configured: boolean;
@@ -4384,11 +4422,15 @@ export type OsintPreview = {
 // target — without launching anything.
 export function previewOsintTargets(): OsintPreview {
   const s = store();
+  // This runs unconditionally on every Connectors page load (no click
+  // needed) — osintTargetsForCompany() once per company used to rescan the
+  // whole store per company; build the grouped map once instead.
+  const domainsByCompany = buildDomainsByCompany(s);
   const perCompany: { company: string; domains: string[] }[] = [];
   let domainsTotal = 0;
   for (const company of s.companies.values()) {
     if (company.kind !== "client") continue;
-    const domains = osintTargetsForCompany(s, company.id);
+    const domains = domainsByCompany.get(company.id) ?? [];
     if (domains.length === 0) continue;
     perCompany.push({ company: company.name, domains });
     domainsTotal += domains.length;
@@ -4433,8 +4475,9 @@ export async function launchOsintScans(): Promise<OsintLaunchResult> {
   const clients = Array.from(s.companies.values()).filter(
     (c) => c.kind === "client",
   );
+  const domainsByCompany = buildDomainsByCompany(s);
   for (const company of clients) {
-    const domains = osintTargetsForCompany(s, company.id);
+    const domains = domainsByCompany.get(company.id) ?? [];
     if (domains.length === 0) continue;
     result.companies += 1;
     result.domainsTotal += domains.length;
