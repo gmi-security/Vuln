@@ -315,7 +315,10 @@ test("patch export collects beyond top 100, deduplicates findings and tenant-sco
   await mockHttp([auth, page(rows.slice(0, 80), "next", 104), page([rows[0], ...rows.slice(80)], "", 104)], async calls => {
     const packet = await client.executePatchRequest(connection, { cve: patchCve, top: 10, query: "status:'closed'" });
     assert.equal(packet.hostCount, 104); assert.equal(packet.findingCount, 104); assert.equal(packet.csvRows, 104);
-    assert.match(packet.body, /device-102/); assert.match(packet.body, /other-tenant-device/);
+    assert.match(packet.csv, /device-102/); assert.match(packet.csv, /other-tenant-device/);
+    assert.doesNotMatch(packet.body, /device-102|other-tenant-device|Host ID:|ALL AFFECTED HOSTS/);
+    assert.match(packet.body, /See the attached CVE-2026-12345-patch-request.csv/);
+    assert.match(packet.body, /Affected hosts: 104/);
     assert.match(packet.body, /9\.8/); assert.match(packet.body, /GMI policy, not a CrowdStrike score/);
     assert.match(packet.csv, /CVSS:3.1\/AV:N/); assert.match(packet.csv, /Install version 2.0, then restart./);
     assert.deepEqual(packet.warnings, []);
@@ -396,7 +399,8 @@ test("recommendations exclude minimum-only alternatives, preserve missing hosts,
   assert.doesNotMatch(packet.csv, /min-a|min-only|unrelated-rec|minimum_remediation_id/);
   assert.doesNotMatch(packet.body, /min-a|min-only|unrelated-rec/);
   assert.match(packet.body, /rec-a/); assert.match(packet.body, /rec-b/);
-  assert.match(packet.body, /host-without-recommendation/);
+  assert.match(packet.csv, /host-without-recommendation/);
+  assert.doesNotMatch(packet.body, /host-without-recommendation/);
   assert.match(packet.csv, /No recommended remediation supplied/);
   assert.equal(packet.warnings.length, 1);
 });

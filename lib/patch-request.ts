@@ -21,7 +21,6 @@ const text = (value: unknown): string => typeof value === "string" ? value.repla
 const list = (value: unknown): string[] => Array.isArray(value) ? [...new Set(value.map(text).filter(Boolean))] : [];
 const num = (value: unknown): number | null => typeof value === "number" && Number.isFinite(value) ? value : null;
 const shown = (value: unknown): string => value === null || value === undefined || value === "" ? "Not supplied" : String(value);
-const line = (value: string) => value.replace(/[\r\n\t]+/g, " ");
 
 export function parsePatchInput(value: unknown): { source: "crowdstrike"; cve: string } {
   const cve = (value as { cve?: unknown } | null)?.cve;
@@ -112,7 +111,6 @@ export function buildPatchRequest(cve: string, records: PatchFinding[], region: 
     return [`- ${r.id} — ${shown(r.title)} (tenant ${cid})`, `  Action: ${shown(r.action)}`, `  Type: Recommended; reference: ${shown(r.reference)}`,
       `  Source: ${shown(r.link)}; vendor: ${shown(r.vendorUrl)}`, `  Patch published: ${shown(r.published)}`].join("\n");
   });
-  const hostText = [...hosts.values()].map((h) => `- ${line(h.hostname || "Hostname not supplied")} | Tenant: ${line(h.cid)} | Host ID: ${line(h.hostId)} | IP: ${line(shown(h.ip))} | OS: ${line(shown(h.os))} | Criticality: ${line(shown(h.hostCriticality))}`);
   const descriptions = [...new Set(ordered.map((r) => r.description).filter(Boolean))];
   const references = [...new Set(ordered.flatMap((r) => r.references))];
   const body = ["PATCH REQUEST — MANUAL CONNECTWISE ENTRY", "", `CVE: ${cve}`, `Source: CrowdStrike Spotlight (${region.toUpperCase()})`,
@@ -127,7 +125,7 @@ export function buildPatchRequest(cve: string, records: PatchFinding[], region: 
     "3. Review suppressed findings and entries with missing remediation before scheduling work.",
     "4. After patching and any required restart, verify the findings are closed in Falcon and record the outcome in this ticket.",
     "", "RECOMMENDED REMEDIATIONS FROM CROWDSTRIKE", remediationText.join("\n\n") || "No recommended remediation was supplied. Manual investigation is required.",
-    "", "ALL AFFECTED HOSTS", ...hostText, "", "SOURCE REFERENCES", references.join("\n") || "Not supplied.",
+    "", "AFFECTED ASSETS", `See the attached ${cve}-patch-request.csv for the complete asset list and per-application recommended remediations.`, "", "SOURCE REFERENCES", references.join("\n") || "Not supplied.",
     "", "COLLECTION NOTES", "All matching pages were collected. This is a paginated observation, not an atomic CrowdStrike snapshot. Counts can differ from the cached dashboard.",
     ...warnings, `Attach ${cve}-patch-request.csv. No ticket has been sent to ConnectWise.`].join("\n");
   const csv = dashboardCsv({ columns: names.map((name) => ({ name, type: "keyword" })), rows: csvRows, truncated: false });
