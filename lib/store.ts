@@ -1287,32 +1287,44 @@ function companyCoverage(
   return { known: known.length, scanned };
 }
 
-function companyRollup(s: StoreShape, companyId: string) {
-  // Single pass per collection instead of Array.from(map.values()).filter(...)
-  // — with tens of thousands of findings in production, materializing a full
-  // array just to discard almost all of it (this company's slice is always a
-  // small fraction) burns real CPU and garbage-collector pressure on every
-  // company view, and this runs once per company on the Companies list.
-  const scans: InternalScan[] = [];
-  for (const sc of s.scans.values()) if (sc.companyId === companyId) scans.push(sc);
-  const findings: Finding[] = [];
-  for (const f of s.findings.values()) if (f.companyId === companyId) findings.push(f);
+// Coverage computed from lists already scoped to one company — shared by the
+// single-company path (companyRollup) and the bulk path (buildAllRollups)
+// so neither has to re-scan the whole store.
+function coverageFromLists(
+  assets: InternalAsset[],
+  findings: Finding[],
+): { known: number; scanned: number } {
+  const findingAssets = new Set<string>();
+  for (const f of findings) findingAssets.add(f.asset.trim().toLowerCase());
+  let scanned = 0;
+  for (const a of assets) {
+    const keys = [a.identifier, a.hostname, ...a.ipAddresses].map((k) =>
+      k.trim().toLowerCase(),
+    );
+    if (keys.some((k) => findingAssets.has(k))) scanned += 1;
+  }
+  return { known: assets.length, scanned };
+}
+
+function rollupFromLists(
+  scans: InternalScan[],
+  findings: Finding[],
+  assets: InternalAsset[],
+  folderCount: number,
+) {
   // Two stories per customer: vulnerability posture (CVE-based scan findings)
   // and attack-surface exposure (OSINT). The security-posture rollup is
   // vuln-based; exposure is counted alongside it, not blended in.
   const open = findings.filter((f) => isOpen(f) && isRemediationFinding(f));
   const openExposure = findings.filter((f) => isOpen(f) && isOsintFinding(f)).length;
-  let inventoryAssets = 0;
-  for (const a of s.assets.values()) if (a.companyId === companyId) inventoryAssets += 1;
+  const inventoryAssets = assets.length;
   const withInventory = open.filter(
     (f) => f.assetSource === "tidal" || f.assetSource === "manual",
   ).length;
   const composite = computeComposite(
     open,
-    inventoryAssets > 0 ? companyCoverage(s, companyId) : null,
+    inventoryAssets > 0 ? coverageFromLists(assets, findings) : null,
   );
-  let folderCount = 0;
-  for (const f of s.folders.values()) if (f.companyId === companyId) folderCount += 1;
   return {
     folderCount,
     scanCount: scans.length,
@@ -1332,8 +1344,72 @@ function companyRollup(s: StoreShape, companyId: string) {
   };
 }
 
-function toPublicCompany(s: StoreShape, c: InternalCompany): Company {
-  return { ...c, ...companyRollup(s, c.id), isDemo: isDemoCompany(c) };
+function companyRollup(s: StoreShape, companyId: string) {
+  // Single pass per collection instead of Array.from(map.values()).filter(...)
+  // — with tens of thousands of findings in production, materializing a full
+  // array just to discard almost all of it (this company's slice is always a
+  // small fraction) burns real CPU and garbage-collector pressure on every
+  // company view.
+  const scans: InternalScan[] = [];
+  for (const sc of s.scans.values()) if (sc.companyId === companyId) scans.push(sc);
+  const findings: Finding[] = [];
+  for (const f of s.findings.values()) if (f.companyId === companyId) findings.push(f);
+  const assets: InternalAsset[] = [];
+  for (const a of s.assets.values()) if (a.companyId === companyId) assets.push(a);
+  let folderCount = 0;
+  for (const f of s.folders.values()) if (f.companyId === companyId) folderCount += 1;
+  return rollupFromLists(scans, findings, assets, folderCount);
+}
+
+// Bulk path for listCompanies(): companyRollup() re-scans the whole store
+// per company, so calling it once per company is O(companies x store size).
+// Grouping each collection by companyId in one pass first drops that to
+// O(store size) total regardless of how many companies there are.
+function buildAllCompanyRollups(s: StoreShape): Map<string, ReturnType<typeof rollupFromLists>> {
+  const scansBy = new Map<string, InternalScan[]>();
+  for (const sc of s.scans.values()) {
+    const list = scansBy.get(sc.companyId);
+    if (list) list.push(sc);
+    else scansBy.set(sc.companyId, [sc]);
+  }
+  const findingsBy = new Map<string, Finding[]>();
+  for (const f of s.findings.values()) {
+    const list = findingsBy.get(f.companyId);
+    if (list) list.push(f);
+    else findingsBy.set(f.companyId, [f]);
+  }
+  const assetsBy = new Map<string, InternalAsset[]>();
+  for (const a of s.assets.values()) {
+    const list = assetsBy.get(a.companyId);
+    if (list) list.push(a);
+    else assetsBy.set(a.companyId, [a]);
+  }
+  const folderCountBy = new Map<string, number>();
+  for (const f of s.folders.values()) {
+    folderCountBy.set(f.companyId, (folderCountBy.get(f.companyId) ?? 0) + 1);
+  }
+
+  const out = new Map<string, ReturnType<typeof rollupFromLists>>();
+  for (const c of s.companies.values()) {
+    out.set(
+      c.id,
+      rollupFromLists(
+        scansBy.get(c.id) ?? [],
+        findingsBy.get(c.id) ?? [],
+        assetsBy.get(c.id) ?? [],
+        folderCountBy.get(c.id) ?? 0,
+      ),
+    );
+  }
+  return out;
+}
+
+function toPublicCompany(
+  s: StoreShape,
+  c: InternalCompany,
+  rollup?: ReturnType<typeof rollupFromLists>,
+): Company {
+  return { ...c, ...(rollup ?? companyRollup(s, c.id)), isDemo: isDemoCompany(c) };
 }
 
 function toPublicFolder(s: StoreShape, f: InternalFolder): Folder {
@@ -1346,8 +1422,9 @@ function toPublicFolder(s: StoreShape, f: InternalFolder): Folder {
 export function listCompanies(): Company[] {
   const s = store();
   tick(s);
+  const rollups = buildAllCompanyRollups(s);
   return Array.from(s.companies.values())
-    .map((c) => toPublicCompany(s, c))
+    .map((c) => toPublicCompany(s, c, rollups.get(c.id)))
     // Our own organization (GMI) sorts first, then clients alphabetically.
     .sort(
       (a, b) =>
@@ -6244,21 +6321,25 @@ export function computeMetrics(filter?: { companyId?: string }): QuantifyMetrics
     open: count,
   }));
 
+  // Precompute each finding's timestamps once — the loop below scans every
+  // finding for each of 14 days, and re-parsing date strings inside that
+  // (28 `new Date(...).getTime()` calls per finding) is the expensive part;
+  // a single pass to numbers up front turns the rest into plain int compares.
+  const firstSeenMs = all.map((f) => new Date(f.firstSeen).getTime());
+  const resolvedAtMs = all.map((f) => (f.resolvedAt ? new Date(f.resolvedAt).getTime() : null));
   const trend: QuantifyMetrics["trend"] = [];
   for (let d = 13; d >= 0; d--) {
     const dayEnd = now - d * 86_400_000;
+    const dayStart = dayEnd - 86_400_000;
     const date = new Date(dayEnd).toISOString().slice(0, 10);
-    const openAt = all.filter((f) => {
-      const seen = new Date(f.firstSeen).getTime() <= dayEnd;
-      const resolvedBefore = f.resolvedAt && new Date(f.resolvedAt).getTime() <= dayEnd;
-      return seen && !resolvedBefore;
-    }).length;
-    const resolvedThatDay = all.filter(
-      (f) =>
-        f.resolvedAt &&
-        new Date(f.resolvedAt).getTime() > dayEnd - 86_400_000 &&
-        new Date(f.resolvedAt).getTime() <= dayEnd,
-    ).length;
+    let openAt = 0;
+    let resolvedThatDay = 0;
+    for (let i = 0; i < all.length; i++) {
+      const resolved = resolvedAtMs[i];
+      const resolvedBefore = resolved !== null && resolved <= dayEnd;
+      if (firstSeenMs[i] <= dayEnd && !resolvedBefore) openAt += 1;
+      if (resolved !== null && resolved > dayStart && resolved <= dayEnd) resolvedThatDay += 1;
+    }
     trend.push({ date, open: openAt, resolved: resolvedThatDay });
   }
 
@@ -6302,15 +6383,42 @@ export function computeMetrics(filter?: { companyId?: string }): QuantifyMetrics
   for (const f of open) riskPriorityCounts[f.riskPriority] += 1;
 
   // Scan coverage for the composite: scoped to a company, or summed globally.
+  // The global case used to call companyCoverage() once per company, each of
+  // which does a full store scan — O(companies x store size). Grouping assets
+  // and findings by company in one pass each first keeps the per-company
+  // matching (no cross-company key leakage) but drops total work to
+  // O(store size) regardless of company count.
   const globalCoverage = filter?.companyId
     ? companyCoverage(s, filter.companyId)
-    : Array.from(s.companies.keys()).reduce(
-        (acc, cid) => {
-          const c = companyCoverage(s, cid);
-          return { known: acc.known + c.known, scanned: acc.scanned + c.scanned };
-        },
-        { known: 0, scanned: 0 },
-      );
+    : (() => {
+        const assetsByCompany = new Map<string, InternalAsset[]>();
+        for (const a of s.assets.values()) {
+          const list = assetsByCompany.get(a.companyId);
+          if (list) list.push(a);
+          else assetsByCompany.set(a.companyId, [a]);
+        }
+        const findingAssetsByCompany = new Map<string, Set<string>>();
+        for (const f of s.findings.values()) {
+          const key = f.asset.trim().toLowerCase();
+          const set = findingAssetsByCompany.get(f.companyId);
+          if (set) set.add(key);
+          else findingAssetsByCompany.set(f.companyId, new Set([key]));
+        }
+        let known = 0;
+        let scanned = 0;
+        for (const [cid, assets] of assetsByCompany) {
+          known += assets.length;
+          const findingAssets = findingAssetsByCompany.get(cid);
+          if (!findingAssets) continue;
+          for (const a of assets) {
+            const keys = [a.identifier, a.hostname, ...a.ipAddresses].map((k) =>
+              k.trim().toLowerCase(),
+            );
+            if (keys.some((k) => findingAssets.has(k))) scanned += 1;
+          }
+        }
+        return { known, scanned };
+      })();
 
   const topRisks = [...open]
     .sort((a, b) => b.realRisk - a.realRisk)
