@@ -244,6 +244,36 @@ export type Finding = {
   // `overdue` is only ever true while the finding is still open.
   dueAt?: string | null;
   overdue?: boolean;
+
+  // Set when an active compensating control matched this finding and
+  // reduced its real-risk score — the pre-reduction score plus which
+  // control did it, so the UI can show why the number is lower than
+  // CVSS/KEV/exposure alone would suggest.
+  compensatingControl?: { id: string; title: string; effectivenessPct: number; scoreBeforeControl: number } | null;
+};
+
+export type CompensatingControlStatus = "Active" | "Expired" | "Under Review";
+
+// A documented mitigation that reduces a finding's real-risk score without
+// closing the underlying vulnerability — the standard PCI DSS concept,
+// generalized to every compliance framework this console scores against.
+// Scoped to one customer; matches findings by CVE and/or asset (a control
+// with neither set applies to every open finding for that customer).
+export type CompensatingControl = {
+  id: string;
+  companyId: string;
+  companyName: string;
+  title: string;
+  description: string;
+  cveMatch: string | null; // exact CVE, e.g. "CVE-2023-44487"
+  assetMatch: string | null; // substring match against the finding's asset field
+  effectivenessPct: number; // 0-100, how much this reduces the real-risk score
+  status: CompensatingControlStatus;
+  evidence: string;
+  reviewBy: string | null; // ISO date this control needs re-validation
+  createdAt: string;
+  createdBy: string;
+  updatedAt: string;
 };
 
 export type ComplianceStatus = "Pass" | "Fail" | "At Risk" | "Info";

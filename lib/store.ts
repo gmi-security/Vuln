@@ -18,6 +18,7 @@ import {
   isKev,
   isKevRansomware,
   refreshKevFromCisa,
+  riskPriority,
 } from "@/lib/threat";
 import {
   tidalConfig,
@@ -92,6 +93,8 @@ import type {
   AttackEntry,
   AttackHop,
   AttackPathResult,
+  CompensatingControl,
+  CompensatingControlStatus,
   CompliancePosture,
   ComplianceRequirement,
   ComplianceResult,
@@ -110,6 +113,28 @@ import type {
   SlaSettings,
   SlaSeverity,
 } from "@/lib/types";
+
+// Best-matching active compensating control for a finding, within its own
+// company only. A control with neither cveMatch nor assetMatch set applies
+// to every finding for that customer; otherwise every filter it does set
+// must match. When more than one control matches, the strongest
+// (highest-effectiveness) one applies — effects don't stack, so a stack of
+// weak controls can't be misread as equivalent to one strong one.
+function bestCompensatingControl(
+  s: StoreShape,
+  companyId: string,
+  cve: string,
+  asset: string,
+): CompensatingControl | null {
+  let best: CompensatingControl | null = null;
+  for (const c of s.compensatingControls.values()) {
+    if (c.companyId !== companyId || c.status !== "Active") continue;
+    if (c.cveMatch && c.cveMatch.toUpperCase() !== cve.toUpperCase()) continue;
+    if (c.assetMatch && !asset.toLowerCase().includes(c.assetMatch.toLowerCase())) continue;
+    if (!best || c.effectivenessPct > best.effectivenessPct) best = c;
+  }
+  return best;
+}
 
 // Threat + environment enrichment for a finding: KEV status, the asset's
 // exposure/criticality (from the asset inventory when known, else inferred
@@ -135,7 +160,7 @@ function riskFields(
     ? inventory.criticality
     : classifyAsset(input.asset).criticality;
   const assetSource: AssetSource = inventory ? inventory.source : "inferred";
-  const { score, priority } = computeRealRisk({
+  const { score: rawScore } = computeRealRisk({
     cvss: input.cvss,
     kev,
     epss: input.epss,
@@ -144,6 +169,11 @@ function riskFields(
     criticality,
     ransomware,
   });
+  const control = bestCompensatingControl(s, input.companyId, input.cve, input.asset);
+  const score = control
+    ? Math.max(0, Math.round(rawScore * (1 - control.effectivenessPct / 100)))
+    : rawScore;
+  const priority = riskPriority(score);
   return {
     kev,
     ransomware,
@@ -152,6 +182,14 @@ function riskFields(
     assetSource,
     realRisk: score,
     riskPriority: priority,
+    compensatingControl: control
+      ? {
+          id: control.id,
+          title: control.title,
+          effectivenessPct: control.effectivenessPct,
+          scoreBeforeControl: rawScore,
+        }
+      : null,
   };
 }
 
@@ -303,6 +341,7 @@ type StoreShape = {
   scans: Map<string, InternalScan>;
   findings: Map<string, Finding>;
   assets: Map<string, InternalAsset>;
+  compensatingControls: Map<string, CompensatingControl>;
   settings: Settings;
   meta: StoreMeta;
   seeded: boolean;
@@ -347,6 +386,7 @@ function store(): StoreShape {
       scans: new Map(),
       findings: new Map(),
       assets: new Map(),
+      compensatingControls: new Map(),
       settings: defaultSettings(),
       meta: defaultMeta(),
       seeded: false,
@@ -366,6 +406,7 @@ function serializeStore(s: StoreShape) {
     scans: [...s.scans.entries()],
     findings: [...s.findings.entries()],
     assets: [...s.assets.entries()],
+    compensatingControls: [...s.compensatingControls.entries()],
     settings: s.settings,
     meta: s.meta,
     counter: s.counter,
@@ -378,6 +419,7 @@ function deserializeStore(obj: {
   scans?: [string, InternalScan][];
   findings?: [string, Finding][];
   assets?: [string, InternalAsset][];
+  compensatingControls?: [string, CompensatingControl][];
   settings?: unknown;
   meta?: unknown;
   counter?: number;
@@ -388,6 +430,7 @@ function deserializeStore(obj: {
     scans: new Map(obj.scans ?? []),
     findings: new Map(obj.findings ?? []),
     assets: new Map(obj.assets ?? []),
+    compensatingControls: new Map(obj.compensatingControls ?? []),
     settings: normalizeSettings(obj.settings),
     meta: normalizeMeta(obj.meta),
     seeded: true,
@@ -1567,6 +1610,127 @@ export function deleteFolder(id: string): { deleted: true } | { error: string } 
   if (hasScans) return { error: "Move this folder's scans before deleting it." };
   s.folders.delete(id);
   markDirty();
+  return { deleted: true };
+}
+
+// --- compensating controls ---------------------------------------------------
+
+// Re-scores one company's findings — used after a compensating control is
+// created/edited/deleted, since that changes what riskFields() computes for
+// every finding it matches. Scans the whole findings map (no per-company
+// index exists) but only does real rescore work for matches; yields
+// periodically like rescoreAllFindings so a large customer's finding count
+// can't block the event loop for the whole pass.
+async function rescoreCompanyFindings(s: StoreShape, companyId: string): Promise<void> {
+  let i = 0;
+  for (const f of s.findings.values()) {
+    i += 1;
+    if (f.companyId === companyId) rescoreFinding(s, f);
+    if (i % 500 === 0) await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+export function listCompensatingControls(companyId?: string): CompensatingControl[] {
+  const s = store();
+  return Array.from(s.compensatingControls.values())
+    .filter((c) => !companyId || c.companyId === companyId)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export async function createCompensatingControl(input: {
+  companyId: string;
+  title: string;
+  description?: string;
+  cveMatch?: string | null;
+  assetMatch?: string | null;
+  effectivenessPct: number;
+  status?: CompensatingControlStatus;
+  evidence?: string;
+  reviewBy?: string | null;
+  createdBy: string;
+}): Promise<CompensatingControl | { error: string }> {
+  const s = store();
+  const company = s.companies.get(input.companyId);
+  if (!company) return { error: "Company not found." };
+  if (!input.title.trim()) return { error: "Title is required." };
+  if (!Number.isFinite(input.effectivenessPct)) {
+    return { error: "Effectiveness must be a number between 0 and 100." };
+  }
+  const id = nextId(s, "CC");
+  const now = new Date().toISOString();
+  const control: CompensatingControl = {
+    id,
+    companyId: input.companyId,
+    companyName: company.name,
+    title: input.title.trim(),
+    description: (input.description ?? "").trim(),
+    cveMatch: input.cveMatch?.trim().toUpperCase() || null,
+    assetMatch: input.assetMatch?.trim() || null,
+    effectivenessPct: Math.max(0, Math.min(100, Math.round(input.effectivenessPct))),
+    status: input.status ?? "Active",
+    evidence: (input.evidence ?? "").trim(),
+    reviewBy: input.reviewBy || null,
+    createdAt: now,
+    createdBy: input.createdBy,
+    updatedAt: now,
+  };
+  s.compensatingControls.set(id, control);
+  markDirty();
+  await rescoreCompanyFindings(s, input.companyId);
+  return control;
+}
+
+export async function updateCompensatingControl(
+  id: string,
+  patch: Partial<{
+    title: string;
+    description: string;
+    cveMatch: string | null;
+    assetMatch: string | null;
+    effectivenessPct: number;
+    status: CompensatingControlStatus;
+    evidence: string;
+    reviewBy: string | null;
+  }>,
+): Promise<CompensatingControl | { error: string }> {
+  const s = store();
+  const existing = s.compensatingControls.get(id);
+  if (!existing) return { error: "Compensating control not found." };
+  if (patch.title !== undefined && !patch.title.trim()) {
+    return { error: "Title is required." };
+  }
+  if (patch.effectivenessPct !== undefined && !Number.isFinite(patch.effectivenessPct)) {
+    return { error: "Effectiveness must be a number between 0 and 100." };
+  }
+  const next: CompensatingControl = {
+    ...existing,
+    ...(patch.title !== undefined ? { title: patch.title.trim() } : {}),
+    ...(patch.description !== undefined ? { description: patch.description.trim() } : {}),
+    ...(patch.cveMatch !== undefined ? { cveMatch: patch.cveMatch?.trim().toUpperCase() || null } : {}),
+    ...(patch.assetMatch !== undefined ? { assetMatch: patch.assetMatch?.trim() || null } : {}),
+    ...(patch.effectivenessPct !== undefined
+      ? { effectivenessPct: Math.max(0, Math.min(100, Math.round(patch.effectivenessPct))) }
+      : {}),
+    ...(patch.status !== undefined ? { status: patch.status } : {}),
+    ...(patch.evidence !== undefined ? { evidence: patch.evidence.trim() } : {}),
+    ...(patch.reviewBy !== undefined ? { reviewBy: patch.reviewBy || null } : {}),
+    updatedAt: new Date().toISOString(),
+  };
+  s.compensatingControls.set(id, next);
+  markDirty();
+  await rescoreCompanyFindings(s, existing.companyId);
+  return next;
+}
+
+export async function deleteCompensatingControl(
+  id: string,
+): Promise<{ deleted: true } | { error: string }> {
+  const s = store();
+  const existing = s.compensatingControls.get(id);
+  if (!existing) return { error: "Compensating control not found." };
+  s.compensatingControls.delete(id);
+  markDirty();
+  await rescoreCompanyFindings(s, existing.companyId);
   return { deleted: true };
 }
 

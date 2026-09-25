@@ -14,9 +14,11 @@ import {
   ExternalLink,
   RefreshCcw,
   Search,
+  ShieldCheck,
   X,
 } from "lucide-react";
 import VulnShell from "@/components/VulnShell";
+import RealRiskInfo from "@/components/RealRiskInfo";
 import {
   PanelCard,
   Pill,
@@ -546,7 +548,10 @@ export default function VulnFindingsPage() {
             <div>ID</div>
             <div>Finding</div>
             <div>Asset</div>
-            <div>Real risk</div>
+            <div className="flex items-center gap-1.5">
+              Real risk
+              <RealRiskInfo />
+            </div>
             <div>{cvssVersion === "vpr" ? "VPR" : `CVSS ${cvssVersion}`}</div>
             <div>Severity</div>
             <div>Status</div>
@@ -748,8 +753,9 @@ export default function VulnFindingsPage() {
           <div className={`flex-1 space-y-6 px-6 py-6 ${scrollAreaClass}`}>
             <div className="rounded-2xl border border-[rgba(179,14,20,0.20)] bg-[linear-gradient(180deg,#0c0708,#070707)] p-5">
               <div className="flex items-center justify-between">
-                <div className="text-xs uppercase tracking-[0.24em] text-zinc-500">
+                <div className="flex items-center gap-1.5 text-xs uppercase tracking-[0.24em] text-zinc-500">
                   Real risk
+                  <RealRiskInfo />
                 </div>
                 <Pill className={riskPriorityClass[focus.riskPriority]}>
                   {focus.riskPriority}
@@ -764,6 +770,13 @@ export default function VulnFindingsPage() {
                 </span>
                 <span className="mb-1 text-sm text-zinc-500">/ 100</span>
               </div>
+              {focus.compensatingControl ? (
+                <div className="mt-3 flex items-center gap-2 rounded-xl border border-emerald-900/60 bg-[rgba(16,185,129,0.08)] px-3 py-2 text-xs text-emerald-300">
+                  <ShieldCheck size={14} />
+                  Reduced from {focus.compensatingControl.scoreBeforeControl} by{" "}
+                  {focus.compensatingControl.effectivenessPct}% — {focus.compensatingControl.title}
+                </div>
+              ) : null}
               <div className="mt-4 grid grid-cols-2 gap-2 text-xs">
                 <RiskFactor
                   label="Base CVSS"

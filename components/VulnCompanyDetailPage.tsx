@@ -19,6 +19,7 @@ import {
 import { IconAlertTriangle, IconBug, IconGauge, IconRadar } from "@tabler/icons-react";
 import VulnShell from "@/components/VulnShell";
 import NewScanModal from "@/components/NewScanModal";
+import CompensatingControlsPanel from "@/components/CompensatingControlsPanel";
 import {
   PanelCard,
   Pill,
@@ -485,6 +486,8 @@ export default function VulnCompanyDetailPage({
           </div>
         )}
       </PanelCard>
+
+      {company ? <CompensatingControlsPanel companyId={company.id} /> : null}
 
       {folders.map((folder) => {
         const folderScans = byFolder.get(folder.id) ?? [];
