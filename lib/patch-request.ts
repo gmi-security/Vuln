@@ -5,6 +5,7 @@ import { dashboardCsv } from "./dashboard-csv";
 export type PatchRequest = {
   cve: string; collectedAt: string; region: string; hostCount: number; findingCount: number;
   csvRows: number; title: string; body: string; csv: string; warnings: string[];
+  tenantIds: string[]; hostScope: string[];
 };
 export type Remediation = {
   id: string; title: string; action: string; link: string; vendorUrl: string;
@@ -22,10 +23,12 @@ const list = (value: unknown): string[] => Array.isArray(value) ? [...new Set(va
 const num = (value: unknown): number | null => typeof value === "number" && Number.isFinite(value) ? value : null;
 const shown = (value: unknown): string => value === null || value === undefined || value === "" ? "Not supplied" : String(value);
 
-export function parsePatchInput(value: unknown): { source: "crowdstrike"; cve: string } {
+export function parsePatchInput(value: unknown): { source: "crowdstrike"; cve: string; tenantId?: string } {
   const cve = (value as { cve?: unknown } | null)?.cve;
   if (typeof cve !== "string" || !/^CVE-\d{4}-\d{4,19}$/i.test(cve)) throw new DashboardError("Choose a valid CVE identifier.");
-  return { source: "crowdstrike", cve: cve.toUpperCase() };
+  const tenantId = (value as { tenantId?: unknown }).tenantId;
+  if (tenantId !== undefined && (typeof tenantId !== "string" || !/^[a-f0-9]{32}$/i.test(tenantId))) throw new DashboardError("Choose a valid CrowdStrike tenant.");
+  return { source: "crowdstrike", cve: cve.toUpperCase(), ...(typeof tenantId === "string" ? { tenantId: tenantId.toLowerCase() } : {}) };
 }
 
 export function normalizeRemediation(raw: Json): Remediation {
@@ -129,7 +132,8 @@ export function buildPatchRequest(cve: string, records: PatchFinding[], region: 
     "", "COLLECTION NOTES", "All matching pages were collected. This is a paginated observation, not an atomic CrowdStrike snapshot. Counts can differ from the cached dashboard.",
     ...warnings, `Attach ${cve}-patch-request.csv. No ticket has been sent to ConnectWise.`].join("\n");
   const csv = dashboardCsv({ columns: names.map((name) => ({ name, type: "keyword" })), rows: csvRows, truncated: false });
-  const packet: PatchRequest = { cve, collectedAt, region, hostCount: hosts.size, findingCount: records.length, csvRows: csvRows.length, title, body, csv, warnings: [...warnings] };
+  const packet: PatchRequest = { cve, collectedAt, region, hostCount: hosts.size, findingCount: records.length, csvRows: csvRows.length, title, body, csv, warnings: [...warnings],
+    tenantIds: [...new Set(ordered.map(row => row.cid))].sort(), hostScope: [...hosts.keys()].sort() };
   if (new TextEncoder().encode(JSON.stringify(packet)).length > 32 * 1024 * 1024) throw new DashboardError("This patch request exceeds the 32 MiB export limit. No partial export was prepared.");
   return packet;
 }

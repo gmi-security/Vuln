@@ -196,13 +196,13 @@ async function collectRecords(auth: Awaited<ReturnType<typeof session>>, deadlin
 }
 
 export async function executePatchRequest(connection: CrowdStrikeConnection, value: unknown, budgetMs = 300_000): Promise<PatchRequest> {
-  const { cve } = parsePatchInput(value), startedAt = new Date().toISOString();
+  const { cve, tenantId } = parsePatchInput(value), startedAt = new Date().toISOString();
   const deadline = Date.now() + budgetMs, auth = await session(connection, deadline);
   const records = new Map<string, PatchFinding>(), cursors = new Set<string>();
   let after = "", expected: number | undefined, received = 0, bytes = 0, complete = false;
   for (let page = 0; page < 500; page++) {
     const url = new URL(`${auth.base}/spotlight/combined/vulnerabilities/v1`);
-    url.searchParams.set("filter", `cve.id:'${cve}'+status:['open','reopen']`);
+    url.searchParams.set("filter", `cve.id:'${cve}'+status:['open','reopen']${tenantId ? `+cid:'${tenantId}'` : ""}`);
     url.searchParams.set("limit", "500");
     for (const facet of ["cve", "host_info", "remediation"]) url.searchParams.append("facet", facet);
     if (after) url.searchParams.set("after", after);
@@ -215,6 +215,7 @@ export async function executePatchRequest(connection: CrowdStrikeConnection, val
     if (expected! > 250_000 || received > 250_000) throw new DashboardError("This CVE exceeds the 250,000-finding collection limit. No partial export was prepared.");
     for (const raw of body.resources) {
       const row = normalizePatchFinding(raw, cve), key = JSON.stringify([row.cid, row.id]), old = records.get(key);
+      if (tenantId && row.cid !== tenantId) throw new DashboardError("CrowdStrike returned a finding for another tenant. No export was prepared.");
       if (old && JSON.stringify(old) !== JSON.stringify(row)) throw new DashboardError("A finding changed during collection. Retry to prepare a consistent patch request.");
       if (!old) {
         bytes += Buffer.byteLength(JSON.stringify(row));

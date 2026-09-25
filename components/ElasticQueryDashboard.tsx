@@ -7,6 +7,8 @@ import { dashboardCsv } from "@/lib/dashboard-csv";
 import { dashboardRequest } from "@/lib/dashboard-browser-client";
 import VulnShell from "@/components/VulnShell";
 import Results from "@/components/QueryDashboardResults";
+import ConnectWiseSettings from "@/components/ConnectWiseSettings";
+import PatchTicketRegister from "@/components/PatchTicketRegister";
 import styles from "./QueryDashboard.module.css";
 import { OPEN_VULN_TREND } from "@/lib/elastic-query-templates";
 import { inputClass, PanelCard, selectClass } from "@/components/ui";
@@ -29,7 +31,8 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
   const [connectionOpen, setConnectionOpen] = useState(false);
   const [endpoint, setEndpoint] = useState(initial.endpoint ?? "");
   const [apiKey, setApiKey] = useState("");
-  const [connectionSource, setConnectionSource] = useState<DashboardSource>("crowdstrike");
+  const [connectionSource, setConnectionSource] = useState<DashboardSource | "connectwise">("crowdstrike");
+  const [ticketsOpen, setTicketsOpen] = useState(false);
   const [region, setRegion] = useState(initial.crowdstrike?.region ?? "us-1");
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
@@ -157,6 +160,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
         </> : <>
           <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || dashboard.queries.length < 2 || Boolean(draft)} onClick={() => { setLayoutIds(dashboard.queries.map((query) => query.id)); setConnectionOpen(false); setDeleting(null); setMessage(""); setError(""); }}><LayoutGrid size={16} />Arrange tiles</button>
           <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => setConnectionOpen((open) => !open)}><Settings2 size={16} />Connections</button>
+          <button type="button" className={ghostButtonClass} onClick={() => setTicketsOpen(open => !open)}>Patch tickets</button>
           <button type="button" className={primaryButtonClass} disabled={!anyConnected || Boolean(busy)} onClick={() => edit()}><Plus size={16} />Add tile</button>
         </>}
       </>}
@@ -178,12 +182,13 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
 
     {dashboard.canManage && connectionOpen && <PanelCard eyebrow="Connections" description="Choose the source to connect. Credentials stay encrypted on the server.">
       <label className="mb-5 block text-sm text-zinc-300">Connection source
-        <select disabled={Boolean(busy)} className={`${selectClass} mt-2 block`} value={connectionSource} onChange={(event) => setConnectionSource(event.target.value as DashboardSource)}>
+        <select disabled={Boolean(busy)} className={`${selectClass} mt-2 block`} value={connectionSource} onChange={(event) => setConnectionSource(event.target.value as DashboardSource | "connectwise")}>
           <option value="crowdstrike">CrowdStrike{dashboard.crowdstrike?.connected ? " — connected" : ""}</option>
           <option value="elastic">Elasticsearch{dashboard.connected ? " — connected" : ""}</option>
+          <option value="connectwise">ConnectWise · Patch tickets</option>
         </select>
       </label>
-      {connectionSource === "crowdstrike" ? <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void action("connection", async () => {
+      {connectionSource === "connectwise" ? <ConnectWiseSettings /> : connectionSource === "crowdstrike" ? <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void action("connection", async () => {
         await post("connections/crowdstrike", { region, clientId, clientSecret }); setClientId(""); setClientSecret("");
         await reload(); setConnectionOpen(false); setMessage("CrowdStrike connection verified. Choose Add query to create an FQL tile.");
       }); }}>
@@ -216,6 +221,8 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
         <button className={primaryButtonClass} disabled={Boolean(busy) || !dashboard.storageReady}>{busy === "connection" ? "Testing connection…" : "Test and save connection"}</button>
       </form>}
     </PanelCard>}
+
+    {ticketsOpen && <PatchTicketRegister />}
 
     {dashboard.canManage && draft && <PanelCard eyebrow={draft.id ? "Edit tile" : "Add tile"} description="Add the tile immediately. Its results load on the dashboard. Preview is optional.">
       <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void action("save", async () => {
