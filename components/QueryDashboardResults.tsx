@@ -11,7 +11,7 @@ import type { Severity } from "@/lib/types";
 import styles from "./QueryDashboard.module.css";
 
 function severity(value: string): Severity | undefined {
-  return Object.keys(severityBarColor).find((key) => key.toLowerCase() === value.toLowerCase()) as Severity | undefined;
+  return Object.keys(severityBarColor).find((key) => key.toLowerCase() === value.replace(/_cves$/i, "").toLowerCase()) as Severity | undefined;
 }
 
 export function formatResultValue(value: string | number | boolean | null, column: string): string {
@@ -45,7 +45,8 @@ export default function QueryDashboardResults({ result, display, chart, prepareP
   );
   if (isChartDisplay(display)) return <><ElasticResultChart result={result} definition={{ display, chart }} onCveSelect={cve => setSelected({ cve })} />{details}</>;
   if (display !== "table" && canShowMetrics(result)) {
-    const severityMetrics = result.columns.every((column) => severity(column.name) || /^(none|unknown)$/i.test(column.name));
+    const uniqueCves = result.columns.every((column) => /^(critical|high|medium|low|none|unknown)_cves$/i.test(column.name));
+    const severityMetrics = result.columns.every((column) => severity(column.name) || /^(none|unknown)(_cves)?$/i.test(column.name));
     const total = severityMetrics ? result.rows[0].reduce<number>((sum, value) => sum + (typeof value === "number" ? value : 0), 0) : 0;
     return <><div className={styles.metrics}>
       {result.columns.map((column, index) => {
@@ -53,10 +54,10 @@ export default function QueryDashboardResults({ result, display, chart, prepareP
         const share = total > 0 && typeof value === "number" ? value / total * 100 : 0;
         const color = level ? severityBarColor[level] : "#b30e14";
         return <div key={column.name} className={styles.metric}>
-          <div className={styles.metricLabel}>{level && <span className={styles.dot} style={{ background: color }} />}<CveText text={columnLabel(column.name)} onSelect={cve => setSelected({ cve })} /></div>
+          <div className={styles.metricLabel}>{level && <span className={styles.dot} style={{ background: color }} />}<CveText text={columnLabel(column.name).replace(/ cves$/i, " CVEs")} onSelect={cve => setSelected({ cve })} /></div>
           <div className={styles.metricValue}>{formatResultValue(value, column.name)}</div>
           {severityMetrics && <><div className={styles.track} aria-hidden="true"><span style={{ width: `${share}%`, background: color }} /></div>
-            <div className={styles.metricNote}>{total > 0 ? `${share.toFixed(1)}% of returned findings` : "No findings"}</div></>}
+            <div className={styles.metricNote}>{total > 0 ? `${share.toFixed(1)}% of ${uniqueCves ? "unique CVEs" : "returned findings"}` : uniqueCves ? "No open CVEs" : "No findings"}</div></>}
         </div>;
       })}
     </div>{details}</>;

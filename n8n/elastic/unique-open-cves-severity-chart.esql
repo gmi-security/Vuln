@@ -1,0 +1,31 @@
+// Counts unique CVEs in retained CrowdStrike imports, not live Falcon findings.
+// Resolve each stable finding's latest state before selecting open findings.
+// One severity per CVE: highest observed severity among its open findings.
+FROM logs-crowdstrike.vulnerability-*
+| WHERE event.id IS NOT NULL AND @timestamp < NOW()
+| EVAL source_status = TO_LOWER(COALESCE(crowdstrike.vulnerability.status, "unknown")),
+    severity = TO_UPPER(COALESCE(vulnerability.severity, "UNKNOWN"))
+| EVAL state_code = CASE(source_status IN ("open", "reopen"), 1, source_status == "closed", 0, 2),
+    severity_rank = CASE(severity == "CRITICAL", 5, severity == "HIGH", 4, severity == "MEDIUM", 3, severity == "LOW", 2, severity == "NONE", 1, 0)
+// Numeric latest-state aggregation avoids building large timestamp strings.
+// Stable finding IDs identify a fixed device/product/CVE finding.
+| EVAL state_number = TO_LONG(@timestamp) * 100 + state_code * 10 + severity_rank
+| STATS latest_state = MAX(state_number) BY event.id, vulnerability.id
+| EVAL state = (latest_state % 100) / 10, rank = latest_state % 10,
+    cve = TO_UPPER(COALESCE(vulnerability.id, ""))
+| WHERE state == 1 AND cve RLIKE "CVE-[0-9]{4}-[0-9]{4,19}"
+| STATS highest_rank = MAX(rank) BY cve
+| STATS critical_cves = COUNT(*) WHERE highest_rank == 5,
+    high_cves = COUNT(*) WHERE highest_rank == 4,
+    medium_cves = COUNT(*) WHERE highest_rank == 3,
+    low_cves = COUNT(*) WHERE highest_rank == 2,
+    none_cves = COUNT(*) WHERE highest_rank == 1,
+    unknown_cves = COUNT(*) WHERE highest_rank == 0
+| LIMIT 6
+| EVAL severity_order = [0,1,2,3,4,5]
+| MV_EXPAND severity_order
+| EVAL severity = CASE(severity_order == 0, "Critical", severity_order == 1, "High", severity_order == 2, "Medium", severity_order == 3, "Low", severity_order == 4, "None", "Unknown"),
+    unique_cves = CASE(severity_order == 0, critical_cves, severity_order == 1, high_cves, severity_order == 2, medium_cves, severity_order == 3, low_cves, severity_order == 4, none_cves, unknown_cves)
+| SORT severity_order
+| KEEP severity, unique_cves
+| LIMIT 6

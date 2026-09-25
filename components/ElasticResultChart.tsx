@@ -6,6 +6,7 @@ import { chartData, columnLabel, type QueryDefinition, type QueryResult } from "
 import CveText, { cveIdentifier } from "@/components/CveText";
 
 const colors = ["#f87171", "#fbbf24", "#38bdf8", "#a78bfa", "#34d399", "#fb923c", "#f472b6", "#a3e635"];
+const severityColors: Record<string, string> = { critical: "#b30e14", high: "#f97316", medium: "#f5a623", low: "#4aa3ff", none: "#71717a", unknown: "#a1a1aa" };
 const number = (value: number) => value.toLocaleString("en-US", { maximumFractionDigits: 2 });
 const short = (text: string, length = 24) => text.length > length ? `${text.slice(0, length - 1)}…` : text;
 
@@ -28,6 +29,7 @@ export default function ElasticResultChart({ result, definition, onCveSelect }: 
   try { data = chartData(result, definition); }
   catch (error) { return <p role="alert" className="py-4 text-sm text-amber-300">{error instanceof Error ? error.message : "Unable to display this chart."}</p>; }
   const { points, category, value, scale } = data;
+  const color = (label: string, index: number) => /severity/i.test(category) ? severityColors[label.toLowerCase()] ?? colors[index % colors.length] : colors[index % colors.length];
   const chartRole = onCveSelect && points.some(point => cveIdentifier(point.label)) ? "group" : "img";
   function cveAction(label: string) {
     const cve = cveIdentifier(label);
@@ -62,18 +64,18 @@ export default function ElasticResultChart({ result, definition, onCveSelect }: 
           {points.map((point, index) => {
             const share = (point.value ?? 0) / unit / scaledTotal;
             const start = offset; offset += share;
-            return share > 0 ? <circle key={index} cx="120" cy="120" r="82" fill="none" stroke={colors[index % colors.length]}
+            return share > 0 ? <circle key={index} cx="120" cy="120" r="82" fill="none" stroke={color(point.label, index)}
               strokeWidth="34" pathLength="100" strokeDasharray={`${share * 100} ${100 - share * 100}`}
               strokeDashoffset={-start * 100} transform="rotate(-90 120 120)" tabIndex={0} {...cveAction(point.label)}>
               <title>{`${point.label}: ${format(point.value!)} (${number(share * 100)}%)`}</title>
             </circle> : null;
           })}
-          <text x="120" y="115" textAnchor="middle" fill="#a1a1aa" fontSize="13">Total</text>
+          <text x="120" y="115" textAnchor="middle" fill="#a1a1aa" fontSize="13">{value === "unique_cves" ? "Unique CVEs" : "Total"}</text>
           <text x="120" y="142" textAnchor="middle" fill="#fafafa" fontSize="22">{Number.isFinite(total) ? short(format(total), 13) : "See values"}</text>
         </svg>
         <ul className="max-h-80 min-w-0 flex-1 space-y-2 overflow-y-auto text-sm">
           {points.map((point, index) => <li key={index} className="flex items-start gap-3">
-            <span className="mt-1 h-3 w-3 shrink-0 rounded-sm" style={{ background: colors[index % colors.length] }} />
+            <span className="mt-1 h-3 w-3 shrink-0 rounded-sm" style={{ background: color(point.label, index) }} />
             <span className="min-w-0 flex-1 break-words text-zinc-300"><CveText text={point.label} onSelect={onCveSelect} /></span>
             <span className="shrink-0 tabular-nums text-white">{point.value === null ? "No data" : `${format(point.value)} · ${number(point.value / unit / scaledTotal * 100)}%`}</span>
           </li>)}
@@ -91,7 +93,7 @@ export default function ElasticResultChart({ result, definition, onCveSelect }: 
           return <g key={index} tabIndex={0} {...cveAction(point.label)}>
             <title>{`${point.label}: ${point.value === null ? "No data" : format(point.value)}`}</title>
             <text x={left - 12} y={y + 18} textAnchor="end" fill="#d4d4d8" fontSize="13">{short(point.label)}</text>
-            {point.value !== null && <rect x={Math.min(x, zero)} y={y} width={Math.abs(x - zero)} height="25" rx="3" fill={colors[index % colors.length]} />}
+            {point.value !== null && <rect x={Math.min(x, zero)} y={y} width={Math.abs(x - zero)} height="25" rx="3" fill={color(point.label, index)} />}
             <text x={width - 100} y={y + 18} fill="#fafafa" fontSize="13">{point.value === null ? "No data" : short(format(point.value), 13)}</text>
           </g>;
         })}

@@ -95,6 +95,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
   }
   function edit(query?: DashboardQuery) {
     setDraft(query ? { id: query.id, title: query.title, query: query.query, display: query.display,
+      description: query.description,
       source: query.source, crowdstrike: query.crowdstrike,
       refreshMinutes: query.refreshMinutes, enabled: query.enabled, chart: query.chart } : dashboard.crowdstrike?.connected ? crowdStrikeDraft() : newDraft());
     setPreview(query?.result ?? null); setError(""); setMessage("");
@@ -239,6 +240,9 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
         <label className="block text-sm text-zinc-300">Title
           <input required maxLength={100} className={`${inputClass} mt-2`} value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="e.g. Critical vulnerabilities" />
         </label>
+        {draft.description !== undefined && <label className="block text-sm text-zinc-300">Result details
+          <textarea maxLength={600} rows={3} className={`${inputClass} mt-2`} value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} />
+        </label>}
         {!draft.id && draft.source !== "crowdstrike" && <div className="space-y-2">
           <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => {
             setDraft({ title: "Open vulnerabilities — daily trend", query: OPEN_VULN_TREND, display: "line", chart: { category: "day", value: "open_vulns" }, refreshMinutes: 1440, enabled: true });
@@ -406,8 +410,9 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
         {query.error && <p className="mb-4 text-sm text-amber-300">{query.error} {query.result ? "Showing the last successful result." : "No successful result yet."}</p>}
         {stale && !query.error && <p className="mb-4 text-sm text-amber-300">These results are older than two refresh intervals.</p>}
         {query.result ? <Results result={query.result} display={query.display} chart={query.chart} preparePatch={dashboard.canManage && dashboard.crowdstrike?.connected} /> : !query.error && <p role="status" className="flex items-center gap-2 py-5 text-zinc-400"><RefreshCw size={16} className="animate-spin" />Loading results in the background…</p>}
-        {(query.result?.note || (query.id === "asset-coverage" && query.source !== "crowdstrike")) && <details className={styles.resultDetails}>
+        {(query.description || query.result?.note || (query.id === "asset-coverage" && query.source !== "crowdstrike")) && <details className={styles.resultDetails}>
           <summary>Result details</summary>
+          {query.description && <p>{query.description}</p>}
           {query.result?.note && <p>{query.result.note}</p>}
           {query.id === "asset-coverage" && query.source !== "crowdstrike" && <p>Asset inventory coverage, not vulnerability counts. Records from the last 25 hours; assets last seen within seven days. IDs recorded as both managed and unmanaged can count in both categories.</p>}
         </details>}

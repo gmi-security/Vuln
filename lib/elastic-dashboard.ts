@@ -24,6 +24,7 @@ export type QueryInput = { query: string; source?: DashboardSource; crowdstrike?
 export type QueryDefinition = QueryInput & {
   id: string;
   title: string;
+  description?: string;
   query: string;
   display: "auto" | "metrics" | "table" | "bar" | "line" | "doughnut";
   chart?: { category: string; value: string };
@@ -105,6 +106,7 @@ export function parseDefinition(value: unknown, id: string): QueryDefinition {
   const body = value as Record<string, unknown>;
   if (!/^[a-zA-Z0-9-]{1,64}$/.test(id)) throw new DashboardError("Invalid query ID.");
   if (typeof body.title !== "string" || !body.title.trim() || body.title.length > 100) throw new DashboardError("Enter a title of at most 100 characters.");
+  if (body.description !== undefined && (typeof body.description !== "string" || body.description.length > 600)) throw new DashboardError("Keep the tile description under 600 characters.");
   if (!["auto", "metrics", "table", "bar", "line", "doughnut"].includes(String(body.display))) throw new DashboardError("Choose a display type.");
   let chart: QueryDefinition["chart"];
   if (isChartDisplay(String(body.display))) {
@@ -122,6 +124,7 @@ export function parseDefinition(value: unknown, id: string): QueryDefinition {
   if (input.crowdstrike?.view === "severity-counts" && !["auto", "metrics", "table"].includes(String(body.display))) throw new DashboardError("Use Number cards or Table for severity counts.");
   if (input.crowdstrike?.view === "cve-devices" && !["auto", "table"].includes(String(body.display))) throw new DashboardError("Use Table for affected devices by CVE.");
   return { id, title: body.title.trim(), ...input, display: body.display as QueryDefinition["display"],
+    ...(typeof body.description === "string" && body.description.trim() ? { description: body.description.trim() } : {}),
     refreshMinutes: body.refreshMinutes, enabled: body.enabled, ...(chart ? { chart } : {}) };
 }
 
@@ -159,7 +162,7 @@ export function canShowMetrics(result: QueryResult): boolean {
 }
 
 export function columnLabel(name: string): string {
-  return name.replace(/_pct$/i, " percentage").replace(/[_.]/g, " ").replace(/^./, (char) => char.toUpperCase());
+  return name.replace(/_pct$/i, " percentage").replace(/[_.]/g, " ").replace(/\bcves\b/gi, "CVEs").replace(/^./, (char) => char.toUpperCase());
 }
 
 export function isChartDisplay(display: string): display is "bar" | "line" | "doughnut" {
