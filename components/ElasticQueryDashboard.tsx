@@ -347,7 +347,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
           <button className={primaryButtonClass} disabled={Boolean(busy) || !sourceConnected(draft.source) || (isChartDisplay(draft.display) && (!draft.chart?.category || !draft.chart?.value))}>{busy === "save" ? "Saving tile…" : draft.id ? "Save changes" : "Add to dashboard"}</button>
           <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => { setDraft(null); setPreview(null); }}>Cancel</button>
         </div>
-        {preview && <div className="border-t border-zinc-800 pt-4"><p className="mb-3 text-sm text-zinc-400">Preview</p><Results result={preview} display={draft.display} chart={draft.chart} />{preview.note && <p className="mt-3 text-xs text-zinc-500">{preview.note}</p>}</div>}
+        {preview && <div className="border-t border-zinc-800 pt-4"><p className="mb-3 text-sm text-zinc-400">Preview</p><Results result={preview} display={draft.display} chart={draft.chart} preparePatch={dashboard.canManage && dashboard.crowdstrike?.connected} />{preview.note && <p className="mt-3 text-xs text-zinc-500">{preview.note}</p>}</div>}
         </fieldset>
       </form>
     </PanelCard>}
@@ -405,7 +405,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
         </div>}
         {query.error && <p className="mb-4 text-sm text-amber-300">{query.error} {query.result ? "Showing the last successful result." : "No successful result yet."}</p>}
         {stale && !query.error && <p className="mb-4 text-sm text-amber-300">These results are older than two refresh intervals.</p>}
-        {query.result ? <Results result={query.result} display={query.display} chart={query.chart} preparePatch={dashboard.canManage && query.source === "crowdstrike" && query.crowdstrike?.view === "cve-devices" && dashboard.crowdstrike?.connected} /> : !query.error && <p role="status" className="flex items-center gap-2 py-5 text-zinc-400"><RefreshCw size={16} className="animate-spin" />Loading results in the background…</p>}
+        {query.result ? <Results result={query.result} display={query.display} chart={query.chart} preparePatch={dashboard.canManage && dashboard.crowdstrike?.connected} /> : !query.error && <p role="status" className="flex items-center gap-2 py-5 text-zinc-400"><RefreshCw size={16} className="animate-spin" />Loading results in the background…</p>}
         {(query.result?.note || (query.id === "asset-coverage" && query.source !== "crowdstrike")) && <details className={styles.resultDetails}>
           <summary>Result details</summary>
           {query.result?.note && <p>{query.result.note}</p>}

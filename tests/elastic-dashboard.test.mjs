@@ -24,6 +24,7 @@ async function load(path) {
   const module = new SourceTextModule(js, { identifier: path });
   modules.set(path, module);
   await module.link(async (specifier) => {
+    if (specifier === "@/components/CveText") return load("components/CveText.tsx");
     if (specifier === "@/lib/elastic-dashboard") return load("lib/elastic-dashboard.ts");
     if (overrides.has(specifier)) {
       const values = overrides.get(specifier);

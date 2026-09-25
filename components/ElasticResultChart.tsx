@@ -1,14 +1,16 @@
 "use client";
 
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import { chartData, columnLabel, type QueryDefinition, type QueryResult } from "@/lib/elastic-dashboard";
+
+import CveText, { cveIdentifier } from "@/components/CveText";
 
 const colors = ["#f87171", "#fbbf24", "#38bdf8", "#a78bfa", "#34d399", "#fb923c", "#f472b6", "#a3e635"];
 const number = (value: number) => value.toLocaleString("en-US", { maximumFractionDigits: 2 });
 const short = (text: string, length = 24) => text.length > length ? `${text.slice(0, length - 1)}…` : text;
 
-export default function ElasticResultChart({ result, definition }: {
-  result: QueryResult; definition: Pick<QueryDefinition, "display" | "chart">;
+export default function ElasticResultChart({ result, definition, onCveSelect }: {
+  result: QueryResult; definition: Pick<QueryDefinition, "display" | "chart">; onCveSelect?: (cve: string) => void;
 }) {
   const titleId = useId();
   const container = useRef<HTMLDivElement>(null);
@@ -26,6 +28,14 @@ export default function ElasticResultChart({ result, definition }: {
   try { data = chartData(result, definition); }
   catch (error) { return <p role="alert" className="py-4 text-sm text-amber-300">{error instanceof Error ? error.message : "Unable to display this chart."}</p>; }
   const { points, category, value, scale } = data;
+  const chartRole = onCveSelect && points.some(point => cveIdentifier(point.label)) ? "group" : "img";
+  function cveAction(label: string) {
+    const cve = cveIdentifier(label);
+    if (!cve || !onCveSelect) return {};
+    const select = () => onCveSelect(cve);
+    return { role: "button" as const, tabIndex: 0, "aria-label": `View ${cve} details`, style: { cursor: "pointer" }, onClick: select,
+      onKeyDown: (event: KeyboardEvent<SVGElement>) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); select(); } } };
+  }
   const values = points.flatMap((point) => point.value === null ? [] : [point.value]);
   const format = (n: number) => `${number(n)}${/(?:_pct|_percent|percentage)$/i.test(value) ? "%" : ""}`;
   const description = `${columnLabel(value)} by ${columnLabel(category)}`;
@@ -46,7 +56,7 @@ export default function ElasticResultChart({ result, definition }: {
     let offset = 0;
     chart = scaledTotal === 0 ? <p className="py-10 text-center text-zinc-400">All values are zero. No proportions to display.</p> :
       <div className="flex flex-wrap items-center gap-8">
-        <svg viewBox="0 0 240 240" className="w-60 max-w-full shrink-0" role="img" aria-labelledby={titleId}>
+        <svg viewBox="0 0 240 240" className="w-60 max-w-full shrink-0" role={chartRole} aria-labelledby={titleId}>
           <title id={titleId}>{description}</title>
           <circle cx="120" cy="120" r="82" fill="none" stroke="#27272a" strokeWidth="34" />
           {points.map((point, index) => {
@@ -54,7 +64,7 @@ export default function ElasticResultChart({ result, definition }: {
             const start = offset; offset += share;
             return share > 0 ? <circle key={index} cx="120" cy="120" r="82" fill="none" stroke={colors[index % colors.length]}
               strokeWidth="34" pathLength="100" strokeDasharray={`${share * 100} ${100 - share * 100}`}
-              strokeDashoffset={-start * 100} transform="rotate(-90 120 120)" tabIndex={0}>
+              strokeDashoffset={-start * 100} transform="rotate(-90 120 120)" tabIndex={0} {...cveAction(point.label)}>
               <title>{`${point.label}: ${format(point.value!)} (${number(share * 100)}%)`}</title>
             </circle> : null;
           })}
@@ -64,7 +74,7 @@ export default function ElasticResultChart({ result, definition }: {
         <ul className="max-h-80 min-w-0 flex-1 space-y-2 overflow-y-auto text-sm">
           {points.map((point, index) => <li key={index} className="flex items-start gap-3">
             <span className="mt-1 h-3 w-3 shrink-0 rounded-sm" style={{ background: colors[index % colors.length] }} />
-            <span className="min-w-0 flex-1 break-words text-zinc-300">{point.label}</span>
+            <span className="min-w-0 flex-1 break-words text-zinc-300"><CveText text={point.label} onSelect={onCveSelect} /></span>
             <span className="shrink-0 tabular-nums text-white">{point.value === null ? "No data" : `${format(point.value)} · ${number(point.value / unit / scaledTotal * 100)}%`}</span>
           </li>)}
         </ul>
@@ -72,13 +82,13 @@ export default function ElasticResultChart({ result, definition }: {
   } else if (definition.display === "bar") {
     const width = plotWidth, left = 195, plot = width - left - 115, zero = left + fraction(0) * plot;
     chart = <div className="max-h-[520px] overflow-auto">
-      <svg viewBox={`0 0 ${width} ${points.length * 36 + 45}`} width={width} height={points.length * 36 + 45} className="block max-w-none" role="img" aria-labelledby={titleId}>
+      <svg viewBox={`0 0 ${width} ${points.length * 36 + 45}`} width={width} height={points.length * 36 + 45} className="block max-w-none" role={chartRole} aria-labelledby={titleId}>
         <title id={titleId}>{`${description}. Bars start at zero.`}</title>
         <line x1={zero} x2={zero} y1="5" y2={points.length * 36} stroke="#71717a" />
         {points.map((point, index) => {
           const x = point.value === null ? zero : left + fraction(point.value) * plot;
           const y = index * 36 + 5;
-          return <g key={index} tabIndex={0}>
+          return <g key={index} tabIndex={0} {...cveAction(point.label)}>
             <title>{`${point.label}: ${point.value === null ? "No data" : format(point.value)}`}</title>
             <text x={left - 12} y={y + 18} textAnchor="end" fill="#d4d4d8" fontSize="13">{short(point.label)}</text>
             {point.value !== null && <rect x={Math.min(x, zero)} y={y} width={Math.abs(x - zero)} height="25" rx="3" fill={colors[index % colors.length]} />}
@@ -117,15 +127,15 @@ export default function ElasticResultChart({ result, definition }: {
       return `${command}${x(index)},${y(point.value)}`;
     }).join(" ");
     chart = <div className="overflow-x-auto">
-      <svg viewBox={`0 0 ${plotWidth} 335`} width={plotWidth} height="335" className="block max-w-none" role="img" aria-labelledby={titleId}>
+      <svg viewBox={`0 0 ${plotWidth} 335`} width={plotWidth} height="335" className="block max-w-none" role={chartRole} aria-labelledby={titleId}>
         <title id={titleId}>{`${description}. Null values leave gaps in the line.`}</title>
         {[0, 0.25, 0.5, 0.75, 1].map((tick) => <g key={tick}>
           <line x1={left} x2={left + width} y1={top + height * tick} y2={top + height * tick} stroke="#27272a" />
           <text x={left - 10} y={top + height * tick + 4} textAnchor="end" fill="#d4d4d8" fontSize="12">{short(format((high - tick * (high - low)) * unit), 12)}</text>
         </g>)}
         <path d={path} fill="none" stroke="#38bdf8" strokeWidth="3" />
-        {points.map((point, index) => <g key={index}>
-          {point.value !== null && <circle cx={x(index)} cy={y(point.value)} r="4" fill="#38bdf8" stroke="#09090b" tabIndex={0}>
+        {points.map((point, index) => <g key={index} {...cveAction(point.label)}>
+          {point.value !== null && <circle cx={x(index)} cy={y(point.value)} r="4" fill="#38bdf8" stroke="#09090b" tabIndex={onCveSelect && cveIdentifier(point.label) ? -1 : 0}>
             <title>{`${point.label}: ${format(point.value)}`}</title>
           </circle>}
           {ticks.has(index) &&
@@ -146,7 +156,7 @@ export default function ElasticResultChart({ result, definition }: {
       <div className="mt-3 max-h-80 overflow-auto"><table className="w-full text-left">
         <caption className="sr-only">{description}</caption>
         <thead><tr><th scope="col" className="p-2">{columnLabel(category)}</th><th scope="col" className="p-2">{columnLabel(value)}</th></tr></thead>
-        <tbody>{points.map((point, index) => <tr key={index} className="border-t border-zinc-800"><td className="break-words p-2">{point.label}</td><td className="p-2">{point.value === null ? "No data" : format(point.value)}</td></tr>)}</tbody>
+        <tbody>{points.map((point, index) => <tr key={index} className="border-t border-zinc-800"><td className="break-words p-2"><CveText text={point.label} onSelect={onCveSelect} /></td><td className="p-2">{point.value === null ? "No data" : format(point.value)}</td></tr>)}</tbody>
       </table></div>
     </details>
   </div>;
