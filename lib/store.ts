@@ -1468,10 +1468,15 @@ export function listCompanies(): Company[] {
   const rollups = buildAllCompanyRollups(s);
   return Array.from(s.companies.values())
     .map((c) => toPublicCompany(s, c, rollups.get(c.id)))
-    // Our own organization (GMI) sorts first, then clients alphabetically.
+    // Our own organization (GMI) sorts first as a fixed reference point;
+    // client companies then sort by risk (worst composite score first) —
+    // the customers needing attention surface at the top instead of being
+    // buried alphabetically, matching how the rest of the console prioritizes
+    // (see the Prioritize page).
     .sort(
       (a, b) =>
         (a.kind === "internal" ? 0 : 1) - (b.kind === "internal" ? 0 : 1) ||
+        b.compositeScore - a.compositeScore ||
         a.name.localeCompare(b.name),
     );
 }

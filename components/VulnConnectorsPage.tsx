@@ -486,7 +486,7 @@ function IntegrationCard({ card }: { card: CardData }) {
   // Auto-expand a connector that isn't configured yet — that's the one case
   // where someone landing here actually needs the env-var checklist visible
   // immediately, not tucked behind a click.
-  const [expanded, setExpanded] = useState(!card.configured);
+  const [expanded, setExpanded] = useState(!card.configured && card.status !== "Planned");
   const isTidal = card.id === "tidal";
   const isCrowdstrike = card.id === "crowdstrike" || card.id === "crowdstrike-devices";
   // Offline upload fallback: Tidal takes a CSV inventory export, Burp takes an
@@ -945,6 +945,24 @@ function IntegrationCard({ card }: { card: CardData }) {
   );
 }
 
+// What's live and in use surfaces first; what's not actionable yet (Planned)
+// sinks to the bottom. Alphabetical within each group so the order is stable
+// and predictable, not just "whatever the API happened to return."
+const STATUS_ORDER: Record<string, number> = {
+  Connected: 0,
+  "Demo Mode": 1,
+  "CSV Upload": 1,
+  "Not Configured": 2,
+  Error: 2,
+  Planned: 3,
+};
+function byStatusThenName(a: { status: string; name: string }, b: { status: string; name: string }) {
+  return (
+    (STATUS_ORDER[a.status] ?? 2) - (STATUS_ORDER[b.status] ?? 2) ||
+    a.name.localeCompare(b.name)
+  );
+}
+
 export default function VulnConnectorsPage() {
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [integrations, setIntegrations] = useState<CardData[]>([]);
@@ -952,11 +970,11 @@ export default function VulnConnectorsPage() {
   useEffect(() => {
     void fetch("/api/connectors", { cache: "no-store" })
       .then((res) => res.json())
-      .then((json) => setConnectors(json.connectors ?? []))
+      .then((json) => setConnectors([...(json.connectors ?? [])].sort(byStatusThenName)))
       .catch(() => undefined);
     void fetch("/api/integrations", { cache: "no-store" })
       .then((res) => res.json())
-      .then((json) => setIntegrations(json.integrations ?? []))
+      .then((json) => setIntegrations([...(json.integrations ?? [])].sort(byStatusThenName)))
       .catch(() => undefined);
   }, []);
 
