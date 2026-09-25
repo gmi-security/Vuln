@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { ExternalLink, RefreshCw, Upload } from "lucide-react";
+import { ChevronDown, ExternalLink, RefreshCw, Upload } from "lucide-react";
 import {
   IconBug,
   IconClipboardCheck,
@@ -483,6 +483,10 @@ function IntegrationCard({ card }: { card: CardData }) {
     };
   }, []);
   const [uploading, setUploading] = useState(false);
+  // Auto-expand a connector that isn't configured yet — that's the one case
+  // where someone landing here actually needs the env-var checklist visible
+  // immediately, not tucked behind a click.
+  const [expanded, setExpanded] = useState(!card.configured);
   const isTidal = card.id === "tidal";
   const isCrowdstrike = card.id === "crowdstrike" || card.id === "crowdstrike-devices";
   // Offline upload fallback: Tidal takes a CSV inventory export, Burp takes an
@@ -678,173 +682,212 @@ function IntegrationCard({ card }: { card: CardData }) {
       eyebrow={card.vendor}
       actions={<Pill className={statusClass[card.status]}>{card.status}</Pill>}
     >
-      <div className="flex items-start gap-4">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="flex w-full items-start gap-4 text-left"
+        aria-expanded={expanded}
+      >
         <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full border border-[rgba(179,14,20,0.22)] bg-[rgba(179,14,20,0.08)] text-[#b30e14]">
           <Icon size={26} />
         </div>
-        <div className="min-w-0">
-          <h2 className="flex flex-wrap items-center gap-2 text-xl font-semibold text-white">
-            {card.name}
-            {isCrowdstrike && health?.tenants && health.tenants.length > 1 ? (
-              <span className="rounded-full border border-[rgba(179,14,20,0.35)] bg-[rgba(179,14,20,0.1)] px-2 py-0.5 text-[11px] font-medium text-[#ff8a8a]">
-                {health.tenants.length} tenants
-              </span>
-            ) : null}
-          </h2>
-          <div className="mt-1 text-sm text-zinc-500">{card.kind}</div>
-          <p className="mt-3 text-sm leading-relaxed text-zinc-400">
-            {card.description}
-          </p>
-        </div>
-      </div>
-
-      <div className="mt-5 flex flex-wrap gap-2">
-        {card.capabilities.map((cap) => (
-          <span
-            key={cap}
-            className="rounded-full border border-zinc-800 bg-zinc-950 px-3 py-1 text-xs text-zinc-300"
-          >
-            {cap}
-          </span>
-        ))}
-      </div>
-
-      <div className="mt-5 rounded-2xl border border-zinc-900 bg-[#090909] p-4">
-        <div className="flex items-center justify-between gap-3">
-          <div className="text-xs uppercase tracking-[0.24em] text-zinc-500">
-            Configuration
-          </div>
-          {healthUrl && card.configured ? (
-            <span
-              title={health?.message ?? "Checking reachability…"}
-              className={`inline-flex items-center gap-1.5 text-xs ${
-                health === undefined
-                  ? "text-zinc-500"
-                  : health?.reachable
-                    ? "text-emerald-300"
-                    : "text-[#ff8a8a]"
-              }`}
-            >
-              <span
-                className={`h-1.5 w-1.5 rounded-full ${
-                  health === undefined
-                    ? "animate-pulse bg-zinc-600"
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 className="flex flex-wrap items-center gap-2 text-xl font-semibold text-white">
+              {card.name}
+              {isCrowdstrike && health?.tenants && health.tenants.length > 1 ? (
+                <span className="rounded-full border border-[rgba(179,14,20,0.35)] bg-[rgba(179,14,20,0.1)] px-2 py-0.5 text-[11px] font-medium text-[#ff8a8a]">
+                  {health.tenants.length} tenants
+                </span>
+              ) : null}
+            </h2>
+            <div className="flex shrink-0 items-center gap-3">
+              {healthUrl && card.configured ? (
+                <span
+                  title={health?.message ?? "Checking reachability…"}
+                  className={`inline-flex items-center gap-1.5 text-xs ${
+                    health === undefined
+                      ? "text-zinc-500"
+                      : health?.reachable
+                        ? "text-emerald-300"
+                        : "text-[#ff8a8a]"
+                  }`}
+                >
+                  <span
+                    className={`h-1.5 w-1.5 rounded-full ${
+                      health === undefined
+                        ? "animate-pulse bg-zinc-600"
+                        : health?.reachable
+                          ? "bg-emerald-400"
+                          : "bg-[#ff4d57]"
+                    }`}
+                  />
+                  {health === undefined
+                    ? "Checking…"
                     : health?.reachable
-                      ? "bg-emerald-400"
-                      : "bg-[#ff4d57]"
-                }`}
+                      ? "Live"
+                      : "Unreachable"}
+                </span>
+              ) : null}
+              <ChevronDown
+                size={16}
+                className={`text-zinc-500 transition-transform ${expanded ? "rotate-180" : ""}`}
               />
-              {health === undefined
-                ? "Checking…"
-                : health?.reachable
-                  ? "Live"
-                  : "Unreachable"}
-            </span>
+            </div>
+          </div>
+          <div className="mt-1 text-sm text-zinc-500">{card.kind}</div>
+          {expanded ? (
+            <p className="mt-3 text-sm leading-relaxed text-zinc-400">
+              {card.description}
+            </p>
           ) : null}
         </div>
-        {isCrowdstrike && health?.tenants && health.tenants.length > 1 ? (
-          <div className="mt-3 space-y-1.5 border-t border-zinc-900 pt-3">
-            {health.tenants.map((t) => (
-              <div
-                key={t.label}
-                title={t.message}
-                className="flex items-center justify-between gap-3 text-xs"
+      </button>
+
+      {expanded ? (
+        <>
+          <div className="mt-5 flex flex-wrap gap-2">
+            {card.capabilities.map((cap) => (
+              <span
+                key={cap}
+                className="rounded-full border border-zinc-800 bg-zinc-950 px-3 py-1 text-xs text-zinc-300"
               >
-                <span className="flex items-center gap-1.5 text-zinc-300">
-                  <span
-                    className={`h-1.5 w-1.5 rounded-full ${t.reachable ? "bg-emerald-400" : "bg-[#ff4d57]"}`}
-                  />
-                  {t.label === "primary" ? "GMI (own estate)" : t.label}
-                </span>
-                <span className={t.reachable ? "text-emerald-300" : "text-[#ff8a8a]"}>
-                  {t.status}
-                </span>
-              </div>
+                {cap}
+              </span>
             ))}
           </div>
-        ) : null}
-        <div className="mt-3 space-y-2">
-          {card.envVars.map((envVar) => (
-            <div key={envVar} className="flex items-center justify-between gap-4">
-              <code className="text-sm text-zinc-300">{envVar}</code>
-              <span
-                className={
-                  card.configured
-                    ? "text-xs text-emerald-300"
-                    : "text-xs text-zinc-500"
-                }
-              >
-                {card.configured ? "set" : "not set"}
-              </span>
+
+          <div className="mt-5 rounded-2xl border border-zinc-900 bg-[#090909] p-4">
+            <div className="text-xs uppercase tracking-[0.24em] text-zinc-500">
+              Configuration
             </div>
-          ))}
-        </div>
-      </div>
-
-      {supportsCsv ? (
-        <div
-          onDragOver={(e) => e.preventDefault()}
-          onDrop={(e) => {
-            e.preventDefault();
-            const file = e.dataTransfer.files?.[0];
-            if (file) void uploadCsv(file);
-          }}
-          className="mt-4 rounded-2xl border border-dashed border-zinc-800 bg-[#090909] p-4 text-center"
-        >
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept={uploadSpec?.accept}
-            className="hidden"
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) void uploadCsv(file);
-              e.target.value = "";
-            }}
-          />
-          <div className="text-xs uppercase tracking-[0.24em] text-zinc-500">
-            {uploadSpec?.eyebrow}
+            {isCrowdstrike && health?.tenants && health.tenants.length > 1 ? (
+              <div className="mt-3 space-y-1.5 border-t border-zinc-900 pt-3">
+                {health.tenants.map((t) => (
+                  <div
+                    key={t.label}
+                    title={t.message}
+                    className="flex items-center justify-between gap-3 text-xs"
+                  >
+                    <span className="flex items-center gap-1.5 text-zinc-300">
+                      <span
+                        className={`h-1.5 w-1.5 rounded-full ${t.reachable ? "bg-emerald-400" : "bg-[#ff4d57]"}`}
+                      />
+                      {t.label === "primary" ? "GMI (own estate)" : t.label}
+                    </span>
+                    <span className={t.reachable ? "text-emerald-300" : "text-[#ff8a8a]"}>
+                      {t.status}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            <div className="mt-3 space-y-2">
+              {card.envVars.map((envVar) => (
+                <div key={envVar} className="flex items-center justify-between gap-4">
+                  <code className="text-sm text-zinc-300">{envVar}</code>
+                  <span
+                    className={
+                      card.configured
+                        ? "text-xs text-emerald-300"
+                        : "text-xs text-zinc-500"
+                    }
+                  >
+                    {card.configured ? "set" : "not set"}
+                  </span>
+                </div>
+              ))}
+            </div>
           </div>
-          <p className="mt-2 text-sm text-zinc-400">{uploadSpec?.blurb}</p>
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={uploading}
-            className="mt-3 inline-flex items-center gap-2 rounded-lg border border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.12)] px-3 py-1.5 text-sm font-medium text-[#ff4d57] transition hover:bg-[rgba(179,14,20,0.2)] disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <Upload size={14} className={uploading ? "animate-pulse" : ""} />
-            {uploading ? "Importing…" : `Choose ${uploadSpec?.label} file`}
-          </button>
-        </div>
-      ) : null}
 
-      <div className="mt-4 flex items-center justify-between gap-3">
-        <a
-          href={card.docsUrl}
-          target="_blank"
-          rel="noreferrer"
-          className="inline-flex items-center gap-2 text-sm text-[#ff4d57] transition hover:text-white"
-        >
-          <ExternalLink size={14} />
-          Documentation
-        </a>
-        {syncUrl ? (
-          <button
-            type="button"
-            onClick={runSync}
-            disabled={syncing || !card.configured}
-            title={
-              card.configured
-                ? "Pull the latest scan results into the console"
-                : "Set this connector's environment variables to enable sync"
-            }
-            className="inline-flex items-center gap-2 rounded-lg border border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.12)] px-3 py-1.5 text-sm font-medium text-[#ff4d57] transition hover:bg-[rgba(179,14,20,0.2)] disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <RefreshCw size={14} className={syncing ? "animate-spin" : ""} />
-            {syncing ? "Syncing…" : "Sync now"}
-          </button>
-        ) : null}
-      </div>
+          {supportsCsv ? (
+            <div
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => {
+                e.preventDefault();
+                const file = e.dataTransfer.files?.[0];
+                if (file) void uploadCsv(file);
+              }}
+              className="mt-4 rounded-2xl border border-dashed border-zinc-800 bg-[#090909] p-4 text-center"
+            >
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept={uploadSpec?.accept}
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) void uploadCsv(file);
+                  e.target.value = "";
+                }}
+              />
+              <div className="text-xs uppercase tracking-[0.24em] text-zinc-500">
+                {uploadSpec?.eyebrow}
+              </div>
+              <p className="mt-2 text-sm text-zinc-400">{uploadSpec?.blurb}</p>
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploading}
+                className="mt-3 inline-flex items-center gap-2 rounded-lg border border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.12)] px-3 py-1.5 text-sm font-medium text-[#ff4d57] transition hover:bg-[rgba(179,14,20,0.2)] disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <Upload size={14} className={uploading ? "animate-pulse" : ""} />
+                {uploading ? "Importing…" : `Choose ${uploadSpec?.label} file`}
+              </button>
+            </div>
+          ) : null}
+
+          <div className="mt-4 flex items-center justify-between gap-3">
+            <a
+              href={card.docsUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-2 text-sm text-[#ff4d57] transition hover:text-white"
+            >
+              <ExternalLink size={14} />
+              Documentation
+            </a>
+            {syncUrl ? (
+              <button
+                type="button"
+                onClick={runSync}
+                disabled={syncing || !card.configured}
+                title={
+                  card.configured
+                    ? "Pull the latest scan results into the console"
+                    : "Set this connector's environment variables to enable sync"
+                }
+                className="inline-flex items-center gap-2 rounded-lg border border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.12)] px-3 py-1.5 text-sm font-medium text-[#ff4d57] transition hover:bg-[rgba(179,14,20,0.2)] disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <RefreshCw size={14} className={syncing ? "animate-spin" : ""} />
+                {syncing ? "Syncing…" : "Sync now"}
+              </button>
+            ) : null}
+          </div>
+        </>
+      ) : (
+        <div className="mt-4 flex items-center justify-between gap-3">
+          <span className="text-xs text-zinc-600">
+            {card.configured ? "Configured" : "Not configured"}
+          </span>
+          {syncUrl ? (
+            <button
+              type="button"
+              onClick={runSync}
+              disabled={syncing || !card.configured}
+              title={
+                card.configured
+                  ? "Pull the latest scan results into the console"
+                  : "Set this connector's environment variables to enable sync"
+              }
+              className="inline-flex items-center gap-2 rounded-lg border border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.12)] px-3 py-1.5 text-sm font-medium text-[#ff4d57] transition hover:bg-[rgba(179,14,20,0.2)] disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <RefreshCw size={14} className={syncing ? "animate-spin" : ""} />
+              {syncing ? "Syncing…" : "Sync now"}
+            </button>
+          ) : null}
+        </div>
+      )}
 
       {isCrowdstrike && syncing && csProgress ? (
         <div className="mt-3 rounded-lg border border-zinc-800 bg-[#090909] px-3 py-3">

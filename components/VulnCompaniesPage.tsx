@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Building2, Database, DownloadCloud, FolderKanban, Laptop, Plus, Radar, ShieldAlert, ShieldCheck, X } from "lucide-react";
+import { Building2, ChevronDown, Database, DownloadCloud, FolderKanban, Laptop, Plus, Radar, RefreshCw, ShieldAlert, ShieldCheck, X } from "lucide-react";
 import { IconAlertTriangle, IconBug } from "@tabler/icons-react";
 import VulnShell from "@/components/VulnShell";
 import {
@@ -36,6 +36,20 @@ export default function VulnCompaniesPage() {
     return () => {
       aliveRef.current = false;
     };
+  }, []);
+
+  // The five sync/import actions are secondary to "Add company" — tucked
+  // into one dropdown instead of five equal-weight buttons across the header.
+  const [syncMenuOpen, setSyncMenuOpen] = useState(false);
+  const syncMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    function onClick(event: MouseEvent) {
+      if (syncMenuRef.current && !syncMenuRef.current.contains(event.target as Node)) {
+        setSyncMenuOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onClick);
+    return () => document.removeEventListener("mousedown", onClick);
   }, []);
 
   const load = useCallback(async () => {
@@ -239,46 +253,46 @@ export default function VulnCompaniesPage() {
       subtitle="GMI (our own organization) plus the external clients we scan. Each company groups its scans into folders and rolls up its own open findings and exposure."
       actions={
         <>
-          <button
-            onClick={() => void syncTidal()}
-            disabled={importing}
-            className={`${ghostButtonClass} disabled:opacity-50`}
-          >
-            <Database size={16} className="text-zinc-400" />
-            Sync from Tidal
-          </button>
-          <button
-            onClick={() => void syncIntune()}
-            disabled={importing}
-            className={`${ghostButtonClass} disabled:opacity-50`}
-          >
-            <Laptop size={16} className="text-zinc-400" />
-            Sync from Intune
-          </button>
-          <button
-            onClick={() => void syncCrowdstrike()}
-            disabled={importing}
-            className={`${ghostButtonClass} disabled:opacity-50`}
-          >
-            <ShieldCheck size={16} className="text-zinc-400" />
-            Sync CrowdStrike hosts
-          </button>
-          <button
-            onClick={() => void importNessus()}
-            disabled={importing}
-            className={`${ghostButtonClass} disabled:opacity-50`}
-          >
-            <DownloadCloud size={16} className="text-zinc-400" />
-            {importing ? "Importing..." : "Import from Nessus"}
-          </button>
-          <button
-            onClick={() => void importDefender()}
-            disabled={importing}
-            className={`${ghostButtonClass} disabled:opacity-50`}
-          >
-            <ShieldAlert size={16} className="text-zinc-400" />
-            Import from Defender
-          </button>
+          <div ref={syncMenuRef} className="relative">
+            <button
+              onClick={() => setSyncMenuOpen((v) => !v)}
+              disabled={importing}
+              className={`${ghostButtonClass} disabled:opacity-50`}
+            >
+              <RefreshCw size={16} className={`text-zinc-400 ${importing ? "animate-spin" : ""}`} />
+              {importing ? "Syncing…" : "Sync data"}
+              <ChevronDown size={14} className={`text-zinc-500 transition-transform ${syncMenuOpen ? "rotate-180" : ""}`} />
+            </button>
+            <div
+              className={[
+                "absolute right-0 z-20 mt-2 w-64 overflow-hidden rounded-2xl border border-zinc-800 bg-[#0a0a0a] shadow-[0_20px_60px_rgba(0,0,0,0.5)] transition",
+                syncMenuOpen ? "visible opacity-100" : "invisible opacity-0",
+              ].join(" ")}
+            >
+              <div className="p-2">
+                {[
+                  { icon: Database, label: "Sync from Tidal", run: syncTidal },
+                  { icon: Laptop, label: "Sync from Intune", run: syncIntune },
+                  { icon: ShieldCheck, label: "Sync CrowdStrike hosts", run: syncCrowdstrike },
+                  { icon: DownloadCloud, label: "Import from Nessus", run: importNessus },
+                  { icon: ShieldAlert, label: "Import from Defender", run: importDefender },
+                ].map(({ icon: ItemIcon, label, run }) => (
+                  <button
+                    key={label}
+                    onClick={() => {
+                      setSyncMenuOpen(false);
+                      void run();
+                    }}
+                    disabled={importing}
+                    className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm text-zinc-200 transition hover:bg-zinc-900 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <ItemIcon size={16} className="text-zinc-400" />
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
           <button onClick={() => setShowNew(true)} className={primaryButtonClass}>
             <Plus size={16} />
             Add company
