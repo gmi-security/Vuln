@@ -3255,6 +3255,32 @@ function rescoreFinding(s: StoreShape, f: Finding): void {
   );
 }
 
+// Rescore every finding in the store. This is O(total findings) — tens of
+// thousands in production — and each rescore is real work (risk-field
+// recomputation), so running it as a single unyielding synchronous loop
+// blocks Node's event loop for the entire pass: no other request on this
+// single-instance app can be served until it finishes. Yielding periodically
+// keeps the app responsive during a full rescore instead of appearing to
+// hang. `matchesSource` flags which findings count toward the caller's
+// "findings rescored because of this import" total (real-risk change OR
+// belongs to the source being imported), matching the two call sites this
+// replaced.
+async function rescoreAllFindings(
+  s: StoreShape,
+  matchesSource: (f: Finding) => boolean,
+): Promise<number> {
+  let rescored = 0;
+  let i = 0;
+  for (const f of s.findings.values()) {
+    const before = f.realRisk;
+    rescoreFinding(s, f);
+    if (f.realRisk !== before || matchesSource(f)) rescored += 1;
+    i += 1;
+    if (i % 500 === 0) await new Promise((resolve) => setImmediate(resolve));
+  }
+  return rescored;
+}
+
 function upsertAsset(
   s: StoreShape,
   input: Omit<InternalAsset, "id" | "lastSynced"> & { id?: string },
@@ -4537,12 +4563,7 @@ export async function importTidalInventory(
     assetsUpserted += 1;
   }
 
-  let findingsRescored = 0;
-  for (const f of s.findings.values()) {
-    const before = f.realRisk;
-    rescoreFinding(s, f);
-    if (f.realRisk !== before || f.assetSource === "tidal") findingsRescored += 1;
-  }
+  const findingsRescored = await rescoreAllFindings(s, (f) => f.assetSource === "tidal");
 
   // If auto-scan is enabled, scan any newly-known assets that have no
   // coverage yet.
@@ -4935,12 +4956,7 @@ async function importEndpoints(
     assetsUpserted += 1;
   }
 
-  let findingsRescored = 0;
-  for (const f of s.findings.values()) {
-    const before = f.realRisk;
-    rescoreFinding(s, f);
-    if (f.realRisk !== before || f.assetSource === source) findingsRescored += 1;
-  }
+  const findingsRescored = await rescoreAllFindings(s, (f) => f.assetSource === source);
 
   let autoScan: AutoScanResult | undefined;
   if (s.settings.autoScanNewAssets) autoScan = await autoScanGaps();
