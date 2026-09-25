@@ -4,7 +4,7 @@ import { intuneConfig } from "@/lib/intune";
 import { falconConfig } from "@/lib/crowdstrike";
 import { grcConfig } from "@/lib/grc";
 import { emailConfigured, slackConfigured } from "@/lib/alerts";
-import { n8nConfig } from "@/lib/n8n";
+import { n8nConfig, n8nMcpConfig } from "@/lib/n8n";
 
 export const dynamic = "force-dynamic";
 
@@ -15,7 +15,8 @@ export async function GET() {
   const intune = intuneConfig();
   const falcon = falconConfig();
   const grc = grcConfig();
-  const n8n = n8nConfig();
+  const n8nWebhook = n8nConfig();
+  const n8nMcp = n8nMcpConfig();
   return NextResponse.json({
     integrations: [
       {
@@ -97,12 +98,12 @@ export async function GET() {
         vendor: "n8n",
         kind: "Workflow Automation (alternative data source)",
         description:
-          "General-purpose pipe into a workflow on the GMI n8n instance, for data sources without a dedicated connector of their own. Runs alongside the existing scanners — nothing is wired to it yet, so it's reachability-only until a specific workflow and data shape are decided.",
-        capabilities: ["Reachability probe", "Generic workflow call", "Supplemental source"],
-        envVars: ["N8N_WEBHOOK_URL"],
-        configured: Boolean(n8n),
-        status: n8n ? "Connected" : "Not Configured",
-        docsUrl: "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.webhook/",
+          "General-purpose pipe into a workflow on the GMI n8n instance, for data sources without a dedicated connector of their own. Two independent transports — a plain webhook trigger, or the MCP trigger over JSON-RPC — either is enough to connect. Runs alongside the existing scanners — nothing is wired to it yet, so it's reachability-only until a specific workflow and data shape are decided.",
+        capabilities: ["Reachability probe", "Webhook call", "MCP tool call", "Supplemental source"],
+        envVars: ["N8N_WEBHOOK_URL", "N8N_MCP_URL"],
+        configured: Boolean(n8nWebhook) || Boolean(n8nMcp),
+        status: n8nWebhook || n8nMcp ? "Connected" : "Not Configured",
+        docsUrl: "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-langchain.mcptrigger/",
       },
       {
         id: "resend-email",
