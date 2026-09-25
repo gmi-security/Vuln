@@ -4967,22 +4967,40 @@ export async function importFromCrowdstrike(): Promise<
   let assetsUpserted = 0;
   let findingsRescored = 0;
   let autoScan: AutoScanResult | undefined;
-  for (const config of configs) {
-    try {
-      const devices = await falconListAssets(config);
-      const r = await importEndpoints(s, devices, "crowdstrike", config.customerName);
-      assetsUpserted += r.assetsUpserted;
-      findingsRescored += r.findingsRescored;
-      if (r.autoScan) autoScan = r.autoScan;
-      tenants.push({ label: config.label, company: r.company, assetsUpserted: r.assetsUpserted });
-    } catch (err) {
+
+  // Fetch every tenant's devices concurrently — this is pure network I/O
+  // against independent CrowdStrike tenants, so there's no reason one
+  // tenant's fetch should wait on another's. Only the store-mutating import
+  // step below runs sequentially per tenant (cheap: no more network calls).
+  const fetched = await Promise.all(
+    configs.map(async (config) => {
+      try {
+        return { config, devices: await falconListAssets(config), error: null as string | null };
+      } catch (err) {
+        return {
+          config,
+          devices: null,
+          error: err instanceof Error ? err.message : "Failed to reach the CrowdStrike API.",
+        };
+      }
+    }),
+  );
+
+  for (const { config, devices, error } of fetched) {
+    if (error || !devices) {
       tenants.push({
         label: config.label,
         company: config.customerName ?? "(internal)",
         assetsUpserted: 0,
-        error: err instanceof Error ? err.message : "Failed to reach the CrowdStrike API.",
+        error: error ?? "Failed to reach the CrowdStrike API.",
       });
+      continue;
     }
+    const r = await importEndpoints(s, devices, "crowdstrike", config.customerName);
+    assetsUpserted += r.assetsUpserted;
+    findingsRescored += r.findingsRescored;
+    if (r.autoScan) autoScan = r.autoScan;
+    tenants.push({ label: config.label, company: r.company, assetsUpserted: r.assetsUpserted });
   }
   // Every tenant failed — surface as a top-level error rather than a silent
   // "0 assets synced" result.
@@ -5044,14 +5062,31 @@ export async function importFromCrowdstrikeSpotlight(): Promise<
   }
 
   const tenantErrors: string[] = [];
-  for (const config of configs) {
-    let items: Awaited<ReturnType<typeof spotlightListFindings>>;
-    try {
-      items = await spotlightListFindings(config);
-    } catch (err) {
-      tenantErrors.push(
-        `${config.label}: ${err instanceof Error ? err.message : "Failed to reach the CrowdStrike Spotlight API."}`,
-      );
+  // Fetch every tenant's Spotlight findings concurrently. Each tenant's own
+  // pagination must stay sequential internally (cursor-based, each page
+  // depends on the last — enforced inside spotlightListFindings), but
+  // there's no reason one tenant's up-to-200-page walk should block another
+  // tenant's walk from even starting: a large primary estate (tens of
+  // thousands of findings) was serializing behind every additional tenant,
+  // and vice versa, turning what should be independent fetches into one
+  // long chain.
+  const fetched = await Promise.all(
+    configs.map(async (config) => {
+      try {
+        return { config, items: await spotlightListFindings(config), error: null as string | null };
+      } catch (err) {
+        return {
+          config,
+          items: null,
+          error: err instanceof Error ? err.message : "Failed to reach the CrowdStrike Spotlight API.",
+        };
+      }
+    }),
+  );
+
+  for (const { config, items, error } of fetched) {
+    if (error || !items) {
+      tenantErrors.push(`${config.label}: ${error ?? "Failed to reach the CrowdStrike Spotlight API."}`);
       continue;
     }
 
