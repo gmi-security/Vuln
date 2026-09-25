@@ -7,7 +7,7 @@ import { DEFAULT_COVERAGE, DashboardError, validateDisplayResult, parseDefinitio
   type DashboardQuery, type ElasticDashboard, type QueryResult } from "./elastic-dashboard";
 import { normalizeEndpoint, sealConnection, type ElasticConnection } from "./elastic-query-client";
 import { DASHBOARD_CONNECTORS } from "./dashboard-query-connectors";
-import { parseCrowdStrikeConnection, sealCrowdStrike, testCrowdStrikeConnection } from "./crowdstrike-dashboard-client";
+import { executePatchRequest, parseCrowdStrikeConnection, sealCrowdStrike, testCrowdStrikeConnection } from "./crowdstrike-dashboard-client";
 import { type CrowdStrikeConnection } from "./crowdstrike-dashboard";
 
 let dedicatedPool: Pool | undefined;
@@ -226,6 +226,15 @@ export async function saveCrowdStrikeConnection(value: unknown, actor: string): 
     await client.query("COMMIT");
   } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
   triggerRefresh();
+}
+
+export async function preparePatchRequest(input: unknown, revision: number) {
+  const saved = await connection("crowdstrike");
+  if (!saved || saved.revision !== revision) throw new DashboardError("The CrowdStrike connection changed. Prepare the request again.", 409);
+  if (state.running >= 2) throw new DashboardError("Two queries are already running. Try again shortly.", 429);
+  state.running++;
+  try { return await executePatchRequest(saved.value as CrowdStrikeConnection, input); }
+  finally { state.running--; }
 }
 
 // Save settings first. Remote validation and execution belong to the refresh

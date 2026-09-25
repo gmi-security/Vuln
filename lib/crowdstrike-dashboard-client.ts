@@ -2,6 +2,7 @@ import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:cr
 import { setTimeout as delay } from "node:timers/promises";
 import { DashboardError, parseQueryInput, type QueryInput, type QueryResult } from "./elastic-dashboard";
 import { CROWDSTRIKE_DATASETS, FALCON_REGIONS, type CrowdStrikeConnection, type Vulnerability } from "./crowdstrike-dashboard";
+import { buildPatchRequest, normalizePatchFinding, normalizeRemediation, parsePatchInput, type PatchFinding, type PatchRequest } from "./patch-request";
 
 export function parseCrowdStrikeConnection(value: unknown): CrowdStrikeConnection {
   const body = value as CrowdStrikeConnection | null;
@@ -192,4 +193,73 @@ async function collectRecords(auth: Awaited<ReturnType<typeof session>>, deadlin
     cursors.add(after);
   }
   throw new DashboardError("CrowdStrike collection reached the page limit. Narrow the filter. No partial totals were saved.");
+}
+
+export async function executePatchRequest(connection: CrowdStrikeConnection, value: unknown, budgetMs = 300_000): Promise<PatchRequest> {
+  const { cve } = parsePatchInput(value), startedAt = new Date().toISOString();
+  const deadline = Date.now() + budgetMs, auth = await session(connection, deadline);
+  const records = new Map<string, PatchFinding>(), cursors = new Set<string>();
+  let after = "", expected: number | undefined, received = 0, bytes = 0, complete = false;
+  for (let page = 0; page < 500; page++) {
+    const url = new URL(`${auth.base}/spotlight/combined/vulnerabilities/v1`);
+    url.searchParams.set("filter", `cve.id:'${cve}'+status:['open','reopen']`);
+    url.searchParams.set("limit", "500");
+    for (const facet of ["cve", "host_info", "remediation"]) url.searchParams.append("facet", facet);
+    if (after) url.searchParams.set("after", after);
+    const body = await jsonRequest(url, { headers: auth.headers }, deadline, auth.secrets);
+    const pagination = body.meta?.pagination;
+    if (!Array.isArray(body.resources) || !Number.isSafeInteger(pagination?.total) || pagination.total < 0) throw new DashboardError("CrowdStrike returned invalid patch-request pagination. No partial export was prepared.");
+    if (expected !== undefined && expected !== pagination.total) throw new DashboardError("The matching CVE population changed during collection. Retry to collect all affected hosts.");
+    expected = pagination.total;
+    received += body.resources.length;
+    if (expected! > 250_000 || received > 250_000) throw new DashboardError("This CVE exceeds the 250,000-finding collection limit. No partial export was prepared.");
+    for (const raw of body.resources) {
+      const row = normalizePatchFinding(raw, cve), key = JSON.stringify([row.cid, row.id]), old = records.get(key);
+      if (old && JSON.stringify(old) !== JSON.stringify(row)) throw new DashboardError("A finding changed during collection. Retry to prepare a consistent patch request.");
+      if (!old) {
+        bytes += Buffer.byteLength(JSON.stringify(row));
+        if (bytes > 32 * 1024 * 1024) throw new DashboardError("The CVE details exceed the 32 MiB collection limit. No partial export was prepared.");
+        records.set(key, row);
+      }
+    }
+    if (pagination.after !== undefined && pagination.after !== null && typeof pagination.after !== "string") throw new DashboardError("CrowdStrike returned an invalid page cursor.");
+    after = pagination.after || "";
+    if (!after || records.size >= expected!) {
+      if (records.size !== expected) throw new DashboardError("CrowdStrike pagination ended without all matching findings. No partial export was prepared.");
+      complete = true; break;
+    }
+    if (!body.resources.length || cursors.has(after)) throw new DashboardError("CrowdStrike pagination did not advance. No partial export was prepared.");
+    cursors.add(after);
+  }
+  if (!complete) throw new DashboardError("CrowdStrike reached the page limit. No partial export was prepared.");
+  // The remediation facet usually supplies the entities. Resolve any referenced
+  // IDs still missing an action with the documented remediation entity endpoint.
+  const missing = new Set<string>();
+  for (const row of records.values()) {
+    const known = new Map(row.remediations.map((r) => [r.id, r]));
+    for (const id of new Set([...row.apps.flatMap((app) => app.ids), ...known.keys()])) if (!known.get(id)?.action) missing.add(id);
+  }
+  const hydrated = new Map<string, ReturnType<typeof normalizeRemediation>>();
+  const ids = [...missing];
+  for (let start = 0; start < ids.length; start += 100) {
+    const batch = ids.slice(start, start + 100), url = new URL(`${auth.base}/spotlight/entities/remediations/v2`);
+    for (const id of batch) url.searchParams.append("ids", id);
+    const body = await jsonRequest(url, { headers: auth.headers }, deadline, auth.secrets);
+    if (!Array.isArray(body.resources)) throw new DashboardError("CrowdStrike did not return remediation details. No patch request was prepared.");
+    for (const raw of body.resources) {
+      const remediation = normalizeRemediation(raw);
+      if (!batch.includes(remediation.id)) throw new DashboardError("CrowdStrike returned an unexpected remediation identifier.");
+      hydrated.set(remediation.id, remediation);
+    }
+    if (batch.some((id) => !hydrated.has(id))) throw new DashboardError("CrowdStrike did not return all referenced remediations. No partial export was prepared.");
+  }
+  for (const row of records.values()) {
+    const known = new Map(row.remediations.map((r) => [r.id, r]));
+    for (const id of new Set([...row.apps.flatMap((app) => app.ids), ...known.keys()])) {
+      if (!known.get(id)?.action && hydrated.has(id)) known.set(id, hydrated.get(id)!);
+    }
+    row.remediations = [...known.values()];
+  }
+  if (Date.now() >= deadline) throw new DashboardError("Patch request collection exceeded five minutes. Retry; no partial export was prepared.");
+  return buildPatchRequest(cve, [...records.values()], connection.region, startedAt, new Date().toISOString());
 }

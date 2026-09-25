@@ -48,7 +48,7 @@
 .arranging .tile { border-color:#b30e14; }
 .dragging { opacity:.5; }
 .drop { outline:2px solid #ff4d57; outline-offset:3px; }
-.detail { position:fixed; inset:0 0 0 auto; margin:0; padding:0; max-width:100vw; width:460px; max-height:100dvh; height:100dvh; border:0; border-left:1px solid #3f3f46; background:#090909; color:#ededed; box-shadow:-20px 0 80px #0007; }
+.detail { position:fixed; inset:0 0 0 auto; margin:0; padding:0; max-width:100vw; width:560px; max-height:100dvh; height:100dvh; border:0; border-left:1px solid #3f3f46; background:#090909; color:#ededed; box-shadow:-20px 0 80px #0007; }
 .detail::backdrop { background:#000a; }
 .detailBody { padding:26px; }
 .detailTop { display:flex; align-items:center; justify-content:space-between; gap:10px; color:#d4d4d8; font-size:14px; margin-bottom:24px; }
@@ -56,6 +56,15 @@
 .detailFields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:22px; margin-top:24px; padding-top:24px; border-top:1px solid #27272a; }
 .detailFields dt { font-size:13px; color:#d4d4d8; margin-bottom:6px; }
 .detailFields dd { font-size:18px; overflow-wrap:anywhere; }
+.patchSection { margin-top:28px; padding-top:24px; border-top:1px solid #3f3f46; }
+.patchSection h3 { font-size:18px; font-weight:600; }
+.patchSection > button { margin-top:16px; background:#b30e14; border-color:#dd3037; }
+.patchActions { display:flex; flex-wrap:wrap; gap:8px; margin:18px 0; }
+.patchLabel { display:block; margin:16px 0; font-size:14px; color:#ededed; }
+.patchLabel input, .patchLabel textarea { display:block; width:100%; margin-top:8px; padding:12px; background:#18181b; color:#ededed; border:1px solid #52525b; border-radius:8px; font-size:14px; line-height:1.6; }
+.patchLabel textarea { resize:vertical; min-height:180px; }
+.patchError { color:#ff9da3; font-size:14px; margin-top:14px; }
+.patchWarnings { padding-left:20px; list-style:disc; color:#fcd98b; font-size:14px; line-height:1.6; margin:14px 0; }
 @media(min-width:1500px) { .metrics { grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); } }
 @media(max-width:850px) { .tile { flex-basis:100%; } .tileCount { margin-left:0; } }
 @media(max-width:480px) { .tileHeader { padding:16px; } .tileContent { padding:0 16px 16px; } .tileFooter { padding:11px 16px; } .metrics { gap:16px; grid-template-columns:repeat(2,minmax(0,1fr)); } .detailBody { padding:20px; } }

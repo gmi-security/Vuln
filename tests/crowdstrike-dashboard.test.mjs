@@ -37,7 +37,7 @@ async function mockHttp(replies, work) {
   globalThis.fetch = async (url, init) => {
     if (new URL(url).pathname === "/spotlight/combined/vulnerabilities/v1") {
       const facets = new URL(url).searchParams.getAll("facet");
-      assert.ok(JSON.stringify(facets) === '["cve","host_info"]' || JSON.stringify(facets) === '["cve"]',
+      assert.ok(JSON.stringify(facets) === '["cve","host_info"]' || JSON.stringify(facets) === '["cve"]' || JSON.stringify(facets) === '["cve","host_info","remediation"]',
         "CrowdStrike requires separate facet parameters; CVE summaries omit host detail");
     }
     calls.push({ url: new URL(url), init });
@@ -292,4 +292,85 @@ test("rate limits retry with bounded waits; upstream messages redact credentials
       assert.match(error.message, /Bad field/); assert.doesNotMatch(error.message, /fake-/); return true;
     });
   });
+});
+
+const patchModel = (await load("lib/patch-request.ts")).namespace;
+const patchCve = "CVE-2026-12345";
+const remedy = (id = "patch-1") => ({ id, title: "Vendor update", action: 'Install version 2.0, then restart.\nVerify "closed".', link: "https://vendor.example/patch", reference: "KB123" });
+const patchRaw = (id, props = {}) => raw(id, {
+  cve: { id: patchCve, severity: "CRITICAL", base_score: 9.8, vector: "CVSS:3.1/AV:N", exprt_rating: "HIGH", exploit_status: 90, exploitability_score: 3.9, impact_score: 5.9, cisa_info: { is_cisa_kev: true }, description: "Test vulnerability" },
+  suppression_info: { is_suppressed: false },
+  apps: [{ vendor_normalized: "Vendor", product_name_normalized: "Product", product_name_version: "Product 1.0", remediation: { ids: ["patch-1"] }, remediation_info: { recommended_id: "patch-1" } }],
+  remediation: { entities: [remedy()] }, ...props
+});
+
+test("patch input accepts only an exact CVE and cannot inject FQL", () => {
+  assert.deepEqual(patchModel.parsePatchInput({ cve: "cve-2026-12345", query: "status:'closed'" }), { source: "crowdstrike", cve: patchCve });
+  for (const cve of ["CVE-2026-1", " CVE-2026-12345", "CVE-2026-12345'+status:'closed'", null]) assert.throws(() => patchModel.parsePatchInput({ cve }), /valid CVE/);
+});
+
+test("patch export collects beyond top 100, deduplicates findings and tenant-scopes devices", async () => {
+  const rows = Array.from({ length: 103 }, (_, i) => patchRaw(`finding-${i}`, { aid: `host-${i}`, host_info: { hostname: `device-${i}` } }));
+  rows.push(patchRaw("finding-0", { cid: "tenant-b", aid: "host-0", host_info: { hostname: "other-tenant-device" } }));
+  await mockHttp([auth, page(rows.slice(0, 80), "next", 104), page([rows[0], ...rows.slice(80)], "", 104)], async calls => {
+    const packet = await client.executePatchRequest(connection, { cve: patchCve, top: 10, query: "status:'closed'" });
+    assert.equal(packet.hostCount, 104); assert.equal(packet.findingCount, 104); assert.equal(packet.csvRows, 104);
+    assert.match(packet.body, /device-102/); assert.match(packet.body, /other-tenant-device/);
+    assert.match(packet.body, /9\.8/); assert.match(packet.body, /GMI policy, not a CrowdStrike score/);
+    assert.match(packet.csv, /CVSS:3.1\/AV:N/); assert.match(packet.csv, /Install version 2.0, then restart./);
+    assert.deepEqual(packet.warnings, []);
+    for (const call of calls.slice(1)) {
+      assert.equal(call.url.searchParams.get("filter"), `cve.id:'${patchCve}'+status:['open','reopen']`);
+      assert.deepEqual(call.url.searchParams.getAll("facet"), ["cve", "host_info", "remediation"]);
+    }
+  });
+});
+
+test("patch export resolves missing remediation IDs and preserves application mapping", async () => {
+  const row = patchRaw("a", { apps: [
+    { product_name_normalized: "Alpha", remediation: { ids: ["patch-1"] }, remediation_info: { recommended_id: "patch-2", minimum_id: "patch-1" } },
+    { product_name_normalized: "Beta", remediation: { ids: ["patch-3"] } }
+  ], remediation: { entities: [remedy()] } });
+  await mockHttp([auth, page([row]), { resources: [remedy("patch-2"), remedy("patch-3")] }], async calls => {
+    const packet = await client.executePatchRequest(connection, { cve: patchCve });
+    assert.equal(packet.csvRows, 3); assert.equal(packet.hostCount, 1);
+    const last = calls.at(-1).url;
+    assert.equal(last.pathname, "/spotlight/entities/remediations/v2");
+    assert.deepEqual(last.searchParams.getAll("ids"), ["patch-2", "patch-3"]);
+    assert.match(packet.csv, /"Alpha","","patch-1"/);
+    assert.match(packet.csv, /"Alpha","","patch-2"/);
+    assert.match(packet.csv, /"Beta","","patch-3"/);
+    assert.doesNotMatch(packet.csv, /"Beta","","patch-1"/);
+  });
+});
+
+test("patch export fails closed on incomplete, changing, or nonadvancing pages", async () => {
+  for (const [replies, message] of [
+    [[page([patchRaw("a")], "", 2)], /without all matching/],
+    [[page([patchRaw("a")], "next", 2), page([patchRaw("b")], "", 3)], /population changed/],
+    [[page([patchRaw("a")], "next", 3), page([patchRaw("a")], "next", 3)], /did not advance/],
+    [[page([patchRaw("a")], "next", 2), page([patchRaw("a", { aid: "changed" })], "", 2)], /finding changed/],
+    [[page([patchRaw("a", { aid: "" })])], /host ID/],
+    [[page([patchRaw("a", { status: "closed" })])], /outside/],
+    [[page([], "", 250001)], /250,000/],
+    [[page([])], /no open/],
+  ]) await mockHttp([auth, ...replies], () => assert.rejects(() => client.executePatchRequest(connection, { cve: patchCve }), message));
+});
+
+test("patch export refuses incomplete remediation responses and API failures", async () => {
+  const row = patchRaw("a", { remediation: { entities: [] } });
+  await mockHttp([auth, page([row]), { resources: [] }], () => assert.rejects(() => client.executePatchRequest(connection, { cve: patchCve }), /all referenced remediations/));
+  await mockHttp([auth, page([row]), { status: 403, body: { errors: [{ message: "Forbidden" }] } }], () => assert.rejects(() => client.executePatchRequest(connection, { cve: patchCve }), /rejected access/));
+});
+
+test("patch output escapes CSV formulas and reports suppressed and missing details", () => {
+  const row = patchModel.normalizePatchFinding(patchRaw("a", { host_info: { hostname: "=HYPERLINK(\"bad\")" }, suppression_info: { is_suppressed: true }, apps: [{ product_name_normalized: "Unmapped application" }], cve: { id: patchCve } }), patchCve);
+  const packet = patchModel.buildPatchRequest(patchCve, [row], "us-1", "start", "end");
+  assert.match(packet.csv, /'\=HYPERLINK/);
+  assert.match(packet.body, /CVSS base score\(s\): Not supplied/);
+  assert.match(packet.body, /CISA KEV: Not supplied/);
+  assert.ok(packet.warnings.some(w => /Suppressed/.test(w)));
+  assert.ok(packet.warnings.some(w => /actionable remediation/.test(w)));
+  assert.match(packet.csv, /No application remediation supplied/);
+  assert.doesNotMatch(packet.csv, /"Unmapped application","","patch-1"/);
 });

@@ -205,7 +205,12 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
   await falconModule.evaluate();
   let falconFail = false, falconHold = null;
   const falconResult = { columns: [{ name: "findings", type: "long" }], rows: [[7]], truncated: false };
-  overrides.set("./crowdstrike-dashboard-client", { ...falconModule.namespace, testCrowdStrikeConnection: async () => {}, executeCrowdStrike: async () => {
+  let patchHold = null;
+  const patchPacket = { cve: "CVE-2026-12345", hostCount: 104, findingCount: 108, body: "All hosts and remediations", csv: "test csv" };
+  overrides.set("./crowdstrike-dashboard-client", { ...falconModule.namespace, executePatchRequest: async () => {
+    if (patchHold) { const wait = patchHold; patchHold = null; return wait; }
+    return patchPacket;
+  }, testCrowdStrikeConnection: async () => {}, executeCrowdStrike: async () => {
     if (falconHold) { const wait = falconHold; falconHold = null; return wait; }
     if (falconFail) throw new contract.DashboardError("Simulated CrowdStrike outage.");
     return falconResult;
@@ -306,6 +311,14 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
     assert.doesNotMatch(JSON.stringify(publicView), /fake-falcon/);
     const sealedFalcon = (await db.query("SELECT secret FROM dashboard_source_connections")).rows[0].secret;
     assert.ok(!sealedFalcon.includes("fake-falcon"));
+    const beforePatch = (await db.query("SELECT count(*)::int AS count FROM elastic_dashboard_queries")).rows[0].count;
+    const patchJob = await jobs.enqueueDashboardJob("patch", { cve: patchPacket.cve }, "patch-member");
+    await waitFor(async () => (await jobs.readDashboardJob(patchJob.jobId, "patch-member")).status === "succeeded");
+    assert.deepEqual((await jobs.readDashboardJob(patchJob.jobId, "patch-member")).patchRequest, patchPacket);
+    await assert.rejects(() => jobs.readDashboardJob(patchJob.jobId, "other-member"), /not found/);
+    assert.equal((await db.query("SELECT count(*)::int AS count FROM elastic_dashboard_queries")).rows[0].count, beforePatch, "Preparing a patch request never adds or edits tiles");
+    await db.query("UPDATE elastic_dashboard_jobs SET expires_at = now() - interval '1 minute' WHERE id = $1", [patchJob.jobId]);
+    await assert.rejects(() => jobs.readDashboardJob(patchJob.jobId, "patch-member"), /expired|not found/);
     const falconDefinition = { id: "falcon-history", title: "Open findings", query: "status:['open','reopen']", source: "crowdstrike",
       crowdstrike: { ...contract.DEFAULT_CROWDSTRIKE, history: true }, display: "line", chart: { category: "day", value: "findings" }, refreshMinutes: 1440, enabled: true };
     const falconPreview = await jobs.enqueueDashboardJob("preview", falconDefinition, "falcon-preview");
@@ -491,6 +504,15 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
     process.env.NEXTAUTH_SECRET = randomBytes(32).toString("hex");
     assert.equal((await store.readDashboard(true)).storageReady, true, "Reconnect must remain available after secret rotation.");
     process.env.NEXTAUTH_SECRET = oldSecret;
+    let finishPatch;
+    patchHold = new Promise(resolve => { finishPatch = resolve; });
+    const stalePatch = await jobs.enqueueDashboardJob("patch", { cve: patchPacket.cve }, "stale-patch-member");
+    await waitFor(() => patchHold === null);
+    await store.saveCrowdStrikeConnection(falconConnection, "patch-connection-change");
+    finishPatch(patchPacket);
+    await waitFor(async () => (await db.query("SELECT status FROM elastic_dashboard_jobs WHERE id = $1", [stalePatch.jobId])).rows[0].status === "failed");
+    await assert.rejects(() => jobs.readDashboardJob(stalePatch.jobId, "stale-patch-member"), /connection changed/);
+    assert.equal((await db.query("SELECT result FROM elastic_dashboard_jobs WHERE id = $1", [stalePatch.jobId])).rows[0].result, null);
     // Leave the isolated DB unconnected for the subsequent HTTP authorization checks.
     await db.query("DELETE FROM elastic_dashboard_connection");
     await db.query("DELETE FROM dashboard_source_connections; DELETE FROM dashboard_daily_history; DELETE FROM elastic_dashboard_queries WHERE definition->>'source' = 'crowdstrike'");

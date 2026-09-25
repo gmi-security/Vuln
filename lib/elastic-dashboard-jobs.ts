@@ -1,14 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { DashboardError, parseDefinition, parseQueryInput, querySource } from "./elastic-dashboard";
 import { elasticVulnEnabled } from "./elastic-vuln-server";
-import { dashboardDatabase, dashboardConnectionRevision, previewQuery, saveQuery, throttlePreview } from "./elastic-dashboard-store";
+import { dashboardDatabase, dashboardConnectionRevision, preparePatchRequest, previewQuery, saveQuery, throttlePreview } from "./elastic-dashboard-store";
+import { parsePatchInput } from "./patch-request";
 
 const global = globalThis as typeof globalThis & { __elasticJobs?: { timer?: ReturnType<typeof setInterval>; working?: Promise<void> } };
 const state = global.__elasticJobs ??= {};
 
-export async function enqueueDashboardJob(kind: "preview" | "save", value: unknown, actor: string) {
+export async function enqueueDashboardJob(kind: "preview" | "save" | "patch", value: unknown, actor: string) {
   const body = value as Record<string, unknown> | null;
-  const input = kind === "preview" ? { ...parseQueryInput(body), ...(typeof body?.id === "string" && /^[a-zA-Z0-9-]{1,64}$/.test(body.id) ? { id: body.id } : {}) } : parseDefinition(value, typeof body?.id === "string" ? body.id : randomUUID());
+  const input = kind === "patch" ? parsePatchInput(body) : kind === "preview" ? { ...parseQueryInput(body), ...(typeof body?.id === "string" && /^[a-zA-Z0-9-]{1,64}$/.test(body.id) ? { id: body.id } : {}) } : parseDefinition(value, typeof body?.id === "string" ? body.id : randomUUID());
   const revision = await dashboardConnectionRevision(querySource(input));
   if (revision === null) throw new DashboardError(`Connect ${querySource(input) === "elastic" ? "Elasticsearch" : "CrowdStrike"} first.`, 409);
   throttlePreview(actor);
@@ -19,7 +20,7 @@ export async function enqueueDashboardJob(kind: "preview" | "save", value: unkno
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(804202)");
     const count = await client.query("SELECT count(*)::int AS count FROM elastic_dashboard_jobs WHERE status IN ('queued', 'running') AND expires_at > now()");
-    if (count.rows[0].count >= 2) throw new DashboardError("Two preview/save jobs are already queued or running. Try again after one finishes.", 429);
+    if (count.rows[0].count >= 2) throw new DashboardError("Two background jobs are already queued or running. Try again after one finishes.", 429);
     const previous = kind === "save" ? await client.query("SELECT revision FROM elastic_dashboard_queries WHERE id = $1", [(input as { id: string }).id]) : null;
     await client.query("INSERT INTO elastic_dashboard_jobs (id, actor, kind, input, connection_revision, query_revision) VALUES ($1, $2, $3, $4::jsonb, $5, $6)",
       [id, actor, kind, JSON.stringify(input), revision, previous?.rows[0]?.revision ?? null]);
@@ -69,6 +70,8 @@ async function work() {
       if (job.kind === "save") {
         await saveQuery(job.input, job.actor, { id: job.id, connectionRevision: job.connection_revision, queryRevision: job.query_revision });
         result = { saved: true };
+      } else if (job.kind === "patch") {
+        result = { patchRequest: await preparePatchRequest(job.input, job.connection_revision) };
       } else {
         result = { result: await previewQuery(job.input, job.actor, true, job.input.id) };
       }

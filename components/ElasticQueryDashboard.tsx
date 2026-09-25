@@ -405,7 +405,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
         </div>}
         {query.error && <p className="mb-4 text-sm text-amber-300">{query.error} {query.result ? "Showing the last successful result." : "No successful result yet."}</p>}
         {stale && !query.error && <p className="mb-4 text-sm text-amber-300">These results are older than two refresh intervals.</p>}
-        {query.result ? <Results result={query.result} display={query.display} chart={query.chart} /> : !query.error && <p role="status" className="flex items-center gap-2 py-5 text-zinc-400"><RefreshCw size={16} className="animate-spin" />Loading results in the background…</p>}
+        {query.result ? <Results result={query.result} display={query.display} chart={query.chart} preparePatch={dashboard.canManage && query.source === "crowdstrike" && query.crowdstrike?.view === "cve-devices" && dashboard.crowdstrike?.connected} /> : !query.error && <p role="status" className="flex items-center gap-2 py-5 text-zinc-400"><RefreshCw size={16} className="animate-spin" />Loading results in the background…</p>}
         {(query.result?.note || (query.id === "asset-coverage" && query.source !== "crowdstrike")) && <details className={styles.resultDetails}>
           <summary>Result details</summary>
           {query.result?.note && <p>{query.result.note}</p>}

@@ -3,6 +3,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { X } from "lucide-react";
 import ElasticResultChart from "@/components/ElasticResultChart";
+import PatchRequestPanel from "@/components/PatchRequestPanel";
 import { canShowMetrics, columnLabel, isChartDisplay, numericColumn, type QueryDefinition, type QueryResult } from "@/lib/elastic-dashboard";
 import { severityBarColor, severityClass } from "@/lib/format";
 import type { Severity } from "@/lib/types";
@@ -22,8 +23,8 @@ export function formatResultValue(value: string | number | boolean | null, colum
   return String(value);
 }
 
-export default function QueryDashboardResults({ result, display, chart }: {
-  result: QueryResult; display: QueryDefinition["display"]; chart?: QueryDefinition["chart"];
+export default function QueryDashboardResults({ result, display, chart, preparePatch = false }: {
+  result: QueryResult; display: QueryDefinition["display"]; chart?: QueryDefinition["chart"]; preparePatch?: boolean;
 }) {
   const [selected, setSelected] = useState<QueryResult["rows"][number] | null>(null);
   const dialog = useRef<HTMLDialogElement>(null);
@@ -78,6 +79,7 @@ export default function QueryDashboardResults({ result, display, chart }: {
         <h2 id={titleId}>{selected && cveIndex >= 0 ? String(selected[cveIndex]) : "CVE details"}</h2>
         <p className={styles.resultNote}>Snapshot of the result selected from this tile.</p>
         <dl className={styles.detailFields}>{selected && result.columns.map((column, index) => index !== cveIndex && <div key={column.name}><dt>{columnLabel(column.name)}</dt><dd>{cell(selected[index], column.name)}</dd></div>)}</dl>
+        {preparePatch && selected && cveIndex >= 0 && /^CVE-\d{4}-\d{4,19}$/i.test(String(selected[cveIndex])) && <PatchRequestPanel key={String(selected[cveIndex])} cve={String(selected[cveIndex]).toUpperCase()} />}
       </div>
     </dialog>
   </div>;
