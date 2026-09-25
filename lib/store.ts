@@ -1622,24 +1622,50 @@ function assetOwners(s: StoreShape, ...assetStrs: string[]): Set<string> {
   return owners;
 }
 
-function toPublicAsset(s: StoreShape, a: InternalAsset): InventoryAsset {
-  const openFindings = Array.from(s.findings.values()).filter(
-    (f) =>
-      f.companyId === a.companyId &&
-      (f.status === "Open" || f.status === "In Remediation") &&
-      (f.asset.toLowerCase() === a.identifier.toLowerCase() ||
-        f.asset.toLowerCase() === a.hostname.toLowerCase() ||
-        a.ipAddresses.some((ip) => ip.toLowerCase() === f.asset.toLowerCase())),
-  ).length;
+// Maps "companyId::assetKey" (lowercased asset string) -> count of open/
+// in-remediation findings whose f.asset matches that key. Built once per
+// listAssets() call so per-asset lookup is O(1) average instead of each
+// asset re-scanning every finding in the store.
+function buildOpenFindingCountIndex(findings: Finding[]): Map<string, number> {
+  const idx = new Map<string, number>();
+  for (const f of findings) {
+    if (f.status !== "Open" && f.status !== "In Remediation") continue;
+    const key = `${f.companyId}::${f.asset.trim().toLowerCase()}`;
+    idx.set(key, (idx.get(key) ?? 0) + 1);
+  }
+  return idx;
+}
+
+function toPublicAsset(a: InternalAsset, openFindingIdx: Map<string, number>): InventoryAsset {
+  // Dedupe candidate keys first — identifier/hostname/an IP can coincide, and
+  // summing raw (non-deduped) lookups would double-count a finding that
+  // matches under two attributes resolving to the same key.
+  const keys = new Set(
+    [a.identifier, a.hostname, ...a.ipAddresses]
+      .filter(Boolean)
+      .map((k) => `${a.companyId}::${k.toLowerCase()}`),
+  );
+  let openFindings = 0;
+  for (const k of keys) openFindings += openFindingIdx.get(k) ?? 0;
   return { ...a, openFindings };
 }
 
 export function listAssets(filter?: { companyId?: string }): InventoryAsset[] {
   const s = store();
   tick(s);
+  // toPublicAsset() used to call Array.from(s.findings.values()).filter(...)
+  // per asset — O(assets x total findings in the whole store), unscoped even
+  // by company. With one client alone at ~1,500 assets, that's hundreds of
+  // millions of iterations on a single request. Build the findings index
+  // once instead.
+  const findings: Finding[] = [];
+  for (const f of s.findings.values()) {
+    if (!filter?.companyId || f.companyId === filter.companyId) findings.push(f);
+  }
+  const openFindingIdx = buildOpenFindingCountIndex(findings);
   return Array.from(s.assets.values())
     .filter((a) => !filter?.companyId || a.companyId === filter.companyId)
-    .map((a) => toPublicAsset(s, a))
+    .map((a) => toPublicAsset(a, openFindingIdx))
     .sort((a, b) => a.identifier.localeCompare(b.identifier));
 }
 
