@@ -37,7 +37,10 @@ export default function QueryDashboardResults({ result, display, chart, prepareP
   const consolidationTitleId = useId();
   useEffect(() => { if (selected) dialog.current?.showModal(); }, [selected]);
   useEffect(() => { if (consolidating) consolidationDialog.current?.showModal(); }, [consolidating]);
-  const consolidationCves = [...new Set(result.rows.flatMap((row) => row.filter((value): value is string => typeof value === "string" && /\bCVE-\d{4}-\d{4,19}\b/i.test(value)).map((value) => value.match(/CVE-\d{4}-\d{4,19}/i)![0].toUpperCase())))].slice(0, 12);
+  // Dynamic to however many distinct CVEs the tile actually shows — bounded
+  // only by the tile's own top-N setting (max 100), which is also the
+  // consolidation endpoint's own ceiling, so this never has to truncate.
+  const consolidationCves = [...new Set(result.rows.flatMap((row) => row.filter((value): value is string => typeof value === "string" && /\bCVE-\d{4}-\d{4,19}\b/i.test(value)).map((value) => value.match(/CVE-\d{4}-\d{4,19}/i)![0].toUpperCase())))].slice(0, 100);
   const consolidationPanel = (
     <dialog ref={consolidationDialog} className={styles.detail} aria-labelledby={consolidationTitleId} onClose={() => setConsolidating(false)} onClick={(event) => { if (event.target === event.currentTarget) consolidationDialog.current?.close(); }}>
       <div className={styles.detailBody}>
@@ -92,7 +95,7 @@ export default function QueryDashboardResults({ result, display, chart, prepareP
   return <div>
     {preparePatch && consolidationCves.length >= 2 && (
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[rgba(179,14,20,0.14)] bg-[#0a0a0a] px-4 py-3">
-        <p className="text-sm text-zinc-300">{consolidationCves.length} CVEs shown{result.rows.length > consolidationCves.length ? " (first 12)" : ""} — see which patches cover the most of them.</p>
+        <p className="text-sm text-zinc-300">{consolidationCves.length} CVEs shown — see which patches cover the most of them.</p>
         <button type="button" className={styles.button} onClick={() => setConsolidating(true)}>Build consolidated patch plan</button>
       </div>
     )}

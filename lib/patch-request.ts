@@ -33,7 +33,10 @@ export function parsePatchInput(value: unknown): { source: "crowdstrike"; cve: s
 
 export function parseConsolidationInput(value: unknown): { source: "crowdstrike"; cves: string[]; tenantId?: string } {
   const cves = (value as { cves?: unknown } | null)?.cves;
-  if (!Array.isArray(cves) || cves.length < 2 || cves.length > 12) throw new DashboardError("Choose 2 to 12 CVEs to consolidate.");
+  // 100 matches the query dashboard's own highest "top N" setting for the
+  // CrowdStrike CVE tiles — the largest set of CVEs a single tile can ever
+  // show, so a consolidation never has to truncate what's actually in scope.
+  if (!Array.isArray(cves) || cves.length < 2 || cves.length > 100) throw new DashboardError("Choose 2 to 100 CVEs to consolidate.");
   const normalized = cves.map((c) => (typeof c === "string" ? c.toUpperCase() : ""));
   if (normalized.some((c) => !/^CVE-\d{4}-\d{4,19}$/.test(c))) throw new DashboardError("Choose valid CVE identifiers.");
   const unique = [...new Set(normalized)];

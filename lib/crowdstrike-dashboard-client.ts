@@ -293,7 +293,7 @@ export async function executePatchRequest(connection: CrowdStrikeConnection, val
   return buildPatchRequest(cve, [...records.values()], connection.region, startedAt, new Date().toISOString());
 }
 
-export async function executePatchConsolidation(connection: CrowdStrikeConnection, value: unknown, alreadyTicketed: Set<string> = new Set(), budgetMs = 360_000): Promise<PatchConsolidation> {
+export async function executePatchConsolidation(connection: CrowdStrikeConnection, value: unknown, alreadyTicketed: Set<string> = new Set(), budgetMs = 600_000): Promise<PatchConsolidation> {
   const { cves, tenantId } = parseConsolidationInput(value), startedAt = new Date().toISOString();
   const deadline = Date.now() + budgetMs, auth = await session(connection, deadline);
   const all: PatchFinding[] = [];

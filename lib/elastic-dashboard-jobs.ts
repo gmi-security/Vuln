@@ -47,7 +47,10 @@ export async function readDashboardJob(id: string, actor: string) {
 async function work() {
   if (!elasticVulnEnabled()) return;
   const db = await dashboardDatabase();
-  await db.query("UPDATE elastic_dashboard_jobs SET status = 'failed', error = 'The background query was interrupted or expired. Please retry.' WHERE status = 'running' AND started_at < now() - interval '7 minutes'");
+  // Must stay above every job kind's own collection budget (consolidation's
+  // is the longest, up to 10 minutes for a full 100-CVE run) or this would
+  // kill a job that's still legitimately working.
+  await db.query("UPDATE elastic_dashboard_jobs SET status = 'failed', error = 'The background query was interrupted or expired. Please retry.' WHERE status = 'running' AND started_at < now() - interval '12 minutes'");
   await db.query("DELETE FROM elastic_dashboard_jobs WHERE expires_at <= now()");
   while (elasticVulnEnabled()) {
     // Reserve room for the automatic refresh worker in this process.
