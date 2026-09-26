@@ -218,9 +218,49 @@ const CORRELATED_CONNECTORS = new Set<ConnectorId>([
 // of two unrelated strings. Falls back to the normalized raw string for
 // assets the inventory doesn't have yet (e.g. discovered only by the scan
 // itself).
+function normalizeIdentifier(id: string): string {
+  return id.trim().toLowerCase().replace(/\.+$/, "");
+}
+function identityKey(companyId: string, id: string): string {
+  return `${companyId}::${normalizeIdentifier(id)}`;
+}
+// Union-find with path compression over identityKey()s. A device's known
+// identifiers (hostname, internal IP, external IP, ...) get linked together
+// by linkIdentities whenever a connector reports more than one of them for
+// the same finding; resolveIdentity then maps any one of them to the same
+// group regardless of which identifier a DIFFERENT connector used.
+function findIdentityRoot(s: StoreShape, key: string): string {
+  let root = key;
+  const path: string[] = [];
+  while (s.identityAliases.has(root)) {
+    path.push(root);
+    const next = s.identityAliases.get(root)!;
+    if (next === root) break;
+    root = next;
+  }
+  for (const step of path) if (step !== root) s.identityAliases.set(step, root);
+  return root;
+}
+function resolveIdentity(s: StoreShape, companyId: string, id: string): string {
+  return findIdentityRoot(s, identityKey(companyId, id));
+}
+// Links every non-empty identifier in `ids` as the same device, company-
+// scoped so two customers' devices are never merged just for sharing an IP.
+// Safe to call every import — already-linked identifiers are a no-op.
+function linkIdentities(s: StoreShape, companyId: string, ids: (string | undefined | null)[]): void {
+  const keys = [...new Set(ids.filter((id): id is string => Boolean(id?.trim())).map((id) => identityKey(companyId, id)))];
+  if (keys.length < 2) return;
+  const canonical = findIdentityRoot(s, keys[0]);
+  for (const key of keys) {
+    const root = findIdentityRoot(s, key);
+    if (root !== canonical) s.identityAliases.set(root, canonical);
+  }
+}
+
 function canonicalAssetKey(s: StoreShape, companyId: string, asset: string): string {
   const inventory = lookupAsset(s, asset, companyId);
-  return inventory ? `asset:${inventory.id}` : asset.trim().toLowerCase().replace(/\.+$/, "");
+  if (inventory) return `asset:${inventory.id}`;
+  return `alias:${resolveIdentity(s, companyId, asset)}`;
 }
 
 function correlationKey(s: StoreShape, companyId: string, cve: string, asset: string): string {
@@ -414,6 +454,13 @@ type StoreShape = {
   findings: Map<string, Finding>;
   assets: Map<string, InternalAsset>;
   compensatingControls: Map<string, CompensatingControl>;
+  // Self-learned asset identity links: company-scoped "companyId::identifier"
+  // -> the identifier it's been unioned into. Lets correlation resolve two
+  // scanners that report the same device under different strings (an
+  // external scan's public IP, an agent's internal hostname) even when the
+  // asset inventory was never told they're the same box — see
+  // linkIdentities/resolveIdentity.
+  identityAliases: Map<string, string>;
   settings: Settings;
   meta: StoreMeta;
   seeded: boolean;
@@ -459,6 +506,7 @@ function store(): StoreShape {
       findings: new Map(),
       assets: new Map(),
       compensatingControls: new Map(),
+      identityAliases: new Map(),
       settings: defaultSettings(),
       meta: defaultMeta(),
       seeded: false,
@@ -479,6 +527,7 @@ function serializeStore(s: StoreShape) {
     findings: [...s.findings.entries()],
     assets: [...s.assets.entries()],
     compensatingControls: [...s.compensatingControls.entries()],
+    identityAliases: [...s.identityAliases.entries()],
     settings: s.settings,
     meta: s.meta,
     counter: s.counter,
@@ -492,6 +541,7 @@ function deserializeStore(obj: {
   findings?: [string, Finding][];
   assets?: [string, InternalAsset][];
   compensatingControls?: [string, CompensatingControl][];
+  identityAliases?: [string, string][];
   settings?: unknown;
   meta?: unknown;
   counter?: number;
@@ -503,6 +553,7 @@ function deserializeStore(obj: {
     findings: new Map(obj.findings ?? []),
     assets: new Map(obj.assets ?? []),
     compensatingControls: new Map(obj.compensatingControls ?? []),
+    identityAliases: new Map(obj.identityAliases ?? []),
     settings: normalizeSettings(obj.settings),
     meta: normalizeMeta(obj.meta),
     seeded: true,
@@ -1236,6 +1287,7 @@ async function importVendorFindings(s: StoreShape, scan: InternalScan): Promise<
   // same host in the same company is the same real vulnerability.
   const index = buildCorrelationIndex(s);
   for (const item of imported) {
+    linkIdentities(s, scan.companyId, item.assetAliases);
     const key = correlationKey(s, scan.companyId, item.cve, item.asset);
     const existing = index.get(key);
     if (existing) {
@@ -4416,8 +4468,10 @@ export async function importFromVulnersBridge(): Promise<
       const severity = (v.cvss >= 9 ? "Critical" : v.cvss >= 7 ? "High" : v.cvss >= 4 ? "Medium" : v.cvss > 0 ? "Low" : "Info") as Finding["severity"];
       // Company-scoped, cross-connector correlation. Only non-Resolved
       // findings match — a re-detected CVE that was Resolved is a
-      // regression and must surface as a new Open finding. Vulners
-      // attributes to whichever of IP/hostname the finding is stored under.
+      // regression and must surface as a new Open finding. Vulners knows
+      // both the IP it scanned and the inventory's hostname for it — link
+      // them permanently so any connector reporting either one correlates.
+      linkIdentities(s, companyId, [ip, asset.hostname]);
       const keys = [correlationKey(s, companyId, v.cve, ip), ...(asset.hostname ? [correlationKey(s, companyId, v.cve, asset.hostname)] : [])];
       const existing = keys.map((k) => index.get(k)).find((f): f is Finding => Boolean(f));
       if (existing) {
@@ -5569,6 +5623,11 @@ export async function importFromCrowdstrikeSpotlight(): Promise<
       scan.completedAt = nowIso;
       scanByCompany.set(companyId, scan);
 
+      // CrowdStrike reports a host's internal and external IP together with
+      // its hostname — link them now so an external scanner's finding on
+      // this device's public IP correlates with this one even if the asset
+      // inventory never recorded that IP against this host.
+      linkIdentities(s, companyId, [item.hostname, item.localIp, item.externalIp]);
       const dedupeKey = correlationKey(s, companyId, item.cve, assetKey);
       const existingFinding = existingFindingByKey.get(dedupeKey);
       if (existingFinding) {

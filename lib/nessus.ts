@@ -274,6 +274,10 @@ export type NessusFinding = {
   cvssV3: number;
   vpr: number;
   asset: string;
+  // Every identifier Nessus has for this host (FQDN, IP, scan-target
+  // hostname) — lets the store link them as the same device even when
+  // another connector only reports one of them.
+  assetAliases: string[];
   port: string;
   category: string;
   description: string;
@@ -318,6 +322,8 @@ export async function nessusImportFindings(
     );
     const hostname: string =
       hostDetail?.info?.["host-fqdn"] ?? hostDetail?.info?.["host-ip"] ?? host.hostname;
+    const assetAliases = [...new Set([hostDetail?.info?.["host-fqdn"], hostDetail?.info?.["host-ip"], host.hostname]
+      .filter((x): x is string => typeof x === "string" && x.length > 0))];
     const vulns: any[] = (hostDetail?.vulnerabilities ?? []).sort(
       (a: any, b: any) => (b.severity ?? 0) - (a.severity ?? 0),
     );
@@ -381,6 +387,7 @@ export async function nessusImportFindings(
         cvssV3,
         vpr,
         asset: hostname,
+        assetAliases,
         port,
         category: String(vuln.plugin_family ?? "Nessus"),
         description: String(attrs?.description ?? "Imported from Nessus scan results."),
