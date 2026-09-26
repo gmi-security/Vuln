@@ -613,6 +613,14 @@ export default function VulnFindingsPage() {
                         Exploit
                       </span>
                     ) : null}
+                    {finding.seenBy && finding.seenBy.length > 1 ? (
+                      <span
+                        title={`Also reported by: ${finding.seenBy.map((c) => connectorLabels[c]).join(", ")}`}
+                        className="rounded-full border border-sky-800/60 bg-[rgba(56,189,248,0.12)] px-2 py-0.5 text-[10px] uppercase tracking-[0.14em] text-sky-300"
+                      >
+                        {finding.seenBy.length} scanners
+                      </span>
+                    ) : null}
                   </div>
                 </div>
                 <div className="min-w-0">
@@ -849,7 +857,11 @@ export default function VulnFindingsPage() {
               />
               <Detail
                 label="Source"
-                value={connectorLabels[focus.connector]}
+                value={
+                  focus.seenBy && focus.seenBy.length > 1
+                    ? `${focus.seenBy.map((c) => connectorLabels[c]).join(", ")} (corroborated)`
+                    : connectorLabels[focus.connector]
+                }
               />
               <Detail label="Category" value={focus.category} />
               <Detail

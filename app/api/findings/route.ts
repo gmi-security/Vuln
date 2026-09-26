@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { ensureHydrated, listFindings, withSlaInfo } from "@/lib/store";
+import type { ConnectorId } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -37,7 +38,12 @@ export async function GET(request: Request) {
   if (overdueOnly) findings = findings.filter((f) => f.overdue);
   if (severity) findings = findings.filter((f) => f.severity === severity);
   if (status) findings = findings.filter((f) => f.status === status);
-  if (connector) findings = findings.filter((f) => f.connector === connector);
+  // A finding corroborated by more than one scanner keeps a single primary
+  // `connector` but records every scanner that has seen it in `seenBy` — the
+  // filter should still surface it under any of those connectors, not just
+  // the primary one, or corroborated findings would appear to vanish from a
+  // per-connector view.
+  if (connector) findings = findings.filter((f) => f.connector === connector || f.seenBy?.includes(connector as ConnectorId));
   if (exploitOnly) findings = findings.filter((f) => f.exploitAvailable);
   if (q) {
     findings = findings.filter((f) =>

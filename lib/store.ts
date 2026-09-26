@@ -193,6 +193,66 @@ function riskFields(
   };
 }
 
+// Cross-connector correlation: the same (company, CVE, asset) reported by
+// more than one scanner is one real vulnerability, not one per scanner. Two
+// scanners agreeing corroborates it; correlateFinding merges the report into
+// the existing record instead of creating a duplicate row, tracking every
+// connector that has seen it and keeping the most severe/complete
+// assessment across all of them — under-reporting risk is the dangerous
+// failure mode, so a stricter scanner's read is never masked by a looser
+// one. Scoped to the connectors that report "this host has this CVE" facts;
+// web/app/recon tools (Burp, Nmap, SpiderFoot, ZAP, Artemis) report
+// scanner-specific test results instead and stay on their own dedupe.
+const CORRELATED_CONNECTORS = new Set<ConnectorId>([
+  "crowdstrike",
+  "nessus",
+  "defender",
+  "vulners",
+  "qualys",
+]);
+
+function correlationKey(companyId: string, cve: string, asset: string): string {
+  return `${companyId}::${cve.toUpperCase()}::${asset.trim().toLowerCase().replace(/\.+$/, "")}`;
+}
+
+// Built once per import run — O(store size) — instead of scanning every
+// finding per imported item, which would make a large import O(n*m).
+function buildCorrelationIndex(s: StoreShape): Map<string, Finding> {
+  const index = new Map<string, Finding>();
+  for (const f of s.findings.values()) {
+    if (f.status === "Resolved" || !CORRELATED_CONNECTORS.has(f.connector)) continue;
+    index.set(correlationKey(f.companyId, f.cve, f.asset), f);
+  }
+  return index;
+}
+
+function correlateFinding(
+  s: StoreShape,
+  existing: Finding,
+  incoming: {
+    connector: ConnectorId;
+    cvss: number;
+    cvssV3: number;
+    cvssV2: number;
+    vpr: number;
+    epss: number;
+    exploitAvailable: boolean;
+    severity: Severity;
+    lastSeen: string;
+  },
+): void {
+  existing.seenBy = [...new Set([...(existing.seenBy ?? [existing.connector]), incoming.connector])];
+  existing.lastSeen = incoming.lastSeen;
+  if (incoming.cvss > existing.cvss) existing.cvss = incoming.cvss;
+  if (incoming.cvssV3 > existing.cvssV3) existing.cvssV3 = incoming.cvssV3;
+  if (incoming.cvssV2 > existing.cvssV2) existing.cvssV2 = incoming.cvssV2;
+  if (incoming.vpr > existing.vpr) existing.vpr = incoming.vpr;
+  if (incoming.epss > existing.epss) existing.epss = incoming.epss;
+  if (incoming.exploitAvailable) existing.exploitAvailable = true;
+  if (SEVERITY_WEIGHT[incoming.severity] > SEVERITY_WEIGHT[existing.severity]) existing.severity = incoming.severity;
+  rescoreFinding(s, existing);
+}
+
 // In-memory operational store. Scans progress in real time (progress is a
 // function of elapsed wall clock, so it advances between requests without a
 // background worker) and completed scans materialize findings. Swap for
@@ -1158,57 +1218,58 @@ async function refreshVendorScans(s: StoreShape): Promise<void> {
 async function importVendorFindings(s: StoreShape, scan: InternalScan): Promise<void> {
   const imported = await nessusImportFindings(scan.vendor!.nessusScanId);
   const completedAt = scan.completedAt ?? new Date().toISOString();
+  // Company-scoped, cross-connector correlation: customers can share asset
+  // strings (10.x IPs, DESKTOP-XXXX), so one client's finding must never
+  // swallow another's, but a CVE another connector already reported on the
+  // same host in the same company is the same real vulnerability.
+  const index = buildCorrelationIndex(s);
   for (const item of imported) {
-    // Company-scoped dedupe: customers can share asset strings (10.x IPs,
-    // DESKTOP-XXXX), so one client's finding must never swallow another's.
-    const dedupeKey = `${scan.companyId}::${item.cve}::${item.asset}::${item.title}`;
-    const existing = Array.from(s.findings.values()).find(
-      (f) =>
-        `${f.companyId}::${f.cve}::${f.asset}::${f.title}` === dedupeKey &&
-        f.status !== "Resolved",
-    );
+    const key = correlationKey(scan.companyId, item.cve, item.asset);
+    const existing = index.get(key);
     if (existing) {
-      existing.lastSeen = completedAt;
+      correlateFinding(s, existing, {
+        connector: scan.connector, cvss: item.cvss, cvssV3: item.cvssV3, cvssV2: item.cvssV2,
+        vpr: item.vpr, epss: 0, exploitAvailable: item.exploitAvailable, severity: item.severity, lastSeen: completedAt,
+      });
       continue;
     }
-    s.findings.set(
-      `VLN-${(s.counter += 1)}`,
-      {
-        id: `VLN-${s.counter}`,
-        scanId: scan.id,
-        companyId: scan.companyId,
-        companyName: scan.companyName,
-        connector: scan.connector,
+    const created: Finding = {
+      id: `VLN-${(s.counter += 1)}`,
+      scanId: scan.id,
+      companyId: scan.companyId,
+      companyName: scan.companyName,
+      connector: scan.connector,
+      cve: item.cve,
+      cves: item.cves,
+      title: item.title,
+      severity: item.severity,
+      cvss: item.cvss,
+      cvssV3: item.cvssV3,
+      cvssV2: item.cvssV2,
+      vpr: item.vpr,
+      epss: 0,
+      asset: item.asset,
+      port: item.port,
+      category: item.category,
+      description: item.description,
+      remediation: item.remediation,
+      status: "Open",
+      assignee: null,
+      firstSeen: completedAt,
+      lastSeen: completedAt,
+      resolvedAt: null,
+      exploitAvailable: item.exploitAvailable,
+      ...riskFields(s, {
         cve: item.cve,
-        cves: item.cves,
-        title: item.title,
-        severity: item.severity,
         cvss: item.cvss,
-        cvssV3: item.cvssV3,
-        cvssV2: item.cvssV2,
-        vpr: item.vpr,
         epss: 0,
-        asset: item.asset,
-        port: item.port,
-        category: item.category,
-        description: item.description,
-        remediation: item.remediation,
-        status: "Open",
-        assignee: null,
-        firstSeen: completedAt,
-        lastSeen: completedAt,
-        resolvedAt: null,
         exploitAvailable: item.exploitAvailable,
-        ...riskFields(s, {
-          cve: item.cve,
-          cvss: item.cvss,
-          epss: 0,
-          exploitAvailable: item.exploitAvailable,
-          asset: item.asset,
-          companyId: scan.companyId,
-        }),
-      },
-    );
+        asset: item.asset,
+        companyId: scan.companyId,
+      }),
+    };
+    s.findings.set(created.id, created);
+    index.set(key, created);
   }
   const all = Array.from(s.findings.values()).filter((f) => f.scanId === scan.id);
   scan.findingsCount = all.length;
@@ -4279,6 +4340,7 @@ export async function importFromVulnersBridge(): Promise<
   let findingsImported = 0;
   let skipped = 0;
   const scanByCompany = new Map<string, InternalScan>();
+  const index = buildCorrelationIndex(s);
 
   // Collect unique IPs from asset inventory — scan each once.
   const targets = new Map<string, { companyId: string; companyName: string; asset: InternalAsset }>();
@@ -4339,25 +4401,20 @@ export async function importFromVulnersBridge(): Promise<
     }
 
     for (const v of results) {
-      // Company-scoped, and only non-Resolved findings match — a re-detected
-      // CVE that was Resolved is a regression and must surface as a new Open
-      // finding (same behavior as the other importers).
-      const existing = Array.from(s.findings.values()).find(
-        (f) =>
-          f.companyId === companyId &&
-          f.cve === v.cve &&
-          (f.asset === ip || f.asset === asset.hostname) &&
-          f.status !== "Resolved",
-      );
+      const severity = (v.cvss >= 9 ? "Critical" : v.cvss >= 7 ? "High" : v.cvss >= 4 ? "Medium" : v.cvss > 0 ? "Low" : "Info") as Finding["severity"];
+      // Company-scoped, cross-connector correlation. Only non-Resolved
+      // findings match — a re-detected CVE that was Resolved is a
+      // regression and must surface as a new Open finding. Vulners
+      // attributes to whichever of IP/hostname the finding is stored under.
+      const keys = [correlationKey(companyId, v.cve, ip), ...(asset.hostname ? [correlationKey(companyId, v.cve, asset.hostname)] : [])];
+      const existing = keys.map((k) => index.get(k)).find((f): f is Finding => Boolean(f));
       if (existing) {
-        if (v.exploitAvailable && !existing.exploitAvailable) {
-          existing.exploitAvailable = true;
-          rescoreFinding(s, existing);
-        }
-        existing.lastSeen = nowIso;
+        correlateFinding(s, existing, {
+          connector: "vulners", cvss: v.cvss, cvssV3: v.cvss, cvssV2: 0, vpr: 0, epss: 0,
+          exploitAvailable: v.exploitAvailable, severity, lastSeen: nowIso,
+        });
         continue;
       }
-      const severity = v.cvss >= 9 ? "Critical" : v.cvss >= 7 ? "High" : v.cvss >= 4 ? "Medium" : v.cvss > 0 ? "Low" : "Info";
       const fid = nextId(s, "FIND");
       const f: Finding = {
         id: fid,
@@ -4367,7 +4424,7 @@ export async function importFromVulnersBridge(): Promise<
         connector: "vulners",
         cve: v.cve,
         title: `${v.cve} — ${v.component}`,
-        severity: severity as Finding["severity"],
+        severity,
         cvss: v.cvss,
         cvssV2: 0,
         cvssV3: v.cvss,
@@ -4394,6 +4451,7 @@ export async function importFromVulnersBridge(): Promise<
       };
       rescoreFinding(s, f);
       s.findings.set(fid, f);
+      index.set(correlationKey(companyId, v.cve, f.asset), f);
       scan.findingsCount += 1;
       scan.severityCounts[f.severity] = (scan.severityCounts[f.severity] ?? 0) + 1;
       scan.hostsScanned += 1;
@@ -5385,15 +5443,12 @@ export async function importFromCrowdstrikeSpotlight(): Promise<
   const hosts = new Set<string>();
   const scanByCompany = new Map<string, InternalScan>();
 
-  // Build a dedupe index once — O(n) — instead of scanning all findings per
-  // item. Keys are company-scoped so customers sharing asset strings never
-  // swallow each other's findings.
-  const existingFindingByKey = new Map<string, Finding>();
-  for (const f of s.findings.values()) {
-    if (f.connector === "crowdstrike" && f.status !== "Resolved") {
-      existingFindingByKey.set(`${f.companyId}::${f.cve}::${f.asset}`, f);
-    }
-  }
+  // Build a correlation index once — O(n) — instead of scanning all findings
+  // per item. Keys are company-scoped so customers sharing asset strings
+  // never swallow each other's findings, and cross-connector so a CVE
+  // another scanner already reported on the same host correlates instead of
+  // duplicating.
+  const existingFindingByKey = buildCorrelationIndex(s);
 
   // Reuse existing spotlight scan per company (upsert by externalRef).
   const existingScanByCompany = new Map<string, InternalScan>();
@@ -5502,12 +5557,18 @@ export async function importFromCrowdstrikeSpotlight(): Promise<
       scan.completedAt = nowIso;
       scanByCompany.set(companyId, scan);
 
-      const dedupeKey = `${companyId}::${item.cve}::${assetKey}`;
+      const dedupeKey = correlationKey(companyId, item.cve, assetKey);
       const existingFinding = existingFindingByKey.get(dedupeKey);
-      if (existingFinding) { existingFinding.lastSeen = nowIso; continue; }
+      if (existingFinding) {
+        correlateFinding(s, existingFinding, {
+          connector: "crowdstrike", cvss: item.cvss, cvssV3: item.cvss, cvssV2: 0, vpr: 0, epss: 0,
+          exploitAvailable: item.exploitAvailable, severity: item.severity, lastSeen: nowIso,
+        });
+        continue;
+      }
 
-      s.findings.set(`VLN-${(s.counter += 1)}`, {
-        id: `VLN-${s.counter}`,
+      const created: Finding = {
+        id: `VLN-${(s.counter += 1)}`,
         scanId: scan.id,
         companyId: scan.companyId,
         companyName: scan.companyName,
@@ -5539,7 +5600,9 @@ export async function importFromCrowdstrikeSpotlight(): Promise<
           asset: item.hostname || item.localIp,
           companyId: scan.companyId,
         }),
-      });
+      };
+      s.findings.set(created.id, created);
+      existingFindingByKey.set(dedupeKey, created);
       findingsImported += 1;
     }
   }
@@ -5649,20 +5712,19 @@ export async function importFromDefender(): Promise<
   s.scans.set(scanId, scan);
 
   let findingsImported = 0;
+  const index = buildCorrelationIndex(s);
   for (const item of items) {
-    const dedupeKey = `${item.cve}::${item.asset}`;
-    const existing = Array.from(s.findings.values()).find(
-      (f) =>
-        `${f.cve}::${f.asset}` === dedupeKey &&
-        f.companyId === company!.id &&
-        f.status !== "Resolved",
-    );
+    const key = correlationKey(company.id, item.cve, item.asset);
+    const existing = index.get(key);
     if (existing) {
-      existing.lastSeen = nowIso;
+      correlateFinding(s, existing, {
+        connector: "defender", cvss: item.cvss, cvssV3: item.cvss, cvssV2: 0, vpr: 0, epss: 0,
+        exploitAvailable: false, severity: item.severity, lastSeen: nowIso,
+      });
       continue;
     }
     const id = nextId(s, "VLN");
-    s.findings.set(id, {
+    const created: Finding = {
       id,
       scanId,
       companyId: company.id,
@@ -5695,7 +5757,9 @@ export async function importFromDefender(): Promise<
         asset: item.asset,
         companyId: company.id,
       }),
-    });
+    };
+    s.findings.set(id, created);
+    index.set(key, created);
     findingsImported += 1;
   }
 

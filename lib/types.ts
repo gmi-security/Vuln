@@ -203,6 +203,10 @@ export type Finding = {
   companyId: string;
   companyName: string;
   connector: ConnectorId;
+  // Every connector that has independently reported this exact vulnerability
+  // (same CVE, same asset) — populated once a second scanner corroborates it;
+  // absent/one entry means only `connector` has ever seen it.
+  seenBy?: ConnectorId[];
   cve: string;
   title: string;
   severity: Severity;
