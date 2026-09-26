@@ -211,8 +211,20 @@ const CORRELATED_CONNECTORS = new Set<ConnectorId>([
   "qualys",
 ]);
 
-function correlationKey(companyId: string, cve: string, asset: string): string {
-  return `${companyId}::${cve.toUpperCase()}::${asset.trim().toLowerCase().replace(/\.+$/, "")}`;
+// Resolves a scanner-reported asset string to the inventory's stable asset
+// id when the asset is known, so two connectors watching the same device
+// from different vantage points — an external scanner's public IP, an
+// agent's internal hostname — correlate on the same underlying asset instead
+// of two unrelated strings. Falls back to the normalized raw string for
+// assets the inventory doesn't have yet (e.g. discovered only by the scan
+// itself).
+function canonicalAssetKey(s: StoreShape, companyId: string, asset: string): string {
+  const inventory = lookupAsset(s, asset, companyId);
+  return inventory ? `asset:${inventory.id}` : asset.trim().toLowerCase().replace(/\.+$/, "");
+}
+
+function correlationKey(s: StoreShape, companyId: string, cve: string, asset: string): string {
+  return `${companyId}::${cve.toUpperCase()}::${canonicalAssetKey(s, companyId, asset)}`;
 }
 
 // Built once per import run — O(store size) — instead of scanning every
@@ -221,7 +233,7 @@ function buildCorrelationIndex(s: StoreShape): Map<string, Finding> {
   const index = new Map<string, Finding>();
   for (const f of s.findings.values()) {
     if (f.status === "Resolved" || !CORRELATED_CONNECTORS.has(f.connector)) continue;
-    index.set(correlationKey(f.companyId, f.cve, f.asset), f);
+    index.set(correlationKey(s, f.companyId, f.cve, f.asset), f);
   }
   return index;
 }
@@ -1224,7 +1236,7 @@ async function importVendorFindings(s: StoreShape, scan: InternalScan): Promise<
   // same host in the same company is the same real vulnerability.
   const index = buildCorrelationIndex(s);
   for (const item of imported) {
-    const key = correlationKey(scan.companyId, item.cve, item.asset);
+    const key = correlationKey(s, scan.companyId, item.cve, item.asset);
     const existing = index.get(key);
     if (existing) {
       correlateFinding(s, existing, {
@@ -4406,7 +4418,7 @@ export async function importFromVulnersBridge(): Promise<
       // findings match — a re-detected CVE that was Resolved is a
       // regression and must surface as a new Open finding. Vulners
       // attributes to whichever of IP/hostname the finding is stored under.
-      const keys = [correlationKey(companyId, v.cve, ip), ...(asset.hostname ? [correlationKey(companyId, v.cve, asset.hostname)] : [])];
+      const keys = [correlationKey(s, companyId, v.cve, ip), ...(asset.hostname ? [correlationKey(s, companyId, v.cve, asset.hostname)] : [])];
       const existing = keys.map((k) => index.get(k)).find((f): f is Finding => Boolean(f));
       if (existing) {
         correlateFinding(s, existing, {
@@ -4451,7 +4463,7 @@ export async function importFromVulnersBridge(): Promise<
       };
       rescoreFinding(s, f);
       s.findings.set(fid, f);
-      index.set(correlationKey(companyId, v.cve, f.asset), f);
+      index.set(correlationKey(s, companyId, v.cve, f.asset), f);
       scan.findingsCount += 1;
       scan.severityCounts[f.severity] = (scan.severityCounts[f.severity] ?? 0) + 1;
       scan.hostsScanned += 1;
@@ -5557,7 +5569,7 @@ export async function importFromCrowdstrikeSpotlight(): Promise<
       scan.completedAt = nowIso;
       scanByCompany.set(companyId, scan);
 
-      const dedupeKey = correlationKey(companyId, item.cve, assetKey);
+      const dedupeKey = correlationKey(s, companyId, item.cve, assetKey);
       const existingFinding = existingFindingByKey.get(dedupeKey);
       if (existingFinding) {
         correlateFinding(s, existingFinding, {
@@ -5714,7 +5726,7 @@ export async function importFromDefender(): Promise<
   let findingsImported = 0;
   const index = buildCorrelationIndex(s);
   for (const item of items) {
-    const key = correlationKey(company.id, item.cve, item.asset);
+    const key = correlationKey(s, company.id, item.cve, item.asset);
     const existing = index.get(key);
     if (existing) {
       correlateFinding(s, existing, {
