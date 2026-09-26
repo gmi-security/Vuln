@@ -6,7 +6,7 @@ import { isPublicIPv4 } from "./elastic-query-client";
 
 export type ConnectWiseConnection = { endpoint: string; companyId: string; clientId: string; publicKey: string; privateKey: string; authMode?: "encoded" };
 export type CWOption = { id: number; name: string; identifier?: string };
-export type TicketRouting = { companyId: number; boardId: number; statusId: number; priorityId: number; teamId?: number };
+export type TicketRouting = { companyId: number; boardId: number; teamId?: number };
 export type CWDefaults = Omit<Partial<TicketRouting>, "companyId">;
 export type CWRecord = Record<string, any>;
 
@@ -126,8 +126,9 @@ export async function cwRequest(connection: ConnectWiseConnection, path: string,
 export const cwId = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v > 0;
 export function parseRouting(value: unknown): TicketRouting {
   const body = value as TicketRouting | null;
-  if (!body || ![body.companyId, body.boardId, body.statusId, body.priorityId].every(cwId) || (body.teamId !== undefined && !cwId(body.teamId))) throw new DashboardError("Choose a company, board, open status, and priority from ConnectWise.");
-  return { companyId: body.companyId, boardId: body.boardId, statusId: body.statusId, priorityId: body.priorityId, ...(body.teamId ? { teamId: body.teamId } : {}) };
+  if (!body || ![body.companyId, body.boardId].every(cwId) || (body.teamId !== undefined && !cwId(body.teamId))) throw new DashboardError("Choose a company and board from ConnectWise.");
+  // Ignore legacy status/priority selections; ConnectWise applies its defaults.
+  return { companyId: body.companyId, boardId: body.boardId, ...(body.teamId ? { teamId: body.teamId } : {}) };
 }
 export async function cwOptions(connection: ConnectWiseConnection, kind: string, boardId?: number, page = 1, search = "", selectedId?: number) {
   // BoardInfo uses ticket inquiry access rather than the board setup-table API.
@@ -158,11 +159,10 @@ export async function cwOptions(connection: ConnectWiseConnection, kind: string,
 }
 export async function validateCWRouting(connection: ConnectWiseConnection, routing: TicketRouting | Omit<TicketRouting, "companyId">) {
   const refs = { ...("companyId" in routing ? { company: `/company/companies/${routing.companyId}` } : {}), board: `/service/info/boards/${routing.boardId}`,
-    status: `/service/boards/${routing.boardId}/statuses/${routing.statusId}`, priority: `/service/priorities/${routing.priorityId}`,
     ...(routing.teamId ? { team: `/service/boards/${routing.boardId}/teams/${routing.teamId}` } : {}) };
   const entries = await Promise.all(Object.entries(refs).map(async ([name, path]) => {
     const row = await cwRequest(connection, path);
-    if (!row || !cwId(row.id) || row.id !== Number(path.split("/").at(-1)) || typeof row.name !== "string" || !row.name.trim() || row.inactiveFlag || row.inactive || row.deletedFlag || (name === "status" && (row.closedStatus || row.closedFlag))) throw new DashboardError(`The selected ConnectWise ${name} is unavailable. Reload its list.`);
+    if (!row || !cwId(row.id) || row.id !== Number(path.split("/").at(-1)) || typeof row.name !== "string" || !row.name.trim() || row.inactiveFlag || row.inactive || row.deletedFlag) throw new DashboardError(`The selected ConnectWise ${name} is unavailable. Reload its list.`);
     return [name, { id: row.id, name: row.name }] as const;
   }));
   return Object.fromEntries(entries) as Record<string, CWOption>;

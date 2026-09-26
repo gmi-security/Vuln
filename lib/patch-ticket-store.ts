@@ -194,7 +194,7 @@ async function runCreation(id: string) {
     if (current.revision !== saved.revision) throw new DashboardError("ConnectWise connection changed before sending. Review and submit again.");
     writeStarted = true;
     const ticket = await cwRequest(saved.value, "/service/tickets", "POST", { summary: row.title, initialDescription: row.body, recordType: "ServiceTicket",
-      board: { id: row.routing.boardId }, company: { id: row.routing.companyId }, status: { id: row.routing.statusId }, priority: { id: row.routing.priorityId },
+      board: { id: row.routing.boardId }, company: { id: row.routing.companyId },
       ...(row.routing.teamId ? { team: { id: row.routing.teamId } } : {}), externalXRef: `GMI-${id}` });
     await recordTicket(id, ticket, saved.value); ticketSaved = true;
     await db.query("INSERT INTO patch_ticket_audit(request_id,actor,action) VALUES($1,$2,'ticket.created')", [id, row.created_by]);

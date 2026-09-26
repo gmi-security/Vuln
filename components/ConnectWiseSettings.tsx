@@ -39,7 +39,7 @@ export default function ConnectWiseSettings() {
         <label className="block text-sm text-zinc-200">Public API key<input type="password" required={!settings.configured} className={`${inputClass} mt-2`} value={form.publicKey} onChange={e => setForm({ ...form, publicKey: e.target.value })} autoComplete="new-password" spellCheck={false} placeholder={settings.configured ? "Saved securely — leave blank to keep" : "Paste public key"} /></label>
         <label className="block text-sm text-zinc-200">Private API key<input type="password" required={!settings.configured} className={`${inputClass} mt-2`} value={form.privateKey} onChange={e => setForm({ ...form, privateKey: e.target.value })} autoComplete="new-password" spellCheck={false} placeholder={settings.configured ? "Saved securely — leave blank to keep" : "Paste private key"} /></label>
         </>}
-        <p className={`${styles.resultNote} sm:col-span-2`}>Credentials are encrypted on the server and never returned to the browser. Use an API member with permission to read companies, boards, statuses, teams and priorities, create service tickets, and read/upload ticket documents. The ticket's customer is chosen separately.</p>
+        <p className={`${styles.resultNote} sm:col-span-2`}>Credentials are encrypted on the server and never returned to the browser. Use an API member with permission to read companies, boards and teams, create service tickets, and read/upload ticket documents. The ticket's customer is chosen separately.</p>
         <button type="submit" className={`${styles.primaryButton} justify-self-start`}>{busy === "connectwise" ? "Testing and saving…" : "Test and save ConnectWise"}</button>
       </fieldset>
     </form>

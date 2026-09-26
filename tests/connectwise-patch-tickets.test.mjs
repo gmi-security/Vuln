@@ -78,11 +78,12 @@ test('real list names, selected values past page one, board status filtering and
   replies = Array.from({ length: 3 }, () => ({ body: { id: 999, name: 'Wrong reference' } }));
   await assert.rejects(client.validateCWRouting(connection, { boardId: 1, statusId: 2, priorityId: 3 }), /unavailable/);
 });
-test('routing validates BoardInfo without reading board setup or attempting ticket creation', async () => {
-  calls = []; replies = [{ body: { id: 10, name: 'Patch board' } }, { body: { id: 11, name: 'Ready' } }, { body: { id: 12, name: 'High' } }];
-  const labels = await client.validateCWRouting(connection, { boardId: 10, statusId: 11, priorityId: 12 });
+test('routing uses defaults without reading priority or status setup and ignores legacy selections', async () => {
+  assert.deepEqual(client.parseRouting({ companyId: 30, boardId: 10, statusId: 11, priorityId: 12 }), { companyId: 30, boardId: 10 });
+  calls = []; replies = [{ body: { id: 10, name: 'Patch board' } }];
+  const labels = await client.validateCWRouting(connection, { boardId: 10 });
   assert.equal(labels.board.name, 'Patch board');
-  assert.deepEqual(calls.map(c => c.url.pathname.replace('/v4_6_release/apis/3.0', '')), ['/service/info/boards/10', '/service/boards/10/statuses/11', '/service/priorities/12']);
+  assert.deepEqual(calls.map(c => c.url.pathname.replace('/v4_6_release/apis/3.0', '')), ['/service/info/boards/10']);
   assert.ok(calls.every(c => c.options.method === 'GET'));
   calls = []; replies = [{ status: 403, body: { message: 'You do not have security permission to perform this action.' } }];
   await assert.rejects(client.cwOptions(connection, 'boards'), /HTTP 403/);
@@ -121,7 +122,7 @@ test('durable ticket lifecycle and duplicate protection in PostgreSQL', { skip: 
       cwOptions: async () => ({ options: [{ id: 10, name: 'Customer patching' }], more: false, page: 1 }),
       validateCWRouting: async (_c, r) => ({ company: { id: r.companyId, name: 'Actual customer' }, board: { id: r.boardId, name: 'Customer patching' } }),
       cwRequest: async (_c, path, method, body) => {
-        if (method === 'POST') { posts++; if (pausePost) await pausePost;
+        if (method === 'POST') { assert.ok(!('status' in body), 'ConnectWise must choose the initial status'); assert.ok(!('priority' in body), 'ConnectWise must choose the priority'); posts++; if (pausePost) await pausePost;
           if (mode === 'rejected') throw new client.CWRequestError('Bad routing', false);
           const ticket = { id: ++ticketSequence, externalXRef: body.externalXRef, company: body.company, status: { name: 'New' }, closedFlag: false }; tickets.set(ticket.id, ticket);
           if (mode === 'uncertain') throw new client.CWRequestError('Lost response', true);
@@ -142,6 +143,8 @@ test('durable ticket lifecycle and duplicate protection in PostgreSQL', { skip: 
   try {
     await store.saveCWSettings(connection, 'admin@example.test');
     const settings = await store.readCWSettings(); assert.equal(settings.revision, 1); assert.ok(!JSON.stringify(settings).includes('test-private')); assert.ok(!('publicKey' in settings));
+    await store.saveCWDefaults({ boardId: 10, statusId: 11, priorityId: 12 }, 'member');
+    assert.deepEqual((await store.readCWSettings()).defaults, { boardId: 10 }, 'Old status/priority choices must not override ConnectWise defaults');
     await t.test('concurrent same scope and repeated same ID create exactly one ticket', async () => {
       const first = await draft(), second = await draft(); let release; pausePost = new Promise(r => release = r);
       const results = await Promise.allSettled([store.createPatchTicket(first, submit, 'member'), store.createPatchTicket(second, submit, 'member')]);

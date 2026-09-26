@@ -60,9 +60,8 @@ export function ConnectWiseRouting({ value, onChange, revision, disabled = false
   value: CWDefaults; onChange: (value: CWDefaults) => void; revision?: number; disabled?: boolean;
 }) {
   return <div className="grid gap-4 sm:grid-cols-2">
-    <ConnectWiseSelect label="Service board" kind="boards" value={value.boardId} revision={revision} disabled={disabled} onChange={boardId => onChange({ ...value, boardId, statusId: undefined, teamId: undefined })} />
-    <ConnectWiseSelect label="Initial ticket status" kind="statuses" value={value.statusId} boardId={value.boardId} revision={revision} disabled={disabled} onChange={statusId => onChange({ ...value, statusId })} />
+    <ConnectWiseSelect label="Service board" kind="boards" value={value.boardId} revision={revision} disabled={disabled} onChange={boardId => onChange({ boardId, teamId: undefined })} />
     <ConnectWiseSelect label="Team" kind="teams" optional value={value.teamId} boardId={value.boardId} revision={revision} disabled={disabled} onChange={teamId => onChange({ ...value, teamId })} />
-    <ConnectWiseSelect label="Ticket priority" kind="priorities" value={value.priorityId} revision={revision} disabled={disabled} onChange={priorityId => onChange({ ...value, priorityId })} />
+    <p className={`${styles.resultNote} sm:col-span-2`}>ConnectWise will apply its default ticket priority and initial status.</p>
   </div>;
 }
