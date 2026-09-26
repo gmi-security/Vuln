@@ -1,15 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { DashboardError, parseDefinition, parseQueryInput, querySource } from "./elastic-dashboard";
 import { elasticVulnEnabled } from "./elastic-vuln-server";
-import { dashboardDatabase, dashboardConnectionRevision, preparePatchRequest, previewQuery, saveQuery, throttlePreview } from "./elastic-dashboard-store";
-import { parsePatchInput } from "./patch-request";
+import { dashboardDatabase, dashboardConnectionRevision, prepareConsolidation, preparePatchRequest, previewQuery, saveQuery, throttlePreview } from "./elastic-dashboard-store";
+import { parseConsolidationInput, parsePatchInput } from "./patch-request";
 
 const global = globalThis as typeof globalThis & { __elasticJobs?: { timer?: ReturnType<typeof setInterval>; working?: Promise<void> } };
 const state = global.__elasticJobs ??= {};
 
-export async function enqueueDashboardJob(kind: "preview" | "save" | "patch", value: unknown, actor: string) {
+export async function enqueueDashboardJob(kind: "preview" | "save" | "patch" | "consolidate", value: unknown, actor: string) {
   const body = value as Record<string, unknown> | null;
-  const input = kind === "patch" ? parsePatchInput(body) : kind === "preview" ? { ...parseQueryInput(body), ...(typeof body?.id === "string" && /^[a-zA-Z0-9-]{1,64}$/.test(body.id) ? { id: body.id } : {}) } : parseDefinition(value, typeof body?.id === "string" ? body.id : randomUUID());
+  const input = kind === "patch" ? parsePatchInput(body) : kind === "consolidate" ? parseConsolidationInput(body) : kind === "preview" ? { ...parseQueryInput(body), ...(typeof body?.id === "string" && /^[a-zA-Z0-9-]{1,64}$/.test(body.id) ? { id: body.id } : {}) } : parseDefinition(value, typeof body?.id === "string" ? body.id : randomUUID());
   const revision = await dashboardConnectionRevision(querySource(input));
   if (revision === null) throw new DashboardError(`Connect ${querySource(input) === "elastic" ? "Elasticsearch" : "CrowdStrike"} first.`, 409);
   throttlePreview(actor);
@@ -72,6 +72,8 @@ async function work() {
         result = { saved: true };
       } else if (job.kind === "patch") {
         result = { patchRequest: await preparePatchRequest(job.input, job.connection_revision) };
+      } else if (job.kind === "consolidate") {
+        result = { consolidation: await prepareConsolidation(job.input, job.connection_revision) };
       } else {
         result = { result: await previewQuery(job.input, job.actor, true, job.input.id) };
       }

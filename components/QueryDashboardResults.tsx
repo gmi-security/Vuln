@@ -5,6 +5,7 @@ import { X } from "lucide-react";
 import ElasticResultChart from "@/components/ElasticResultChart";
 import CveText from "@/components/CveText";
 import PatchRequestPanel from "@/components/PatchRequestPanel";
+import PatchConsolidationPanel from "@/components/PatchConsolidationPanel";
 import { canShowMetrics, columnLabel, isChartDisplay, numericColumn, type QueryDefinition, type QueryResult } from "@/lib/elastic-dashboard";
 import { severityBarColor, severityClass } from "@/lib/format";
 import type { Severity } from "@/lib/types";
@@ -28,9 +29,24 @@ export default function QueryDashboardResults({ result, display, chart, prepareP
   result: QueryResult; display: QueryDefinition["display"]; chart?: QueryDefinition["chart"]; preparePatch?: boolean;
 }) {
   const [selected, setSelected] = useState<{ cve: string; row?: QueryResult["rows"][number] } | null>(null);
+  const [consolidating, setConsolidating] = useState(false);
   const dialog = useRef<HTMLDialogElement>(null);
+  const consolidationDialog = useRef<HTMLDialogElement>(null);
   const titleId = useId();
+  const consolidationTitleId = useId();
   useEffect(() => { if (selected) dialog.current?.showModal(); }, [selected]);
+  useEffect(() => { if (consolidating) consolidationDialog.current?.showModal(); }, [consolidating]);
+  const consolidationCves = [...new Set(result.rows.flatMap((row) => row.filter((value): value is string => typeof value === "string" && /\bCVE-\d{4}-\d{4,19}\b/i.test(value)).map((value) => value.match(/CVE-\d{4}-\d{4,19}/i)![0].toUpperCase())))].slice(0, 12);
+  const consolidationPanel = (
+    <dialog ref={consolidationDialog} className={styles.detail} aria-labelledby={consolidationTitleId} onClose={() => setConsolidating(false)} onClick={(event) => { if (event.target === event.currentTarget) consolidationDialog.current?.close(); }}>
+      <div className={styles.detailBody}>
+        <div className={styles.detailTop}><span>Patch consolidation</span><button type="button" className={styles.button} onClick={() => consolidationDialog.current?.close()}><X size={15} />Close</button></div>
+        <h2 id={consolidationTitleId}>{consolidationCves.length} CVEs</h2>
+        <p className={styles.resultNote}>{consolidationCves.join(", ")}</p>
+        {consolidating && <PatchConsolidationPanel key={consolidationCves.join(",")} cves={consolidationCves} />}
+      </div>
+    </dialog>
+  );
 
   const details = (
     <dialog ref={dialog} className={styles.detail} aria-labelledby={titleId} onClose={() => setSelected(null)} onClick={(event) => { if (event.target === event.currentTarget) dialog.current?.close(); }}>
@@ -43,7 +59,7 @@ export default function QueryDashboardResults({ result, display, chart, prepareP
       </div>
     </dialog>
   );
-  if (isChartDisplay(display)) return <><ElasticResultChart result={result} definition={{ display, chart }} onCveSelect={cve => setSelected({ cve })} />{details}</>;
+  if (isChartDisplay(display)) return <><ElasticResultChart result={result} definition={{ display, chart }} onCveSelect={cve => setSelected({ cve })} />{details}{consolidationPanel}</>;
   if (display !== "table" && canShowMetrics(result)) {
     const uniqueCves = result.columns.every((column) => /^(critical|high|medium|low|none|unknown)_cves$/i.test(column.name));
     const severityMetrics = result.columns.every((column) => severity(column.name) || /^(none|unknown)(_cves)?$/i.test(column.name));
@@ -60,7 +76,7 @@ export default function QueryDashboardResults({ result, display, chart, prepareP
             <div className={styles.metricNote}>{total > 0 ? `${share.toFixed(1)}% of ${uniqueCves ? "unique CVEs" : "returned findings"}` : uniqueCves ? "No open CVEs" : "No findings"}</div></>}
         </div>;
       })}
-    </div>{details}</>;
+    </div>{details}{consolidationPanel}</>;
   }
   const hasCves = result.rows.some(row => row.some(value => typeof value === "string" && /\bCVE-\d{4}-\d{4,19}\b/i.test(value)));
   const devicesIndex = result.columns.findIndex((column) => column.name === "affected_devices");
@@ -73,6 +89,12 @@ export default function QueryDashboardResults({ result, display, chart, prepareP
     return formatResultValue(value, name);
   }
   return <div>
+    {preparePatch && consolidationCves.length >= 2 && (
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[rgba(179,14,20,0.14)] bg-[#0a0a0a] px-4 py-3">
+        <p className="text-sm text-zinc-300">{consolidationCves.length} CVEs shown{result.rows.length > consolidationCves.length ? " (first 12)" : ""} — see which patches cover the most of them.</p>
+        <button type="button" className={styles.button} onClick={() => setConsolidating(true)}>Build consolidated patch plan</button>
+      </div>
+    )}
     <div role="region" aria-label="Scrollable query results" tabIndex={0} className={styles.tableScroll}>
       <table className={styles.table}>
         <caption className="sr-only">Dashboard query results</caption>
@@ -88,5 +110,6 @@ export default function QueryDashboardResults({ result, display, chart, prepareP
     <p className={styles.resultNote}>{result.rows.length ? `${result.rows.length} rows · Scroll inside the table${hasCves ? " · Select a CVE for details" : ""}` : "The query returned no rows."}</p>
     {result.truncated && <p className="mt-3 text-sm text-amber-300">Showing the first 100 rows. Narrow or aggregate the query to show the full result.</p>}
     {details}
+    {consolidationPanel}
   </div>;
 }

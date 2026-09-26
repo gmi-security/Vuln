@@ -2,7 +2,7 @@ import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:cr
 import { setTimeout as delay } from "node:timers/promises";
 import { DashboardError, parseQueryInput, type QueryInput, type QueryResult } from "./elastic-dashboard";
 import { CROWDSTRIKE_DATASETS, FALCON_REGIONS, type CrowdStrikeConnection, type Vulnerability } from "./crowdstrike-dashboard";
-import { buildPatchRequest, normalizePatchFinding, normalizeRemediation, parsePatchInput, patchRecommendationIds, type PatchFinding, type PatchRequest } from "./patch-request";
+import { buildPatchConsolidation, buildPatchRequest, normalizePatchFinding, normalizeRemediation, parseConsolidationInput, parsePatchInput, patchRecommendationIds, type PatchConsolidation, type PatchFinding, type PatchRequest } from "./patch-request";
 
 export function parseCrowdStrikeConnection(value: unknown): CrowdStrikeConnection {
   const body = value as CrowdStrikeConnection | null;
@@ -195,9 +195,7 @@ async function collectRecords(auth: Awaited<ReturnType<typeof session>>, deadlin
   throw new DashboardError("CrowdStrike collection reached the page limit. Narrow the filter. No partial totals were saved.");
 }
 
-export async function executePatchRequest(connection: CrowdStrikeConnection, value: unknown, budgetMs = 300_000): Promise<PatchRequest> {
-  const { cve } = parsePatchInput(value), startedAt = new Date().toISOString();
-  const deadline = Date.now() + budgetMs, auth = await session(connection, deadline);
+async function collectPatchFindings(auth: Awaited<ReturnType<typeof session>>, deadline: number, cve: string): Promise<Map<string, PatchFinding>> {
   const records = new Map<string, PatchFinding>(), cursors = new Set<string>();
   let after = "", expected: number | undefined, received = 0, bytes = 0, complete = false;
   for (let page = 0; page < 500; page++) {
@@ -232,10 +230,15 @@ export async function executePatchRequest(connection: CrowdStrikeConnection, val
     cursors.add(after);
   }
   if (!complete) throw new DashboardError("CrowdStrike reached the page limit. No partial export was prepared.");
-  // The remediation facet usually supplies the entities. Resolve any referenced
-  // IDs still missing an action with the documented remediation entity endpoint.
+  return records;
+}
+
+// The remediation facet usually supplies the entities. Resolve any referenced
+// IDs still missing an action with the documented remediation entity endpoint.
+async function hydrateRemediations(auth: Awaited<ReturnType<typeof session>>, deadline: number, records: Iterable<PatchFinding>): Promise<void> {
+  const rows = [...records];
   const missing = new Set<string>();
-  for (const row of records.values()) {
+  for (const row of rows) {
     const known = new Map(row.remediations.map((r) => [r.id, r]));
     for (const id of patchRecommendationIds(row)) if (!known.get(id)?.action) missing.add(id);
   }
@@ -253,13 +256,34 @@ export async function executePatchRequest(connection: CrowdStrikeConnection, val
     }
     if (batch.some((id) => !hydrated.has(id))) throw new DashboardError("CrowdStrike did not return all referenced remediations. No partial export was prepared.");
   }
-  for (const row of records.values()) {
+  for (const row of rows) {
     const known = new Map(row.remediations.map((r) => [r.id, r]));
     for (const id of patchRecommendationIds(row)) {
       if (!known.get(id)?.action && hydrated.has(id)) known.set(id, hydrated.get(id)!);
     }
     row.remediations = [...known.values()];
   }
+}
+
+export async function executePatchRequest(connection: CrowdStrikeConnection, value: unknown, budgetMs = 300_000): Promise<PatchRequest> {
+  const { cve } = parsePatchInput(value), startedAt = new Date().toISOString();
+  const deadline = Date.now() + budgetMs, auth = await session(connection, deadline);
+  const records = await collectPatchFindings(auth, deadline, cve);
+  await hydrateRemediations(auth, deadline, records.values());
   if (Date.now() >= deadline) throw new DashboardError("Patch request collection exceeded five minutes. Retry; no partial export was prepared.");
   return buildPatchRequest(cve, [...records.values()], connection.region, startedAt, new Date().toISOString());
+}
+
+export async function executePatchConsolidation(connection: CrowdStrikeConnection, value: unknown, budgetMs = 360_000): Promise<PatchConsolidation> {
+  const { cves } = parseConsolidationInput(value), startedAt = new Date().toISOString();
+  const deadline = Date.now() + budgetMs, auth = await session(connection, deadline);
+  const all: PatchFinding[] = [];
+  for (const cve of cves) {
+    const records = await collectPatchFindings(auth, deadline, cve);
+    all.push(...records.values());
+    if (all.length > 500_000) throw new DashboardError("This CVE set exceeds the 500,000-finding combined collection limit. Choose fewer CVEs.");
+  }
+  await hydrateRemediations(auth, deadline, all);
+  if (Date.now() >= deadline) throw new DashboardError("Consolidation collection exceeded the time budget. Retry; no partial export was prepared.");
+  return buildPatchConsolidation(cves, all, connection.region, startedAt, new Date().toISOString());
 }
