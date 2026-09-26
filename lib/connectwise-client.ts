@@ -175,7 +175,7 @@ export function ticketUrl(connection: ConnectWiseConnection, id: number): string
   return url.toString();
 }
 export async function findCWRequest(connection: ConnectWiseConnection, reference: string): Promise<CWRecord | null> {
-  if (!/^GMI-[a-f0-9-]{36}$/.test(reference)) throw new DashboardError("Invalid request reference.");
+  if (!/^GMI-(?:GRP-)?[a-f0-9-]{36}$/.test(reference)) throw new DashboardError("Invalid request reference.");
   const rows = await cwRequest(connection, `/service/tickets?${new URLSearchParams({ conditions: `externalXRef="${reference}"`, pageSize: "2" })}`);
   if (!Array.isArray(rows) || rows.length > 1) throw new DashboardError("ConnectWise returned multiple tickets for this request. Review them in ConnectWise before continuing.", 409);
   if (rows[0] && (!cwId(rows[0].id) || rows[0].externalXRef !== reference)) throw new DashboardError("ConnectWise returned an unexpected ticket reference.", 502);

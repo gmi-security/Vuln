@@ -4,6 +4,7 @@ import { elasticVulnEnabled } from "./elastic-vuln-server";
 import { dashboardDatabase, dashboardConnectionRevision, prepareConsolidation, preparePatchRequest, previewQuery, saveQuery, throttlePreview } from "./elastic-dashboard-store";
 import { parseConsolidationInput, parsePatchInput } from "./patch-request";
 import { persistPreparedPatch } from "./patch-ticket-store";
+import { persistPreparedGroups } from "./patch-group-ticket-store";
 
 const global = globalThis as typeof globalThis & { __elasticJobs?: { timer?: ReturnType<typeof setInterval>; working?: Promise<void> } };
 const state = global.__elasticJobs ??= {};
@@ -76,7 +77,9 @@ async function work() {
         const patchRequestId = await persistPreparedPatch(job.id, patchRequest, job.actor, job.connection_revision);
         result = { patchRequest, patchRequestId };
       } else if (job.kind === "consolidate") {
-        result = { consolidation: await prepareConsolidation(job.input, job.connection_revision) };
+        const consolidation = await prepareConsolidation(job.input, job.connection_revision);
+        const groupTicketIds = await persistPreparedGroups(consolidation, job.actor, job.connection_revision);
+        result = { consolidation, groupTicketIds };
       } else {
         result = { result: await previewQuery(job.input, job.actor, true, job.input.id) };
       }

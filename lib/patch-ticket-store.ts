@@ -28,6 +28,22 @@ export async function patchTicketDatabase() {
     WHERE state IN ('creating','uncertain','created') AND closed=false;
   CREATE TABLE IF NOT EXISTS patch_ticket_audit (
     id BIGSERIAL PRIMARY KEY, request_id UUID, actor TEXT NOT NULL, action TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE TABLE IF NOT EXISTS patch_group_ticket_requests (
+    id UUID PRIMARY KEY, cves JSONB NOT NULL, remediation_id TEXT NOT NULL, tenant_id TEXT NOT NULL,
+    prepared_by TEXT NOT NULL, created_by TEXT, prepared_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    crowdstrike_revision INT NOT NULL, packet JSONB NOT NULL, host_count INT NOT NULL, finding_count INT NOT NULL,
+    scope_hash TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'prepared',
+    cw_target TEXT, cw_revision INT, company_id INT, routing JSONB, labels JSONB,
+    title TEXT, body TEXT, started_at TIMESTAMPTZ, ticket_id INT, ticket_url TEXT, ticket_status TEXT,
+    closed BOOLEAN NOT NULL DEFAULT false, attachment_state TEXT NOT NULL DEFAULT 'not_started',
+    attachment_started TIMESTAMPTZ, document_id INT, last_error TEXT
+  );
+  CREATE INDEX IF NOT EXISTS patch_group_ticket_date ON patch_group_ticket_requests(prepared_at DESC);
+  CREATE UNIQUE INDEX IF NOT EXISTS patch_group_ticket_active_scope ON patch_group_ticket_requests(cw_target,remediation_id,tenant_id,company_id,scope_hash)
+    WHERE state IN ('creating','uncertain','created') AND closed=false;
+  CREATE TABLE IF NOT EXISTS patch_group_ticket_audit (
+    id BIGSERIAL PRIMARY KEY, request_id UUID, actor TEXT NOT NULL, action TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
   )`).then(() => {}).catch(error => { ready = undefined; throw error; });
   await ready;
   return db;
@@ -41,7 +57,7 @@ function summary(row: CWRecord): PatchTicketSummary {
     attachmentState: row.attachment_state, error: row.last_error };
 }
 function requestId(id: string) { if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(id)) throw new DashboardError("Patch request not found.", 404); }
-async function savedConnection(): Promise<{ value: ConnectWiseConnection; revision: number; target: string; defaults: CWDefaults }> {
+export async function savedConnection(): Promise<{ value: ConnectWiseConnection; revision: number; target: string; defaults: CWDefaults }> {
   const db = await patchTicketDatabase(), row = (await db.query("SELECT * FROM patch_connectwise_connection WHERE id=1")).rows[0];
   if (!row) throw new DashboardError("Add your ConnectWise connection under Connections first.", 409);
   return { value: openCWConnection(row.secret), revision: row.revision, target: row.target, defaults: row.defaults };

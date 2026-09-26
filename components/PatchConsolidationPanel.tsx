@@ -3,12 +3,15 @@
 import { useEffect, useRef, useState } from "react";
 import { dashboardRequest } from "@/lib/dashboard-browser-client";
 import type { PatchConsolidation } from "@/lib/patch-request";
+import ConnectWiseGroupTicket from "@/components/ConnectWiseGroupTicket";
 import styles from "./QueryDashboard.module.css";
 
-type Job = { jobId: string; status: string; error?: string; consolidation?: PatchConsolidation };
+type Job = { jobId: string; status: string; error?: string; consolidation?: PatchConsolidation; groupTicketIds?: string[] };
 
 export default function PatchConsolidationPanel({ cves }: { cves: string[] }) {
   const [packet, setPacket] = useState<PatchConsolidation | null>(null);
+  const [groupTicketIds, setGroupTicketIds] = useState<string[]>([]);
+  const [expanded, setExpanded] = useState<number | null>(null);
   const [tenantId, setTenantId] = useState("");
   const [tenants, setTenants] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
@@ -31,7 +34,7 @@ export default function PatchConsolidationPanel({ cves }: { cves: string[] }) {
       }
       if (generation.current !== current) return;
       if (job.status !== "succeeded" || !job.consolidation) throw new Error(job.error || "The consolidation could not be prepared. Please retry.");
-      setPacket(job.consolidation);
+      setPacket(job.consolidation); setGroupTicketIds(job.groupTicketIds ?? []); setExpanded(null);
       setTenants(old => [...new Set([...old, ...(job.consolidation?.tenantIds ?? [])])].sort());
       setMessage("Consolidated patch plan ready. Work the ranked list top to bottom.");
     } catch (cause) {
@@ -112,11 +115,17 @@ export default function PatchConsolidationPanel({ cves }: { cves: string[] }) {
                   <div className="mt-1 text-[11px] text-zinc-500">{share}% of scope · {group.cves.length} CVE{group.cves.length === 1 ? "" : "s"} · {group.findingCount.toLocaleString()} findings</div>
                 </div>
               </div>
+              {groupTicketIds[index] && (
+                <button type="button" className={`${styles.button} mt-3`} onClick={() => setExpanded(v => v === index ? null : index)}>
+                  {expanded === index ? "Hide ConnectWise ticket" : "Create ConnectWise ticket"}
+                </button>
+              )}
+              {expanded === index && groupTicketIds[index] && <ConnectWiseGroupTicket key={groupTicketIds[index]} group={group} requestId={groupTicketIds[index]} />}
             </div>
           );
         })}
       </div>
-      <p className={styles.resultNote}>No ticket has been sent to ConnectWise and no patching has been started.</p>
+      <p className={styles.resultNote}>Each ranked action above can be sent to ConnectWise as its own ticket, covering every CVE it resolves. Nothing is sent until you create one.</p>
     </>}
   </section>;
 }
