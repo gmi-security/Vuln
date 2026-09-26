@@ -1,6 +1,6 @@
 import type { PatchGroup } from "./patch-request";
 export type PatchGroupTicketSummary = {
-  id: string; cves: string[]; remediationId: string; tenantId: string;
+  id: string; cves: string[]; remediationId: string; remediationTitle: string; tenantId: string;
   state: "prepared" | "creating" | "uncertain" | "failed" | "created";
   preparedBy: string; createdBy: string | null; preparedAt: string; updatedAt: string;
   hostCount: number; findingCount: number; company: string | null; board: string | null;

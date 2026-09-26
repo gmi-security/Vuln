@@ -30,7 +30,8 @@ export default function PatchTicketTracker() {
       ]);
       const combined: Row[] = [
         ...cveData.requests.map((row): Row => ({ kind: "cve", id: row.id, scope: row.cve, cves: [row.cve], row })),
-        ...groupData.requests.map((row): Row => ({ kind: "group", id: row.id, scope: row.cves.length === 1 ? row.cves[0] : `${row.cves.length} CVEs (consolidated)`, cves: row.cves, row })),
+        ...groupData.requests.map((row): Row => ({ kind: "group", id: row.id,
+          scope: row.cves.length === 1 ? row.cves[0] : `${(row.remediationTitle || "Remediation").slice(0, 48)} · ${row.cves.length} CVEs`, cves: row.cves, row })),
       ].sort((a, b) => new Date(b.row.preparedAt).getTime() - new Date(a.row.preparedAt).getTime());
       setRows(combined); setMore(cveData.more || groupData.more);
     } catch (e) { setError(e instanceof Error ? e.message : "Could not load the ticket tracker."); }
@@ -67,7 +68,7 @@ export default function PatchTicketTracker() {
       <thead><tr><th>Type</th><th>Scope</th><th>Ticket / state</th><th>Company</th><th>Devices</th><th>Prepared</th></tr></thead>
       <tbody>{rows.map(r => <tr key={`${r.kind}-${r.id}`}>
         <td>{r.kind === "cve" ? "Single CVE" : "Consolidated"}</td>
-        <td title={r.cves.join(", ")}>{r.scope}</td>
+        <td title={r.kind === "group" ? `${r.row.remediationTitle || "Remediation"}\nResolves: ${r.cves.join(", ")}` : r.scope}>{r.scope}</td>
         <td>{r.row.ticketUrl && <a href={r.row.ticketUrl} target="_blank" rel="noopener noreferrer" className="text-sky-300 underline">#{r.row.ticketId}</a>}<div>{r.kind === "cve" ? patchTicketState(r.row) : patchGroupTicketState(r.row)}</div></td>
         <td>{r.row.company ?? "Draft"}</td>
         <td>{r.row.hostCount.toLocaleString()}</td>

@@ -5,9 +5,9 @@ import type { PatchConsolidation, PatchGroup } from "./patch-request";
 import { automatedGroupTicketBody, type PatchGroupTicketSummary } from "./patch-group-ticket-types";
 import { cwId, cwRequest, findCWRequest, CWRequestError, parseRouting, ticketUrl, uploadPatchCsv, validateCWRouting, type ConnectWiseConnection, type CWRecord, type TicketRouting } from "./connectwise-client";
 
-const fields = "id,cves,remediation_id,tenant_id,state,prepared_by,created_by,prepared_at,updated_at,host_count,finding_count,labels,ticket_id,ticket_url,ticket_status,closed,attachment_state,last_error";
+const fields = "id,cves,remediation_id,tenant_id,state,prepared_by,created_by,prepared_at,updated_at,host_count,finding_count,labels,ticket_id,ticket_url,ticket_status,closed,attachment_state,last_error,packet->>'title' AS remediation_title";
 function summary(row: CWRecord): PatchGroupTicketSummary {
-  return { id: row.id, cves: row.cves, remediationId: row.remediation_id, tenantId: row.tenant_id, state: row.state,
+  return { id: row.id, cves: row.cves, remediationId: row.remediation_id, remediationTitle: row.remediation_title, tenantId: row.tenant_id, state: row.state,
     preparedBy: row.prepared_by, createdBy: row.created_by, preparedAt: new Date(row.prepared_at).toISOString(), updatedAt: new Date(row.updated_at).toISOString(),
     hostCount: row.host_count, findingCount: row.finding_count, company: row.labels?.company?.name ?? null, board: row.labels?.board?.name ?? null,
     ticketId: row.ticket_id, ticketUrl: row.ticket_url, ticketStatus: row.ticket_status, closed: row.closed,
