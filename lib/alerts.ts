@@ -298,6 +298,49 @@ export async function sendSyncAlerts(input: SyncAlertInput): Promise<void> {
   }
 }
 
+// --- SLA breach digest -----------------------------------------------------
+
+export type SlaBreachFinding = SyncAlertFinding & { dueAt: string };
+
+// A human still creates the ConnectWise ticket — this only pages ops once,
+// the day a finding first crosses its SLA, so nothing overdue goes unnoticed
+// waiting for someone to check the dashboard. Callers are responsible for
+// only passing findings that haven't been alerted before (never re-sent for
+// the same finding).
+export async function sendSlaBreachAlert(
+  findings: SlaBreachFinding[],
+): Promise<void> {
+  if (findings.length === 0) return;
+  try {
+    const base = consoleBaseUrl();
+    const crits = findings.filter((f) => f.severity === "Critical").length;
+    const highs = findings.filter((f) => f.severity === "High").length;
+    const kevCount = findings.filter((f) => f.kev).length;
+    const counts = [
+      crits ? `${crits} Critical` : "",
+      highs ? `${highs} High` : "",
+    ]
+      .filter(Boolean)
+      .join(", ");
+    const text = `gmi-vuln: SLA breach — ${findings.length} finding${findings.length === 1 ? "" : "s"} past due (${counts})${kevCount ? ` · ${kevCount} KEV` : ""} — ${companySummary(findings)}`;
+    await sendSlack(base ? `${text}\n<${base}/findings|Open console>` : text);
+    if (alertInbox()) {
+      const html = `<pre style="font-family:inherit;white-space:pre-wrap;">${escapeHtml(text)}</pre>${base ? `<p><a href="${base}/findings">Open console</a></p>` : ""}`;
+      await sendEmail({
+        to: alertInbox(),
+        subject: "gmi-vuln: SLA breach",
+        html,
+        text,
+      });
+    }
+  } catch (err) {
+    console.error(
+      "[alerts] SLA breach alert failed:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
 // --- remediation handoff email --------------------------------------------------
 
 export type RemediationEmailFinding = {

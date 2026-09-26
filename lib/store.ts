@@ -90,7 +90,9 @@ import {
   emailConfigured,
   sendMonthlyReportEmail,
   sendOpsAlert,
+  sendSlaBreachAlert,
   sendSyncAlerts,
+  type SlaBreachFinding,
   type SyncAlertFinding,
 } from "@/lib/alerts";
 import type {
@@ -369,6 +371,7 @@ type StoreMeta = {
   lastMonthlyReportMonth: string | null; // "YYYY-MM" (UTC)
   lastNessusHealthOk: boolean | null; // watchdog state; null = never probed
   lastNessusHealthCheckAt: number | null; // epoch ms of the last watchdog probe
+  lastSlaBreachCheckDay: string | null; // "YYYY-MM-DD" (UTC) — one digest per day
   // One-time correction: the recurring-scan-import fix's first backfill pass
   // unconditionally trusted Nessus's current lastModified as "already
   // known," which could silently skip past already-completed newer runs.
@@ -385,6 +388,7 @@ function defaultMeta(): StoreMeta {
     lastMonthlyReportMonth: null,
     lastNessusHealthOk: null,
     lastNessusHealthCheckAt: null,
+    lastSlaBreachCheckDay: null,
     nessusBackfillCorrected: false,
   };
 }
@@ -768,6 +772,44 @@ async function schedulerTick(): Promise<void> {
       }
     } catch (err) {
       console.error("[scheduler] nessus health probe failed:", err);
+    }
+  }
+
+  // SLA breach digest: once a day, page ops for every open Critical/High or
+  // KEV finding that has newly crossed its SLA due date — a human still
+  // creates the ConnectWise ticket from the dashboard, this just makes sure
+  // nobody has to notice a breach by checking manually. Each finding is
+  // flagged after its first alert so a redeploy or a quiet day never
+  // re-sends the same breach.
+  if (sched.alertsEnabled && s.meta.lastSlaBreachCheckDay !== todayUtc()) {
+    s.meta.lastSlaBreachCheckDay = todayUtc();
+    markDirty();
+    try {
+      const nowIso = new Date().toISOString();
+      const breaching: SlaBreachFinding[] = [];
+      for (const f of s.findings.values()) {
+        if (f.slaBreachAlertedAt || isAlertExcludedCompany(f.companyName)) continue;
+        if (f.severity !== "Critical" && f.severity !== "High" && !f.kev) continue;
+        const sla = findingSlaInfo(f);
+        if (!sla.overdue || !sla.dueAt) continue;
+        f.slaBreachAlertedAt = nowIso;
+        breaching.push({
+          companyId: f.companyId,
+          companyName: f.companyName,
+          cve: f.cve,
+          title: f.title,
+          severity: f.severity,
+          kev: f.kev,
+          ransomware: f.ransomware,
+          dueAt: sla.dueAt,
+        });
+      }
+      if (breaching.length > 0) {
+        markDirty();
+        await sendSlaBreachAlert(breaching);
+      }
+    } catch (err) {
+      console.error("[scheduler] SLA breach digest failed:", err);
     }
   }
 }

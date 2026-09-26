@@ -254,6 +254,11 @@ export type Finding = {
   // control did it, so the UI can show why the number is lower than
   // CVSS/KEV/exposure alone would suggest.
   compensatingControl?: { id: string; title: string; effectivenessPct: number; scoreBeforeControl: number } | null;
+
+  // Set once an SLA-breach alert has been sent for this finding, so the
+  // daily scheduler check never pages ops twice for the same breach. Absent
+  // for findings that have never crossed the alert threshold.
+  slaBreachAlertedAt?: string;
 };
 
 export type CompensatingControlStatus = "Active" | "Expired" | "Under Review";
