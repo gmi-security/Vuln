@@ -3,6 +3,7 @@ import { DashboardError, parseDefinition, parseQueryInput, querySource } from ".
 import { elasticVulnEnabled } from "./elastic-vuln-server";
 import { dashboardDatabase, dashboardConnectionRevision, prepareConsolidation, preparePatchRequest, previewQuery, saveQuery, throttlePreview } from "./elastic-dashboard-store";
 import { parseConsolidationInput, parsePatchInput } from "./patch-request";
+import { persistPreparedPatch } from "./patch-ticket-store";
 
 const global = globalThis as typeof globalThis & { __elasticJobs?: { timer?: ReturnType<typeof setInterval>; working?: Promise<void> } };
 const state = global.__elasticJobs ??= {};
@@ -71,7 +72,9 @@ async function work() {
         await saveQuery(job.input, job.actor, { id: job.id, connectionRevision: job.connection_revision, queryRevision: job.query_revision });
         result = { saved: true };
       } else if (job.kind === "patch") {
-        result = { patchRequest: await preparePatchRequest(job.input, job.connection_revision) };
+        const patchRequest = await preparePatchRequest(job.input, job.connection_revision);
+        const patchRequestId = await persistPreparedPatch(job.id, patchRequest, job.actor, job.connection_revision);
+        result = { patchRequest, patchRequestId };
       } else if (job.kind === "consolidate") {
         result = { consolidation: await prepareConsolidation(job.input, job.connection_revision) };
       } else {

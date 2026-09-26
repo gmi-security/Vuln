@@ -18,7 +18,7 @@ export async function dashboardAccess(request?: Request, mutation = false) {
   return { canManage, actor: user.login || user.email || user.name || "organization-member" };
 }
 
-export async function dashboardBody(request: Request): Promise<unknown> {
+export async function dashboardBody(request: Request, maxBytes = 32 * 1024): Promise<unknown> {
   if (!request.headers.get("content-type")?.startsWith("application/json")) throw new DashboardError("Expected application/json", 415);
   const reader = request.body?.getReader();
   if (!reader) throw new DashboardError("Missing request body.");
@@ -29,7 +29,7 @@ export async function dashboardBody(request: Request): Promise<unknown> {
       const { value, done } = await reader.read();
       if (done) break;
       bytes += value.byteLength;
-      if (bytes > 32 * 1024) { await reader.cancel(); throw new DashboardError("Request exceeds 32 KiB.", 413); }
+      if (bytes > maxBytes) { await reader.cancel(); throw new DashboardError(`Request exceeds ${maxBytes / 1024} KiB.`, 413); }
       chunks.push(value);
     }
     try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); }
