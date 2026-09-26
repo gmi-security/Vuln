@@ -1,8 +1,9 @@
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { DashboardError, parseQueryInput, type QueryInput, type QueryResult } from "./elastic-dashboard";
-import { CROWDSTRIKE_DATASETS, FALCON_REGIONS, type CrowdStrikeConnection, type Vulnerability } from "./crowdstrike-dashboard";
+import { applyEpss, CROWDSTRIKE_DATASETS, FALCON_REGIONS, type CrowdStrikeConnection, type Vulnerability } from "./crowdstrike-dashboard";
 import { buildPatchConsolidation, buildPatchRequest, normalizePatchFinding, normalizeRemediation, parseConsolidationInput, parsePatchInput, patchRecommendationIds, type PatchConsolidation, type PatchFinding, type PatchRequest } from "./patch-request";
+import { fetchEpss } from "./threat";
 
 export function parseCrowdStrikeConnection(value: unknown): CrowdStrikeConnection {
   const body = value as CrowdStrikeConnection | null;
@@ -113,6 +114,20 @@ export async function testCrowdStrikeConnection(connection: CrowdStrikeConnectio
   if (!Array.isArray(result.resources)) throw new DashboardError("CrowdStrike did not return vulnerability data.");
 }
 
+// EPSS is unknown until fetched (a separate batched call to FIRST.org), so it
+// is folded in after collection rather than at parse time. The cache is kept
+// across severity batches in the cve-devices loop so each CVE is only looked
+// up once per query, however many times this query re-enriches records.
+async function enrichEpss(records: Map<string, Vulnerability>, cache: Map<string, number>): Promise<void> {
+  const candidates = [...records.values()].map((row) => row.cve).filter((cve) => cve && !cache.has(cve.toUpperCase()));
+  const missing = [...new Set(candidates)];
+  if (missing.length) {
+    const fetched = await fetchEpss(missing);
+    for (const [cve, score] of fetched) cache.set(cve, score);
+  }
+  applyEpss(records.values(), cache);
+}
+
 export async function executeCrowdStrike(connection: CrowdStrikeConnection, value: QueryInput, budgetMs = 300_000): Promise<QueryResult> {
   const input = parseQueryInput(value), options = input.crowdstrike;
   if (!options) throw new DashboardError("Choose a CrowdStrike dataset.");
@@ -139,7 +154,7 @@ export async function executeCrowdStrike(connection: CrowdStrikeConnection, valu
       note: "CrowdStrike CVSS severity counts for this filter, one finding per vulnerability instance. Counts are separate API observations collected during this refresh, not a single atomic snapshot. None and Unknown are retained; these are not GMI priorities or ExPRT ratings." };
   }
   if (options.view === "cve-devices") {
-    const records = new Map<string, Vulnerability>();
+    const records = new Map<string, Vulnerability>(), epssCache = new Map<string, number>();
     // Severity is the primary ordering key. Finish each severity completely;
     // lower severities cannot displace a full top-N from completed higher ones.
     for (const severity of ["CRITICAL", "HIGH", "MEDIUM", "LOW", "NONE", "UNKNOWN"]) {
@@ -148,12 +163,15 @@ export async function executeCrowdStrike(connection: CrowdStrikeConnection, valu
         if (row.severity !== severity || records.has(id)) throw new DashboardError("CrowdStrike findings changed severity during collection. Retry; no partial device counts were saved.");
         records.set(id, row);
       }
+      await enrichEpss(records, epssCache);
       const result = dataset.summarize(records.values(), options);
       if (result.rows.length >= options.top) return result;
     }
     return dataset.summarize(records.values(), options);
   }
-  return dataset.summarize((await collectRecords(auth, deadline, input.query, dataset.facets, 500)).values(), options);
+  const records = await collectRecords(auth, deadline, input.query, dataset.facets, 500);
+  if (options.view === "patch-worklist") await enrichEpss(records, new Map());
+  return dataset.summarize(records.values(), options);
 }
 
 async function collectRecords(auth: Awaited<ReturnType<typeof session>>, deadline: number, filter: string, facets: string[], limit: number): Promise<Map<string, Vulnerability>> {
@@ -287,4 +305,22 @@ export async function executePatchConsolidation(connection: CrowdStrikeConnectio
   await hydrateRemediations(auth, deadline, all);
   if (Date.now() >= deadline) throw new DashboardError("Consolidation collection exceeded the time budget. Retry; no partial export was prepared.");
   return buildPatchConsolidation(cves, all, connection.region, startedAt, new Date().toISOString());
+}
+
+// Closed-loop check: re-collects each CVE's currently open/reopened findings
+// (unhydrated — remediation detail is not needed to answer "is it still
+// open") and reports which of the ticket's originally scoped devices still
+// show up. Absence from the current open population is the signal a device
+// is fixed; it is not a positive confirmation the specific patch ran.
+export async function verifyPatchFix(connection: CrowdStrikeConnection, cves: string[], hostScope: string[], tenantId: string, budgetMs = 120_000): Promise<{ checkedAt: string; stillOpenHosts: string[]; scopedDevices: number }> {
+  const deadline = Date.now() + budgetMs, auth = await session(connection, deadline);
+  const scoped = new Set(hostScope), stillOpen = new Set<string>();
+  for (const cve of cves) {
+    const records = await collectPatchFindings(auth, deadline, cve, tenantId);
+    for (const row of records.values()) {
+      const key = JSON.stringify([row.cid, row.hostId]);
+      if (scoped.has(key)) stillOpen.add(key);
+    }
+  }
+  return { checkedAt: new Date().toISOString(), stillOpenHosts: [...stillOpen].sort(), scopedDevices: scoped.size };
 }

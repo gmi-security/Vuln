@@ -162,7 +162,7 @@ export function canShowMetrics(result: QueryResult): boolean {
 }
 
 export function columnLabel(name: string): string {
-  return name.replace(/_pct$/i, " percentage").replace(/[_.]/g, " ").replace(/\bcves\b/gi, "CVEs").replace(/^./, (char) => char.toUpperCase());
+  return name.replace(/_pct$/i, " percentage").replace(/[_.]/g, " ").replace(/\bcves\b/gi, "CVEs").replace(/\bepss\b/gi, "EPSS").replace(/^./, (char) => char.toUpperCase());
 }
 
 export function isChartDisplay(display: string): display is "bar" | "line" | "doughnut" {

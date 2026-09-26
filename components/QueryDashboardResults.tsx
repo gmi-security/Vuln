@@ -18,6 +18,7 @@ function severity(value: string): Severity | undefined {
 export function formatResultValue(value: string | number | boolean | null, column: string): string {
   if (value === null) return "—";
   if (typeof value === "number") {
+    if (column === "epss") return `${Math.round(value * 100)}%`;
     const formatted = value.toLocaleString("en-US", { maximumFractionDigits: 2 });
     return /(?:_pct|_percent|percentage)$/i.test(column) ? `${formatted}%` : formatted;
   }
