@@ -5785,6 +5785,7 @@ export async function importFromDefender(): Promise<
   let findingsImported = 0;
   const index = buildCorrelationIndex(s);
   for (const item of items) {
+    linkIdentities(s, company.id, item.assetAliases);
     const key = correlationKey(s, company.id, item.cve, item.asset);
     const existing = index.get(key);
     if (existing) {
