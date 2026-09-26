@@ -9,6 +9,7 @@ import VulnShell from "@/components/VulnShell";
 import Results from "@/components/QueryDashboardResults";
 import ConnectWiseSettings from "@/components/ConnectWiseSettings";
 import PatchTicketRegister from "@/components/PatchTicketRegister";
+import PatchTicketTracker from "@/components/PatchTicketTracker";
 import styles from "./QueryDashboard.module.css";
 import { OPEN_VULN_TREND } from "@/lib/elastic-query-templates";
 import { inputClass, PanelCard, selectClass } from "@/components/ui";
@@ -428,5 +429,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
       </section>;
     })}
     </div>
+
+    {dashboard.canManage && <PatchTicketTracker />}
   </VulnShell>;
 }
