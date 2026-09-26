@@ -154,6 +154,28 @@ async function recoverInterruptedRequests() {
   await db.query(`UPDATE patch_ticket_requests SET attachment_state='pending',last_error='CSV attachment was interrupted. Retry the attachment check.',updated_at=now()
     WHERE attachment_state='uploading' AND attachment_started < now()-interval '3 minutes'`);
 }
+// Every (tenant, host, CVE) already covered by an active ticket — single-CVE
+// or consolidated, whichever was cut first — so a fresh consolidation run
+// does not re-propose work that already has a ConnectWise ticket in flight.
+// Drafts that never became a ticket don't count: only a real ticket-creation
+// attempt (creating/uncertain/created) represents a commitment worth honoring.
+export async function activeTicketedPairs(): Promise<Set<string>> {
+  const db = await patchTicketDatabase();
+  const pairs = new Set<string>();
+  const cveRows = await db.query(`SELECT cve, packet->'hostScope' AS host_scope FROM patch_ticket_requests WHERE state IN ('creating','uncertain','created') AND closed=false`);
+  for (const row of cveRows.rows) {
+    for (const deviceKey of (row.host_scope ?? []) as string[]) {
+      try { const [cid, hostId] = JSON.parse(deviceKey); if (cid && hostId) pairs.add(JSON.stringify([cid, hostId, row.cve])); } catch { /* skip malformed scope entries */ }
+    }
+  }
+  const groupRows = await db.query(`SELECT packet->'deviceCves' AS device_cves FROM patch_group_ticket_requests WHERE state IN ('creating','uncertain','created') AND closed=false`);
+  for (const row of groupRows.rows) {
+    for (const entry of (row.device_cves ?? []) as { cid?: string; hostId?: string; cve?: string }[]) {
+      if (entry?.cid && entry?.hostId && entry?.cve) pairs.add(JSON.stringify([entry.cid, entry.hostId, entry.cve]));
+    }
+  }
+  return pairs;
+}
 export async function listPatchTickets(cve?: string) {
   if (cve) cve = parsePatchInput({ cve }).cve;
   const db = await patchTicketDatabase(); await recoverInterruptedRequests();

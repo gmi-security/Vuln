@@ -3,7 +3,7 @@ import { DashboardError, parseDefinition, parseQueryInput, querySource } from ".
 import { elasticVulnEnabled } from "./elastic-vuln-server";
 import { dashboardDatabase, dashboardConnectionRevision, prepareConsolidation, preparePatchRequest, previewQuery, saveQuery, throttlePreview } from "./elastic-dashboard-store";
 import { parseConsolidationInput, parsePatchInput, parseVerifyInput } from "./patch-request";
-import { persistPreparedPatch, verifyPatchTicketFix } from "./patch-ticket-store";
+import { activeTicketedPairs, persistPreparedPatch, verifyPatchTicketFix } from "./patch-ticket-store";
 import { persistPreparedGroups, verifyGroupTicketFix } from "./patch-group-ticket-store";
 
 const global = globalThis as typeof globalThis & { __elasticJobs?: { timer?: ReturnType<typeof setInterval>; working?: Promise<void> } };
@@ -78,7 +78,8 @@ async function work() {
         const patchRequestId = await persistPreparedPatch(job.id, patchRequest, job.actor, job.connection_revision);
         result = { patchRequest, patchRequestId };
       } else if (job.kind === "consolidate") {
-        const consolidation = await prepareConsolidation(job.input, job.connection_revision);
+        const excluded = await activeTicketedPairs();
+        const consolidation = await prepareConsolidation(job.input, job.connection_revision, excluded);
         const groupTicketIds = await persistPreparedGroups(consolidation, job.actor, job.connection_revision);
         result = { consolidation, groupTicketIds };
       } else if (job.kind === "verify") {

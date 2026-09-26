@@ -71,6 +71,7 @@ export default function PatchConsolidationPanel({ cves }: { cves: string[] }) {
       <p className={styles.resultNote}>
         <strong>{packet.totalDevices.toLocaleString()} devices · {packet.totalFindings.toLocaleString()} open findings · {packet.groups.length} patch action{packet.groups.length === 1 ? "" : "s"}</strong>
         <br />Collected {packet.collectedAt}.
+        {packet.alreadyTicketedFindings > 0 && <> {packet.alreadyTicketedFindings.toLocaleString()} finding{packet.alreadyTicketedFindings === 1 ? "" : "s"} already had an active ticket and {packet.alreadyTicketedFindings === 1 ? "was" : "were"} left out of the plan below — see the ticket tracker.</>}
       </p>
       {packet.tenantIds.length > 1 && <p role="alert" className={styles.patchError}>This spans {packet.tenantIds.length} CrowdStrike tenants ({packet.tenantIds.join(", ")}). Each ranked action below is scoped to one tenant (shown on its card) — do not combine devices across tenants into one ticket or maintenance window. Use the tenant picker above to narrow the report to one customer.</p>}
       {packet.unmapped.length > 0 && <ul className={styles.patchWarnings}>

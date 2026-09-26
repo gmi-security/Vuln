@@ -56,11 +56,13 @@ export type PatchGroup = {
   remediationId: string; tenantId: string; title: string; action: string; reference: string;
   vendorUrl: string; link: string; published: string;
   cves: string[]; deviceCount: number; findingCount: number; hostScope: string[]; csv: string;
+  deviceCves: { cid: string; hostId: string; cve: string }[];
   label: string; ticketTitle: string; ticketBody: string;
 };
 export type PatchConsolidation = {
   cves: string[]; region: string; collectedAt: string; totalDevices: number; totalFindings: number;
   tenantIds: string[]; title: string; body: string; csv: string; groups: PatchGroup[]; unmapped: { cve: string; deviceCount: number }[];
+  alreadyTicketedFindings: number;
 };
 
 export function normalizeRemediation(raw: Json): Remediation {
@@ -175,13 +177,14 @@ export function buildPatchRequest(cve: string, records: PatchFinding[], region: 
 // devices is not mistaken for several unrelated fixes. Ranked by devices
 // reached per remediation action (highest impact for one maintenance action
 // first), then by how many of the requested CVEs that same action clears.
-export function buildPatchConsolidation(cves: string[], records: PatchFinding[], region: string, startedAt: string, collectedAt: string): PatchConsolidation {
+export function buildPatchConsolidation(cves: string[], records: PatchFinding[], region: string, startedAt: string, collectedAt: string, alreadyTicketed: Set<string> = new Set()): PatchConsolidation {
   if (!records.length) throw new DashboardError("CrowdStrike currently reports no open/reopened findings for these CVEs. No consolidation was prepared.");
   type GroupRow = { cid: string; hostId: string; hostname: string; ip: string; os: string; hostCriticality: string; exposure: string; cve: string };
   type GroupAcc = { tenantId: string; remediation: Remediation; cves: Set<string>; devices: Set<string>; findings: Set<string>; rows: Map<string, GroupRow> };
   const groups = new Map<string, GroupAcc>();
   const devicesByCve = new Map<string, Set<string>>();
   const mappedCves = new Set<string>();
+  let alreadyTicketedFindings = 0;
   const ordered = [...records].sort((a, b) => a.cve.localeCompare(b.cve) || a.cid.localeCompare(b.cid) || a.hostname.localeCompare(b.hostname) || a.id.localeCompare(b.id));
   for (const row of ordered) {
     const deviceKey = JSON.stringify([row.cid, row.hostId]);
@@ -191,9 +194,11 @@ export function buildPatchConsolidation(cves: string[], records: PatchFinding[],
     for (const id of patchRecommendationIds(row)) {
       const remediation = localRemedies.get(id);
       if (!remediation?.action) continue;
+      mappedCves.add(row.cve);
+      const rowKey = JSON.stringify([row.cid, row.hostId, row.cve]);
+      if (alreadyTicketed.has(rowKey)) { alreadyTicketedFindings++; continue; }
       const key = JSON.stringify([row.cid, remediation.id]);
       const existing = groups.get(key);
-      const rowKey = JSON.stringify([row.cid, row.hostId, row.cve]);
       if (existing) {
         if (JSON.stringify(existing.remediation) !== JSON.stringify(remediation)) throw new DashboardError("Remediation details changed during collection. Retry to prepare a consistent consolidation.");
         existing.cves.add(row.cve); existing.devices.add(deviceKey); existing.findings.add(JSON.stringify([row.cid, row.id]));
@@ -202,7 +207,6 @@ export function buildPatchConsolidation(cves: string[], records: PatchFinding[],
         groups.set(key, { tenantId: row.cid, remediation, cves: new Set([row.cve]), devices: new Set([deviceKey]), findings: new Set([JSON.stringify([row.cid, row.id])]),
           rows: new Map([[rowKey, { cid: row.cid, hostId: row.hostId, hostname: row.hostname, ip: row.ip, os: row.os, hostCriticality: row.hostCriticality, exposure: row.exposure, cve: row.cve }]]) });
       }
-      mappedCves.add(row.cve);
     }
   }
   const groupCsvNames = ["cve", "tenant_id", "host_id", "hostname", "local_ip", "operating_system", "host_criticality", "internet_exposure"];
@@ -227,7 +231,8 @@ export function buildPatchConsolidation(cves: string[], records: PatchFinding[],
       `Attach ${label}-patch-request.csv. No ticket has been sent to ConnectWise.`].join("\n");
     return { remediationId: g.remediation.id, tenantId: g.tenantId, title: g.remediation.title, action: g.remediation.action,
       reference: g.remediation.reference, vendorUrl: g.remediation.vendorUrl, link: g.remediation.link, published: g.remediation.published,
-      cves: sortedCves, deviceCount, findingCount, hostScope: [...g.devices].sort(), csv, label, ticketTitle, ticketBody };
+      cves: sortedCves, deviceCount, findingCount, hostScope: [...g.devices].sort(),
+      deviceCves: groupRows.map((r) => ({ cid: r.cid, hostId: r.hostId, cve: r.cve })), csv, label, ticketTitle, ticketBody };
   }).sort((a, b) => b.deviceCount - a.deviceCount || b.cves.length - a.cves.length || a.remediationId.localeCompare(b.remediationId));
   const unmapped = cves.filter((c) => !mappedCves.has(c)).map((c) => ({ cve: c, deviceCount: devicesByCve.get(c)?.size ?? 0 }));
   const totalDevices = new Set(ordered.map((r) => JSON.stringify([r.cid, r.hostId]))).size;
@@ -249,8 +254,9 @@ export function buildPatchConsolidation(cves: string[], records: PatchFinding[],
     `Unique devices affected across all requested CVEs: ${totalDevices.toLocaleString()}`, `Open/reopened findings: ${totalFindings.toLocaleString()}`,
     `Distinct patch actions needed to cover the mapped CVEs: ${groupList.length}`,
     `CrowdStrike tenants (CIDs) represented: ${tenantIds.length} — ${tenantIds.join(", ")}`,
+    ...(alreadyTicketedFindings ? [`${alreadyTicketedFindings.toLocaleString()} finding(s) already covered by an active ConnectWise ticket were excluded from the plan below — see the ticket tracker for their status.`] : []),
     ...(tenantIds.length > 1 ? ["This report spans more than one tenant. Each ranked action below is scoped to a single tenant (shown in its heading); do not combine devices across tenants into one ticket or maintenance window."] : []),
-    "", "HOW TO READ THIS", "Each entry below is one CrowdStrike-recommended remediation (one patch/update/config change), scoped to one tenant. Ranked by how many devices a single action clears, then by how many of the requested CVEs it also resolves — the fastest way to shrink this list is to work top to bottom.",
+    "", "HOW TO READ THIS", "Each entry below is one CrowdStrike-recommended remediation (one patch/update/config change), scoped to one tenant, and excludes any device/CVE pair already covered by an active ticket. Ranked by how many devices a single action clears, then by how many of the requested CVEs it also resolves — the fastest way to shrink this list is to work top to bottom.",
     "", "RANKED PATCH ACTIONS", rank.join("\n\n") || "CrowdStrike did not supply an actionable recommended remediation for any requested CVE. Manual investigation is required.",
     ...(unmapped.length ? ["", "CVEs WITHOUT A MAPPED REMEDIATION", "CrowdStrike did not supply an actionable recommended remediation for these CVEs (or no open findings were found). Review them individually in Falcon.",
       ...unmapped.map((u) => `- ${u.cve} (${u.deviceCount.toLocaleString()} affected device${u.deviceCount === 1 ? "" : "s"})`)] : []),
@@ -260,7 +266,7 @@ export function buildPatchConsolidation(cves: string[], records: PatchFinding[],
   const csvRows: QueryResult["rows"] = groupList.map((g, index) => [index + 1, g.remediationId, g.tenantId, g.cves.join("; "), g.deviceCount, g.findingCount,
     totalDevices > 0 ? Math.round((g.deviceCount / totalDevices) * 1000) / 10 : 0, g.title || null, g.action || null, g.reference || null, g.vendorUrl || null, g.link || null, g.published || null]);
   const csv = dashboardCsv({ columns: names.map((name) => ({ name, type: ["rank", "device_count", "finding_count"].includes(name) ? "long" : name === "share_of_devices_pct" ? "double" : "keyword" })), rows: csvRows, truncated: false });
-  const consolidation: PatchConsolidation = { cves, region, collectedAt, totalDevices, totalFindings, tenantIds, title, body, csv, groups: groupList, unmapped };
+  const consolidation: PatchConsolidation = { cves, region, collectedAt, totalDevices, totalFindings, tenantIds, title, body, csv, groups: groupList, unmapped, alreadyTicketedFindings };
   if (new TextEncoder().encode(JSON.stringify(consolidation)).length > 32 * 1024 * 1024) throw new DashboardError("This consolidation exceeds the 32 MiB export limit. No partial export was prepared.");
   return consolidation;
 }

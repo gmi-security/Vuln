@@ -237,12 +237,12 @@ export async function preparePatchRequest(input: unknown, revision: number) {
   finally { state.running--; }
 }
 
-export async function prepareConsolidation(input: unknown, revision: number) {
+export async function prepareConsolidation(input: unknown, revision: number, alreadyTicketed: Set<string> = new Set()) {
   const saved = await connection("crowdstrike");
   if (!saved || saved.revision !== revision) throw new DashboardError("The CrowdStrike connection changed. Prepare the consolidation again.", 409);
   if (state.running >= 2) throw new DashboardError("Two queries are already running. Try again shortly.", 429);
   state.running++;
-  try { return await executePatchConsolidation(saved.value as CrowdStrikeConnection, input); }
+  try { return await executePatchConsolidation(saved.value as CrowdStrikeConnection, input, alreadyTicketed); }
   finally { state.running--; }
 }
 
