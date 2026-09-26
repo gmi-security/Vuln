@@ -7,7 +7,7 @@ import { DEFAULT_COVERAGE, DashboardError, validateDisplayResult, parseDefinitio
   type DashboardQuery, type ElasticDashboard, type QueryResult } from "./elastic-dashboard";
 import { normalizeEndpoint, sealConnection, type ElasticConnection } from "./elastic-query-client";
 import { DASHBOARD_CONNECTORS } from "./dashboard-query-connectors";
-import { executePatchConsolidation, executePatchRequest, parseCrowdStrikeConnection, sealCrowdStrike, testCrowdStrikeConnection } from "./crowdstrike-dashboard-client";
+import { executePatchConsolidation, executePatchRequest, parseCrowdStrikeConnection, sealCrowdStrike, testCrowdStrikeConnection, verifyPatchFix } from "./crowdstrike-dashboard-client";
 import { type CrowdStrikeConnection } from "./crowdstrike-dashboard";
 
 let dedicatedPool: Pool | undefined;
@@ -243,6 +243,15 @@ export async function prepareConsolidation(input: unknown, revision: number) {
   if (state.running >= 2) throw new DashboardError("Two queries are already running. Try again shortly.", 429);
   state.running++;
   try { return await executePatchConsolidation(saved.value as CrowdStrikeConnection, input); }
+  finally { state.running--; }
+}
+
+export async function verifyAgainstCrowdStrike(cves: string[], hostScope: string[], tenantId: string, revision: number) {
+  const saved = await connection("crowdstrike");
+  if (!saved || saved.revision !== revision) throw new DashboardError("The CrowdStrike connection changed. Prepare a fresh report before verifying.", 409);
+  if (state.running >= 2) throw new DashboardError("Two queries are already running. Try again shortly.", 429);
+  state.running++;
+  try { return await verifyPatchFix(saved.value as CrowdStrikeConnection, cves, hostScope, tenantId); }
   finally { state.running--; }
 }
 

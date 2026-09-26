@@ -1,17 +1,20 @@
 import { createHash, randomUUID } from "node:crypto";
 import { DashboardError } from "./elastic-dashboard";
 import { patchTicketDatabase, savedConnection } from "./patch-ticket-store";
+import { verifyAgainstCrowdStrike } from "./elastic-dashboard-store";
 import type { PatchConsolidation, PatchGroup } from "./patch-request";
 import { automatedGroupTicketBody, type PatchGroupTicketSummary } from "./patch-group-ticket-types";
 import { cwId, cwRequest, findCWRequest, CWRequestError, parseRouting, ticketUrl, uploadPatchCsv, validateCWRouting, type ConnectWiseConnection, type CWRecord, type TicketRouting } from "./connectwise-client";
 
-const fields = "id,cves,remediation_id,tenant_id,state,prepared_by,created_by,prepared_at,updated_at,host_count,finding_count,labels,ticket_id,ticket_url,ticket_status,closed,attachment_state,last_error,packet->>'title' AS remediation_title";
+const fields = "id,cves,remediation_id,tenant_id,state,prepared_by,created_by,prepared_at,updated_at,host_count,finding_count,labels,ticket_id,ticket_url,ticket_status,closed,attachment_state,last_error,packet->>'title' AS remediation_title,fix_verified_at,fix_verified_state,fix_still_open_count";
 function summary(row: CWRecord): PatchGroupTicketSummary {
   return { id: row.id, cves: row.cves, remediationId: row.remediation_id, remediationTitle: row.remediation_title, tenantId: row.tenant_id, state: row.state,
     preparedBy: row.prepared_by, createdBy: row.created_by, preparedAt: new Date(row.prepared_at).toISOString(), updatedAt: new Date(row.updated_at).toISOString(),
     hostCount: row.host_count, findingCount: row.finding_count, company: row.labels?.company?.name ?? null, board: row.labels?.board?.name ?? null,
     ticketId: row.ticket_id, ticketUrl: row.ticket_url, ticketStatus: row.ticket_status, closed: row.closed,
-    attachmentState: row.attachment_state, error: row.last_error };
+    attachmentState: row.attachment_state, error: row.last_error,
+    fixVerifiedAt: row.fix_verified_at ? new Date(row.fix_verified_at).toISOString() : null,
+    fixVerifiedState: row.fix_verified_state ?? null, fixStillOpenCount: row.fix_still_open_count ?? null };
 }
 function requestId(id: string) { if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(id)) throw new DashboardError("Patch group request not found.", 404); }
 
@@ -138,6 +141,24 @@ async function attachCsv(id: string, actor: string) {
   } catch (error) {
     await db.query("UPDATE patch_group_ticket_requests SET attachment_state='pending',last_error=$2,updated_at=now() WHERE id=$1", [id, error instanceof DashboardError ? error.message : "CSV upload was interrupted. Retry the attachment check."]);
   }
+}
+// Closed-loop verification re-collects from CrowdStrike, so it runs on the
+// same background job queue as prepare/consolidate rather than as an instant
+// ticket action — it can take as long as preparing the original plan.
+export async function verifyGroupTicketFix(id: string, actor: string, revision: number) {
+  requestId(id);
+  const db = await patchTicketDatabase();
+  const row = (await db.query("SELECT tenant_id,packet,ticket_id FROM patch_group_ticket_requests WHERE id=$1", [id])).rows[0];
+  if (!row) throw new DashboardError("Patch group request not found.", 404);
+  if (!row.ticket_id) throw new DashboardError("Create the ConnectWise ticket before verifying the fix.");
+  const packet = row.packet as PatchGroup;
+  if (!packet.hostScope?.length) throw new DashboardError("This saved plan has no device scope to verify. Prepare a fresh consolidation.");
+  const result = await verifyAgainstCrowdStrike(packet.cves, packet.hostScope, row.tenant_id, revision);
+  const verifiedState = result.stillOpenHosts.length === 0 ? "verified" : "still_open";
+  await db.query("UPDATE patch_group_ticket_requests SET fix_verified_at=$2,fix_verified_state=$3,fix_still_open_count=$4,updated_at=now() WHERE id=$1",
+    [id, result.checkedAt, verifiedState, result.stillOpenHosts.length]);
+  await db.query("INSERT INTO patch_group_ticket_audit(request_id,actor,action) VALUES($1,$2,'fix.verified')", [id, actor]);
+  return readGroupTicket(id);
 }
 export async function groupTicketAction(id: string, action: unknown, actor: string) {
   requestId(id); await recoverInterruptedRequests();

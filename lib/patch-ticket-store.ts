@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { DashboardError } from "./elastic-dashboard";
-import { dashboardDatabase } from "./elastic-dashboard-store";
+import { dashboardDatabase, verifyAgainstCrowdStrike } from "./elastic-dashboard-store";
 import { parsePatchInput, type PatchRequest } from "./patch-request";
 import { automatedTicketBody, type PatchTicketSummary } from "./patch-ticket-types";
 import { cwId, cwOptions, cwRequest, cwTarget, CWRequestError, findCWRequest, normalizeCWEndpoint, openCWConnection, parseCWConnection, parseRouting,
@@ -21,8 +21,12 @@ export async function patchTicketDatabase() {
     cw_target TEXT, cw_revision INT, company_id INT, routing JSONB, labels JSONB,
     title TEXT, body TEXT, started_at TIMESTAMPTZ, ticket_id INT, ticket_url TEXT, ticket_status TEXT,
     closed BOOLEAN NOT NULL DEFAULT false, attachment_state TEXT NOT NULL DEFAULT 'not_started',
-    attachment_started TIMESTAMPTZ, document_id INT, last_error TEXT
+    attachment_started TIMESTAMPTZ, document_id INT, last_error TEXT,
+    fix_verified_at TIMESTAMPTZ, fix_verified_state TEXT, fix_still_open_count INT
   );
+  ALTER TABLE patch_ticket_requests ADD COLUMN IF NOT EXISTS fix_verified_at TIMESTAMPTZ;
+  ALTER TABLE patch_ticket_requests ADD COLUMN IF NOT EXISTS fix_verified_state TEXT;
+  ALTER TABLE patch_ticket_requests ADD COLUMN IF NOT EXISTS fix_still_open_count INT;
   CREATE INDEX IF NOT EXISTS patch_ticket_cve_date ON patch_ticket_requests(cve, prepared_at DESC);
   CREATE UNIQUE INDEX IF NOT EXISTS patch_ticket_active_scope ON patch_ticket_requests(cw_target,cve,company_id,scope_hash)
     WHERE state IN ('creating','uncertain','created') AND closed=false;
@@ -37,8 +41,12 @@ export async function patchTicketDatabase() {
     cw_target TEXT, cw_revision INT, company_id INT, routing JSONB, labels JSONB,
     title TEXT, body TEXT, started_at TIMESTAMPTZ, ticket_id INT, ticket_url TEXT, ticket_status TEXT,
     closed BOOLEAN NOT NULL DEFAULT false, attachment_state TEXT NOT NULL DEFAULT 'not_started',
-    attachment_started TIMESTAMPTZ, document_id INT, last_error TEXT
+    attachment_started TIMESTAMPTZ, document_id INT, last_error TEXT,
+    fix_verified_at TIMESTAMPTZ, fix_verified_state TEXT, fix_still_open_count INT
   );
+  ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS fix_verified_at TIMESTAMPTZ;
+  ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS fix_verified_state TEXT;
+  ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS fix_still_open_count INT;
   CREATE INDEX IF NOT EXISTS patch_group_ticket_date ON patch_group_ticket_requests(prepared_at DESC);
   CREATE UNIQUE INDEX IF NOT EXISTS patch_group_ticket_active_scope ON patch_group_ticket_requests(cw_target,remediation_id,tenant_id,company_id,scope_hash)
     WHERE state IN ('creating','uncertain','created') AND closed=false;
@@ -48,13 +56,15 @@ export async function patchTicketDatabase() {
   await ready;
   return db;
 }
-const fields = "id,cve,state,prepared_by,created_by,prepared_at,updated_at,host_count,tenant_ids,labels,ticket_id,ticket_url,ticket_status,closed,attachment_state,last_error";
+const fields = "id,cve,state,prepared_by,created_by,prepared_at,updated_at,host_count,tenant_ids,labels,ticket_id,ticket_url,ticket_status,closed,attachment_state,last_error,fix_verified_at,fix_verified_state,fix_still_open_count";
 function summary(row: CWRecord): PatchTicketSummary {
   return { id: row.id, cve: row.cve, state: row.state, preparedBy: row.prepared_by, createdBy: row.created_by,
     preparedAt: new Date(row.prepared_at).toISOString(), updatedAt: new Date(row.updated_at).toISOString(), hostCount: row.host_count,
     tenantIds: row.tenant_ids, company: row.labels?.company?.name ?? null, board: row.labels?.board?.name ?? null,
     ticketId: row.ticket_id, ticketUrl: row.ticket_url, ticketStatus: row.ticket_status, closed: row.closed,
-    attachmentState: row.attachment_state, error: row.last_error };
+    attachmentState: row.attachment_state, error: row.last_error,
+    fixVerifiedAt: row.fix_verified_at ? new Date(row.fix_verified_at).toISOString() : null,
+    fixVerifiedState: row.fix_verified_state ?? null, fixStillOpenCount: row.fix_still_open_count ?? null };
 }
 function requestId(id: string) { if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(id)) throw new DashboardError("Patch request not found.", 404); }
 export async function savedConnection(): Promise<{ value: ConnectWiseConnection; revision: number; target: string; defaults: CWDefaults }> {
@@ -239,6 +249,25 @@ async function attachCsv(id: string, actor: string) {
   } catch (error) {
     await db.query("UPDATE patch_ticket_requests SET attachment_state='pending',last_error=$2,updated_at=now() WHERE id=$1", [id, error instanceof DashboardError ? error.message : "CSV upload was interrupted. Retry the attachment check."]);
   }
+}
+// Closed-loop verification re-collects from CrowdStrike, so it runs on the
+// same background job queue as prepare/consolidate rather than as an instant
+// ticket action — it can take as long as preparing the original report.
+export async function verifyPatchTicketFix(id: string, actor: string, revision: number) {
+  requestId(id);
+  const db = await patchTicketDatabase();
+  const row = (await db.query("SELECT cve,packet,ticket_id FROM patch_ticket_requests WHERE id=$1", [id])).rows[0];
+  if (!row) throw new DashboardError("Patch request not found.", 404);
+  if (!row.ticket_id) throw new DashboardError("Create the ConnectWise ticket before verifying the fix.");
+  const packet = row.packet as PatchRequest;
+  const tenantId = packet.tenantIds?.[0];
+  if (!tenantId || !packet.hostScope?.length) throw new DashboardError("This saved report has no device scope to verify. Prepare a fresh request.");
+  const result = await verifyAgainstCrowdStrike([row.cve], packet.hostScope, tenantId, revision);
+  const verifiedState = result.stillOpenHosts.length === 0 ? "verified" : "still_open";
+  await db.query("UPDATE patch_ticket_requests SET fix_verified_at=$2,fix_verified_state=$3,fix_still_open_count=$4,updated_at=now() WHERE id=$1",
+    [id, result.checkedAt, verifiedState, result.stillOpenHosts.length]);
+  await db.query("INSERT INTO patch_ticket_audit(request_id,actor,action) VALUES($1,$2,'fix.verified')", [id, actor]);
+  return readPatchTicket(id);
 }
 export async function patchTicketAction(id: string, action: unknown, actor: string) {
   requestId(id); await recoverInterruptedRequests();

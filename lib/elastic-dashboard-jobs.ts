@@ -2,16 +2,17 @@ import { randomUUID } from "node:crypto";
 import { DashboardError, parseDefinition, parseQueryInput, querySource } from "./elastic-dashboard";
 import { elasticVulnEnabled } from "./elastic-vuln-server";
 import { dashboardDatabase, dashboardConnectionRevision, prepareConsolidation, preparePatchRequest, previewQuery, saveQuery, throttlePreview } from "./elastic-dashboard-store";
-import { parseConsolidationInput, parsePatchInput } from "./patch-request";
-import { persistPreparedPatch } from "./patch-ticket-store";
-import { persistPreparedGroups } from "./patch-group-ticket-store";
+import { parseConsolidationInput, parsePatchInput, parseVerifyInput } from "./patch-request";
+import { persistPreparedPatch, verifyPatchTicketFix } from "./patch-ticket-store";
+import { persistPreparedGroups, verifyGroupTicketFix } from "./patch-group-ticket-store";
 
 const global = globalThis as typeof globalThis & { __elasticJobs?: { timer?: ReturnType<typeof setInterval>; working?: Promise<void> } };
 const state = global.__elasticJobs ??= {};
 
-export async function enqueueDashboardJob(kind: "preview" | "save" | "patch" | "consolidate", value: unknown, actor: string) {
+export async function enqueueDashboardJob(kind: "preview" | "save" | "patch" | "consolidate" | "verify", value: unknown, actor: string) {
   const body = value as Record<string, unknown> | null;
-  const input = kind === "patch" ? parsePatchInput(body) : kind === "consolidate" ? parseConsolidationInput(body) : kind === "preview" ? { ...parseQueryInput(body), ...(typeof body?.id === "string" && /^[a-zA-Z0-9-]{1,64}$/.test(body.id) ? { id: body.id } : {}) } : parseDefinition(value, typeof body?.id === "string" ? body.id : randomUUID());
+  const input = kind === "patch" ? parsePatchInput(body) : kind === "consolidate" ? parseConsolidationInput(body) : kind === "verify" ? parseVerifyInput(body)
+    : kind === "preview" ? { ...parseQueryInput(body), ...(typeof body?.id === "string" && /^[a-zA-Z0-9-]{1,64}$/.test(body.id) ? { id: body.id } : {}) } : parseDefinition(value, typeof body?.id === "string" ? body.id : randomUUID());
   const revision = await dashboardConnectionRevision(querySource(input));
   if (revision === null) throw new DashboardError(`Connect ${querySource(input) === "elastic" ? "Elasticsearch" : "CrowdStrike"} first.`, 409);
   throttlePreview(actor);
@@ -80,6 +81,9 @@ async function work() {
         const consolidation = await prepareConsolidation(job.input, job.connection_revision);
         const groupTicketIds = await persistPreparedGroups(consolidation, job.actor, job.connection_revision);
         result = { consolidation, groupTicketIds };
+      } else if (job.kind === "verify") {
+        const { ticketKind, ticketId } = job.input;
+        result = { ticket: ticketKind === "group" ? await verifyGroupTicketFix(ticketId, job.actor, job.connection_revision) : await verifyPatchTicketFix(ticketId, job.actor, job.connection_revision) };
       } else {
         result = { result: await previewQuery(job.input, job.actor, true, job.input.id) };
       }

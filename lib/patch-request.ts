@@ -43,6 +43,15 @@ export function parseConsolidationInput(value: unknown): { source: "crowdstrike"
   return { source: "crowdstrike", cves: unique, ...(typeof tenantId === "string" ? { tenantId: tenantId.toLowerCase() } : {}) };
 }
 
+export function parseVerifyInput(value: unknown): { source: "crowdstrike"; ticketKind: "cve" | "group"; ticketId: string } {
+  const body = value as { ticketKind?: unknown; ticketId?: unknown } | null;
+  const ticketKind = body?.ticketKind;
+  if (ticketKind !== "cve" && ticketKind !== "group") throw new DashboardError("Choose a valid ticket type to verify.");
+  const ticketId = body?.ticketId;
+  if (typeof ticketId !== "string" || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(ticketId)) throw new DashboardError("Choose a valid ticket to verify.");
+  return { source: "crowdstrike", ticketKind, ticketId };
+}
+
 export type PatchGroup = {
   remediationId: string; tenantId: string; title: string; action: string; reference: string;
   vendorUrl: string; link: string; published: string;

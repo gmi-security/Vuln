@@ -55,6 +55,24 @@ export default function ConnectWisePatchTicket({ cve, packet, requestId, onResum
     } catch (e) { if (generation.current === token) { setError(e instanceof Error ? e.message : "Could not process this request."); void reload().catch(() => {}); } }
     finally { if (generation.current === token) setBusy(""); }
   }
+  async function verifyFix() {
+    if (!current) return;
+    const token = ++generation.current; setBusy("verify-fix"); setError(""); setMessage("Checking CrowdStrike for this CVE's current status. This can take a minute or two.");
+    try {
+      let job = await dashboardRequest<{ jobId: string; status: string; error?: string; ticket?: { request: PatchTicketSummary } }>("verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ticketKind: "cve", ticketId: current.id }) });
+      const deadline = Date.now() + 5 * 60_000;
+      while (["queued", "running"].includes(job.status)) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        if (generation.current !== token) return;
+        if (Date.now() >= deadline) throw new Error("The verification job expired. Please try again.");
+        job = await dashboardRequest(`jobs/${job.jobId}`);
+      }
+      if (generation.current !== token) return;
+      if (job.status !== "succeeded" || !job.ticket) throw new Error(job.error || "Verification failed. Please retry.");
+      setCurrent(job.ticket.request); setMessage("Verification complete."); await reload();
+    } catch (e) { if (generation.current === token) { setError(e instanceof Error ? e.message : "Verification failed. Please retry."); setMessage(""); } }
+    finally { if (generation.current === token) setBusy(""); }
+  }
   async function resume(id: string) {
     setBusy("resume"); setError("");
     try { onResume(await dashboardRequest<PatchTicketDetail>(`patch-tickets/${id}?packet=1`)); }
@@ -80,12 +98,15 @@ export default function ConnectWisePatchTicket({ cve, packet, requestId, onResum
     {current && !["prepared", "failed"].includes(current.state) && <div className="mt-4 rounded-xl border border-zinc-700 p-4" aria-live="polite">
       <p className="font-medium text-zinc-100">{patchTicketState(current)}{current.ticketId ? ` · #${current.ticketId}` : ""}</p>
       <p className={styles.resultNote}>{current.company ?? "Company selection saved"} · {current.board ?? "Board selection saved"} · {current.hostCount.toLocaleString()} devices</p>
-      {current.ticketStatus && <p className={styles.resultNote}>ConnectWise status: {current.ticketStatus}. CrowdStrike fix verification has not been performed.</p>}
+      {current.ticketStatus && <p className={styles.resultNote}>ConnectWise status: {current.ticketStatus}. {current.fixVerifiedState === "verified" ? `CrowdStrike confirmed no open findings for this CVE on the scoped devices as of ${new Date(current.fixVerifiedAt!).toLocaleString()}.`
+        : current.fixVerifiedState === "still_open" ? `CrowdStrike still shows this CVE open on ${current.fixStillOpenCount} of the scoped devices as of ${new Date(current.fixVerifiedAt!).toLocaleString()}.`
+        : "CrowdStrike fix verification has not been performed."}</p>}
       <div className={styles.patchActions}>
         {current.ticketUrl && <a className={styles.button} href={current.ticketUrl} target="_blank" rel="noopener noreferrer">Open ticket #{current.ticketId}</a>}
         {current.state === "uncertain" && <button type="button" className={styles.button} disabled={Boolean(busy)} onClick={() => action(current.id, "reconcile")}>Check creation outcome</button>}
         {current.ticketId && current.attachmentState === "pending" && <button type="button" className={styles.button} disabled={Boolean(busy)} onClick={() => action(current.id, "retry-attachment")}>Retry CSV attachment</button>}
         {current.ticketId && <button type="button" className={styles.button} disabled={Boolean(busy)} onClick={() => action(current.id, "check-status")}>Check ConnectWise status</button>}
+        {current.ticketId && <button type="button" className={styles.button} disabled={Boolean(busy)} onClick={verifyFix}>{busy === "verify-fix" ? "Verifying…" : "Verify fix in CrowdStrike"}</button>}
       </div>
       {current.error && <p className={styles.patchError}>{current.error}</p>}
     </div>}

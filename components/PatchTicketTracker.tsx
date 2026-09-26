@@ -40,11 +40,13 @@ export default function PatchTicketTracker() {
   useEffect(() => { void reload(); }, [reload]);
 
   const buckets = { "cut-open": 0, "cut-closed": 0, attention: 0, draft: 0 };
-  let devicesCovered = 0;
+  let devicesCovered = 0, fixVerified = 0, fixStillOpen = 0;
   const distinctCves = new Set<string>();
   for (const r of rows) {
     buckets[stateBucket(r.row.state, r.row.ticketId, r.row.closed)]++;
     if (r.row.ticketId) devicesCovered += r.row.hostCount;
+    if (r.row.fixVerifiedState === "verified") fixVerified++;
+    else if (r.row.fixVerifiedState === "still_open") fixStillOpen++;
     for (const cve of r.cves) distinctCves.add(cve);
   }
   const cut = buckets["cut-open"] + buckets["cut-closed"];
@@ -62,7 +64,8 @@ export default function PatchTicketTracker() {
       <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3"><div className="text-2xl font-semibold text-zinc-300">{buckets["cut-closed"]}</div><div className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Closed</div></div>
       <div className="rounded-xl border border-[rgba(179,14,20,0.4)] bg-[rgba(179,14,20,0.08)] p-3"><div className="text-2xl font-semibold text-[#ff8f96]">{buckets.attention}</div><div className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Needs attention</div></div>
     </div>
-    <p className={`${styles.resultNote} mt-3`}>{devicesCovered.toLocaleString()} device-tickets covered by created tickets (a device can appear on more than one ticket) · {distinctCves.size.toLocaleString()} distinct CVEs referenced across every tracked ticket.</p>
+    <p className={`${styles.resultNote} mt-3`}>{devicesCovered.toLocaleString()} device-tickets covered by created tickets (a device can appear on more than one ticket) · {distinctCves.size.toLocaleString()} distinct CVEs referenced across every tracked ticket.
+      {cut > 0 && <> · {fixVerified.toLocaleString()} of {cut.toLocaleString()} cut ticket{cut === 1 ? "" : "s"} confirmed fixed in CrowdStrike{fixStillOpen > 0 ? `, ${fixStillOpen} still show open findings` : ""}.</>}</p>
     {error && <p role="alert" className={styles.patchError}>{error}</p>}
     <div className={`${styles.tableScroll} mt-4`}><table className={styles.table}>
       <thead><tr><th>Type</th><th>Scope</th><th>Ticket / state</th><th>Company</th><th>Devices</th><th>Prepared</th></tr></thead>

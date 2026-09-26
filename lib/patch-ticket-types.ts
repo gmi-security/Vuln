@@ -1,10 +1,12 @@
 import type { PatchRequest } from "./patch-request";
+export type FixVerifiedState = "verified" | "still_open" | null;
 export type PatchTicketSummary = {
   id: string; cve: string; state: "prepared" | "creating" | "uncertain" | "failed" | "created";
   preparedBy: string; createdBy: string | null; preparedAt: string; updatedAt: string;
   hostCount: number; tenantIds: string[]; company: string | null; board: string | null;
   ticketId: number | null; ticketUrl: string | null; ticketStatus: string | null; closed: boolean;
   attachmentState: "not_started" | "uploading" | "pending" | "attached"; error: string | null;
+  fixVerifiedAt: string | null; fixVerifiedState: FixVerifiedState; fixStillOpenCount: number | null;
 };
 export type PatchTicketDetail = { request: PatchTicketSummary; packet: PatchRequest };
 export function automatedTicketBody(packet: Pick<PatchRequest, "body" | "cve">): string {
@@ -12,6 +14,11 @@ export function automatedTicketBody(packet: Pick<PatchRequest, "body" | "cve">):
     .replace(`Attach ${packet.cve}-patch-request.csv. No ticket has been sent to ConnectWise.`, `Affected assets and their recommended remediations are in ${packet.cve}-patch-request.csv.`);
 }
 export function patchTicketState(row: PatchTicketSummary): string {
-  if (row.ticketId) return row.closed ? "Closed in ConnectWise · fix unverified" : row.attachmentState === "attached" ? "Ticket linked" : "Ticket linked · CSV pending";
+  if (row.ticketId) {
+    const verified = row.fixVerifiedState === "verified" ? " · fix verified"
+      : row.fixVerifiedState === "still_open" ? ` · ${row.fixStillOpenCount} device${row.fixStillOpenCount === 1 ? "" : "s"} still open`
+      : row.closed ? " · fix unverified" : "";
+    return `${row.closed ? "Closed in ConnectWise" : row.attachmentState === "attached" ? "Ticket linked" : "Ticket linked · CSV pending"}${verified}`;
+  }
   return ({ prepared: "Draft prepared", creating: "Creating ticket", uncertain: "Check creation outcome", failed: "Creation rejected", created: "Ticket linked" })[row.state];
 }
