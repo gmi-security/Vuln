@@ -11,7 +11,7 @@ import styles from "./QueryDashboard.module.css";
 type Detail = { request: PatchGroupTicketSummary; group: PatchGroup };
 type Page = { requests: PatchGroupTicketSummary[]; more: boolean };
 
-export default function PatchReviewQueue() {
+export default function PatchReviewQueue({ companyId }: { companyId: string }) {
   const [rows, setRows] = useState<PatchGroupTicketSummary[]>([]);
   const [selected, setSelected] = useState<Detail | null>(null);
   const [page, setPage] = useState(1);
@@ -22,12 +22,12 @@ export default function PatchReviewQueue() {
   const load = useCallback(async (nextPage = 1) => {
     setBusy("load"); setError("");
     try {
-      const data = await dashboardRequest<Page>(`patch-group-tickets?review=1&page=${nextPage}`);
+      const data = await dashboardRequest<Page>(`patch-group-tickets?review=1&page=${nextPage}&companyId=${encodeURIComponent(companyId)}`);
       setRows(current => nextPage === 1 ? data.requests : [...current, ...data.requests]);
       setPage(nextPage); setMore(data.more);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not load the review queue."); }
     finally { setBusy(""); }
-  }, []);
+  }, [companyId]);
   useEffect(() => {
     void load();
     const timer = setInterval(() => { void load(); }, 60_000);

@@ -56,13 +56,14 @@ async function recoverInterruptedRequests() {
   await db.query(`UPDATE patch_group_ticket_requests SET attachment_state='pending',last_error='CSV attachment was interrupted. Retry the attachment check.',updated_at=now()
     WHERE attachment_state='uploading' AND attachment_started < now()-interval '3 minutes'`);
 }
-export async function listGroupTickets(reviewOnly = false, page = 1) {
+export async function listGroupTickets(reviewOnly = false, page = 1, appCompanyId?: string) {
   if (!Number.isSafeInteger(page) || page < 1 || page > 10000) throw new DashboardError("Invalid queue page.", 400);
+  if (appCompanyId && !/^CO-\d+$/.test(appCompanyId)) throw new DashboardError("Invalid customer.", 400);
   const db = await patchTicketDatabase(); await recoverInterruptedRequests();
   const rows = await db.query(`SELECT ${fields} FROM patch_group_ticket_requests
-    WHERE ($1::boolean = false OR state='prepared')
+    WHERE ($1::boolean = false OR state='prepared') AND ($3::text IS NULL OR packet->>'appCompanyId'=$3)
     ORDER BY CASE WHEN $1::boolean THEN CASE review_state WHEN 'pending' THEN 0 WHEN 'approved' THEN 1 ELSE 2 END ELSE 0 END,
-      prepared_at DESC LIMIT 101 OFFSET $2`, [reviewOnly, (page - 1) * 100]);
+      prepared_at DESC LIMIT 101 OFFSET $2`, [reviewOnly, (page - 1) * 100, appCompanyId ?? null]);
   return { requests: rows.rows.slice(0, 100).map(summary), more: rows.rows.length > 100 };
 }
 export async function readGroupTicket(id: string, withPacket = false) {

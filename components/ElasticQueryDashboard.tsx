@@ -32,6 +32,7 @@ async function post(path: string, body?: unknown) {
 export default function ElasticQueryDashboard({ initial }: { initial: ElasticDashboard }) {
   const [dashboard, setDashboard] = useState(initial);
   const [companyId, setCompanyId] = useState("");
+  const [customerReady, setCustomerReady] = useState(false);
   const [showSharedQueries, setShowSharedQueries] = useState(false);
   const [customerRefresh, setCustomerRefresh] = useState(0);
   const [connectionOpen, setConnectionOpen] = useState(false);
@@ -72,9 +73,10 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
   }, []);
   const pending = dashboard.queries.some((query) => !query.result && !query.error);
   useEffect(() => {
+    if (!companyId || (companyId !== "CO-147284" && !showSharedQueries)) return;
     const timer = setInterval(() => { setNow(Date.now()); void reload().catch((err) => setLoadError(err.message)); }, pending ? 3000 : 15_000);
     return () => clearInterval(timer);
-  }, [reload, pending]);
+  }, [reload, pending, companyId, showSharedQueries]);
 
   async function action(name: string, work: () => Promise<void>) {
     const sequence = ++actionSequence.current;
@@ -149,13 +151,13 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
   const anyConnected = dashboard.connected || dashboard.crowdstrike?.connected;
   const sourceConnected = (source?: DashboardSource) => source === "crowdstrike" ? dashboard.crowdstrike?.connected : dashboard.connected;
   const visibleQueries = layoutIds ? applyTileOrder(dashboard.queries, layoutIds) : dashboard.queries;
-  const atlasElasticsearch = companyId === "CO-147284" && !showSharedQueries;
-  const showQueryBoard = !companyId || showSharedQueries || atlasElasticsearch;
+  const atlasElasticsearch = customerReady && companyId === "CO-147284" && !showSharedQueries;
+  const showQueryBoard = customerReady && (showSharedQueries || atlasElasticsearch);
   const displayedQueries = atlasElasticsearch ? visibleQueries.filter(query => query.source !== "crowdstrike") : visibleQueries;
 
   return <VulnShell eyebrow="Exposure / Reporting" title="Reporting"
-    subtitle="Customer reports and shared source views."
-    actions={<div className="flex flex-wrap gap-2">
+    subtitle="Select a customer to load its reports, scans, and review work."
+    actions={customerReady && <div className="flex flex-wrap gap-2">
       <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || Boolean(layoutIds)} onClick={() => action("refresh", async () => {
         setCustomerRefresh(value => value + 1);
         if (dashboard.canManage && anyConnected && (!companyId || showSharedQueries || atlasElasticsearch)) {
@@ -170,17 +172,17 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
         </> : <>
           <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || dashboard.queries.length < 2 || Boolean(draft)} onClick={() => { setShowSharedQueries(true); setLayoutIds(dashboard.queries.map((query) => query.id)); setConnectionOpen(false); setDeleting(null); setMessage(""); setError(""); }}><LayoutGrid size={16} />Arrange tiles</button>
           <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => { setShowSharedQueries(true); setConnectionOpen((open) => !open); }}><Settings2 size={16} />Connections</button>
-          <button type="button" className={ghostButtonClass} onClick={() => setTicketsOpen(open => !open)}>Patch tickets</button>
+          <button type="button" className={ghostButtonClass} onClick={() => { setShowSharedQueries(true); setTicketsOpen(open => !open); }}>All patch tickets</button>
           <button type="button" className={primaryButtonClass} disabled={!anyConnected || Boolean(busy)} onClick={() => { setShowSharedQueries(true); edit(); }}><Plus size={16} />Add tile</button>
         </>}
       </>}
     </div>}>
-    <ReportingCustomer companyId={companyId} onCompanyChange={(id) => { setCompanyId(id); setShowSharedQueries(false); setLayoutIds(null); setConnectionOpen(false); setDraft(null); }} refreshToken={customerRefresh} />
-    <div id="consolidation-review" className="mt-6 grid items-start gap-6 2xl:grid-cols-2"><PatchReviewQueue />{dashboard.canManage && <PatchTicketTracker />}</div>
-    {companyId && <div className="mt-8 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-zinc-800 bg-[#090909] px-5 py-4">
+    <ReportingCustomer companyId={companyId} onCompanyChange={(id) => { setCustomerReady(false); setCompanyId(id); setShowSharedQueries(false); setLayoutIds(null); setConnectionOpen(false); setTicketsOpen(false); setDraft(null); setDeleting(null); setPreview(null); }} onCustomerReady={setCustomerReady} refreshToken={customerRefresh} />
+    {customerReady && <div id="consolidation-review" className="mt-6 grid items-start gap-6 2xl:grid-cols-2"><PatchReviewQueue key={`review-${companyId}`} companyId={companyId} />{dashboard.canManage && <PatchTicketTracker key={`tickets-${companyId}`} companyId={companyId} />}</div>}
+    {customerReady && (atlasElasticsearch || showSharedQueries) && <div className="mt-8 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-zinc-800 bg-[#090909] px-5 py-4">
       <div><h2 className="text-lg font-semibold text-white">{atlasElasticsearch ? "Atlas Elasticsearch views" : "Source query views"}</h2>
         <p className="mt-1 text-sm text-zinc-400">{atlasElasticsearch ? "Saved Elasticsearch snapshots for Atlas. The customer scan views above cover every source." : "This customer’s scanner views are shown above. Saved source queries have their own scope."}</p></div>
-      <button type="button" className={ghostButtonClass} onClick={() => { setShowSharedQueries(value => !value); setLayoutIds(null); setDraft(null); setConnectionOpen(false); }}>
+      <button type="button" className={ghostButtonClass} onClick={() => { setShowSharedQueries(value => !value); setLayoutIds(null); setDraft(null); setConnectionOpen(false); setTicketsOpen(false); }}>
         {showSharedQueries ? "Return to customer views" : "Open shared query views"}
       </button>
     </div>}

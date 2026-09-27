@@ -12,7 +12,7 @@ type Setup = { companies: { id: string; name: string }[] };
 type Customer = { report: ExecReport; sources: { name: string; open: number }[]; insights: CustomerInsights };
 const number = (value: number) => value.toLocaleString();
 
-export default function ReportingCustomer({ companyId, onCompanyChange, refreshToken }: { companyId: string; onCompanyChange: (companyId: string) => void; refreshToken: number }) {
+export default function ReportingCustomer({ companyId, onCompanyChange, onCustomerReady, refreshToken }: { companyId: string; onCompanyChange: (companyId: string) => void; onCustomerReady: (ready: boolean) => void; refreshToken: number }) {
   const [setup, setSetup] = useState<Setup | null>(null);
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [loading, setLoading] = useState(false);
@@ -25,15 +25,16 @@ export default function ReportingCustomer({ companyId, onCompanyChange, refreshT
     return () => { active = false; };
   }, []);
   useEffect(() => {
-    if (!companyId) { setCustomer(null); return; }
+    if (!companyId) { setCustomer(null); onCustomerReady(false); return; }
     let active = true;
+    onCustomerReady(false);
     setCustomer(null); setLoading(true); setError("");
     dashboardRequest<Customer>(`reporting?companyId=${encodeURIComponent(companyId)}`)
-      .then(data => { if (active) setCustomer(data); })
-      .catch(cause => { if (active) setError(cause instanceof Error ? cause.message : "Customer report is unavailable."); })
+      .then(data => { if (active) { setCustomer(data); onCustomerReady(true); } })
+      .catch(cause => { if (active) { onCustomerReady(false); setError(cause instanceof Error ? cause.message : "Customer report is unavailable."); } })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [companyId, refreshToken]);
+  }, [companyId, refreshToken, onCustomerReady]);
 
   const report = customer?.report.company.id === companyId ? customer.report : null;
   return <><section aria-label="Customer report" className="rounded-2xl border border-zinc-800 bg-[#090909] p-5 sm:p-7">

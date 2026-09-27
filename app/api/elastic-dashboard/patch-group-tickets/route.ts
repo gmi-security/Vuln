@@ -5,6 +5,6 @@ export async function GET(request: Request) {
   try {
     await dashboardAccess();
     const params = new URL(request.url).searchParams;
-    return dashboardJson(await listGroupTickets(params.get("review") === "1", Number(params.get("page") ?? 1)));
+    return dashboardJson(await listGroupTickets(params.get("review") === "1", Number(params.get("page") ?? 1), params.get("companyId") ?? undefined));
   } catch (error) { return dashboardFailure(error); }
 }
