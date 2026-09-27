@@ -2,6 +2,7 @@ import { DashboardError } from "./elastic-dashboard";
 import { cwOptions } from "./connectwise-client";
 import { patchTicketDatabase, savedConnection } from "./patch-ticket-store";
 import { computeExecReport, ensureHydrated, getCompany, listCompanies, listFindings } from "./store";
+import { exactCompanyMatch } from "./reporting-company-match";
 
 const reportingDatabase = patchTicketDatabase;
 
@@ -50,6 +51,29 @@ export async function reportingLinkForAppCompany(appCompanyId: string) {
   const db = await reportingDatabase();
   const row = (await db.query("SELECT cw_company_id FROM reporting_company_links WHERE cw_target=$1 AND app_company_id=$2", [saved.target, appCompanyId])).rows[0];
   return { cwCompanyId: row?.cw_company_id ?? null };
+}
+
+export async function autoLinkReportingCompany(cwCompanyId: number, actor: string) {
+  validCWId(cwCompanyId);
+  const existing = await reportingCustomer(cwCompanyId);
+  if (existing.linked) return existing;
+  const saved = await savedConnection();
+  const selected = (await cwOptions(saved.value, "companies", undefined, 1, "", cwCompanyId)).options.find(option => option.id === cwCompanyId);
+  if (!selected) throw new DashboardError("ConnectWise company is unavailable.", 400);
+  await ensureHydrated();
+  const company = exactCompanyMatch(selected.name, listCompanies().filter(item => item.kind === "client" && !item.isDemo));
+  if (!company) return { linked: false, matchReason: "No unique exact customer name match was found. Choose the matching app customer once." };
+  const db = await reportingDatabase();
+  try {
+    await db.query(`INSERT INTO reporting_company_links (cw_target,cw_company_id,app_company_id,cw_company_name,linked_by)
+      VALUES ($1,$2,$3,$4,$5) ON CONFLICT (cw_target,cw_company_id) DO NOTHING`,
+      [saved.target, cwCompanyId, company.id, selected.name, actor]);
+  } catch (error) {
+    if ((error as { code?: string }).code === "23505") return { linked: false, matchReason: "This customer is linked to another ConnectWise company. Choose the correct customer manually." };
+    throw error;
+  }
+  await db.query("DELETE FROM reporting_queue_runs WHERE id=1");
+  return reportingCustomer(cwCompanyId);
 }
 
 export async function linkReportingCompany(cwCompanyId: number, appCompanyId: string, actor: string) {

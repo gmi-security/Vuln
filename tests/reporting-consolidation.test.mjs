@@ -38,6 +38,10 @@ test('corroborated findings share one review group while retaining source eviden
   assert.equal(groups[0].findingCount, 2);
   assert.deepEqual([...groups[0].connectors], ['crowdstrike', 'nessus', 'vulners']);
   assert.match(groups[0].csv, /host-one/);
+  assert.deepEqual(groups[0].reviewRows.map(row => [row.asset, row.cve, row.severity, row.risk, row.connectors]), [
+    ['host-one', 'CVE-2026-1234', 'High', 72, ['nessus', 'vulners']],
+    ['host-two', 'CVE-2026-1234', 'High', 72, ['crowdstrike']],
+  ]);
   assert.doesNotMatch(groups[0].csv, /host-closed/);
 });
 

@@ -1,5 +1,5 @@
 import { dashboardAccess, dashboardBody, dashboardFailure, dashboardJson } from "@/lib/elastic-dashboard-http";
-import { linkReportingCompany, reportingCustomer, reportingLinkForAppCompany, reportingSetup } from "@/lib/reporting-store";
+import { autoLinkReportingCompany, linkReportingCompany, reportingCustomer, reportingLinkForAppCompany, reportingSetup } from "@/lib/reporting-store";
 
 export const dynamic = "force-dynamic";
 
@@ -19,5 +19,13 @@ export async function PUT(request: Request) {
     const access = await dashboardAccess(request, true);
     const body = await dashboardBody(request) as { cwCompanyId?: unknown; appCompanyId?: unknown };
     return dashboardJson(await linkReportingCompany(Number(body?.cwCompanyId), body?.appCompanyId as string, access.actor));
+  } catch (error) { return dashboardFailure(error); }
+}
+
+export async function POST(request: Request) {
+  try {
+    const access = await dashboardAccess(request, true);
+    const body = await dashboardBody(request) as { cwCompanyId?: unknown };
+    return dashboardJson(await autoLinkReportingCompany(Number(body?.cwCompanyId), access.actor));
   } catch (error) { return dashboardFailure(error); }
 }

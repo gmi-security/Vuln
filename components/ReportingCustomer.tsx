@@ -8,7 +8,7 @@ import type { ExecReport } from "@/lib/store";
 import { selectClass } from "@/components/ui";
 
 type Setup = { configured: boolean; revision?: number; companies: { id: string; name: string }[] };
-type Customer = { linked: false } | { linked: true; appCompanyId: string; cwCompanyName: string; report: ExecReport; sources: { name: string; open: number }[] };
+type Customer = { linked: false; matchReason?: string } | { linked: true; appCompanyId: string; cwCompanyName: string; report: ExecReport; sources: { name: string; open: number }[] };
 const number = (value: number) => value.toLocaleString();
 
 export default function ReportingCustomer() {
@@ -32,7 +32,7 @@ export default function ReportingCustomer() {
     if (!cwCompanyId) { setCustomer(null); return; }
     let active = true;
     setCustomer(null); setEditingLink(false); setLoading(true); setError("");
-    dashboardRequest<Customer>(`reporting?cwCompanyId=${cwCompanyId}`)
+    dashboardRequest<Customer>("reporting", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cwCompanyId }) })
       .then(data => { if (active) { setCustomer(data); setAppCompanyId(data.linked ? data.appCompanyId : ""); } })
       .catch(cause => { if (active) setError(cause instanceof Error ? cause.message : "Customer report is unavailable."); })
       .finally(() => { if (active) setLoading(false); });
@@ -65,7 +65,7 @@ export default function ReportingCustomer() {
     {loading && <p role="status" className="mt-5 text-sm text-zinc-400">Loading this customer’s report…</p>}
     {setup?.configured && cwCompanyId && customer && (!customer.linked || editingLink) && <div className="mt-6 max-w-2xl rounded-xl border border-zinc-700 bg-zinc-950 p-5">
       <h3 className="font-medium text-white">{customer.linked ? "Change customer link" : "Link this ConnectWise company"}</h3>
-      <p className="mt-2 text-sm text-zinc-400">Choose the matching customer in this app. This link is saved for future reports.</p>
+      <p className="mt-2 text-sm text-zinc-400">{!customer.linked && customer.matchReason ? customer.matchReason : "Choose the matching customer in this app. This link is saved for future reports."}</p>
       <label className="mt-4 block text-sm text-zinc-200">App customer
         <select className={`${selectClass} mt-2 block w-full`} value={appCompanyId} onChange={event => setAppCompanyId(event.target.value)}>
           <option value="">Choose a customer</option>

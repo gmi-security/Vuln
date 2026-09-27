@@ -44,6 +44,8 @@ export function buildStoredFindingGroups(company: { id: string; name: string }, 
       remediationId, tenantId: company.id, title, action, reference: "", vendorUrl: "", link: "", published: "",
       cves, deviceCount: hostScope.length, findingCount: rows.length, hostScope,
       deviceCves: rows.map(row => ({ cid: company.id, hostId: row.asset, cve: row.cve })),
+      reviewRows: rows.map(row => ({ asset: row.asset, cve: row.cve, severity: row.severity, risk: row.realRisk,
+        connectors: row.seenBy?.length ? row.seenBy : [row.connector], findingId: row.id })),
       csv, label, ticketTitle: `${company.name}: ${title}`.slice(0, 100), ticketBody });
     }
     return parts;

@@ -62,6 +62,7 @@ export type PatchGroup = {
   vendorUrl: string; link: string; published: string;
   cves: string[]; deviceCount: number; findingCount: number; hostScope: string[]; csv: string;
   deviceCves: { cid: string; hostId: string; cve: string }[];
+  reviewRows?: { asset: string; cve: string; severity?: string; risk?: number; connectors?: string[]; findingId?: string; hostname?: string; ip?: string; os?: string; criticality?: string; exposure?: string }[];
   label: string; ticketTitle: string; ticketBody: string;
 };
 export type PatchConsolidation = {
@@ -184,7 +185,7 @@ export function buildPatchRequest(cve: string, records: PatchFinding[], region: 
 // first), then by how many of the requested CVEs that same action clears.
 export function buildPatchConsolidation(cves: string[], records: PatchFinding[], region: string, startedAt: string, collectedAt: string, alreadyTicketed: Set<string> = new Set()): PatchConsolidation {
   if (!records.length) throw new DashboardError("CrowdStrike currently reports no open/reopened findings for these CVEs. No consolidation was prepared.");
-  type GroupRow = { cid: string; hostId: string; hostname: string; ip: string; os: string; hostCriticality: string; exposure: string; cve: string };
+  type GroupRow = { cid: string; hostId: string; hostname: string; ip: string; os: string; hostCriticality: string; exposure: string; cve: string; severity: string; risk: number; findingId: string };
   type GroupAcc = { tenantId: string; remediation: Remediation; cves: Set<string>; devices: Set<string>; findings: Set<string>; rows: Map<string, GroupRow> };
   const groups = new Map<string, GroupAcc>();
   const devicesByCve = new Map<string, Set<string>>();
@@ -207,10 +208,10 @@ export function buildPatchConsolidation(cves: string[], records: PatchFinding[],
       if (existing) {
         if (JSON.stringify(existing.remediation) !== JSON.stringify(remediation)) throw new DashboardError("Remediation details changed during collection. Retry to prepare a consistent consolidation.");
         existing.cves.add(row.cve); existing.devices.add(deviceKey); existing.findings.add(JSON.stringify([row.cid, row.id]));
-        existing.rows.set(rowKey, { cid: row.cid, hostId: row.hostId, hostname: row.hostname, ip: row.ip, os: row.os, hostCriticality: row.hostCriticality, exposure: row.exposure, cve: row.cve });
+        existing.rows.set(rowKey, { cid: row.cid, hostId: row.hostId, hostname: row.hostname, ip: row.ip, os: row.os, hostCriticality: row.hostCriticality, exposure: row.exposure, cve: row.cve, severity: row.severity, risk: row.risk, findingId: row.id });
       } else {
         groups.set(key, { tenantId: row.cid, remediation, cves: new Set([row.cve]), devices: new Set([deviceKey]), findings: new Set([JSON.stringify([row.cid, row.id])]),
-          rows: new Map([[rowKey, { cid: row.cid, hostId: row.hostId, hostname: row.hostname, ip: row.ip, os: row.os, hostCriticality: row.hostCriticality, exposure: row.exposure, cve: row.cve }]]) });
+          rows: new Map([[rowKey, { cid: row.cid, hostId: row.hostId, hostname: row.hostname, ip: row.ip, os: row.os, hostCriticality: row.hostCriticality, exposure: row.exposure, cve: row.cve, severity: row.severity, risk: row.risk, findingId: row.id }]]) });
       }
     }
   }
@@ -237,7 +238,10 @@ export function buildPatchConsolidation(cves: string[], records: PatchFinding[],
     return { remediationId: g.remediation.id, tenantId: g.tenantId, title: g.remediation.title, action: g.remediation.action,
       reference: g.remediation.reference, vendorUrl: g.remediation.vendorUrl, link: g.remediation.link, published: g.remediation.published,
       cves: sortedCves, deviceCount, findingCount, hostScope: [...g.devices].sort(),
-      deviceCves: groupRows.map((r) => ({ cid: r.cid, hostId: r.hostId, cve: r.cve })), csv, label, ticketTitle, ticketBody };
+      deviceCves: groupRows.map((r) => ({ cid: r.cid, hostId: r.hostId, cve: r.cve })),
+      reviewRows: groupRows.map((r) => ({ asset: r.hostname || r.hostId, cve: r.cve, severity: r.severity, risk: r.risk, findingId: r.findingId,
+        hostname: r.hostname, ip: r.ip, os: r.os, criticality: r.hostCriticality, exposure: r.exposure, connectors: ["CrowdStrike"] })),
+      csv, label, ticketTitle, ticketBody };
   }).sort((a, b) => b.deviceCount - a.deviceCount || b.cves.length - a.cves.length || a.remediationId.localeCompare(b.remediationId));
   const unmapped = cves.filter((c) => !mappedCves.has(c)).map((c) => ({ cve: c, deviceCount: devicesByCve.get(c)?.size ?? 0 }));
   const totalDevices = new Set(ordered.map((r) => JSON.stringify([r.cid, r.hostId]))).size;

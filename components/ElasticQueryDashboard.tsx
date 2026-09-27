@@ -169,7 +169,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
       </>}
     </div>}>
     <ReportingCustomer />
-    <div id="consolidation-review" className="mt-6"><PatchReviewQueue /></div>
+    <div id="consolidation-review" className="mt-6 grid items-start gap-6 2xl:grid-cols-2"><PatchReviewQueue />{dashboard.canManage && <PatchTicketTracker />}</div>
     <div className="mt-8 mb-3"><h2 className="text-xl font-semibold text-white">Shared query views</h2><p className="mt-1 text-sm text-zinc-400">These tiles show their configured source scope. They do not change with the selected customer above.</p></div>
     <div className={styles.connections}>
       {[{ name: "CrowdStrike", connected: dashboard.crowdstrike?.connected }, { name: "Elasticsearch", connected: dashboard.connected }].map((source) => <span key={source.name} className={styles.connection}><span className={styles.dot} style={{ background: source.connected ? "#34d399" : "#71717a" }} />{source.name} · {source.connected ? "Configured" : "Not connected"}</span>)}
@@ -435,6 +435,5 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
     })}
     </div>
 
-    {dashboard.canManage && <PatchTicketTracker />}
   </VulnShell>;
 }
