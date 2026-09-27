@@ -26,14 +26,6 @@ export default function ConnectWiseGroupTicket({ group, requestId }: { group: Pa
       .catch(e => { if (live) setError(e.message); });
     return () => { live = false; generation.current++; };
   }, [requestId]);
-  useEffect(() => {
-    if (group.source !== "stored-findings" || !group.appCompanyId) return;
-    let live = true;
-    dashboardRequest<{ cwCompanyId: number | null }>(`reporting?appCompanyId=${encodeURIComponent(group.appCompanyId)}`)
-      .then(data => { if (live && data.cwCompanyId) setCompanyId(data.cwCompanyId); })
-      .catch(e => { if (live) setError(e instanceof Error ? e.message : "Could not load the linked ConnectWise company."); });
-    return () => { live = false; };
-  }, [group.source, group.appCompanyId]);
   async function track(token: number) {
     for (let attempt = 0; attempt < 95; attempt++) {
       await new Promise(resolve => setTimeout(resolve, 2000));

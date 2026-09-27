@@ -13,15 +13,7 @@ async function load(path) {
   return module.namespace;
 }
 
-const { exactCompanyMatch } = await load(resolve('lib/reporting-company-match.ts'));
 const { patchReviewRows } = await load(resolve('lib/patch-review-rows.ts'));
-
-test('automatic linking only accepts a unique exact customer name', () => {
-  const companies = [{ id: 'atlas', name: 'Atlas Healthcare' }, { id: 'other', name: 'Atlas Healthcare East' }];
-  assert.equal(exactCompanyMatch('  ATLAS   HEALTHCARE ', companies)?.id, 'atlas');
-  assert.equal(exactCompanyMatch('Atlas', companies), null);
-  assert.equal(exactCompanyMatch('Atlas Healthcare', [...companies, { id: 'duplicate', name: 'atlas healthcare' }]), null);
-});
 
 test('existing saved reports recover asset detail from CSV, including quoted cells', () => {
   const rows = patchReviewRows({ csv: '\uFEFF"cve","asset","severity","risk_score","connectors","finding_id","remediation"\r\n"CVE-2026-1234","host, one","High","72","nessus; vulners","finding-1","Apply ""vendor"" patch"\r\n', deviceCves: [] });

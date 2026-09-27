@@ -56,14 +56,10 @@ export async function patchTicketDatabase() {
   CREATE TABLE IF NOT EXISTS patch_group_ticket_audit (
     id BIGSERIAL PRIMARY KEY, request_id UUID, actor TEXT NOT NULL, action TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
   );
-  CREATE TABLE IF NOT EXISTS reporting_company_links (
-    cw_target TEXT NOT NULL, cw_company_id INT NOT NULL, app_company_id TEXT NOT NULL,
-    cw_company_name TEXT NOT NULL, linked_by TEXT NOT NULL, linked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (cw_target, cw_company_id), UNIQUE (cw_target, app_company_id)
-  );
   CREATE TABLE IF NOT EXISTS reporting_queue_runs (
-    id INT PRIMARY KEY CHECK(id=1), completed_at TIMESTAMPTZ NOT NULL
-  )`).then(() => {}).catch(error => { ready = undefined; throw error; });
+    id INT PRIMARY KEY CHECK(id=1), completed_at TIMESTAMPTZ NOT NULL, scope_version INT NOT NULL DEFAULT 1
+  );
+  ALTER TABLE reporting_queue_runs ADD COLUMN IF NOT EXISTS scope_version INT NOT NULL DEFAULT 1`).then(() => {}).catch(error => { ready = undefined; throw error; });
   await ready;
   return db;
 }

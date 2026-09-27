@@ -110,12 +110,7 @@ export async function createGroupTicket(id: string, value: unknown, actor: strin
     if (["creating", "uncertain", "created"].includes(row.state)) { await client.query("COMMIT"); return readGroupTicket(id); }
     if (row.review_state !== "approved") throw new DashboardError("Approve this consolidation in the review queue before sending a ticket.", 409);
     const packet = row.packet as PatchGroup;
-    if (packet.source === "stored-findings") {
-      const link = (await client.query(`SELECT app_company_id FROM reporting_company_links
-        WHERE cw_target=$1 AND cw_company_id=$2 AND app_company_id=$3 FOR SHARE`,
-        [saved.target, routing.companyId, packet.appCompanyId])).rows[0];
-      if (!link) throw new DashboardError("This ConnectWise company is not linked to the reviewed customer in Reporting.", 409);
-    } else {
+    if (packet.source !== "stored-findings") {
       const cs = (await client.query("SELECT revision FROM dashboard_source_connections WHERE source='crowdstrike' FOR SHARE")).rows[0];
       if (cs?.revision !== row.crowdstrike_revision) throw new DashboardError("CrowdStrike connection changed. Prepare a fresh consolidation before sending.", 409);
     }

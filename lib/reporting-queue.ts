@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { patchTicketDatabase, savedConnection, activeTicketedPairs } from "./patch-ticket-store";
-import { ensureHydrated, getCompany, listFindings } from "./store";
+import { patchTicketDatabase, activeTicketedPairs } from "./patch-ticket-store";
+import { ensureHydrated, listCompanies, listFindings } from "./store";
 import { buildStoredFindingGroups } from "./reporting-consolidation";
 import { elasticVulnEnabled } from "./elastic-vuln-server";
 
@@ -9,32 +9,25 @@ const state = runtime.__reportingQueue ??= {};
 
 export async function refreshReportingQueue(): Promise<void> {
   const db = await patchTicketDatabase();
-  const last = (await db.query("SELECT completed_at FROM reporting_queue_runs WHERE id=1")).rows[0];
-  if (last && Date.now() - new Date(last.completed_at).getTime() < 60 * 60_000) return;
-  let saved;
-  try { saved = await savedConnection(); } catch { return; }
-  const links = (await db.query("SELECT DISTINCT app_company_id FROM reporting_company_links WHERE cw_target=$1", [saved.target])).rows;
-  if (!links.length) return;
+  const last = (await db.query("SELECT completed_at,scope_version FROM reporting_queue_runs WHERE id=1")).rows[0];
+  if (last?.scope_version === 2 && Date.now() - new Date(last.completed_at).getTime() < 60 * 60_000) return;
   await ensureHydrated();
+  const companies = listCompanies().filter(company => company.kind === "client" && !company.isDemo);
   const active = await activeTicketedPairs();
   const byCompany = new Map<string, ReturnType<typeof listFindings>>();
-  const linked = new Set(links.map(row => row.app_company_id as string));
+  const eligible = new Set(companies.map(company => company.id));
   for (const finding of listFindings()) {
-    if (!linked.has(finding.companyId)) continue;
+    if (!eligible.has(finding.companyId)) continue;
     const rows = byCompany.get(finding.companyId) ?? [];
     rows.push(finding); byCompany.set(finding.companyId, rows);
   }
-  const groups = links.flatMap(row => {
-    const company = getCompany(row.app_company_id);
-    if (!company || company.kind !== "client" || company.isDemo) return [];
-    return buildStoredFindingGroups(company, byCompany.get(company.id) ?? [], active);
-  });
+  const groups = companies.flatMap(company => buildStoredFindingGroups(company, byCompany.get(company.id) ?? [], active));
   const client = await db.connect();
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(804208)");
-    const current = (await client.query("SELECT completed_at FROM reporting_queue_runs WHERE id=1 FOR UPDATE")).rows[0];
-    if (current && Date.now() - new Date(current.completed_at).getTime() < 60 * 60_000) { await client.query("COMMIT"); return; }
+    const current = (await client.query("SELECT completed_at,scope_version FROM reporting_queue_runs WHERE id=1 FOR UPDATE")).rows[0];
+    if (current?.scope_version === 2 && Date.now() - new Date(current.completed_at).getTime() < 60 * 60_000) { await client.query("COMMIT"); return; }
     for (const group of groups) {
       const scopeHash = createHash("sha256").update(JSON.stringify(group.deviceCves)).digest("hex");
       const prior = await client.query(`SELECT id FROM patch_group_ticket_requests
@@ -48,8 +41,8 @@ export async function refreshReportingQueue(): Promise<void> {
         [id, JSON.stringify(group.cves), group.remediationId, group.tenantId, JSON.stringify(group), group.deviceCount, group.findingCount, scopeHash]);
       await client.query("INSERT INTO patch_group_ticket_audit(request_id,actor,action) VALUES($1,'automatic reporting','group.prepared')", [id]);
     }
-    await client.query(`INSERT INTO reporting_queue_runs(id,completed_at) VALUES(1,now())
-      ON CONFLICT(id) DO UPDATE SET completed_at=EXCLUDED.completed_at`);
+    await client.query(`INSERT INTO reporting_queue_runs(id,completed_at,scope_version) VALUES(1,now(),2)
+      ON CONFLICT(id) DO UPDATE SET completed_at=EXCLUDED.completed_at,scope_version=EXCLUDED.scope_version`);
     await client.query("COMMIT");
   } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
 }
