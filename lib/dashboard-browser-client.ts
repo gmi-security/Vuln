@@ -28,6 +28,14 @@ export async function readDashboardResponse<T>(response: Response): Promise<T> {
   return data as T;
 }
 
+// Reads poll a background job every few seconds for up to 15 minutes (patch
+// consolidation, previews, verification). Over that many requests a single
+// transient network blip is expected, not exceptional — giving up on the
+// first one would throw away minutes of legitimate server-side progress for
+// a hiccup that clears on its own. So reads get several retries with rising
+// backoff; only a failure that persists across all of them is a real outage.
+const READ_RETRY_BACKOFF_MS = [500, 1500, 3000, 5000];
+
 export async function dashboardRequest<T = Record<string, any>>(path: string, init: RequestInit = {}): Promise<T> {
   const readOnly = !init.method || init.method.toUpperCase() === "GET";
   for (let attempt = 0; ; attempt++) {
@@ -45,10 +53,10 @@ export async function dashboardRequest<T = Record<string, any>>(path: string, in
       }
       return await readDashboardResponse<T>(response);
     } catch (error) {
-      // Reads are safe to retry once. Never replay a save/preview/delete without
+      // Reads are safe to retry. Never replay a save/preview/delete without
       // knowing whether the first attempt committed on the server.
-      if (readOnly && attempt === 0 && error instanceof DashboardRequestError && error.retryable) {
-        await new Promise((resolve) => setTimeout(resolve, 500));
+      if (readOnly && attempt < READ_RETRY_BACKOFF_MS.length && error instanceof DashboardRequestError && error.retryable) {
+        await new Promise((resolve) => setTimeout(resolve, READ_RETRY_BACKOFF_MS[attempt]));
         continue;
       }
       throw error;

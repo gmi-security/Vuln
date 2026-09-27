@@ -45,21 +45,38 @@ async function withFetch(replies, work) {
   try { await work(calls); } finally { globalThis.fetch = original; }
 }
 
-test("background reads retry a transient gateway failure once, then recover", async () => {
+test("background reads retry a transient gateway failure, then recover", async () => {
   await withFetch([html(502), json({ queries: [] })], async (calls) => {
     assert.deepEqual(await dashboardRequest(""), { queries: [] });
     assert.equal(calls.length, 2);
     assert.equal(calls[0].init.headers.Accept, "application/json");
     assert.ok(calls[0].init.signal instanceof AbortSignal);
   });
-  await withFetch([html(503), html(503)], async (calls) => {
+  // A background job is polled every few seconds for up to 15 minutes, so a
+  // single blip is expected, not exceptional — only a failure that persists
+  // across every retry should surface as a real outage.
+  await withFetch([html(503), html(503), html(503), html(503), html(503)], async (calls) => {
     await assert.rejects(() => dashboardRequest("jobs/test"), /HTTP 503/);
-    assert.equal(calls.length, 2);
+    assert.equal(calls.length, 5);
   });
   await withFetch([json({ error: "Unauthorized" }, 401)], async (calls) => {
     await assert.rejects(() => dashboardRequest(""), /Sign in again/);
     assert.equal(calls.length, 1);
   });
+});
+
+test("a poll surviving several consecutive network failures still recovers", async () => {
+  // The failure mode that mattered in production: a raw fetch() throw (proxy
+  // reset, dropped connection) rather than an HTTP error status, repeated a
+  // few times in a row over a long-running job poll — must not abandon the
+  // poll and discard minutes of already-completed background work.
+  await withFetch(
+    [new TypeError("network"), new TypeError("network"), new TypeError("network"), json({ status: "running" })],
+    async (calls) => {
+      assert.deepEqual(await dashboardRequest("jobs/test"), { status: "running" });
+      assert.equal(calls.length, 4);
+    },
+  );
 });
 
 test("save, preview and delete requests are never automatically replayed", async () => {
