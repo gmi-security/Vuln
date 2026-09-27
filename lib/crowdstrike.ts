@@ -95,10 +95,41 @@ export type FalconAsset = {
 
 // Wraps fetch with a hard timeout. Node's native fetch has no default timeout
 // so CrowdStrike API stalls would hang background tasks indefinitely.
-function timedFetch(url: string, init: RequestInit, timeoutMs = 60_000): Promise<Response> {
+function timedFetchOnce(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), timeoutMs);
   return fetch(url, { ...init, signal: ac.signal }).finally(() => clearTimeout(timer));
+}
+
+// A large tenant's device/vuln hydration fans out many of these requests
+// (bounded by runWithConcurrency below), which makes hitting CrowdStrike's
+// rate limiter an expected, recoverable event rather than a rare one — retry
+// 429/502/503/504 with backoff (honoring Retry-After when CrowdStrike sends
+// it) instead of failing the whole sync over a single throttled request.
+async function timedFetch(url: string, init: RequestInit, timeoutMs = 60_000): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    const res = await timedFetchOnce(url, init, timeoutMs);
+    if (res.ok || ![429, 502, 503, 504].includes(res.status) || attempt >= 4) return res;
+    const retryAfter = Number(res.headers.get("retry-after"));
+    const delayMs = Number.isFinite(retryAfter) && retryAfter > 0
+      ? Math.min(retryAfter * 1000, 30_000)
+      : Math.min(500 * 2 ** attempt, 8_000);
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+}
+
+// Runs `fn` over `items` with at most `limit` in flight at once, so a large
+// tenant's device/vuln hydration (which used to fire hundreds of requests in
+// one unbounded Promise.all) can't overwhelm CrowdStrike's rate limiter just
+// because the underlying dataset is large.
+async function runWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  async function worker() {
+    for (let i = next++; i < items.length; i = next++) results[i] = await fn(items[i]);
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
 }
 
 async function falconToken(config: FalconConfig): Promise<string> {
@@ -257,19 +288,17 @@ export async function spotlightListFindings(config: FalconTenant): Promise<Spotl
     };
   };
 
-  const results = await Promise.all(
-    batches.map(async (batch) => {
-      const r = await timedFetch(
-        `${config.baseUrl}/spotlight/entities/vulnerabilities/v2?ids=${batch.join("&ids=")}`,
-        { headers: authHeader, cache: "no-store" },
-      );
-      if (!r.ok) {
-        throw new Error(`Spotlight entities ${r.status}: ${await r.text().catch(() => r.statusText)}`);
-      }
-      const j: any = await r.json();
-      return (j?.resources ?? []).map(parseResource) as SpotlightFinding[];
-    }),
-  );
+  const results = await runWithConcurrency(batches, 8, async (batch) => {
+    const r = await timedFetch(
+      `${config.baseUrl}/spotlight/entities/vulnerabilities/v2?ids=${batch.join("&ids=")}`,
+      { headers: authHeader, cache: "no-store" },
+    );
+    if (!r.ok) {
+      throw new Error(`Spotlight entities ${r.status}: ${await r.text().catch(() => r.statusText)}`);
+    }
+    const j: any = await r.json();
+    return (j?.resources ?? []).map(parseResource) as SpotlightFinding[];
+  });
   return { findings: results.flat(), truncated };
 }
 
@@ -320,7 +349,7 @@ export async function falconListAssets(config: FalconConfig): Promise<FalconAsse
       .filter((a: FalconAsset) => a.hostname);
   };
 
-  // Fetch first page to learn the total, then fire remaining pages in parallel.
+  // Fetch first page to learn the total, then fire remaining pages, bounded.
   const first = await fetchIdPage(0);
   if (!first.ids.length) return [];
 
@@ -328,13 +357,13 @@ export async function falconListAssets(config: FalconConfig): Promise<FalconAsse
   const remainingOffsets: number[] = [];
   for (let off = PAGE; off < total; off += PAGE) remainingOffsets.push(off);
 
-  const restPages = await Promise.all(remainingOffsets.map((off) => fetchIdPage(off)));
+  const restPages = await runWithConcurrency(remainingOffsets, 8, fetchIdPage);
   const allIds = [first.ids, ...restPages.map((p) => p.ids)].flat();
 
-  // Hydrate all ID batches in parallel (API accepts up to 500 per POST).
+  // Hydrate all ID batches, bounded (API accepts up to 500 per POST).
   const idBatches: string[][] = [];
   for (let i = 0; i < allIds.length; i += PAGE) idBatches.push(allIds.slice(i, i + PAGE));
 
-  const results = await Promise.all(idBatches.map(hydrateIds));
+  const results = await runWithConcurrency(idBatches, 8, hydrateIds);
   return results.flat();
 }
