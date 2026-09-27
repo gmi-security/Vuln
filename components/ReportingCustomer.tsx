@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { dashboardRequest } from "@/lib/dashboard-browser-client";
 import type { ExecReport } from "@/lib/store";
-import styles from "./ReportingCustomer.module.css";
+import { selectClass } from "@/components/ui";
 
 type Setup = { companies: { id: string; name: string }[] };
 type Customer = { report: ExecReport; sources: { name: string; open: number }[] };
@@ -35,58 +35,39 @@ export default function ReportingCustomer() {
   }, [appCompanyId]);
 
   const report = customer?.report;
-  return <section aria-label="Customer report" className={styles.section}>
-    <div className={styles.intro}>
-      <div className={styles.introCopy}>
-        <p className={styles.kicker}>Customer intelligence</p>
-        <h2>Customer overview</h2>
-        <p>One customer view across every connected scanner. Select a customer to inspect its current exposure and priorities.</p>
-      </div>
-      <label className={styles.selector}>Customer
-        <select value={appCompanyId} onChange={event => setAppCompanyId(event.target.value)} disabled={!setup}>
-          <option value="">Choose a customer</option>
-          {setup?.companies.map(company => <option key={company.id} value={company.id}>{company.name} ({company.id})</option>)}
-        </select>
-      </label>
+  return <section aria-label="Customer report" className="rounded-2xl border border-zinc-800 bg-[#090909] p-5 sm:p-7">
+    <div className="mb-6 flex flex-wrap items-end justify-between gap-4 border-b border-zinc-800 pb-5">
+      <div><p className="text-xs uppercase tracking-[0.25em] text-red-500">Customer reporting</p>
+        <h2 className="mt-2 text-2xl font-semibold text-white">Customer report</h2>
+        <p className="mt-2 max-w-2xl text-sm text-zinc-400">Select an app customer to see its findings across all connected scanners.</p></div>
+      {report && <Link href={`/report/${encodeURIComponent(report.company.id)}`} className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-100 hover:bg-zinc-800">Open full report</Link>}
     </div>
-
-    {!setup && !error && <p role="status" className={styles.status}>Loading customers...</p>}
-    {setup && !setup.companies.length && <p role="status" className={styles.status}>No app customers are available yet.</p>}
-    {error && <p role="alert" className={styles.error}>{error}</p>}
-    {loading && <p role="status" className={styles.status}>Loading this customer&apos;s report...</p>}
-    {!appCompanyId && setup?.companies.length ? <div className={styles.empty}>
-      <span className={styles.emptyMark} aria-hidden="true">CO</span>
-      <div><h3>Choose a customer to begin</h3><p>Findings, scanner coverage, and the full report will appear here.</p></div>
-    </div> : null}
-
-    {report && customer && <div className={styles.report}>
-      <div className={styles.customerHeading}>
-        <div><p className={styles.customerId}>{report.company.id}</p><h3>{report.company.name}</h3>
-          <p className={styles.updated}>Updated {new Date(report.generatedAt).toLocaleString()}</p></div>
-        <Link href={`/report/${encodeURIComponent(report.company.id)}`} className={styles.fullReport}>Open full report <span aria-hidden="true">↗</span></Link>
-      </div>
-      <div className={styles.metricGrid}>
+    {!setup && !error && <p role="status" className="text-sm text-zinc-400">Loading customer reporting…</p>}
+    {setup && <label className="block max-w-xl text-sm text-zinc-200">Customer
+      <select className={`${selectClass} mt-2 block w-full`} value={appCompanyId} onChange={event => setAppCompanyId(event.target.value)}>
+        <option value="">Choose a customer</option>
+        {setup.companies.map(company => <option key={company.id} value={company.id}>{company.name} ({company.id})</option>)}
+      </select>
+    </label>}
+    {error && <p role="alert" className="mt-4 text-sm text-red-300">{error}</p>}
+    {loading && <p role="status" className="mt-5 text-sm text-zinc-400">Loading this customer’s report…</p>}
+    {report && customer && <div className="mt-6 space-y-6">
+      <div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="text-xl font-medium text-white">{report.company.name}</h3>
+        <p className="mt-1 text-xs text-zinc-500">{report.company.id} · Updated {new Date(report.generatedAt).toLocaleString()}</p></div></div>
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {[
-          { label: "Open findings", value: number(report.findings.open), tone: "primary" },
-          { label: "Critical open", value: number(report.findings.critical), tone: "critical" },
-          { label: "Known exploited", value: number(report.findings.kevOpen), tone: "standard" },
-          { label: "Exposure score", value: number(report.posture.exposureScore), tone: "standard" },
-        ].map(metric => <div key={metric.label} className={`${styles.metric} ${metric.tone === "primary" ? styles.metricPrimary : metric.tone === "critical" ? styles.metricCritical : ""}`}>
-          <span>{metric.label}</span><strong>{metric.value}</strong>
-        </div>)}
+          ["Open findings", number(report.findings.open)], ["Critical open", number(report.findings.critical)],
+          ["Known exploited", number(report.findings.kevOpen)], ["Exposure score", number(report.posture.exposureScore)],
+        ].map(([label, value]) => <div key={label} className="rounded-xl border border-zinc-800 bg-black p-4"><p className="text-xs text-zinc-400">{label}</p><p className="mt-2 text-3xl font-semibold tabular-nums text-white">{value}</p></div>)}
       </div>
-      <div className={styles.insights}>
-        <section className={styles.insight} aria-label="Next priorities"><div className={styles.insightHeading}><h4>Next priorities</h4><span>{report.topRisks.length} listed</span></div>
-          {report.topRisks.length ? <div className={styles.priorityScroll}><table className={styles.priorityTable}>
-            <thead><tr><th>CVE</th><th>Finding</th><th>Risk</th></tr></thead>
-            <tbody>{report.topRisks.map((risk, index) => <tr key={`${risk.cve}-${index}`}><td>{risk.cve}</td><td>{risk.title}</td><td>{risk.realRisk}</td></tr>)}</tbody>
-          </table></div> : <p className={styles.emptyInsight}>No open priorities.</p>}
-        </section>
-        <section className={styles.insight} aria-label="Scanner coverage"><div className={styles.insightHeading}><h4>Scanner coverage</h4><span>{customer.sources.length} sources</span></div>
-          <p className={styles.sourceNote}>Open findings observed by each source. A finding seen by multiple scanners appears under each source.</p>
-          {customer.sources.length ? <div className={styles.sourceList}>{customer.sources.map(source => <div key={source.name} className={styles.sourceRow}><span>{source.name}</span><strong>{number(source.open)}</strong></div>)}</div>
-            : <p className={styles.emptyInsight}>No open findings from a scanner.</p>}
-        </section>
+      <div className="grid gap-5 lg:grid-cols-2">
+        <div className="rounded-xl border border-zinc-800 p-5"><h4 className="font-medium text-white">Next priorities</h4>
+          {report.topRisks.length ? <ul className="mt-3 divide-y divide-zinc-800">{report.topRisks.map((risk, index) => <li key={`${risk.cve}-${index}`} className="flex items-start justify-between gap-4 py-3 text-sm"><span className="min-w-0"><span className="block font-medium text-zinc-100">{risk.cve}</span><span className="block truncate text-zinc-400">{risk.title}</span></span><span className="shrink-0 tabular-nums text-red-300">{risk.realRisk}</span></li>)}</ul> : <p className="mt-3 text-sm text-zinc-400">No open priorities.</p>}
+        </div>
+        <div className="rounded-xl border border-zinc-800 p-5"><h4 className="font-medium text-white">Scanner coverage</h4>
+          <p className="mt-2 text-xs text-zinc-500">Open findings observed by each source. A finding seen by multiple scanners appears under each source.</p>
+          {customer.sources.length ? <ul className="mt-3 divide-y divide-zinc-800">{customer.sources.map(source => <li key={source.name} className="flex justify-between gap-3 py-3 text-sm"><span className="capitalize text-zinc-200">{source.name}</span><span className="tabular-nums text-white">{number(source.open)}</span></li>)}</ul> : <p className="mt-3 text-sm text-zinc-400">No open findings from a scanner.</p>}
+        </div>
       </div>
     </div>}
   </section>;

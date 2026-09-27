@@ -1,7 +1,0 @@
-.workflow { display:flex; flex-direction:column; gap:18px; min-width:0; }
-.sectionHeading h2 { color:#f9f9f8; font-size:clamp(25px,2.4vw,32px); font-weight:640; line-height:1.15; letter-spacing:-.045em; }
-.sectionHeading p { margin-top:7px; color:#aab0b4; font-size:14px; line-height:1.55; }
-.workGrid { display:grid; grid-template-columns:1fr; align-items:start; gap:18px; min-width:0; }
-.sharedHead { display:flex; align-items:flex-end; justify-content:space-between; gap:20px; }
-.sourceBar { display:flex; flex-wrap:wrap; align-items:center; gap:10px; padding:13px 18px; border:1px solid #ffffff18; border-radius:12px; background:#151719; color:#bfc2c5; }
-@media(min-width:1600px) { .workGrid { grid-template-columns:minmax(0,1fr) minmax(0,1fr); } }

@@ -4,7 +4,6 @@ import { dashboardRequest } from "@/lib/dashboard-browser-client";
 import { patchTicketState, type PatchTicketSummary } from "@/lib/patch-ticket-types";
 import { patchGroupTicketState, type PatchGroupTicketSummary } from "@/lib/patch-group-ticket-types";
 import styles from "./QueryDashboard.module.css";
-import workflow from "./ReportingWorkflow.module.css";
 
 type Row =
   | { kind: "cve"; id: string; scope: string; cves: string[]; row: PatchTicketSummary }
@@ -55,7 +54,7 @@ export default function PatchTicketTracker() {
   }
   const cut = buckets["cut-open"] + buckets["cut-closed"];
 
-  return <section className={workflow.panel} aria-label="Patch ticket tracker">
+  return <section className="rounded-2xl border border-[rgba(179,14,20,0.14)] bg-[#050505] p-5" aria-label="Patch ticket tracker">
     <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
       <h2 className="text-lg text-zinc-100">Patch ticket tracker</h2>
       <button type="button" className={styles.button} disabled={loading} onClick={() => void reload()}>{loading ? "Loading…" : "Refresh"}</button>
