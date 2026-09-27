@@ -1,5 +1,6 @@
 import { DashboardError } from "./elastic-dashboard";
-import { computeExecReport, ensureHydrated, getCompany, listCompanies, listFindings } from "./store";
+import { buildCustomerInsights } from "./reporting-insights";
+import { computeExecReport, ensureHydrated, getCompany, listCompanies, listFindings, listScans } from "./store";
 
 export async function reportingSetup() {
   await ensureHydrated();
@@ -14,12 +15,8 @@ export async function reportingCustomer(appCompanyId: string) {
   if (!company || company.kind !== "client" || company.isDemo) throw new DashboardError("Customer not found.", 404);
   const report = computeExecReport(company.id);
   if (!report) throw new DashboardError("Customer report is unavailable.", 404);
-  const sources = new Map<string, number>();
-  for (const finding of listFindings({ companyId: company.id })) {
-    if (finding.status !== "Open" && finding.status !== "In Remediation") continue;
-    for (const source of new Set(finding.seenBy?.length ? finding.seenBy : [finding.connector]))
-      sources.set(source, (sources.get(source) ?? 0) + 1);
-  }
+  const findings = listFindings({ companyId: company.id });
+  const insights = buildCustomerInsights(company.id, findings, await listScans({ companyId: company.id }));
   return { report: { ...report, generatedAt: new Date().toISOString() },
-    sources: [...sources].sort((a, b) => b[1] - a[1]).map(([name, open]) => ({ name, open })) };
+    sources: insights.sources.map(({ name, open }) => ({ name, open })), insights };
 }

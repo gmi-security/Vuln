@@ -31,6 +31,9 @@ async function post(path: string, body?: unknown) {
 
 export default function ElasticQueryDashboard({ initial }: { initial: ElasticDashboard }) {
   const [dashboard, setDashboard] = useState(initial);
+  const [companyId, setCompanyId] = useState("");
+  const [showSharedQueries, setShowSharedQueries] = useState(false);
+  const [customerRefresh, setCustomerRefresh] = useState(0);
   const [connectionOpen, setConnectionOpen] = useState(false);
   const [endpoint, setEndpoint] = useState(initial.endpoint ?? "");
   const [apiKey, setApiKey] = useState("");
@@ -146,12 +149,16 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
   const anyConnected = dashboard.connected || dashboard.crowdstrike?.connected;
   const sourceConnected = (source?: DashboardSource) => source === "crowdstrike" ? dashboard.crowdstrike?.connected : dashboard.connected;
   const visibleQueries = layoutIds ? applyTileOrder(dashboard.queries, layoutIds) : dashboard.queries;
+  const atlasElasticsearch = companyId === "CO-147284" && !showSharedQueries;
+  const showQueryBoard = !companyId || showSharedQueries || atlasElasticsearch;
+  const displayedQueries = atlasElasticsearch ? visibleQueries.filter(query => query.source !== "crowdstrike") : visibleQueries;
 
   return <VulnShell eyebrow="Exposure / Reporting" title="Reporting"
     subtitle="Customer reports and shared source views."
     actions={<div className="flex flex-wrap gap-2">
       <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || Boolean(layoutIds)} onClick={() => action("refresh", async () => {
-        if (dashboard.canManage && anyConnected) {
+        setCustomerRefresh(value => value + 1);
+        if (dashboard.canManage && anyConnected && (!companyId || showSharedQueries || atlasElasticsearch)) {
           await post("refresh"); setMessage("Refresh requested. Results will update here as queries finish.");
         }
         await reload();
@@ -161,19 +168,27 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
           <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => { setLayoutIds(null); setMessage("Layout changes canceled."); }}>Cancel</button>
           <button type="button" className={primaryButtonClass} disabled={Boolean(busy)} onClick={saveLayout}>{busy === "reorder" ? "Saving layout…" : "Save layout"}</button>
         </> : <>
-          <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || dashboard.queries.length < 2 || Boolean(draft)} onClick={() => { setLayoutIds(dashboard.queries.map((query) => query.id)); setConnectionOpen(false); setDeleting(null); setMessage(""); setError(""); }}><LayoutGrid size={16} />Arrange tiles</button>
-          <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => setConnectionOpen((open) => !open)}><Settings2 size={16} />Connections</button>
+          <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || dashboard.queries.length < 2 || Boolean(draft)} onClick={() => { setShowSharedQueries(true); setLayoutIds(dashboard.queries.map((query) => query.id)); setConnectionOpen(false); setDeleting(null); setMessage(""); setError(""); }}><LayoutGrid size={16} />Arrange tiles</button>
+          <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => { setShowSharedQueries(true); setConnectionOpen((open) => !open); }}><Settings2 size={16} />Connections</button>
           <button type="button" className={ghostButtonClass} onClick={() => setTicketsOpen(open => !open)}>Patch tickets</button>
-          <button type="button" className={primaryButtonClass} disabled={!anyConnected || Boolean(busy)} onClick={() => edit()}><Plus size={16} />Add tile</button>
+          <button type="button" className={primaryButtonClass} disabled={!anyConnected || Boolean(busy)} onClick={() => { setShowSharedQueries(true); edit(); }}><Plus size={16} />Add tile</button>
         </>}
       </>}
     </div>}>
-    <ReportingCustomer />
+    <ReportingCustomer companyId={companyId} onCompanyChange={(id) => { setCompanyId(id); setShowSharedQueries(false); setLayoutIds(null); setConnectionOpen(false); setDraft(null); }} refreshToken={customerRefresh} />
     <div id="consolidation-review" className="mt-6 grid items-start gap-6 2xl:grid-cols-2"><PatchReviewQueue />{dashboard.canManage && <PatchTicketTracker />}</div>
-    <div className="mt-8 mb-3"><h2 className="text-xl font-semibold text-white">Shared query views</h2><p className="mt-1 text-sm text-zinc-400">These tiles show their configured source scope. They do not change with the selected customer above.</p></div>
+    {companyId && <div className="mt-8 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-zinc-800 bg-[#090909] px-5 py-4">
+      <div><h2 className="text-lg font-semibold text-white">{atlasElasticsearch ? "Atlas Elasticsearch views" : "Source query views"}</h2>
+        <p className="mt-1 text-sm text-zinc-400">{atlasElasticsearch ? "Saved Elasticsearch snapshots for Atlas. The customer scan views above cover every source." : "This customer’s scanner views are shown above. Saved source queries have their own scope."}</p></div>
+      <button type="button" className={ghostButtonClass} onClick={() => { setShowSharedQueries(value => !value); setLayoutIds(null); setDraft(null); setConnectionOpen(false); }}>
+        {showSharedQueries ? "Return to customer views" : "Open shared query views"}
+      </button>
+    </div>}
+    {showQueryBoard && <>
+    <div className="mt-8 mb-3"><h2 className="text-xl font-semibold text-white">{atlasElasticsearch ? "Elasticsearch tiles" : "Shared query views"}</h2><p className="mt-1 text-sm text-zinc-400">{atlasElasticsearch ? "Atlas only · Elasticsearch saved results" : "These tiles show their configured source scope. They do not change with the selected customer above."}</p></div>
     <div className={styles.connections}>
-      {[{ name: "CrowdStrike", connected: dashboard.crowdstrike?.connected }, { name: "Elasticsearch", connected: dashboard.connected }].map((source) => <span key={source.name} className={styles.connection}><span className={styles.dot} style={{ background: source.connected ? "#34d399" : "#71717a" }} />{source.name} · {source.connected ? "Configured" : "Not connected"}</span>)}
-      <span className={styles.tileCount}>{dashboard.queries.length} saved tiles · Shared dashboard</span>
+      {(atlasElasticsearch ? [{ name: "Elasticsearch", connected: dashboard.connected }] : [{ name: "CrowdStrike", connected: dashboard.crowdstrike?.connected }, { name: "Elasticsearch", connected: dashboard.connected }]).map((source) => <span key={source.name} className={styles.connection}><span className={styles.dot} style={{ background: source.connected ? "#34d399" : "#71717a" }} />{source.name} · {source.connected ? "Configured" : "Not connected"}</span>)}
+      <span className={styles.tileCount}>{displayedQueries.length} saved tiles · {atlasElasticsearch ? "Atlas Elasticsearch" : "Shared dashboard"}</span>
     </div>
     {error && <p role="alert" className="rounded-xl border border-red-900 bg-red-950/20 p-4 text-sm text-red-300">{error}</p>}
     {loadError && !error && <p role="alert" className="rounded-xl border border-amber-900 bg-amber-950/20 p-4 text-sm text-amber-300">{loadError}</p>}
@@ -370,9 +385,9 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
     </PanelCard>}
 
     {layoutIds && <p id="tile-order-help" className={styles.arrangeHelp}><GripVertical size={16} />Drag tiles by their handles or use the arrows. Save layout applies the order for everyone.</p>}
-    {!dashboard.queries.length && <div className="rounded-xl border border-zinc-800 p-8 text-center text-zinc-400">No saved tiles yet. {dashboard.canManage && "Choose Add tile to create your first view."}</div>}
+    {!displayedQueries.length && <div className="rounded-xl border border-zinc-800 p-8 text-center text-zinc-400">{atlasElasticsearch ? "No Elasticsearch tiles are available for Atlas." : "No saved tiles yet."} {dashboard.canManage && !atlasElasticsearch && "Choose Add tile to create your first view."}</div>}
     <div className={`${styles.board} ${layoutIds ? styles.arranging : ""}`}>
-    {visibleQueries.map((query, index) => {
+    {displayedQueries.map((query, index) => {
       const stale = query.refreshedAt && now !== null && now - Date.parse(query.refreshedAt) > query.refreshMinutes * 2 * 60_000;
       const metrics = query.result && query.display !== "table" && !isChartDisplay(query.display) && canShowMetrics(query.result);
       const wide = query.display === "table" || query.crowdstrike?.view === "cve-devices" || query.crowdstrike?.view === "patch-worklist" || (query.result && (metrics ? query.result.columns.length >= 4 : !isChartDisplay(query.display)));
@@ -389,7 +404,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
           onDragEnd={() => { dragging.current = null; setDraggedId(null); setDropId(null); }}
           onKeyDown={(event) => { if (event.key === "ArrowUp" || event.key === "ArrowDown") { event.preventDefault(); const target = visibleQueries[index + (event.key === "ArrowUp" ? -1 : 1)]; if (target) moveTile(query.id, target.id); } }}><GripVertical size={16} />Move tile</button>
         <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || index === 0} aria-label={`Move ${query.title} earlier`} onClick={() => moveTile(query.id, visibleQueries[index - 1].id)}><ArrowUp size={14} />Earlier</button>
-        <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || index === visibleQueries.length - 1} aria-label={`Move ${query.title} later`} onClick={() => moveTile(query.id, visibleQueries[index + 1].id)}><ArrowDown size={14} />Later</button>
+        <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || index === displayedQueries.length - 1} aria-label={`Move ${query.title} later`} onClick={() => moveTile(query.id, displayedQueries[index + 1].id)}><ArrowDown size={14} />Later</button>
       </div>}
       <header className={styles.tileHeader}>
         <div className={styles.tileHeading}><h2>{query.title}</h2><p className={styles.source}><RadioTower size={12} />{query.source === "crowdstrike" ? "CrowdStrike · Vulnerabilities" : "Elasticsearch"}</p></div>
@@ -434,6 +449,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
       </section>;
     })}
     </div>
+    </>}
 
   </VulnShell>;
 }

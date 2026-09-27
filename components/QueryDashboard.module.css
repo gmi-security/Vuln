@@ -15,6 +15,22 @@
 .tileHeader { display:flex; align-items:flex-start; justify-content:space-between; flex-wrap:wrap; gap:14px; padding:18px 20px; }
 .tileHeading { min-width:0; flex:1 1 220px; }
 .tileHeading h2 { font-size:16px; font-weight:600; color:#ededed; line-height:1.5; overflow-wrap:anywhere; }
+.insightTitle { font-size:16px; font-weight:600; color:#ededed; line-height:1.5; }
+.insightCount { font-size:12px; color:#a1a1aa; font-variant-numeric:tabular-nums; }
+.insightBars { display:grid; gap:18px; padding:4px 0 10px; }
+.insightBarRow { display:grid; grid-template-columns:minmax(84px,1fr) minmax(90px,2fr) minmax(72px,auto); align-items:center; gap:12px; font-size:13px; color:#e4e4e7; }
+.insightBarLabel { display:flex; align-items:center; gap:8px; min-width:0; overflow-wrap:anywhere; }
+.insightBarLabel i { width:7px; height:7px; flex:none; border-radius:2px; }
+.insightBarTrack { height:7px; overflow:hidden; border-radius:4px; background:#27272a; }
+.insightBarTrack span { display:block; height:100%; border-radius:4px; background:#b30e14; }
+.insightBarRow strong { text-align:right; font-size:13px; font-weight:600; font-variant-numeric:tabular-nums; }
+.insightBarRow small { font-size:11px; font-weight:400; color:#a1a1aa; }
+.insightScanCount { display:block; margin-top:2px; }
+.insightLink { display:grid; gap:4px; color:#f4f4f5; text-decoration:none; }
+.insightLink:hover strong,.insightLink:focus-visible strong { color:#ff6b72; text-decoration:underline; }
+.insightLink:focus-visible { outline:2px solid #ff4d57; outline-offset:3px; }
+.insightLink span { color:#a1a1aa; font-size:12px; max-width:44ch; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.insightSeverity { display:inline-block; padding:3px 8px; border:1px solid; border-radius:5px; font-size:12px; }
 .source { display:flex; align-items:center; flex-wrap:wrap; gap:6px; font-size:13px; color:#d4d4d8; margin-top:6px; }
 .tileActions { display:flex; flex-wrap:wrap; gap:6px; }
 .tileActions .button { min-height:32px; padding:6px 9px; font-size:13px; }
