@@ -53,7 +53,7 @@ export default function VulnShell({
 
       <div className="flex min-w-0 flex-1 flex-col">
         <header className={variant === "dashboard" ? "border-b border-zinc-800 bg-[radial-gradient(ellipse_at_55%_0%,rgba(179,14,20,0.16),transparent_68%)] px-4 py-5 sm:px-8" : "border-b border-[rgba(179,14,20,0.12)] bg-black px-6 py-6 lg:px-8"}>
-          {variant === "dashboard" && <nav aria-label="Main navigation" className="mb-7 flex flex-wrap items-center gap-6 text-xs text-zinc-400"><Link href="/" className="text-lg font-semibold tracking-widest text-[#b30e14]">GMI VULN</Link><Link href="/" className="hover:text-white">Overview</Link><Link href="/elastic-vulnerabilities" aria-current="page" className="border-b border-[#b30e14] pb-1 text-white">Query dashboard</Link><Link href="/settings" className="hover:text-white">Settings</Link></nav>}
+          {variant === "dashboard" && <nav aria-label="Main navigation" className="mb-7 flex flex-wrap items-center gap-6 text-xs text-zinc-400"><Link href="/" className="text-lg font-semibold tracking-widest text-[#b30e14]">GMI VULN</Link><Link href="/" className="hover:text-white">Overview</Link><Link href="/reporting" aria-current="page" className="border-b border-[#b30e14] pb-1 text-white">Reporting</Link><Link href="/settings" className="hover:text-white">Settings</Link></nav>}
           <div className={variant === "dashboard" ? "flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between" : "flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between"}>
             <div>
               <div className="text-[13px] uppercase tracking-[0.35em] text-[#b30e14]">

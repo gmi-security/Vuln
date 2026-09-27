@@ -47,11 +47,22 @@ export async function patchTicketDatabase() {
   ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS fix_verified_at TIMESTAMPTZ;
   ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS fix_verified_state TEXT;
   ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS fix_still_open_count INT;
+  ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS review_state TEXT NOT NULL DEFAULT 'pending';
+  ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS reviewed_by TEXT;
+  ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;
   CREATE INDEX IF NOT EXISTS patch_group_ticket_date ON patch_group_ticket_requests(prepared_at DESC);
   CREATE UNIQUE INDEX IF NOT EXISTS patch_group_ticket_active_scope ON patch_group_ticket_requests(cw_target,remediation_id,tenant_id,company_id,scope_hash)
     WHERE state IN ('creating','uncertain','created') AND closed=false;
   CREATE TABLE IF NOT EXISTS patch_group_ticket_audit (
     id BIGSERIAL PRIMARY KEY, request_id UUID, actor TEXT NOT NULL, action TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE TABLE IF NOT EXISTS reporting_company_links (
+    cw_target TEXT NOT NULL, cw_company_id INT NOT NULL, app_company_id TEXT NOT NULL,
+    cw_company_name TEXT NOT NULL, linked_by TEXT NOT NULL, linked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (cw_target, cw_company_id), UNIQUE (cw_target, app_company_id)
+  );
+  CREATE TABLE IF NOT EXISTS reporting_queue_runs (
+    id INT PRIMARY KEY CHECK(id=1), completed_at TIMESTAMPTZ NOT NULL
   )`).then(() => {}).catch(error => { ready = undefined; throw error; });
   await ready;
   return db;

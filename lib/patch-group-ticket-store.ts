@@ -6,9 +6,10 @@ import type { PatchConsolidation, PatchGroup } from "./patch-request";
 import { automatedGroupTicketBody, type PatchGroupTicketSummary } from "./patch-group-ticket-types";
 import { cwId, cwRequest, findCWRequest, CWRequestError, parseRouting, ticketUrl, uploadPatchCsv, validateCWRouting, type ConnectWiseConnection, type CWRecord, type TicketRouting } from "./connectwise-client";
 
-const fields = "id,cves,remediation_id,tenant_id,state,prepared_by,created_by,prepared_at,updated_at,host_count,finding_count,labels,ticket_id,ticket_url,ticket_status,closed,attachment_state,last_error,packet->>'title' AS remediation_title,fix_verified_at,fix_verified_state,fix_still_open_count";
+const fields = "id,cves,remediation_id,tenant_id,state,review_state,reviewed_by,reviewed_at,prepared_by,created_by,prepared_at,updated_at,host_count,finding_count,labels,ticket_id,ticket_url,ticket_status,closed,attachment_state,last_error,packet->>'title' AS remediation_title,packet->>'source' AS source,packet->>'companyName' AS company_name,fix_verified_at,fix_verified_state,fix_still_open_count";
 function summary(row: CWRecord): PatchGroupTicketSummary {
-  return { id: row.id, cves: row.cves, remediationId: row.remediation_id, remediationTitle: row.remediation_title, tenantId: row.tenant_id, state: row.state,
+  return { id: row.id, cves: row.cves, remediationId: row.remediation_id, remediationTitle: row.remediation_title, tenantId: row.tenant_id, source: row.source === "stored-findings" ? "stored-findings" : "crowdstrike", companyName: row.company_name ?? null, state: row.state,
+    reviewState: row.review_state, reviewedBy: row.reviewed_by, reviewedAt: row.reviewed_at ? new Date(row.reviewed_at).toISOString() : null,
     preparedBy: row.prepared_by, createdBy: row.created_by, preparedAt: new Date(row.prepared_at).toISOString(), updatedAt: new Date(row.updated_at).toISOString(),
     hostCount: row.host_count, findingCount: row.finding_count, company: row.labels?.company?.name ?? null, board: row.labels?.board?.name ?? null,
     ticketId: row.ticket_id, ticketUrl: row.ticket_url, ticketStatus: row.ticket_status, closed: row.closed,
@@ -28,11 +29,17 @@ export async function persistPreparedGroups(consolidation: PatchConsolidation, a
   const ids = consolidation.groups.map(() => randomUUID());
   try {
     await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(804207)");
     const current = (await client.query("SELECT revision FROM dashboard_source_connections WHERE source='crowdstrike' FOR SHARE")).rows[0];
     if (current?.revision !== revision) throw new DashboardError("CrowdStrike connection changed. Prepare a fresh consolidation.", 409);
     for (const [index, group] of consolidation.groups.entries()) {
       const id = ids[index];
       const scopeHash = createHash("sha256").update(JSON.stringify(group.hostScope)).digest("hex");
+      const existing = (await client.query(`SELECT id FROM patch_group_ticket_requests
+        WHERE remediation_id=$1 AND tenant_id=$2 AND scope_hash=$3 AND cves=$4::jsonb
+        AND state='prepared' AND review_state IN ('pending','approved') ORDER BY prepared_at DESC LIMIT 1`,
+        [group.remediationId, group.tenantId, scopeHash, JSON.stringify(group.cves)])).rows[0];
+      if (existing) { ids[index] = existing.id; continue; }
       await client.query(`INSERT INTO patch_group_ticket_requests(id,cves,remediation_id,tenant_id,prepared_by,prepared_at,crowdstrike_revision,packet,host_count,finding_count,scope_hash)
         VALUES($1,$2::jsonb,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11) ON CONFLICT(id) DO NOTHING`,
         [id, JSON.stringify(group.cves), group.remediationId, group.tenantId, actor, consolidation.collectedAt, revision, JSON.stringify(group), group.deviceCount, group.findingCount, scopeHash]);
@@ -49,9 +56,13 @@ async function recoverInterruptedRequests() {
   await db.query(`UPDATE patch_group_ticket_requests SET attachment_state='pending',last_error='CSV attachment was interrupted. Retry the attachment check.',updated_at=now()
     WHERE attachment_state='uploading' AND attachment_started < now()-interval '3 minutes'`);
 }
-export async function listGroupTickets() {
+export async function listGroupTickets(reviewOnly = false, page = 1) {
+  if (!Number.isSafeInteger(page) || page < 1 || page > 10000) throw new DashboardError("Invalid queue page.", 400);
   const db = await patchTicketDatabase(); await recoverInterruptedRequests();
-  const rows = await db.query(`SELECT ${fields} FROM patch_group_ticket_requests ORDER BY prepared_at DESC LIMIT 101`);
+  const rows = await db.query(`SELECT ${fields} FROM patch_group_ticket_requests
+    WHERE ($1::boolean = false OR state='prepared')
+    ORDER BY CASE WHEN $1::boolean THEN CASE review_state WHEN 'pending' THEN 0 WHEN 'approved' THEN 1 ELSE 2 END ELSE 0 END,
+      prepared_at DESC LIMIT 101 OFFSET $2`, [reviewOnly, (page - 1) * 100]);
   return { requests: rows.rows.slice(0, 100).map(summary), more: rows.rows.length > 100 };
 }
 export async function readGroupTicket(id: string, withPacket = false) {
@@ -59,6 +70,25 @@ export async function readGroupTicket(id: string, withPacket = false) {
   const row = (await db.query(`SELECT ${fields}${withPacket ? ",packet" : ""} FROM patch_group_ticket_requests WHERE id=$1`, [id])).rows[0];
   if (!row) throw new DashboardError("Patch group request not found.", 404);
   return { request: summary(row), ...(withPacket ? { group: row.packet as PatchGroup } : {}) };
+}
+export async function reviewGroupTicket(id: string, action: "approve" | "dismiss" | "reopen", actor: string) {
+  requestId(id);
+  const db = await patchTicketDatabase();
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    const row = (await client.query("SELECT state, review_state FROM patch_group_ticket_requests WHERE id=$1 FOR UPDATE", [id])).rows[0];
+    if (!row) throw new DashboardError("Patch group request not found.", 404);
+    if (row.state !== "prepared") throw new DashboardError("A ticket request has already been started for this draft.", 409);
+    const next = action === "approve" ? "approved" : action === "dismiss" ? "dismissed" : "pending";
+    if (row.review_state === next) { await client.query("COMMIT"); return readGroupTicket(id); }
+    if (action === "reopen" && row.review_state !== "dismissed") throw new DashboardError("Only dismissed drafts can be reopened.", 409);
+    if (action !== "reopen" && row.review_state !== "pending") throw new DashboardError("Reopen this draft before reviewing it again.", 409);
+    await client.query(`UPDATE patch_group_ticket_requests SET review_state=$2,reviewed_by=$3,reviewed_at=now(),updated_at=now() WHERE id=$1`, [id, next, actor]);
+    await client.query("INSERT INTO patch_group_ticket_audit(request_id,actor,action) VALUES($1,$2,$3)", [id, actor, `review.${action}`]);
+    await client.query("COMMIT");
+  } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
+  return readGroupTicket(id);
 }
 const workers = new Set<string>();
 function background(id: string, work: () => Promise<void>) {
@@ -78,8 +108,17 @@ export async function createGroupTicket(id: string, value: unknown, actor: strin
     const row = (await client.query("SELECT * FROM patch_group_ticket_requests WHERE id=$1 FOR UPDATE", [id])).rows[0];
     if (!row) throw new DashboardError("Patch group request not found.", 404);
     if (["creating", "uncertain", "created"].includes(row.state)) { await client.query("COMMIT"); return readGroupTicket(id); }
-    const cs = (await client.query("SELECT revision FROM dashboard_source_connections WHERE source='crowdstrike' FOR SHARE")).rows[0];
-    if (cs?.revision !== row.crowdstrike_revision) throw new DashboardError("CrowdStrike connection changed. Prepare a fresh consolidation before sending.", 409);
+    if (row.review_state !== "approved") throw new DashboardError("Approve this consolidation in the review queue before sending a ticket.", 409);
+    const packet = row.packet as PatchGroup;
+    if (packet.source === "stored-findings") {
+      const link = (await client.query(`SELECT app_company_id FROM reporting_company_links
+        WHERE cw_target=$1 AND cw_company_id=$2 AND app_company_id=$3 FOR SHARE`,
+        [saved.target, routing.companyId, packet.appCompanyId])).rows[0];
+      if (!link) throw new DashboardError("This ConnectWise company is not linked to the reviewed customer in Reporting.", 409);
+    } else {
+      const cs = (await client.query("SELECT revision FROM dashboard_source_connections WHERE source='crowdstrike' FOR SHARE")).rows[0];
+      if (cs?.revision !== row.crowdstrike_revision) throw new DashboardError("CrowdStrike connection changed. Prepare a fresh consolidation before sending.", 409);
+    }
     const cw = (await client.query("SELECT revision FROM patch_connectwise_connection WHERE id=1 FOR SHARE")).rows[0];
     if (cw?.revision !== saved.revision || body.connectionRevision !== saved.revision) throw new DashboardError("ConnectWise connection changed. Reload its options before sending.", 409);
     const existing = (await client.query(`SELECT id,ticket_id FROM patch_group_ticket_requests WHERE cw_target=$1 AND remediation_id=$2 AND tenant_id=$3 AND company_id=$4 AND scope_hash=$5
@@ -152,6 +191,7 @@ export async function verifyGroupTicketFix(id: string, actor: string, revision: 
   if (!row) throw new DashboardError("Patch group request not found.", 404);
   if (!row.ticket_id) throw new DashboardError("Create the ConnectWise ticket before verifying the fix.");
   const packet = row.packet as PatchGroup;
+  if (packet.source === "stored-findings") throw new DashboardError("Use the source scanner to verify this customer's findings. CrowdStrike verification applies only to Falcon patch groups.", 409);
   if (!packet.hostScope?.length) throw new DashboardError("This saved plan has no device scope to verify. Prepare a fresh consolidation.");
   const result = await verifyAgainstCrowdStrike(packet.cves, packet.hostScope, row.tenant_id, revision);
   const verifiedState = result.stillOpenHosts.length === 0 ? "verified" : "still_open";

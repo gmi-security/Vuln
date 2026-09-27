@@ -18,4 +18,6 @@ export async function register(): Promise<void> {
   void ensureHydrated().catch((err) => {
     console.error("[instrumentation] boot hydration failed:", err);
   });
+  const { startReportingQueueScheduler } = await import("@/lib/reporting-queue");
+  startReportingQueueScheduler();
 }

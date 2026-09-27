@@ -56,6 +56,8 @@ export function parseVerifyInput(value: unknown): { source: "crowdstrike"; ticke
 }
 
 export type PatchGroup = {
+  source?: "stored-findings";
+  appCompanyId?: string; companyName?: string; connectors?: string[];
   remediationId: string; tenantId: string; title: string; action: string; reference: string;
   vendorUrl: string; link: string; published: string;
   cves: string[]; deviceCount: number; findingCount: number; hostScope: string[]; csv: string;

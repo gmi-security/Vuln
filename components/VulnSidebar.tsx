@@ -42,7 +42,7 @@ export default function VulnSidebar({
   const [syncAll, setSyncAll] = useState<{ running: boolean; startedAt: number } | null>(null);
   const navItems: VulnNavItem[] = [
     ...baseNavItems,
-    ...(elasticEnabled ? [{ label: "Query Dashboard", icon: ShieldCheck, href: "/elastic-vulnerabilities" }] : []),
+    ...(elasticEnabled ? [{ label: "Reporting", icon: ShieldCheck, href: "/reporting" }] : []),
     ...settingsNavItems,
   ];
 

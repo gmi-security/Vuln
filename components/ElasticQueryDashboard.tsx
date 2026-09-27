@@ -10,6 +10,8 @@ import Results from "@/components/QueryDashboardResults";
 import ConnectWiseSettings from "@/components/ConnectWiseSettings";
 import PatchTicketRegister from "@/components/PatchTicketRegister";
 import PatchTicketTracker from "@/components/PatchTicketTracker";
+import ReportingCustomer from "@/components/ReportingCustomer";
+import PatchReviewQueue from "@/components/PatchReviewQueue";
 import styles from "./QueryDashboard.module.css";
 import { OPEN_VULN_TREND } from "@/lib/elastic-query-templates";
 import { inputClass, PanelCard, selectClass } from "@/components/ui";
@@ -145,8 +147,8 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
   const sourceConnected = (source?: DashboardSource) => source === "crowdstrike" ? dashboard.crowdstrike?.connected : dashboard.connected;
   const visibleQueries = layoutIds ? applyTileOrder(dashboard.queries, layoutIds) : dashboard.queries;
 
-  return <VulnShell variant="dashboard" eyebrow="Exposure / Overview" title="Vulnerability intelligence"
-    subtitle="Understand exposure. Prioritize the next patch."
+  return <VulnShell variant="dashboard" eyebrow="Exposure / Reporting" title="Reporting"
+    subtitle="Customer reports and shared source views."
     actions={<div className="flex flex-wrap gap-2">
       <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || Boolean(layoutIds)} onClick={() => action("refresh", async () => {
         if (dashboard.canManage && anyConnected) {
@@ -166,6 +168,9 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
         </>}
       </>}
     </div>}>
+    <ReportingCustomer />
+    <div id="consolidation-review" className="mt-6"><PatchReviewQueue /></div>
+    <div className="mt-8 mb-3"><h2 className="text-xl font-semibold text-white">Shared query views</h2><p className="mt-1 text-sm text-zinc-400">These tiles show their configured source scope. They do not change with the selected customer above.</p></div>
     <div className={styles.connections}>
       {[{ name: "CrowdStrike", connected: dashboard.crowdstrike?.connected }, { name: "Elasticsearch", connected: dashboard.connected }].map((source) => <span key={source.name} className={styles.connection}><span className={styles.dot} style={{ background: source.connected ? "#34d399" : "#71717a" }} />{source.name} · {source.connected ? "Configured" : "Not connected"}</span>)}
       <span className={styles.tileCount}>{dashboard.queries.length} saved tiles · Shared dashboard</span>

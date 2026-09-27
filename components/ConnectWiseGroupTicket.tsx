@@ -26,6 +26,14 @@ export default function ConnectWiseGroupTicket({ group, requestId }: { group: Pa
       .catch(e => { if (live) setError(e.message); });
     return () => { live = false; generation.current++; };
   }, [requestId]);
+  useEffect(() => {
+    if (group.source !== "stored-findings" || !group.appCompanyId) return;
+    let live = true;
+    dashboardRequest<{ cwCompanyId: number | null }>(`reporting?appCompanyId=${encodeURIComponent(group.appCompanyId)}`)
+      .then(data => { if (live && data.cwCompanyId) setCompanyId(data.cwCompanyId); })
+      .catch(e => { if (live) setError(e instanceof Error ? e.message : "Could not load the linked ConnectWise company."); });
+    return () => { live = false; };
+  }, [group.source, group.appCompanyId]);
   async function track(token: number) {
     for (let attempt = 0; attempt < 95; attempt++) {
       await new Promise(resolve => setTimeout(resolve, 2000));
@@ -64,13 +72,14 @@ export default function ConnectWiseGroupTicket({ group, requestId }: { group: Pa
     } catch (e) { if (generation.current === token) { setError(e instanceof Error ? e.message : "Verification failed. Please retry."); setMessage(""); } }
     finally { if (generation.current === token) setBusy(""); }
   }
-  const canCreate = settings?.configured && (!current || ["prepared", "failed"].includes(current.state));
+  const canCreate = settings?.configured && current?.reviewState === "approved" && ["prepared", "failed"].includes(current.state);
   return <section className="mt-4 rounded-xl border border-[rgba(179,14,20,0.14)] bg-[#050505] p-4" aria-label="ConnectWise ticket for this patch">
     <h4 className="text-sm font-medium text-zinc-100">ConnectWise ticket</h4>
+    {current && current.reviewState !== "approved" && !current.ticketId && <p className={styles.resultNote}>This draft must be approved in the review queue before a ticket can be sent.</p>}
     {settings && !settings.configured && <p className={styles.resultNote}>Open <strong>Connections → ConnectWise</strong> to enter your keys and load your boards.</p>}
     {canCreate && !review && <button type="button" className={styles.primaryButton} disabled={Boolean(busy)} onClick={() => { setReview(true); setError(""); }}>Review ConnectWise ticket</button>}
     {review && canCreate && <form className="mt-4 space-y-4" onSubmit={e => { e.preventDefault(); void action("create", { routing: { ...routing, companyId }, title, body, connectionRevision: settings?.revision }); }}>
-      <p className={styles.resultNote}>{group.deviceCount.toLocaleString()} devices · resolves {group.cves.join(", ")} · CrowdStrike tenant <span className="break-all">{group.tenantId}</span><br />Choose the ConnectWise company that owns this scope.</p>
+      <p className={styles.resultNote}>{group.deviceCount.toLocaleString()} {group.source === "stored-findings" ? "assets" : "devices"} · resolves {group.cves.join(", ")} · {group.source === "stored-findings" ? `Customer ${group.companyName} · sources ${group.connectors?.join(", ")}` : <>CrowdStrike tenant <span className="break-all">{group.tenantId}</span></>}<br />Choose the ConnectWise company that owns this scope.</p>
       <ConnectWiseSelect label="ConnectWise company" kind="companies" value={companyId} onChange={setCompanyId} revision={settings?.revision} disabled={Boolean(busy)} />
       <ConnectWiseRouting value={routing} onChange={setRouting} revision={settings?.revision} disabled={Boolean(busy)} />
       <label className={styles.patchLabel}>Ticket title<input required maxLength={100} value={title} onChange={e => setTitle(e.target.value)} disabled={Boolean(busy)} /></label>
@@ -81,7 +90,7 @@ export default function ConnectWiseGroupTicket({ group, requestId }: { group: Pa
     {current && !["prepared", "failed"].includes(current.state) && <div className="mt-4 rounded-lg border border-zinc-700 p-3" aria-live="polite">
       <p className="font-medium text-zinc-100">{patchGroupTicketState(current)}{current.ticketId ? ` · #${current.ticketId}` : ""}</p>
       <p className={styles.resultNote}>{current.company ?? "Company selection saved"} · {current.board ?? "Board selection saved"} · {current.hostCount.toLocaleString()} devices</p>
-      {current.ticketStatus && <p className={styles.resultNote}>ConnectWise status: {current.ticketStatus}. {current.fixVerifiedState === "verified" ? `CrowdStrike confirmed no open findings for these CVEs on the scoped devices as of ${new Date(current.fixVerifiedAt!).toLocaleString()}.`
+      {current.ticketStatus && <p className={styles.resultNote}>ConnectWise status: {current.ticketStatus}. {group.source === "stored-findings" ? "Verify the fix in the source scanners and record the result in the ticket." : current.fixVerifiedState === "verified" ? `CrowdStrike confirmed no open findings for these CVEs on the scoped devices as of ${new Date(current.fixVerifiedAt!).toLocaleString()}.`
         : current.fixVerifiedState === "still_open" ? `CrowdStrike still shows these CVEs open on ${current.fixStillOpenCount} of the scoped devices as of ${new Date(current.fixVerifiedAt!).toLocaleString()}.`
         : "CrowdStrike fix verification has not been performed."}</p>}
       <div className={styles.patchActions}>
@@ -89,7 +98,7 @@ export default function ConnectWiseGroupTicket({ group, requestId }: { group: Pa
         {current.state === "uncertain" && <button type="button" className={styles.button} disabled={Boolean(busy)} onClick={() => action("reconcile")}>Check creation outcome</button>}
         {current.ticketId && current.attachmentState === "pending" && <button type="button" className={styles.button} disabled={Boolean(busy)} onClick={() => action("retry-attachment")}>Retry CSV attachment</button>}
         {current.ticketId && <button type="button" className={styles.button} disabled={Boolean(busy)} onClick={() => action("check-status")}>Check ConnectWise status</button>}
-        {current.ticketId && <button type="button" className={styles.button} disabled={Boolean(busy)} onClick={verifyFix}>{busy === "verify-fix" ? "Verifying…" : "Verify fix in CrowdStrike"}</button>}
+        {current.ticketId && group.source !== "stored-findings" && <button type="button" className={styles.button} disabled={Boolean(busy)} onClick={verifyFix}>{busy === "verify-fix" ? "Verifying…" : "Verify fix in CrowdStrike"}</button>}
       </div>
       {current.error && <p className={styles.patchError}>{current.error}</p>}
     </div>}
