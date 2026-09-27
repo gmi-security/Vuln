@@ -7,6 +7,7 @@ import { patchReviewRows } from "@/lib/patch-review-rows";
 import { patchGroupTicketState, type PatchGroupTicketSummary } from "@/lib/patch-group-ticket-types";
 import ConnectWiseGroupTicket from "@/components/ConnectWiseGroupTicket";
 import styles from "./QueryDashboard.module.css";
+import workflow from "./ReportingWorkflow.module.css";
 
 type Detail = { request: PatchGroupTicketSummary; group: PatchGroup };
 type Page = { requests: PatchGroupTicketSummary[]; more: boolean };
@@ -61,7 +62,7 @@ export default function PatchReviewQueue() {
   const pending = rows.filter(row => row.reviewState === "pending").length;
   const approved = rows.filter(row => row.reviewState === "approved").length;
   const detailRows = useMemo(() => selected ? patchReviewRows(selected.group) : [], [selected]);
-  return <section aria-label="Consolidation review queue" className="rounded-2xl border border-zinc-800 bg-[#080808] p-5 sm:p-7">
+  return <section aria-label="Consolidation review queue" className={workflow.panel}>
     <div className="flex flex-wrap items-start justify-between gap-3"><div>
       <p className="text-xs uppercase tracking-[0.25em] text-red-500">Consolidation</p>
       <h2 className="mt-2 text-xl font-semibold text-white">Review queue</h2>

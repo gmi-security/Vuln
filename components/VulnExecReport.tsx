@@ -1,17 +1,14 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import ReportingNav from "@/components/ReportingNav";
 import TrendChart, { type TrendSnapshot } from "@/components/TrendChart";
 import { compositeColor } from "@/lib/format";
+import styles from "./VulnExecReport.module.css";
 
-// SLA rollup severities shown in the report (Info carries no SLA).
 const SLA_SEVERITIES = ["Critical", "High", "Medium", "Low"] as const;
-
-type SlaSummary = {
-  bySeverity: Partial<Record<string, { open: number; overdue: number }>>;
-  mttrDays: number | null;
-};
-
+type SlaSummary = { bySeverity: Partial<Record<string, { open: number; overdue: number }>>; mttrDays: number | null };
 type ExecReport = {
   generatedAt: string;
   company: { id: string; name: string; industry: string };
@@ -19,25 +16,13 @@ type ExecReport = {
   findings: { open: number; critical: number; high: number; kevOpen: number };
   ssvc: { act: number; attend: number; overdue: number; kevOverdue: number };
   compliance: { framework: string; overall: string; score: number }[];
-  attackSurface: {
-    total: number;
-    exposedAssets: number;
-    leakedCredentials: number;
-    webVulnerabilities: number;
-  };
+  attackSurface: { total: number; exposedAssets: number; leakedCredentials: number; webVulnerabilities: number };
   financial: { ale: number };
-  topRisks: {
-    cve: string;
-    title: string;
-    asset: string;
-    realRisk: number;
-    decision: string;
-    kev: boolean;
-  }[];
-  // Optional until the backend deploy lands / data accumulates.
+  topRisks: { cve: string; title: string; asset: string; realRisk: number; decision: string; kev: boolean }[];
   sla?: SlaSummary | null;
   trend?: TrendSnapshot[] | null;
 };
+type SendResult = { kind: "sent" | "skipped" | "error"; message: string };
 
 function money(n: number): string {
   if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
@@ -45,333 +30,121 @@ function money(n: number): string {
   return `$${n}`;
 }
 
-const overallColor: Record<string, string> = {
-  Pass: "#16a34a",
-  "At Risk": "#f59e0b",
-  Fail: "#dc2626",
-  Info: "#64748b",
-};
-
-const decisionColor: Record<string, string> = {
-  Act: "#dc2626",
-  Attend: "#ea580c",
-  "Track*": "#f59e0b",
-  Track: "#64748b",
-};
-
-function Stat({ label, value, color }: { label: string; value: React.ReactNode; color?: string }) {
-  return (
-    <div style={{ border: "1px solid #e2e8f0", borderRadius: 10, padding: "12px 14px" }}>
-      <div style={{ fontSize: 22, fontWeight: 700, color: color ?? "#0f172a" }}>{value}</div>
-      <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>{label}</div>
-    </div>
-  );
+function ReportMetric({ label, value, emphasis = false }: { label: string; value: string | number; emphasis?: boolean }) {
+  return <div className={`${styles.metric} ${emphasis ? styles.metricEmphasis : ""}`}><span>{label}</span><strong>{value}</strong></div>;
 }
-
-// Inline result of the last "email to customer" attempt. "skipped" covers the
-// amber cases (no contact email / email not configured / test customer) where
-// retrying without a config change is pointless.
-type SendResult = { kind: "sent" | "skipped" | "error"; message: string };
 
 export default function VulnExecReport({ companyId }: { companyId: string }) {
   const [report, setReport] = useState<ExecReport | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Outward-facing send: idle → confirm (two-step) → sending → result.
   const [sendPhase, setSendPhase] = useState<"idle" | "confirm" | "sending">("idle");
   const [sendResult, setSendResult] = useState<SendResult | null>(null);
 
   async function sendReportEmail() {
-    setSendPhase("sending");
-    setSendResult(null);
+    setSendPhase("sending"); setSendResult(null);
     try {
       const res = await fetch(`/api/report/${companyId}/send`, { method: "POST" });
       const json = await res.json().catch(() => ({}));
-      if (res.ok) {
-        setSendResult({ kind: "sent", message: `Sent to ${json.to}${json.cc?.length ? ` (cc ${json.cc.join(", ")})` : ""}` });
-      } else if (res.status === 400 || res.status === 503) {
-        // Skipped for a stated reason (no contact email, test customer,
-        // email not configured) — retrying won't change the outcome.
-        setSendResult({ kind: "skipped", message: json.error ?? `Not sent (HTTP ${res.status}).` });
-      } else {
-        setSendResult({ kind: "error", message: json.error ?? `Send failed (HTTP ${res.status}).` });
-      }
-    } catch {
-      setSendResult({ kind: "error", message: "Failed to reach the API — report not sent." });
-    }
+      if (res.ok) setSendResult({ kind: "sent", message: `Sent to ${json.to}${json.cc?.length ? ` (cc ${json.cc.join(", ")})` : ""}` });
+      else if (res.status === 400 || res.status === 503) setSendResult({ kind: "skipped", message: json.error ?? `Not sent (HTTP ${res.status}).` });
+      else setSendResult({ kind: "error", message: json.error ?? `Send failed (HTTP ${res.status}).` });
+    } catch { setSendResult({ kind: "error", message: "Failed to reach the API. Report not sent." }); }
     setSendPhase("idle");
   }
 
   useEffect(() => {
+    let active = true;
     void fetch(`/api/report/${companyId}`, { cache: "no-store" })
-      .then(async (r) => {
-        if (!r.ok) throw new Error((await r.json()).error ?? "Failed to load report.");
-        return r.json();
+      .then(async response => {
+        if (!response.ok) throw new Error((await response.json()).error ?? "Failed to load report.");
+        return response.json();
       })
-      // sla/trend are additive contract fields — accept them on the report
-      // object or at the payload root, whichever the backend ships.
-      .then((j) =>
-        setReport({
-          ...j.report,
-          sla: j.report?.sla ?? j.sla ?? null,
-          trend: j.report?.trend ?? j.trend ?? null,
-        }),
-      )
-      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load report."));
+      .then(payload => { if (active) setReport({ ...payload.report, sla: payload.report?.sla ?? payload.sla ?? null, trend: payload.report?.trend ?? payload.trend ?? null }); })
+      .catch(cause => { if (active) setError(cause instanceof Error ? cause.message : "Failed to load report."); });
+    return () => { active = false; };
   }, [companyId]);
 
-  if (error) return <div style={{ padding: 40, fontFamily: "system-ui", color: "#dc2626" }}>{error}</div>;
-  if (!report) return <div style={{ padding: 40, fontFamily: "system-ui", color: "#64748b" }}>Loading report…</div>;
-
-  const date = new Date(report.generatedAt).toLocaleDateString("en-US", {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  });
-
-  return (
-    <div className="report-root" style={{ background: "#f1f5f9", minHeight: "100vh", padding: 24 }}>
-      <style>{`
-        @page { margin: 14mm; }
-        @media print {
-          .no-print { display: none !important; }
-          html, body { background: #fff !important; }
-          .report-root { background: #fff !important; padding: 0 !important; }
-          .sheet {
-            box-shadow: none !important;
-            margin: 0 !important;
-            max-width: 100% !important;
-            border-radius: 0 !important;
-            padding: 0 !important;
-            color: #0f172a !important;
-          }
-          .avoid-break { break-inside: avoid; page-break-inside: avoid; }
-          a { color: inherit !important; text-decoration: none !important; }
-        }
-      `}</style>
-
-      <div className="no-print" style={{ maxWidth: 820, margin: "0 auto 16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap", fontFamily: "system-ui" }}>
-        <div style={{ fontSize: 13, color: "#475569" }}>Board / QBR one-pager — use your browser to Print → Save as PDF.</div>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-          {sendResult ? (
-            <span
-              style={{
-                fontSize: 12,
-                fontWeight: 600,
-                color:
-                  sendResult.kind === "sent"
-                    ? "#16a34a"
-                    : sendResult.kind === "skipped"
-                      ? "#d97706"
-                      : "#dc2626",
-              }}
-            >
-              {sendResult.message}
-            </span>
-          ) : null}
-          {sendPhase === "confirm" ? (
-            <>
-              <span style={{ fontSize: 12, color: "#475569" }}>Email this report to the customer contact?</span>
-              <button
-                onClick={() => void sendReportEmail()}
-                style={{ background: "#16a34a", color: "#fff", border: 0, borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
-              >
-                Confirm send
-              </button>
-              <button
-                onClick={() => setSendPhase("idle")}
-                style={{ background: "#fff", color: "#475569", border: "1px solid #cbd5e1", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
-              >
-                Cancel
-              </button>
-            </>
-          ) : (
-            <button
-              onClick={() => {
-                setSendResult(null);
-                setSendPhase("confirm");
-              }}
-              disabled={sendPhase === "sending" || sendResult?.kind === "skipped"}
-              style={{
-                background: "#fff",
-                color: sendPhase === "sending" || sendResult?.kind === "skipped" ? "#94a3b8" : "#0f172a",
-                border: "1px solid #cbd5e1",
-                borderRadius: 8,
-                padding: "8px 14px",
-                fontSize: 13,
-                fontWeight: 600,
-                cursor: sendPhase === "sending" || sendResult?.kind === "skipped" ? "default" : "pointer",
-              }}
-            >
-              {sendPhase === "sending" ? "Sending…" : "Email to customer"}
-            </button>
-          )}
-          <button
-            onClick={() => window.print()}
-            style={{ background: "#b30e14", color: "#fff", border: 0, borderRadius: 8, padding: "8px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
-          >
-            Print / Save as PDF
-          </button>
-        </div>
+  const date = report ? new Date(report.generatedAt).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" }) : "";
+  return <div className={styles.page}>
+    <div className={styles.chrome}><ReportingNav />
+      <div className={styles.toolbar}>
+        <div><Link href="/reporting" className={styles.back}>← Reporting</Link><p>Customer report</p></div>
+        {report && <div className={styles.toolbarActions}>
+          {sendPhase === "confirm" ? <div className={styles.confirm} role="group" aria-label="Confirm report email">
+            <span>Email this report to the customer contact?</span>
+            <button type="button" className={styles.sendButton} onClick={() => void sendReportEmail()}>Confirm send</button>
+            <button type="button" className={styles.ghostButton} onClick={() => setSendPhase("idle")}>Cancel</button>
+          </div> : <button type="button" className={styles.ghostButton} disabled={sendPhase === "sending" || sendResult?.kind === "skipped"} onClick={() => { setSendResult(null); setSendPhase("confirm"); }}>{sendPhase === "sending" ? "Sending..." : "Email to customer"}</button>}
+          <button type="button" className={styles.printButton} onClick={() => window.print()}>Print / Save as PDF</button>
+        </div>}
       </div>
-
-      <div
-        className="sheet"
-        style={{
-          maxWidth: 820,
-          margin: "0 auto",
-          background: "#fff",
-          color: "#0f172a",
-          borderRadius: 12,
-          padding: 32,
-          boxShadow: "0 10px 40px rgba(0,0,0,0.12)",
-          fontFamily: "system-ui, -apple-system, sans-serif",
-        }}
-      >
-        {/* Header */}
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", borderBottom: "2px solid #b30e14", paddingBottom: 14 }}>
-          <div>
-            <div style={{ fontSize: 12, letterSpacing: 2, color: "#b30e14", fontWeight: 700, textTransform: "uppercase" }}>GMI Security · Executive Report</div>
-            <div style={{ fontSize: 26, fontWeight: 800, marginTop: 4 }}>{report.company.name}</div>
-            <div style={{ fontSize: 13, color: "#64748b" }}>{report.company.industry || "Vulnerability & compliance posture"}</div>
-          </div>
-          <div style={{ textAlign: "right", fontSize: 12, color: "#64748b" }}>
-            <div>{date}</div>
-            <div style={{ marginTop: 2, fontWeight: 600, color: "#b30e14" }}>CONFIDENTIAL</div>
-          </div>
-        </div>
-
-        {/* Posture hero */}
-        <div className="avoid-break" style={{ display: "flex", gap: 20, alignItems: "center", margin: "18px 0" }}>
-          <div style={{ textAlign: "center", minWidth: 120, border: "1px solid #e2e8f0", borderRadius: 12, padding: "14px 8px" }}>
-            <div style={{ fontSize: 44, fontWeight: 800, lineHeight: 1, color: compositeColor(report.posture.compositeScore) }}>
-              {report.posture.compositeScore}
-            </div>
-            <div style={{ fontSize: 11, color: "#64748b", marginTop: 4 }}>Composite risk /100</div>
-            <div style={{ fontSize: 12, fontWeight: 700, marginTop: 4, color: compositeColor(report.posture.compositeScore) }}>
-              {report.posture.compositeBand}
-            </div>
-          </div>
-          <div style={{ flex: 1, display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
-            <Stat label="Open findings" value={report.findings.open} />
-            <Stat label="Critical" value={report.findings.critical} color="#dc2626" />
-            <Stat label="Actively exploited (KEV)" value={report.findings.kevOpen} color={report.findings.kevOpen ? "#dc2626" : "#0f172a"} />
-            <Stat label="SSVC: Act now" value={report.ssvc.act} color={report.ssvc.act ? "#dc2626" : "#0f172a"} />
-            <Stat label="Past remediation SLA" value={report.ssvc.overdue} color={report.ssvc.overdue ? "#ea580c" : "#0f172a"} />
-            <Stat label="Est. annual risk exposure" value={money(report.financial.ale)} color="#b30e14" />
-          </div>
-        </div>
-
-        {/* Compliance */}
-        <div className="avoid-break" style={{ marginTop: 8 }}>
-          <div style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, color: "#334155", marginBottom: 8 }}>Compliance posture</div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
-            {report.compliance.map((c) => (
-              <div key={c.framework} style={{ border: "1px solid #e2e8f0", borderRadius: 8, padding: "8px 10px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <div style={{ fontSize: 12, color: "#334155", maxWidth: 150 }}>{c.framework}</div>
-                <div style={{ textAlign: "right" }}>
-                  <div style={{ fontSize: 15, fontWeight: 700, color: overallColor[c.overall] ?? "#64748b" }}>{c.score}</div>
-                  <div style={{ fontSize: 10, color: overallColor[c.overall] ?? "#64748b", fontWeight: 600 }}>{c.overall}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Attack surface */}
-        <div className="avoid-break" style={{ marginTop: 16 }}>
-          <div style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, color: "#334155", marginBottom: 8 }}>External attack surface (OSINT)</div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10 }}>
-            <Stat label="Total exposures" value={report.attackSurface.total} />
-            <Stat label="Exposed assets" value={report.attackSurface.exposedAssets} />
-            <Stat label="Leaked credentials" value={report.attackSurface.leakedCredentials} color={report.attackSurface.leakedCredentials ? "#dc2626" : "#0f172a"} />
-            <Stat label="Web weaknesses" value={report.attackSurface.webVulnerabilities} />
-          </div>
-        </div>
-
-        {/* SLA performance */}
-        {report.sla ? (
-          <div className="avoid-break" style={{ marginTop: 16 }}>
-            <div style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, color: "#334155", marginBottom: 8 }}>SLA performance</div>
-            <div style={{ display: "flex", gap: 14, alignItems: "stretch" }}>
-              <div style={{ flex: 1 }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-                  <thead>
-                    <tr style={{ textAlign: "left", color: "#64748b", borderBottom: "1px solid #e2e8f0" }}>
-                      <th style={{ padding: "6px 4px" }}>Severity</th>
-                      <th style={{ padding: "6px 4px", textAlign: "right" }}>Open</th>
-                      <th style={{ padding: "6px 4px", textAlign: "right" }}>Past SLA</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {SLA_SEVERITIES.map((sev) => {
-                      const row = report.sla?.bySeverity?.[sev] ?? { open: 0, overdue: 0 };
-                      return (
-                        <tr key={sev} style={{ borderBottom: "1px solid #f1f5f9" }}>
-                          <td style={{ padding: "6px 4px", fontWeight: 600 }}>{sev}</td>
-                          <td style={{ padding: "6px 4px", textAlign: "right" }}>{row.open}</td>
-                          <td style={{ padding: "6px 4px", textAlign: "right", fontWeight: 700, color: row.overdue > 0 ? "#dc2626" : "#16a34a" }}>
-                            {row.overdue}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-              <div style={{ minWidth: 150, border: "1px solid #e2e8f0", borderRadius: 10, padding: "12px 14px", display: "flex", flexDirection: "column", justifyContent: "center" }}>
-                <div style={{ fontSize: 26, fontWeight: 800, color: "#0f172a" }}>
-                  {report.sla.mttrDays !== null && report.sla.mttrDays !== undefined ? `${report.sla.mttrDays}d` : "—"}
-                </div>
-                <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>Mean time to remediate</div>
-              </div>
-            </div>
-          </div>
-        ) : null}
-
-        {/* Trend */}
-        {(report.trend?.length ?? 0) >= 2 ? (
-          <div className="avoid-break" style={{ marginTop: 16 }}>
-            <div style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, color: "#334155", marginBottom: 8 }}>Trend — open findings, last 90 days</div>
-            <TrendChart snapshots={report.trend ?? []} theme="light" />
-          </div>
-        ) : null}
-
-        {/* Top risks */}
-        <div className="avoid-break" style={{ marginTop: 16 }}>
-          <div style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, color: "#334155", marginBottom: 8 }}>Top priorities</div>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-            <thead>
-              <tr style={{ textAlign: "left", color: "#64748b", borderBottom: "1px solid #e2e8f0" }}>
-                <th style={{ padding: "6px 4px" }}>Action</th>
-                <th style={{ padding: "6px 4px" }}>Finding</th>
-                <th style={{ padding: "6px 4px" }}>Asset</th>
-                <th style={{ padding: "6px 4px", textAlign: "right" }}>Risk</th>
-              </tr>
-            </thead>
-            <tbody>
-              {report.topRisks.map((r, i) => (
-                <tr key={i} style={{ borderBottom: "1px solid #f1f5f9" }}>
-                  <td style={{ padding: "6px 4px" }}>
-                    <span style={{ color: decisionColor[r.decision] ?? "#64748b", fontWeight: 700 }}>{r.decision}</span>
-                    {r.kev ? <span style={{ color: "#dc2626", fontWeight: 700 }}> · KEV</span> : null}
-                  </td>
-                  <td style={{ padding: "6px 4px" }}>{r.cve} — {r.title.slice(0, 60)}</td>
-                  <td style={{ padding: "6px 4px", color: "#64748b" }}>{r.asset}</td>
-                  <td style={{ padding: "6px 4px", textAlign: "right", fontWeight: 700, color: compositeColor(r.realRisk) }}>{r.realRisk}</td>
-                </tr>
-              ))}
-              {report.topRisks.length === 0 ? (
-                <tr><td colSpan={4} style={{ padding: "10px 4px", color: "#16a34a" }}>No open priorities — queue is clear.</td></tr>
-              ) : null}
-            </tbody>
-          </table>
-        </div>
-
-        {/* Footer / methodology */}
-        <div style={{ marginTop: 18, paddingTop: 10, borderTop: "1px solid #e2e8f0", fontSize: 10, color: "#94a3b8", lineHeight: 1.5 }}>
-          Prioritization uses CISA SSVC (Act/Attend/Track) from exploitation (CISA KEV, EPSS, public exploit), exposure, and asset criticality. Estimated annual risk exposure is an ALE model (single-loss-expectancy by severity × annual rate of occurrence weighted by exploitation and exposure) — an order-of-magnitude planning figure, not an actuarial value. Generated by the GMI Vuln console.
-        </div>
-      </div>
+      {sendResult && <p role="status" className={`${styles.sendResult} ${sendResult.kind === "error" ? styles.sendError : sendResult.kind === "sent" ? styles.sendSuccess : ""}`}>{sendResult.message}</p>}
     </div>
-  );
+
+    {error && <div role="alert" className={styles.pageState}>{error}</div>}
+    {!error && !report && <div role="status" className={styles.pageState}>Loading customer report...</div>}
+    {report && <article className={styles.paper} aria-label={`${report.company.name} report`}>
+      <header className={styles.reportHeader}>
+        <div><p className={styles.reportLabel}>GMI Security / Executive report</p><h1>{report.company.name}</h1>
+          <p className={styles.reportIndustry}>{report.company.industry || "Vulnerability and compliance posture"}</p></div>
+        <div className={styles.reportMeta}><span>{date}</span><span>{report.company.id}</span><strong>Confidential</strong></div>
+      </header>
+
+      <section aria-label="Security posture" className={styles.posture}>
+        <div className={styles.score} style={{ borderColor: compositeColor(report.posture.compositeScore) }}>
+          <span>Composite risk</span><strong style={{ color: compositeColor(report.posture.compositeScore) }}>{report.posture.compositeScore}</strong>
+          <small>of 100</small><b style={{ color: compositeColor(report.posture.compositeScore) }}>{report.posture.compositeBand}</b>
+          <span className={styles.exposureScore}>Exposure score <strong>{report.posture.exposureScore.toLocaleString()}</strong></span>
+        </div>
+        <div className={styles.summaryGrid}>
+          <ReportMetric label="Open findings" value={report.findings.open.toLocaleString()} />
+          <ReportMetric label="Critical open" value={report.findings.critical.toLocaleString()} emphasis />
+          <ReportMetric label="High open" value={report.findings.high.toLocaleString()} />
+          <ReportMetric label="Actively exploited (KEV)" value={report.findings.kevOpen.toLocaleString()} emphasis={report.findings.kevOpen > 0} />
+          <ReportMetric label="SSVC: Act now" value={report.ssvc.act.toLocaleString()} emphasis={report.ssvc.act > 0} />
+          <ReportMetric label="SSVC: Attend" value={report.ssvc.attend.toLocaleString()} />
+          <ReportMetric label="Past remediation SLA" value={report.ssvc.overdue.toLocaleString()} emphasis={report.ssvc.overdue > 0} />
+          <ReportMetric label="KEV past SLA" value={report.ssvc.kevOverdue.toLocaleString()} emphasis={report.ssvc.kevOverdue > 0} />
+          <ReportMetric label="Est. annual risk exposure" value={money(report.financial.ale)} />
+        </div>
+      </section>
+
+      <div className={styles.reportColumns}>
+        <section className={styles.reportSection} aria-label="Compliance posture"><div className={styles.sectionHeading}><h2>Compliance posture</h2><span>{report.compliance.length} frameworks</span></div>
+          {report.compliance.length ? <div className={styles.complianceList}>{report.compliance.map(item => <div key={item.framework} className={styles.complianceRow}>
+            <span>{item.framework}</span><strong>{item.score}</strong><small className={item.overall === "Pass" ? styles.good : item.overall === "Fail" ? styles.bad : styles.neutral}>{item.overall}</small>
+          </div>)}</div> : <p className={styles.empty}>No compliance assessments yet.</p>}
+        </section>
+        <section className={styles.reportSection} aria-label="External attack surface"><div className={styles.sectionHeading}><h2>External attack surface</h2><span>OSINT</span></div>
+          <div className={styles.surfaceGrid}>
+            <ReportMetric label="Total exposures" value={report.attackSurface.total.toLocaleString()} />
+            <ReportMetric label="Exposed assets" value={report.attackSurface.exposedAssets.toLocaleString()} />
+            <ReportMetric label="Leaked credentials" value={report.attackSurface.leakedCredentials.toLocaleString()} emphasis={report.attackSurface.leakedCredentials > 0} />
+            <ReportMetric label="Web weaknesses" value={report.attackSurface.webVulnerabilities.toLocaleString()} />
+          </div>
+        </section>
+      </div>
+
+      {report.sla && <section className={styles.reportSection} aria-label="SLA performance"><div className={styles.sectionHeading}><h2>SLA performance</h2><span>Open findings by severity</span></div>
+        <div className={styles.slaLayout}><div className={styles.tableScroll}><table className={styles.dataTable}>
+          <thead><tr><th>Severity</th><th>Open</th><th>Past SLA</th></tr></thead>
+          <tbody>{SLA_SEVERITIES.map(severity => { const row = report.sla?.bySeverity?.[severity] ?? { open: 0, overdue: 0 }; return <tr key={severity}><td>{severity}</td><td>{row.open.toLocaleString()}</td><td className={row.overdue > 0 ? styles.bad : styles.good}>{row.overdue.toLocaleString()}</td></tr>; })}</tbody>
+        </table></div><div className={styles.mttr}><strong>{report.sla.mttrDays != null ? `${report.sla.mttrDays}d` : "N/A"}</strong><span>Mean time to remediate</span></div></div>
+      </section>}
+
+      {(report.trend?.length ?? 0) >= 2 && <section className={styles.reportSection} aria-label="Findings trend"><div className={styles.sectionHeading}><h2>Open findings trend</h2><span>Last 90 days</span></div><div className={styles.chart}><TrendChart snapshots={report.trend ?? []} theme="light" /></div></section>}
+
+      <section className={styles.reportSection} aria-label="Top priorities"><div className={styles.sectionHeading}><h2>Top priorities</h2><span>{report.topRisks.length} listed</span></div>
+        <div className={styles.tableScroll}><table className={styles.dataTable}>
+          <thead><tr><th>Action</th><th>Finding</th><th>Asset</th><th>Risk</th></tr></thead>
+          <tbody>{report.topRisks.map((risk, index) => <tr key={`${risk.cve}-${index}`}><td><strong className={risk.decision === "Act" ? styles.bad : styles.neutral}>{risk.decision}</strong>{risk.kev && <span className={styles.kev}>KEV</span>}</td>
+            <td><strong>{risk.cve}</strong><span className={styles.findingTitle}>{risk.title}</span></td><td>{risk.asset}</td><td><strong style={{ color: compositeColor(risk.realRisk) }}>{risk.realRisk}</strong></td></tr>)}
+            {!report.topRisks.length && <tr><td colSpan={4}>No open priorities. The queue is clear.</td></tr>}
+          </tbody>
+        </table></div>
+      </section>
+
+      <footer className={styles.methodology}><strong>How this report is calculated</strong><p>Prioritization uses CISA SSVC (Act, Attend, Track) from exploitation signals (CISA KEV, EPSS, public exploits), exposure, and asset criticality. Estimated annual risk exposure is an ALE model: single loss expectancy by severity multiplied by an annual rate of occurrence weighted by exploitation and exposure. It is an order of magnitude planning figure, not an actuarial value. Generated by the GMI Vuln console.</p></footer>
+    </article>}
+  </div>;
 }

@@ -1,25 +1,26 @@
 .page { min-width: 0; }
-.button,.primaryButton { display:inline-flex; min-height:38px; align-items:center; justify-content:center; gap:7px; padding:8px 12px; border:1px solid #27272a; border-radius:8px; background:#090909; color:#e4e4e7; font-size:14px; cursor:pointer; transition:background .15s; }
-.button:hover { background:#18181b; border-color:#52525b; }
-.primaryButton { background:linear-gradient(#c71920,#a10c12); border-color:#b30e14; color:white; }
-.primaryButton:hover { background:#b30e14; }
+.button,.primaryButton { display:inline-flex; min-height:42px; align-items:center; justify-content:center; gap:7px; padding:8px 16px; border:1px solid #ffffff29; border-radius:999px; background:#232629; color:#f0f1f0; font-size:13px; font-weight:580; white-space:nowrap; cursor:pointer; transition:transform .25s cubic-bezier(.22,1,.36,1),background .25s cubic-bezier(.22,1,.36,1),border-color .25s cubic-bezier(.22,1,.36,1); }
+.button:hover { background:#303438; border-color:#ffffff50; transform:translateY(-1px); }
+.primaryButton { background:#b92f37; border-color:#d14b52; color:white; }
+.primaryButton:hover { background:#cb3d45; transform:translateY(-1px); }
+.button:active,.primaryButton:active { transform:scale(.97); }
 .button:disabled,.primaryButton:disabled { opacity:.4; cursor:default; }
 .button:focus-visible,.primaryButton:focus-visible,.cveButton:focus-visible,.tableScroll:focus-visible { outline:2px solid #ff4d57; outline-offset:3px; }
-.connections { display:flex; flex-wrap:wrap; align-items:center; gap:10px 20px; font-size:14px; color:#d4d4d8; }
+.connections { display:flex; flex-wrap:wrap; align-items:center; gap:10px 20px; font-size:13px; color:#d4d4d8; }
 .connection { display:flex; align-items:center; gap:7px; }
 .dot { display:inline-block; width:6px; height:6px; border-radius:2px; flex-shrink:0; }
 .tileCount { margin-left:auto; }
-.board { display:flex; flex-wrap:wrap; gap:14px; align-items:flex-start; }
-.tile { flex:1 1 calc(50% - 7px); min-width:0; border:1px solid #27272a; border-radius:14px; background:#080808; overflow:hidden; box-shadow:0 5px 20px #0004; }
+.board { display:flex; flex-wrap:wrap; gap:18px; align-items:flex-start; }
+.tile { flex:1 1 calc(50% - 9px); min-width:0; border:1px solid #ffffff18; border-radius:19px; background:linear-gradient(150deg,#181b1e,#121416 75%); overflow:hidden; box-shadow:inset 0 1px #ffffff0e,0 18px 48px #0002; }
 .wide { flex-basis:100%; }
-.tileHeader { display:flex; align-items:flex-start; justify-content:space-between; flex-wrap:wrap; gap:14px; padding:18px 20px; }
+.tileHeader { display:flex; align-items:flex-start; justify-content:space-between; flex-wrap:wrap; gap:14px; padding:23px 25px; }
 .tileHeading { min-width:0; flex:1 1 220px; }
-.tileHeading h2 { font-size:16px; font-weight:600; color:#ededed; line-height:1.5; overflow-wrap:anywhere; }
+.tileHeading h2 { font-size:18px; font-weight:640; letter-spacing:-.03em; color:#f5f6f5; line-height:1.4; overflow-wrap:anywhere; }
 .source { display:flex; align-items:center; flex-wrap:wrap; gap:6px; font-size:13px; color:#d4d4d8; margin-top:6px; }
 .tileActions { display:flex; flex-wrap:wrap; gap:6px; }
 .tileActions .button { min-height:32px; padding:6px 9px; font-size:13px; }
-.tileContent { padding:0 20px 18px; }
-.tileFooter { display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap; padding:11px 20px; border-top:1px solid #ffffff09; background:#050505; color:#d4d4d8; font-size:13px; }
+.tileContent { padding:0 25px 24px; }
+.tileFooter { display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap; padding:14px 25px; border-top:1px solid #ffffff10; background:#ffffff04; color:#afb3b6; font-size:12px; }
 .metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(140px,100%),1fr)); gap:20px; padding:5px 0; }
 .metric { min-width:0; }
 .metricLabel { display:flex; align-items:center; gap:7px; color:#d4d4d8; font-size:14px; overflow-wrap:anywhere; }
@@ -27,12 +28,12 @@
 .metricNote { margin-top:8px; font-size:13px; color:#d4d4d8; }
 .track,.miniTrack { height:3px; border-radius:3px; background:#27272a; overflow:hidden; }
 .track span,.miniTrack span { display:block; height:100%; border-radius:3px; background:#b30e14; }
-.tableScroll { max-height:min(26rem,65vh); overflow:auto; scrollbar-width:thin; scrollbar-color:#3f3f46 #080808; border:1px solid #27272a; border-radius:8px; }
+.tableScroll { max-height:min(27rem,65vh); overflow:auto; scrollbar-width:thin; scrollbar-color:#5b5d60 #17191b; border:1px solid #ffffff20; border-radius:11px; }
 .table { width:100%; text-align:left; font-size:14px; border-collapse:collapse; }
-.table th { position:sticky; top:0; z-index:1; background:#111; color:#d4d4d8; font-weight:500; white-space:nowrap; }
-.table th,.table td { padding:13px 15px; border-bottom:1px solid #ffffff09; max-width:28rem; overflow-wrap:anywhere; }
+.table th { position:sticky; top:0; z-index:1; background:#222528; color:#ced0d2; font-weight:650; white-space:nowrap; }
+.table th,.table td { padding:13px 15px; border-bottom:1px solid #ffffff11; max-width:28rem; overflow-wrap:anywhere; }
 .table td { color:#e4e4e7; min-width:90px; }
-.table tr:hover td { background:#ffffff04; }
+.table tr:hover td { background:#ffffff09; }
 .table .number { text-align:right; font-variant-numeric:tabular-nums; }
 .badge { display:inline-flex; padding:3px 7px; border-radius:5px; font-size:13px; white-space:nowrap; }
 .cveButton { background:none; border:0; text-align:left; color:#ededed; cursor:pointer; font-size:14px; }
@@ -67,7 +68,7 @@
 .patchWarnings { padding-left:20px; list-style:disc; color:#fcd98b; font-size:14px; line-height:1.6; margin:14px 0; }
 @media(min-width:1500px) { .metrics { grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); } }
 @media(max-width:850px) { .tile { flex-basis:100%; } .tileCount { margin-left:0; } }
-@media(max-width:480px) { .tileHeader { padding:16px; } .tileContent { padding:0 16px 16px; } .tileFooter { padding:11px 16px; } .metrics { gap:16px; grid-template-columns:repeat(2,minmax(0,1fr)); } .detailBody { padding:20px; } }
+@media(max-width:480px) { .tileHeader { padding:18px; } .tileContent { padding:0 18px 18px; } .tileFooter { padding:12px 18px; } .metrics { gap:16px; grid-template-columns:repeat(2,minmax(0,1fr)); } .detailBody { padding:20px; } }
 @media(pointer:coarse) { .button,.primaryButton,.tileActions .button,.movebar .button,.cveButton { min-height:44px; } }
 @media(prefers-reduced-motion:reduce) { .button,.primaryButton { transition:none; } }
 
