@@ -66,7 +66,7 @@ export async function persistPreparedGroups(consolidation: PatchConsolidation, a
       // reopenable in the review queue, they just stop counting as pending.
       const superseded = await client.query(`SELECT id FROM patch_group_ticket_requests
         WHERE remediation_id=$1 AND tenant_id=$2 AND id<>$3 AND state='prepared' AND review_state='pending'
-          AND ($4::text IS NULL OR packet->>'appCompanyId'=$4)`,
+          AND packet->>'appCompanyId' IS NOT DISTINCT FROM $4`,
         [group.remediationId, group.tenantId, id, packet.appCompanyId ?? null]);
       for (const stale of superseded.rows) {
         await client.query(`UPDATE patch_group_ticket_requests SET review_state='dismissed',reviewed_by=$2,reviewed_at=now(),updated_at=now() WHERE id=$1`,

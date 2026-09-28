@@ -20,9 +20,19 @@ export async function autoCreateHighSeverityTickets(): Promise<Counts> {
   const saved = await savedConnection().catch(() => null);
   if (!saved) return { checked: 0, created: 0, errors: 0 };
   const db = await patchTicketDatabase();
+  // Only the newest pending draft per remediation+tenant(+customer) -- the
+  // same ranking group-draft-dedup.ts uses to decide what's stale. Without
+  // this, a slower dedup sweep tick could still be racing to dismiss an
+  // older duplicate at the same moment this auto-creates it.
   const rows = (await db.query(`
-    SELECT id, packet->>'appCompanyId' AS app_company_id FROM patch_group_ticket_requests
-    WHERE state='prepared' AND review_state='pending' AND worst_severity IN ('Critical','High')
+    WITH ranked AS (
+      SELECT id, packet->>'appCompanyId' AS app_company_id, ROW_NUMBER() OVER (
+        PARTITION BY remediation_id, tenant_id, packet->>'appCompanyId' ORDER BY prepared_at DESC
+      ) AS rn
+      FROM patch_group_ticket_requests
+      WHERE state='prepared' AND review_state='pending' AND worst_severity IN ('Critical','High')
+    )
+    SELECT id, app_company_id FROM ranked WHERE rn = 1
   `)).rows as { id: string; app_company_id: string | null }[];
   if (!rows.length) return { checked: 0, created: 0, errors: 0 };
   const routings = (await db.query("SELECT app_company_id, company_id, board_id, team_id FROM patch_customer_routing"))
