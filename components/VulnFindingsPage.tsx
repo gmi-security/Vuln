@@ -112,7 +112,10 @@ export default function VulnFindingsPage() {
   const [findings, setFindings] = useState<FindingRow[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
-  const [kind, setKind] = useState<"vuln" | "osint" | "all">("vuln");
+  const [kind, setKind] = useState<"vuln" | "osint" | "pentest" | "all">(() => {
+    const selected = searchParams.get("kind");
+    return selected === "osint" || selected === "pentest" || selected === "all" ? selected : "vuln";
+  });
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [severityFilter, setSeverityFilter] = useState("All");
@@ -357,6 +360,7 @@ export default function VulnFindingsPage() {
           [
             { id: "vuln", label: "Vulnerabilities" },
             { id: "osint", label: "Attack Surface (OSINT)" },
+            { id: "pentest", label: "Web testing" },
             { id: "all", label: "All" },
           ] as const
         ).map((t) => (

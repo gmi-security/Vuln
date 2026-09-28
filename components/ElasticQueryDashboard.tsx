@@ -14,6 +14,7 @@ import ReportingCustomer from "@/components/ReportingCustomer";
 import PatchReviewQueue from "@/components/PatchReviewQueue";
 import styles from "./QueryDashboard.module.css";
 import { OPEN_VULN_TREND } from "@/lib/elastic-query-templates";
+import { emptyReportingDashboard, hasDirectReportingSources } from "@/lib/reporting-direct-sources";
 import { inputClass, PanelCard, selectClass } from "@/components/ui";
 import { DEFAULT_CROWDSTRIKE, canShowMetrics, isChartDisplay, numericColumn, suggestChart, type CrowdStrikeOptions, type DashboardSource, type DashboardQuery, type ElasticDashboard, type QueryDefinition, type QueryResult } from "@/lib/elastic-dashboard";
 
@@ -32,7 +33,6 @@ async function post(path: string, body?: unknown) {
 export default function ElasticQueryDashboard({ initial }: { initial: ElasticDashboard }) {
   const [dashboard, setDashboard] = useState(initial);
   const [companyId, setCompanyId] = useState("");
-  const [customerReady, setCustomerReady] = useState(false);
   const [showSharedQueries, setShowSharedQueries] = useState(false);
   const [customerRefresh, setCustomerRefresh] = useState(0);
   const [connectionOpen, setConnectionOpen] = useState(false);
@@ -60,23 +60,25 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
   const dragging = useRef<string | null>(null);
   const reordering = useRef(false);
   const reload = useCallback(async () => {
+    if (!hasDirectReportingSources(companyId)) return;
     if (reloadInFlight.current || dragging.current || reordering.current) return;
     reloadInFlight.current = true;
     try {
       const version = dashboardVersion.current;
-      const data = await dashboardRequest<ElasticDashboard>("");
+      const data = await dashboardRequest<ElasticDashboard>(`customer-tiles?companyId=${encodeURIComponent(companyId)}`);
       if (version !== dashboardVersion.current) return;
       if (!data.storageReady) throw new Error("Dashboard storage is unavailable. Previously loaded results are still shown.");
       setDashboard(data); setLoadError("");
       setNow(Date.now());
     } finally { reloadInFlight.current = false; }
-  }, []);
+  }, [companyId]);
   const pending = dashboard.queries.some((query) => !query.result && !query.error);
   useEffect(() => {
-    if (!companyId || (companyId !== "CO-147284" && !showSharedQueries)) return;
+    if (!hasDirectReportingSources(companyId)) return;
+    void reload().catch((err) => setLoadError(err.message));
     const timer = setInterval(() => { setNow(Date.now()); void reload().catch((err) => setLoadError(err.message)); }, pending ? 3000 : 15_000);
     return () => clearInterval(timer);
-  }, [reload, pending, companyId, showSharedQueries]);
+  }, [reload, pending, companyId]);
 
   async function action(name: string, work: () => Promise<void>) {
     const sequence = ++actionSequence.current;
@@ -151,21 +153,20 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
   const anyConnected = dashboard.connected || dashboard.crowdstrike?.connected;
   const sourceConnected = (source?: DashboardSource) => source === "crowdstrike" ? dashboard.crowdstrike?.connected : dashboard.connected;
   const visibleQueries = layoutIds ? applyTileOrder(dashboard.queries, layoutIds) : dashboard.queries;
-  const atlasElasticsearch = customerReady && companyId === "CO-147284" && !showSharedQueries;
-  const showQueryBoard = customerReady && (showSharedQueries || atlasElasticsearch);
-  const displayedQueries = atlasElasticsearch ? visibleQueries.filter(query => query.source !== "crowdstrike") : visibleQueries;
+  const showQueryBoard = hasDirectReportingSources(companyId);
+  const displayedQueries = visibleQueries;
 
   return <VulnShell eyebrow="Exposure / Reporting" title="Reporting"
     subtitle="Select a customer to load its reports, scans, and review work."
-    actions={customerReady && <div className="flex flex-wrap gap-2">
+    actions={companyId && <div className="flex flex-wrap gap-2">
       <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || Boolean(layoutIds)} onClick={() => action("refresh", async () => {
         setCustomerRefresh(value => value + 1);
-        if (dashboard.canManage && anyConnected && (!companyId || showSharedQueries || atlasElasticsearch)) {
+        if (dashboard.canManage && anyConnected && hasDirectReportingSources(companyId)) {
           await post("refresh"); setMessage("Refresh requested. Results will update here as queries finish.");
         }
         await reload();
       })}><RefreshCw size={16} className={busy === "refresh" ? "animate-spin" : ""} />Refresh</button>
-      {dashboard.canManage && <>
+      {dashboard.canManage && hasDirectReportingSources(companyId) && <>
         {layoutIds ? <>
           <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => { setLayoutIds(null); setMessage("Layout changes canceled."); }}>Cancel</button>
           <button type="button" className={primaryButtonClass} disabled={Boolean(busy)} onClick={saveLayout}>{busy === "reorder" ? "Saving layout…" : "Save layout"}</button>
@@ -177,20 +178,20 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
         </>}
       </>}
     </div>}>
-    <ReportingCustomer companyId={companyId} onCompanyChange={(id) => { setCustomerReady(false); setCompanyId(id); setShowSharedQueries(false); setLayoutIds(null); setConnectionOpen(false); setTicketsOpen(false); setDraft(null); setDeleting(null); setPreview(null); }} onCustomerReady={setCustomerReady} refreshToken={customerRefresh} />
-    {customerReady && <div id="consolidation-review" className="mt-6 grid items-start gap-6 2xl:grid-cols-2"><PatchReviewQueue key={`review-${companyId}`} companyId={companyId} />{dashboard.canManage && <PatchTicketTracker key={`tickets-${companyId}`} companyId={companyId} />}</div>}
-    {customerReady && (atlasElasticsearch || showSharedQueries) && <div className="mt-8 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-zinc-800 bg-[#090909] px-5 py-4">
-      <div><h2 className="text-lg font-semibold text-white">{atlasElasticsearch ? "Atlas Elasticsearch views" : "Source query views"}</h2>
-        <p className="mt-1 text-sm text-zinc-400">{atlasElasticsearch ? "Saved Elasticsearch snapshots for Atlas. The customer scan views above cover every source." : "This customer’s scanner views are shown above. Saved source queries have their own scope."}</p></div>
+    <ReportingCustomer companyId={companyId} onCompanyChange={(id) => { dashboardVersion.current++; setDashboard(emptyReportingDashboard(initial.canManage)); setCompanyId(id); setShowSharedQueries(false); setLayoutIds(null); setConnectionOpen(false); setTicketsOpen(false); setDraft(null); setDeleting(null); setPreview(null); }} refreshToken={customerRefresh} />
+    {companyId && <div id="consolidation-review" className="mt-6 grid items-start gap-6 2xl:grid-cols-2"><PatchReviewQueue key={`review-${companyId}`} companyId={companyId} />{dashboard.canManage && <PatchTicketTracker key={`tickets-${companyId}`} companyId={companyId} />}</div>}
+    {hasDirectReportingSources(companyId) && <div className="mt-8 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-zinc-800 bg-[#090909] px-5 py-4">
+      <div><h2 className="text-lg font-semibold text-white">Atlas source views</h2>
+        <p className="mt-1 text-sm text-zinc-400">Saved Elasticsearch and CrowdStrike results for Atlas, shown with their original measures and refresh times.</p></div>
       <button type="button" className={ghostButtonClass} onClick={() => { setShowSharedQueries(value => !value); setLayoutIds(null); setDraft(null); setConnectionOpen(false); setTicketsOpen(false); }}>
-        {showSharedQueries ? "Return to customer views" : "Open shared query views"}
+        {showSharedQueries ? "Close source management" : "Manage saved source views"}
       </button>
     </div>}
     {showQueryBoard && <>
-    <div className="mt-8 mb-3"><h2 className="text-xl font-semibold text-white">{atlasElasticsearch ? "Elasticsearch tiles" : "Shared query views"}</h2><p className="mt-1 text-sm text-zinc-400">{atlasElasticsearch ? "Atlas only · Elasticsearch saved results" : "These tiles show their configured source scope. They do not change with the selected customer above."}</p></div>
+    <div className="mt-8 mb-3"><h2 className="text-xl font-semibold text-white">Atlas saved source results</h2><p className="mt-1 text-sm text-zinc-400">Elasticsearch retained imports and CrowdStrike Falcon are separate measures. Each tile shows its own data and refresh time.</p></div>
     <div className={styles.connections}>
-      {(atlasElasticsearch ? [{ name: "Elasticsearch", connected: dashboard.connected }] : [{ name: "CrowdStrike", connected: dashboard.crowdstrike?.connected }, { name: "Elasticsearch", connected: dashboard.connected }]).map((source) => <span key={source.name} className={styles.connection}><span className={styles.dot} style={{ background: source.connected ? "#34d399" : "#71717a" }} />{source.name} · {source.connected ? "Configured" : "Not connected"}</span>)}
-      <span className={styles.tileCount}>{displayedQueries.length} saved tiles · {atlasElasticsearch ? "Atlas Elasticsearch" : "Shared dashboard"}</span>
+      {[{ name: "CrowdStrike", connected: dashboard.crowdstrike?.connected }, { name: "Elasticsearch", connected: dashboard.connected }].map((source) => <span key={source.name} className={styles.connection}><span className={styles.dot} style={{ background: source.connected ? "#34d399" : "#71717a" }} />{source.name} · {source.connected ? "Configured" : "Not connected"}</span>)}
+      <span className={styles.tileCount}>{displayedQueries.length} saved Atlas source tiles</span>
     </div>
     {error && <p role="alert" className="rounded-xl border border-red-900 bg-red-950/20 p-4 text-sm text-red-300">{error}</p>}
     {loadError && !error && <p role="alert" className="rounded-xl border border-amber-900 bg-amber-950/20 p-4 text-sm text-amber-300">{loadError}</p>}
@@ -387,7 +388,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
     </PanelCard>}
 
     {layoutIds && <p id="tile-order-help" className={styles.arrangeHelp}><GripVertical size={16} />Drag tiles by their handles or use the arrows. Save layout applies the order for everyone.</p>}
-    {!displayedQueries.length && <div className="rounded-xl border border-zinc-800 p-8 text-center text-zinc-400">{atlasElasticsearch ? "No Elasticsearch tiles are available for Atlas." : "No saved tiles yet."} {dashboard.canManage && !atlasElasticsearch && "Choose Add tile to create your first view."}</div>}
+    {!displayedQueries.length && <div className="rounded-xl border border-zinc-800 p-8 text-center text-zinc-400">No saved source tiles are available for Atlas. Check the source connection and saved dashboard storage.</div>}
     <div className={`${styles.board} ${layoutIds ? styles.arranging : ""}`}>
     {displayedQueries.map((query, index) => {
       const stale = query.refreshedAt && now !== null && now - Date.parse(query.refreshedAt) > query.refreshMinutes * 2 * 60_000;

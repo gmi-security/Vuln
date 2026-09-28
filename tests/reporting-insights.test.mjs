@@ -1,7 +1,7 @@
 // node --experimental-vm-modules --test tests/reporting-insights.test.mjs
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { resolve, dirname } from 'node:path';
 import { SourceTextModule } from 'node:vm';
 import test from 'node:test';
 import ts from 'typescript';
@@ -9,7 +9,11 @@ import ts from 'typescript';
 const path = resolve('lib/reporting-insights.ts');
 const code = ts.transpileModule(await readFile(path, 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
 const module = new SourceTextModule(code, { identifier: path });
-await module.link(() => { throw new Error('Unexpected runtime import'); });
+await module.link(async name => {
+  const childPath = resolve(dirname(path), `${name}.ts`);
+  const childCode = ts.transpileModule(await readFile(childPath, 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
+  return new SourceTextModule(childCode, { identifier: childPath });
+});
 await module.evaluate();
 const { buildCustomerInsights } = module.namespace;
 
@@ -40,4 +44,18 @@ test('totals include every customer finding even when the table shows only the h
   assert.equal(result.severity.find(row => row.name === 'High').count, 80);
   assert.equal(result.highestRisk.length, 25);
   assert.equal(result.highestRisk[0].id, '79');
+});
+
+test('open vulnerability count and priority worklist exclude OSINT exposures', () => {
+  const findings = [
+    { id: 'v', companyId: 'CO-1', status: 'Open', severity: 'High', realRisk: 70, cvss: 8,
+      connector: 'nessus', cve: 'CVE-2026-1234', title: 'Patch', asset: 'host-a' },
+    { id: 'o', companyId: 'CO-1', status: 'Open', severity: 'Critical', realRisk: 95, cvss: 9,
+      connector: 'spiderfoot', cve: 'SF-EXPOSED', title: 'Exposure', asset: 'host-b' },
+  ];
+  const result = buildCustomerInsights('CO-1', findings, []);
+  assert.equal(result.totalOpen, 1);
+  assert.equal(result.exposureOpen, 1);
+  assert.deepEqual(result.highestRisk.map(row => row.id), ['v']);
+  assert.equal(result.severity.find(row => row.name === 'Critical').count, 0);
 });

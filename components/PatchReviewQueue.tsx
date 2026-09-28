@@ -9,13 +9,14 @@ import ConnectWiseGroupTicket from "@/components/ConnectWiseGroupTicket";
 import styles from "./QueryDashboard.module.css";
 
 type Detail = { request: PatchGroupTicketSummary; group: PatchGroup };
-type Page = { requests: PatchGroupTicketSummary[]; more: boolean };
+type Page = { requests: PatchGroupTicketSummary[]; more: boolean; total: number; pending: number; approved: number };
 
 export default function PatchReviewQueue({ companyId }: { companyId: string }) {
   const [rows, setRows] = useState<PatchGroupTicketSummary[]>([]);
   const [selected, setSelected] = useState<Detail | null>(null);
   const [page, setPage] = useState(1);
   const [more, setMore] = useState(false);
+  const [counts, setCounts] = useState({ total: 0, pending: 0, approved: 0 });
   const [detailPage, setDetailPage] = useState(1);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -25,6 +26,7 @@ export default function PatchReviewQueue({ companyId }: { companyId: string }) {
       const data = await dashboardRequest<Page>(`patch-group-tickets?review=1&page=${nextPage}&companyId=${encodeURIComponent(companyId)}`);
       setRows(current => nextPage === 1 ? data.requests : [...current, ...data.requests]);
       setPage(nextPage); setMore(data.more);
+      setCounts({ total: data.total, pending: data.pending, approved: data.approved });
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not load the review queue."); }
     finally { setBusy(""); }
   }, [companyId]);
@@ -49,6 +51,7 @@ export default function PatchReviewQueue({ companyId }: { companyId: string }) {
       });
       setSelected({ ...selected, request: data.request });
       setRows(current => current.map(row => row.id === data.request.id ? data.request : row));
+      await load();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not save the review decision."); }
     finally { setBusy(""); }
   }
@@ -58,8 +61,6 @@ export default function PatchReviewQueue({ companyId }: { companyId: string }) {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
-  const pending = rows.filter(row => row.reviewState === "pending").length;
-  const approved = rows.filter(row => row.reviewState === "approved").length;
   const detailRows = useMemo(() => selected ? patchReviewRows(selected.group) : [], [selected]);
   return <section aria-label="Consolidation review queue" className="rounded-2xl border border-zinc-800 bg-[#080808] p-5 sm:p-7">
     <div className="flex flex-wrap items-start justify-between gap-3"><div>
@@ -67,7 +68,7 @@ export default function PatchReviewQueue({ companyId }: { companyId: string }) {
       <h2 className="mt-2 text-xl font-semibold text-white">Review queue</h2>
       <p className="mt-2 max-w-2xl text-sm text-zinc-400">Saved patch candidates wait here for an analyst. Approval prepares a ticket; sending still requires the ConnectWise form.</p>
     </div><button type="button" className={styles.button} disabled={Boolean(busy)} onClick={() => void load()}>Refresh</button></div>
-    <p className="mt-4 text-sm text-zinc-400">{pending} awaiting review · {approved} approved · {rows.length} loaded</p>
+    <p className="mt-4 text-sm text-zinc-400">{counts.pending} awaiting review · {counts.approved} approved · {rows.length} of {counts.total} loaded</p>
     {error && <p role="alert" className={styles.patchError}>{error}</p>}
     {!rows.length && !busy && <p className="mt-5 text-sm text-zinc-400">No saved consolidation candidates yet.</p>}
     <div className={`${styles.tableScroll} mt-4`}><table className={styles.table}>

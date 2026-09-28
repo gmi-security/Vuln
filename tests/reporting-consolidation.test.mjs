@@ -66,3 +66,15 @@ test('already ticketed asset and CVE are excluded', () => {
   const groups = buildStoredFindingGroups(company, [finding('one', 'nessus'), finding('two', 'nessus')], excluded);
   assert.equal(groups[0].findingCount, 1);
 });
+
+test('automatic patch drafts exclude OSINT and non-CVE service findings', () => {
+  const groups = buildStoredFindingGroups(company, [
+    finding('v', 'nessus'),
+    finding('o', 'spiderfoot'),
+    finding('n', 'nmap', 'NMAP-SERVICE-445'),
+    finding('z', 'zap', 'ZAP-1001'),
+  ]);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].findingCount, 1);
+  assert.deepEqual(groups[0].connectors, ['nessus']);
+});

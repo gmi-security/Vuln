@@ -2,6 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { DashboardError } from "./elastic-dashboard";
 import { patchTicketDatabase, savedConnection } from "./patch-ticket-store";
 import { verifyAgainstCrowdStrike } from "./elastic-dashboard-store";
+import { customerFalconTenantIds } from "./reporting-tenant-scope";
+import { atlasFalconReviewPacket } from "./reporting-direct-sources";
 import type { PatchConsolidation, PatchGroup } from "./patch-request";
 import { automatedGroupTicketBody, type PatchGroupTicketSummary } from "./patch-group-ticket-types";
 import { cwId, cwRequest, findCWRequest, CWRequestError, parseRouting, ticketUrl, uploadPatchCsv, validateCWRouting, type ConnectWiseConnection, type CWRecord, type TicketRouting } from "./connectwise-client";
@@ -42,7 +44,9 @@ export async function persistPreparedGroups(consolidation: PatchConsolidation, a
       if (existing) { ids[index] = existing.id; continue; }
       await client.query(`INSERT INTO patch_group_ticket_requests(id,cves,remediation_id,tenant_id,prepared_by,prepared_at,crowdstrike_revision,packet,host_count,finding_count,scope_hash)
         VALUES($1,$2::jsonb,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11) ON CONFLICT(id) DO NOTHING`,
-        [id, JSON.stringify(group.cves), group.remediationId, group.tenantId, actor, consolidation.collectedAt, revision, JSON.stringify(group), group.deviceCount, group.findingCount, scopeHash]);
+        [id, JSON.stringify(group.cves), group.remediationId, group.tenantId, actor, consolidation.collectedAt, revision,
+          JSON.stringify(atlasFalconReviewPacket(group, customerFalconTenantIds("CO-147284", process.env.ATLAS_CROWDSTRIKE_TENANT_IDS))),
+          group.deviceCount, group.findingCount, scopeHash]);
       await client.query("INSERT INTO patch_group_ticket_audit(request_id,actor,action) VALUES($1,$2,'group.prepared')", [id, actor]);
     }
     await client.query("COMMIT");
@@ -60,11 +64,21 @@ export async function listGroupTickets(reviewOnly = false, page = 1, appCompanyI
   if (!Number.isSafeInteger(page) || page < 1 || page > 10000) throw new DashboardError("Invalid queue page.", 400);
   if (appCompanyId && !/^CO-\d+$/.test(appCompanyId)) throw new DashboardError("Invalid customer.", 400);
   const db = await patchTicketDatabase(); await recoverInterruptedRequests();
+  const tenantIds = customerFalconTenantIds(appCompanyId ?? "", process.env.ATLAS_CROWDSTRIKE_TENANT_IDS);
+  const where = (companyParam: number, tenantParam: number) => `WHERE ($1::boolean = false OR state='prepared') AND
+    ($${companyParam}::text IS NULL OR packet->>'appCompanyId'=$${companyParam} OR
+      (lower(tenant_id) = ANY($${tenantParam}::text[]) AND COALESCE(packet->>'source','crowdstrike')='crowdstrike'))`;
+  const params = [reviewOnly, (page - 1) * 100, appCompanyId ?? null, tenantIds];
   const rows = await db.query(`SELECT ${fields} FROM patch_group_ticket_requests
-    WHERE ($1::boolean = false OR state='prepared') AND ($3::text IS NULL OR packet->>'appCompanyId'=$3)
+    ${where(3, 4)}
     ORDER BY CASE WHEN $1::boolean THEN CASE review_state WHEN 'pending' THEN 0 WHEN 'approved' THEN 1 ELSE 2 END ELSE 0 END,
-      prepared_at DESC LIMIT 101 OFFSET $2`, [reviewOnly, (page - 1) * 100, appCompanyId ?? null]);
-  return { requests: rows.rows.slice(0, 100).map(summary), more: rows.rows.length > 100 };
+      prepared_at DESC LIMIT 101 OFFSET $2`, params);
+  const counts = await db.query(`SELECT COUNT(*)::int AS total,
+    COUNT(*) FILTER (WHERE review_state='pending')::int AS pending,
+    COUNT(*) FILTER (WHERE review_state='approved')::int AS approved
+    FROM patch_group_ticket_requests ${where(2, 3)}`, [reviewOnly, appCompanyId ?? null, tenantIds]);
+  return { requests: rows.rows.slice(0, 100).map(summary), more: rows.rows.length > 100,
+    total: counts.rows[0]?.total ?? 0, pending: counts.rows[0]?.pending ?? 0, approved: counts.rows[0]?.approved ?? 0 };
 }
 export async function readGroupTicket(id: string, withPacket = false) {
   requestId(id); const db = await patchTicketDatabase(); await recoverInterruptedRequests();

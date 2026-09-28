@@ -1,6 +1,8 @@
 import { DashboardError } from "./elastic-dashboard";
 import { buildCustomerInsights } from "./reporting-insights";
-import { computeExecReport, ensureHydrated, getCompany, listCompanies, listFindings, listScans } from "./store";
+import { buildCustomerReportingModel } from "./reporting-customer-model";
+import { loadMetricsHistory } from "./persist";
+import { computeExecReport, ensureHydrated, getCompany, listAssets, listCompanies, listFindings, listScans } from "./store";
 
 export async function reportingSetup() {
   await ensureHydrated();
@@ -16,7 +18,9 @@ export async function reportingCustomer(appCompanyId: string) {
   const report = computeExecReport(company.id);
   if (!report) throw new DashboardError("Customer report is unavailable.", 404);
   const findings = listFindings({ companyId: company.id });
-  const insights = buildCustomerInsights(company.id, findings, await listScans({ companyId: company.id }));
+  const scans = await listScans({ companyId: company.id });
+  const insights = buildCustomerInsights(company.id, findings, scans);
+  const model = buildCustomerReportingModel(company, findings, scans, listAssets({ companyId: company.id }), await loadMetricsHistory(company.id, 180));
   return { report: { ...report, generatedAt: new Date().toISOString() },
-    sources: insights.sources.map(({ name, open }) => ({ name, open })), insights };
+    sources: insights.sources.map(({ name, open }) => ({ name, open })), insights, model };
 }
