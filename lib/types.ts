@@ -207,6 +207,8 @@ export type Finding = {
   // (same CVE, same asset) — populated once a second scanner corroborates it;
   // absent/one entry means only `connector` has ever seen it.
   seenBy?: ConnectorId[];
+  // Sources that enriched this finding without independently reporting it.
+  enrichments?: { source: "vulners"; observedAt: string }[];
   cve: string;
   title: string;
   severity: Severity;

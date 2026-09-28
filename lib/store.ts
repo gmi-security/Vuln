@@ -34,6 +34,7 @@ import {
 } from "@/lib/tidal";
 import { intuneConfig, intuneListAssets } from "@/lib/intune";
 import { falconConfigs, falconListAssets, spotlightListFindings } from "@/lib/crowdstrike";
+import { recordVulnersEnrichment } from "@/lib/reporting-source-activity";
 import { defenderConfig, defenderListFindings } from "@/lib/defender";
 import { burpConfig, burpListIssues, type BurpFinding } from "@/lib/burp";
 import {
@@ -4325,6 +4326,7 @@ export async function importFromVulners(): Promise<VulnersImportResult | { error
 
   let findingsUpdated = 0;
   let exploitsFound = 0;
+  const enrichmentObservedAt = new Date().toISOString();
 
   for (const f of s.findings.values()) {
     const cves = f.cves?.length ? f.cves : [f.cve];
@@ -4339,6 +4341,8 @@ export async function importFromVulners(): Promise<VulnersImportResult | { error
     }
 
     if (!best) continue;
+    f.enrichments = recordVulnersEnrichment(f.enrichments, enrichmentObservedAt);
+    markDirty();
 
     let changed = false;
     if (best.epss > 0 && (!f.epss || best.epss > f.epss)) {
@@ -6551,6 +6555,8 @@ const CONNECTOR_CLASS: Record<string, FindingClass> = {
   spiderfoot: "osint",
   artemis: "osint",
   burp: "pentest",
+  zap: "pentest",
+  nmap: "vuln",
 };
 export function findingClass(f: Finding): FindingClass {
   return CONNECTOR_CLASS[f.connector] ?? "vuln";

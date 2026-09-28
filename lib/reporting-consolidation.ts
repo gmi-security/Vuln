@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { dashboardCsv } from "./dashboard-csv";
 import type { Finding } from "./types";
 import type { PatchGroup } from "./patch-request";
+import { reportingFindingClass } from "./reporting-metrics";
 
 const clean = (value: string) => value.trim().replace(/\s+/g, " ");
 const csvText = (value: string) => value.slice(0, 2000);
@@ -13,6 +14,7 @@ export function buildStoredFindingGroups(company: { id: string; name: string }, 
   const groups = new Map<string, Finding[]>();
   for (const finding of findings) {
     if (finding.companyId !== company.id || !["Open", "In Remediation"].includes(finding.status)) continue;
+    if (reportingFindingClass(finding.connector) === "osint" || !/^CVE-\d{4}-\d{4,19}$/i.test(finding.cve)) continue;
     if (excluded.has(JSON.stringify([company.id, finding.asset, finding.cve]))) continue;
     const action = clean(finding.remediation || "");
     const key = `cve:${finding.cve}:${action.toLowerCase()}`;

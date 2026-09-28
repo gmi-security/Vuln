@@ -15,6 +15,7 @@ function stateBucket(state: string, ticketId: number | null, closed: boolean): "
 export default function PatchTicketTracker({ companyId }: { companyId: string }) {
   const [rows, setRows] = useState<Row[]>([]);
   const [more, setMore] = useState(false);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -23,16 +24,18 @@ export default function PatchTicketTracker({ companyId }: { companyId: string })
     try {
       const requests: PatchGroupTicketSummary[] = [];
       let page = 1, hasMore = true;
+      let matchingTotal = 0;
       while (hasMore && page <= 10_000) {
-        const data = await dashboardRequest<{ requests: PatchGroupTicketSummary[]; more: boolean }>(`patch-group-tickets?companyId=${encodeURIComponent(companyId)}&page=${page}`);
+        const data = await dashboardRequest<{ requests: PatchGroupTicketSummary[]; more: boolean; total: number }>(`patch-group-tickets?companyId=${encodeURIComponent(companyId)}&page=${page}`);
         requests.push(...data.requests);
+        matchingTotal = data.total;
         hasMore = data.more;
         page++;
       }
       const combined: Row[] = requests.map(row => ({ id: row.id,
         scope: row.cves.length === 1 ? row.cves[0] : `${(row.remediationTitle || "Remediation").slice(0, 48)} · ${row.cves.length} CVEs`, cves: row.cves, row }))
         .sort((a, b) => new Date(b.row.preparedAt).getTime() - new Date(a.row.preparedAt).getTime());
-      setRows(combined); setMore(hasMore);
+      setRows(combined); setMore(hasMore); setTotal(matchingTotal);
     } catch (e) { setError(e instanceof Error ? e.message : "Could not load the ticket tracker."); }
     finally { setLoading(false); }
   }, [companyId]);
@@ -55,7 +58,7 @@ export default function PatchTicketTracker({ companyId }: { companyId: string })
     </div>
     <p className={styles.resultNote}>Customer-linked consolidation plans prepared for review and their ConnectWise ticket status.</p>
     <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-5">
-      <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3"><div className="text-2xl font-semibold text-white">{rows.length}</div><div className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Prepared</div></div>
+      <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3"><div className="text-2xl font-semibold text-white">{total}</div><div className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Prepared</div></div>
       <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3"><div className="text-2xl font-semibold text-white">{cut}</div><div className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Tickets cut</div></div>
       <div className="rounded-xl border border-emerald-900/60 bg-emerald-950/10 p-3"><div className="text-2xl font-semibold text-emerald-300">{buckets["cut-open"]}</div><div className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Open in ConnectWise</div></div>
       <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3"><div className="text-2xl font-semibold text-zinc-300">{buckets["cut-closed"]}</div><div className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Closed</div></div>
