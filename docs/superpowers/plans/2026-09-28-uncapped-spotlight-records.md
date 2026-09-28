@@ -15,7 +15,7 @@
 - Preserve each CrowdStrike vulnerability ID as a separate row, even when host and CVE match.
 - Select Atlas through its configured customer binding; do not query the unnamed primary tenant.
 - Do not reintroduce an item or page cap or materialize all Atlas records in JS memory.
-- Use `ELASTIC_VULN_DATABASE_URL` for record storage; leave `DATABASE_URL` snapshot content unchanged.
+- Use the established `DATABASE_URL` pool for new Spotlight tables; leave its `vuln_store` snapshot content unchanged. Do not configure `ELASTIC_VULN_DATABASE_URL` for this import.
 - Keep the previous completed generation visible throughout an interrupted or failed run.
 - Do not change the reporting page, reporting calculations, ticket review, ConnectWise pipeline, connector page, or other scanner behavior.
 - Local tests cannot depend on production credentials.
@@ -44,7 +44,7 @@
 
 ### Task 2: Transactional Atlas Record Generations
 
-**Files:** Create `lib/spotlight-record-store.ts`; modify `lib/elastic-dashboard-store.ts` only as needed to reuse its Postgres pool; test `tests/spotlight-record-store.test.mjs`.
+**Files:** Create `lib/spotlight-record-store.ts`; reuse `applicationDatabase()` from `lib/persist.ts`; test `tests/spotlight-record-store.test.mjs`.
 
 **Interfaces:** Produce `beginSpotlightRun(tenantKey: string): Promise<string>`, `writeSpotlightBatch(runId: string, tenantKey: string, rows: SpotlightRecord[]): Promise<number>`, `completeSpotlightRun(runId: string, tenantKey: string, expectedCount: number): Promise<number>` returning the exact promoted row count, `failSpotlightRun(runId: string, error: string): Promise<void>`, `countCompletedSpotlightRecords(tenantKey: string): Promise<number>`, a bounded internal `listCompletedSpotlightRecords` method, and `pruneSpotlightRuns(tenantKey: string): Promise<void>`. `SpotlightRecord` includes source ID, tenant key, Atlas company ID, host/IP/CVE/severity/status, description/remediation, full source JSON, and observed timestamp. A unique `(run_id, tenant_key, source_id)` constraint makes replay idempotent.
 

@@ -2,9 +2,9 @@
 
 ## Scope and prerequisites
 
-This change stores each Atlas CrowdStrike Spotlight vulnerability ID as a separate row in the Postgres database configured by `ELASTIC_VULN_DATABASE_URL`. It does not change the reporting page, the existing in-memory scan and finding counts, or ticket cutting. The unnamed primary CrowdStrike tenant is excluded from this import. The Atlas customer name configured in `FALCON_CUSTOMER_N` must match the existing Atlas company (`CO-147284`).
+This change stores each Atlas CrowdStrike Spotlight vulnerability ID as a separate row in the existing app Postgres database configured by `DATABASE_URL`. It does not change the reporting page, the existing in-memory scan and finding counts, or ticket cutting. The unnamed primary CrowdStrike tenant is excluded from this import. The Atlas customer name configured in `FALCON_CUSTOMER_N` must match the existing Atlas company (`CO-147284`).
 
-The reported DigitalOcean database allocation is 16 GB RAM, 6 vCPU, and 300 GiB disk. That allocation is not a measured free-space value. Check actual free space, backups, and current database size before the first full import. A full generation and the previous completed generation coexist during refresh, so allow for at least two generations plus WAL, indexes, and vacuum headroom. Do not infer row size from the allocation; measure it after an initial batch and project the full size.
+The reported DigitalOcean database allocation is 16 GB RAM, 6 vCPU, and 300 GiB disk. That allocation is not a measured free-space value. Check actual free space, backups, and current database size before the first full import. Snapshot writes and the Spotlight import now share this database and its connection pool. A full generation and the previous completed generation coexist during refresh, so allow for at least two generations plus WAL, indexes, and vacuum headroom. Do not infer row size from the allocation; measure it after an initial batch and project the full size.
 
 ## Local verification
 
@@ -12,7 +12,7 @@ Run `node --experimental-vm-modules tests/crowdstrike-sync-resilience.test.mjs`,
 
 ## First run
 
-1. Deploy the storage change to the intended branch. Confirm `ELASTIC_VULN_DATABASE_URL` points to the transactional database and the app still has one instance.
+1. Remove the temporary `ELASTIC_VULN_DATABASE_URL` setting, deploy this storage change, and confirm the existing `DATABASE_URL` snapshot connection is healthy. The app must still have one instance. This change adds Spotlight tables beside the snapshot tables; it does not add records to `vuln_store`.
 2. Check the Atlas debug count. Capture the query time and `spotlightFindingsAvailable`; it is a moving CrowdStrike count, so a later value may legitimately differ.
 3. Trigger the existing Spotlight import action. The empty-body POST selects the sole named tenant; when multiple named tenants are configured, send `{ "companyId": "CO-147284" }` to `/api/crowdstrike/spotlight-import`.
 4. Poll the Spotlight status. Confirm `tenant` is Atlas, `fetched` and `stored` advance, and the run ends with `phase: "Done"`, no error, and `findingsImported` matching the promoted database count. The import must not request the primary tenant. A hydration ID mismatch, incomplete page, or stored ID shortfall fails the run and keeps the previous completed generation.
@@ -20,7 +20,7 @@ Run `node --experimental-vm-modules tests/crowdstrike-sync-resilience.test.mjs`,
 
 ## Database checks
 
-Use a read-only SQL session on the database behind `ELASTIC_VULN_DATABASE_URL`:
+Use a read-only SQL session on the database behind `DATABASE_URL`:
 
 ```sql
 SELECT r.id, r.status, r.started_at, r.finished_at,

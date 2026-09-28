@@ -6,10 +6,14 @@ import test from "node:test";
 import ts from "typescript";
 
 const source = await readFile(new URL("../lib/spotlight-record-store.ts", import.meta.url), "utf8");
+let runtimeDb;
 const module = new SourceTextModule(ts.transpileModule(source, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
 }).outputText);
 await module.link(async name => {
+  if (name === "./persist") return new SyntheticModule(["applicationDatabase"], function () {
+    this.setExport("applicationDatabase", () => runtimeDb);
+  });
   const values = await import(name);
   return new SyntheticModule(Object.keys(values), function () {
     for (const key of Object.keys(values)) this.setExport(key, values[key]);
@@ -118,4 +122,20 @@ test("cleanup removes interrupted generations in chunks while retaining the acti
   await store.pruneSpotlightRuns("CO-147284");
   assert.deepEqual(removed, ["run-interrupted", "run-interrupted"]);
   assert.ok(!removed.includes("run-active"));
+});
+
+test("runtime Spotlight storage uses the established application database without the dashboard URL", async () => {
+  const prior = process.env.ELASTIC_VULN_DATABASE_URL;
+  delete process.env.ELASTIC_VULN_DATABASE_URL;
+  const calls = [];
+  runtimeDb = { query: async sql => { calls.push(String(sql)); return { rows: [], rowCount: 1 }; } };
+  try {
+    await module.namespace.beginSpotlightRun("CO-147284");
+    assert.ok(calls.some(sql => sql.includes("CREATE TABLE IF NOT EXISTS spotlight_import_runs")));
+    assert.ok(calls.some(sql => sql.includes("INSERT INTO spotlight_import_runs")));
+  } finally {
+    runtimeDb = undefined;
+    if (prior === undefined) delete process.env.ELASTIC_VULN_DATABASE_URL;
+    else process.env.ELASTIC_VULN_DATABASE_URL = prior;
+  }
 });
