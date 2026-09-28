@@ -1,6 +1,8 @@
 import { patchTicketDatabase, savedConnection } from "./patch-ticket-store";
 import { dashboardConnectionRevision, verifyAgainstCrowdStrike } from "./elastic-dashboard-store";
-import { cwDefaultOpenStatus, cwAddTicketNote, cwRequest } from "./connectwise-client";
+import { setGroupTicketPriority } from "./patch-group-ticket-store";
+import { cwDefaultOpenStatus, cwAddTicketNote, cwRequest, cwPrioritiesBySort, type CWOption } from "./connectwise-client";
+import { targetPriorityFor } from "./group-ticket-priority";
 import { runWithConcurrency } from "./ticket-status-sync";
 import { elasticVulnEnabled } from "./elastic-vuln-server";
 import { ATLAS_REPORTING_COMPANY_ID } from "./reporting-direct-sources";
@@ -12,7 +14,7 @@ const PILOT_COMPANY_IDS = [ATLAS_REPORTING_COMPANY_ID];
 
 type Counts = { checked: number; reopened: number; confirmedFixed: number; errors: number };
 type VerifyResult = { checkedAt: string; stillOpenHosts: string[] };
-type ClosedRow = { id: string; tenant_id: string; routing: { boardId?: number } | null; packet: PatchGroup };
+type ClosedRow = { id: string; tenant_id: string; routing: { boardId?: number } | null; packet: PatchGroup; worst_severity: "Critical" | "High" | null };
 
 async function recordVerification(id: string, result: VerifyResult, state: "verified" | "still_open") {
   const db = await patchTicketDatabase();
@@ -27,7 +29,7 @@ async function recordVerification(id: string, result: VerifyResult, state: "veri
 // second one. This puts the ticket back the way it would have looked had it
 // never been closed: reopened, with a visible note explaining why, so the
 // client sees the correction the same way they saw the closure.
-async function reopenTicket(id: string, boardId: number, result: VerifyResult) {
+async function reopenTicket(id: string, boardId: number, result: VerifyResult, severity: "Critical" | "High" | null, priorities: CWOption[]) {
   const db = await patchTicketDatabase();
   const row = (await db.query("SELECT ticket_id,cw_target FROM patch_group_ticket_requests WHERE id=$1", [id])).rows[0];
   if (!row?.ticket_id) throw new Error("Missing ticket to reopen.");
@@ -40,6 +42,14 @@ async function reopenTicket(id: string, boardId: number, result: VerifyResult) {
   await db.query("UPDATE patch_group_ticket_requests SET closed=false,ticket_status=$2,fix_verified_at=$3,fix_verified_state='still_open',fix_still_open_count=$4,updated_at=now() WHERE id=$1",
     [id, status.name, result.checkedAt, result.stillOpenHosts.length]);
   await db.query("INSERT INTO patch_group_ticket_audit(request_id,actor,action) VALUES($1,$2,'ticket.reopened.unverified_closure')", [id, ACTOR]);
+  // Going back live should reassert the ticket's actual severity, not just
+  // trust whatever priority it happened to carry into the reopen -- same
+  // rule auto-create uses at creation time (Critical -> top, High -> next).
+  // Never lets a priority-setting problem undo the reopen itself.
+  if (severity) {
+    const target = targetPriorityFor(severity, priorities);
+    if (target) await setGroupTicketPriority(id, target.id, ACTOR).catch(() => {});
+  }
 }
 
 // Re-checks every closed Atlas ticket that hasn't already been confirmed
@@ -53,7 +63,7 @@ export async function validateClosedGroupTickets(): Promise<Counts> {
   if (!saved) return { checked: 0, reopened: 0, confirmedFixed: 0, errors: 0 };
   const db = await patchTicketDatabase();
   const rows = (await db.query(`
-    SELECT id, tenant_id, routing, packet FROM patch_group_ticket_requests
+    SELECT id, tenant_id, routing, packet, worst_severity FROM patch_group_ticket_requests
     WHERE state='created' AND closed=true AND ticket_id IS NOT NULL AND cw_target=$1
       AND packet->>'appCompanyId' = ANY($2::text[])
       AND fix_verified_state IS DISTINCT FROM 'verified'
@@ -61,6 +71,10 @@ export async function validateClosedGroupTickets(): Promise<Counts> {
   if (!rows.length) return { checked: 0, reopened: 0, confirmedFixed: 0, errors: 0 };
   const crowdstrikeRevision = await dashboardConnectionRevision("crowdstrike");
   if (crowdstrikeRevision === null) return { checked: rows.length, reopened: 0, confirmedFixed: 0, errors: 0 };
+  // Most-urgent-first; fetched once and reused for every ticket this pass,
+  // same as group-auto-create.ts. Missing/unreachable never blocks the
+  // reopen -- it just means priority stays whatever it already was.
+  const priorities = await cwPrioritiesBySort(saved.value).catch(() => []);
   let reopened = 0, confirmedFixed = 0, errors = 0;
   await runWithConcurrency(rows, 2, async (row) => {
     const packet = row.packet;
@@ -72,7 +86,7 @@ export async function validateClosedGroupTickets(): Promise<Counts> {
         confirmedFixed++;
         return;
       }
-      await reopenTicket(row.id, row.routing.boardId, result);
+      await reopenTicket(row.id, row.routing.boardId, result, row.worst_severity, priorities);
       reopened++;
     } catch {
       errors++; // one ticket's connection mismatch or ConnectWise rejection must not block the rest

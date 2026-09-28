@@ -57,24 +57,28 @@ function fakeDb({ closedRows, ticketRows = {} }) {
   };
 }
 
-async function loadValidation({ db, savedConnection, dashboardConnectionRevision, verifyAgainstCrowdStrike, cwDefaultOpenStatus, cwAddTicketNote, cwRequest }) {
+async function loadValidation({ db, savedConnection, dashboardConnectionRevision, verifyAgainstCrowdStrike, cwDefaultOpenStatus, cwAddTicketNote, cwRequest, cwPrioritiesBySort, setGroupTicketPriority }) {
   return loader({
     "./patch-ticket-store": { patchTicketDatabase: async () => db, savedConnection: savedConnection ?? (async () => ({ revision: 7, value: {}, target: "cw-1" })) },
     "./elastic-dashboard-store": {
       dashboardConnectionRevision: dashboardConnectionRevision ?? (async () => 3),
       verifyAgainstCrowdStrike: verifyAgainstCrowdStrike ?? (async () => { throw new Error("not expected to be called"); }),
     },
+    "./patch-group-ticket-store": {
+      setGroupTicketPriority: setGroupTicketPriority ?? (async () => { throw new Error("not expected to be called"); }),
+    },
     "./connectwise-client": {
       cwDefaultOpenStatus: cwDefaultOpenStatus ?? (async () => { throw new Error("not expected to be called"); }),
       cwAddTicketNote: cwAddTicketNote ?? (async () => { throw new Error("not expected to be called"); }),
       cwRequest: cwRequest ?? (async () => { throw new Error("not expected to be called"); }),
+      cwPrioritiesBySort: cwPrioritiesBySort ?? (async () => []),
     },
     "./ticket-status-sync": { runWithConcurrency },
     "./elastic-vuln-server": { elasticVulnEnabled: () => false },
   })("lib/group-closure-validation.ts");
 }
 
-const baseRow = { id: "a", tenant_id: "tenant-1", routing: { boardId: 9 }, packet: { cves: ["CVE-2024-1"], hostScope: ["host-1"] } };
+const baseRow = { id: "a", tenant_id: "tenant-1", routing: { boardId: 9 }, packet: { cves: ["CVE-2024-1"], hostScope: ["host-1"] }, worst_severity: "Critical" };
 
 test("a closed ticket still vulnerable per CrowdStrike is reopened with a note and marked still_open", async () => {
   const db = fakeDb({ closedRows: [baseRow], ticketRows: { a: { ticket_id: 555, cw_target: "cw-1" } } });
@@ -92,6 +96,58 @@ test("a closed ticket still vulnerable per CrowdStrike is reopened with a note a
   assert.equal(noteCalls.length, 1);
   assert.equal(noteCalls[0].ticketId, 555);
   assert.match(noteCalls[0].text, /still present on 1 host/);
+});
+
+test("a reopened Critical ticket has its priority reasserted to the top slot", async () => {
+  const db = fakeDb({ closedRows: [baseRow], ticketRows: { a: { ticket_id: 555, cw_target: "cw-1" } } });
+  const priorityCalls = [];
+  const validate = await loadValidation({
+    db,
+    verifyAgainstCrowdStrike: async () => ({ checkedAt: "2026-09-28T00:00:00.000Z", stillOpenHosts: ["host-1"] }),
+    cwDefaultOpenStatus: async () => ({ id: 42, name: "New" }),
+    cwAddTicketNote: async () => {},
+    cwRequest: async () => ({}),
+    cwPrioritiesBySort: async () => [{ id: 1, name: "Urgent" }, { id: 2, name: "High" }],
+    setGroupTicketPriority: async (id, priorityId, actor) => { priorityCalls.push({ id, priorityId, actor }); },
+  });
+  const result = await validate.validateClosedGroupTickets();
+  assert.deepEqual(result, { checked: 1, reopened: 1, confirmedFixed: 0, errors: 0 });
+  assert.deepEqual(priorityCalls, [{ id: "a", priorityId: 1, actor: "closure-validation" }]);
+});
+
+test("a reopened High ticket gets the next priority down, not the top one", async () => {
+  const row = { ...baseRow, worst_severity: "High" };
+  const db = fakeDb({ closedRows: [row], ticketRows: { a: { ticket_id: 555, cw_target: "cw-1" } } });
+  const priorityCalls = [];
+  const validate = await loadValidation({
+    db,
+    verifyAgainstCrowdStrike: async () => ({ checkedAt: "2026-09-28T00:00:00.000Z", stillOpenHosts: ["host-1"] }),
+    cwDefaultOpenStatus: async () => ({ id: 42, name: "New" }),
+    cwAddTicketNote: async () => {},
+    cwRequest: async () => ({}),
+    cwPrioritiesBySort: async () => [{ id: 1, name: "Urgent" }, { id: 2, name: "High" }],
+    setGroupTicketPriority: async (id, priorityId, actor) => { priorityCalls.push({ id, priorityId, actor }); },
+  });
+  const result = await validate.validateClosedGroupTickets();
+  assert.deepEqual(result, { checked: 1, reopened: 1, confirmedFixed: 0, errors: 0 });
+  assert.deepEqual(priorityCalls, [{ id: "a", priorityId: 2, actor: "closure-validation" }]);
+});
+
+test("no ConnectWise priorities available still reopens the ticket, just without touching priority", async () => {
+  const db = fakeDb({ closedRows: [baseRow], ticketRows: { a: { ticket_id: 555, cw_target: "cw-1" } } });
+  let priorityCalled = false;
+  const validate = await loadValidation({
+    db,
+    verifyAgainstCrowdStrike: async () => ({ checkedAt: "2026-09-28T00:00:00.000Z", stillOpenHosts: ["host-1"] }),
+    cwDefaultOpenStatus: async () => ({ id: 42, name: "New" }),
+    cwAddTicketNote: async () => {},
+    cwRequest: async () => ({}),
+    cwPrioritiesBySort: async () => { throw new Error("ConnectWise unreachable"); },
+    setGroupTicketPriority: async () => { priorityCalled = true; },
+  });
+  const result = await validate.validateClosedGroupTickets();
+  assert.deepEqual(result, { checked: 1, reopened: 1, confirmedFixed: 0, errors: 0 });
+  assert.equal(priorityCalled, false);
 });
 
 test("a closed ticket that's genuinely fixed is marked verified and ConnectWise is never touched", async () => {
