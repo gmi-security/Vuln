@@ -13,6 +13,7 @@ export default function ConnectWiseGroupTicket({ group, requestId }: { group: Pa
   const [routing, setRouting] = useState<CWDefaults>({}), [companyId, setCompanyId] = useState<number>();
   const [title, setTitle] = useState(group.ticketTitle), [body, setBody] = useState(automatedGroupTicketBody(group)), [busy, setBusy] = useState("");
   const [error, setError] = useState(""), [message, setMessage] = useState("");
+  const [editingPriority, setEditingPriority] = useState(false), [priorityDraft, setPriorityDraft] = useState<number>();
   const generation = useRef(0);
   const reload = useCallback(async () => {
     const data = await dashboardRequest<{ request: PatchGroupTicketSummary }>(`patch-group-tickets/${requestId}`);
@@ -37,15 +38,16 @@ export default function ConnectWiseGroupTicket({ group, requestId }: { group: Pa
     }
     setMessage("The operation is still pending. Its saved request can be checked again below.");
   }
-  async function action(operation: string, extra: Record<string, unknown> = {}) {
-    const token = ++generation.current; setBusy(operation); setError(""); setMessage("");
+  async function action(operation: string, extra: Record<string, unknown> = {}): Promise<boolean> {
+    const token = ++generation.current; setBusy(operation); setError(""); setMessage(""); let ok = false;
     try {
       const data = await dashboardRequest<{ request: PatchGroupTicketSummary }>(`patch-group-tickets/${requestId}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: operation, ...extra }) });
-      if (generation.current !== token) return;
-      setCurrent(data.request); setReview(false);
+      if (generation.current !== token) return false;
+      setCurrent(data.request); setReview(false); ok = true;
       if (operation === "create" || operation === "retry-attachment") await track(token); else await reload();
     } catch (e) { if (generation.current === token) { setError(e instanceof Error ? e.message : "Could not process this request."); void reload().catch(() => {}); } }
     finally { if (generation.current === token) setBusy(""); }
+    return ok;
   }
   async function verifyFix() {
     const token = ++generation.current; setBusy("verify-fix"); setError(""); setMessage("Checking CrowdStrike for these CVEs' current status. This can take a minute or two.");
@@ -85,6 +87,15 @@ export default function ConnectWiseGroupTicket({ group, requestId }: { group: Pa
       {current.ticketStatus && <p className={styles.resultNote}>ConnectWise status: {current.ticketStatus}. {group.source === "stored-findings" ? "Verify the fix in the source scanners and record the result in the ticket." : current.fixVerifiedState === "verified" ? `CrowdStrike confirmed no open findings for these CVEs on the scoped devices as of ${new Date(current.fixVerifiedAt!).toLocaleString()}.`
         : current.fixVerifiedState === "still_open" ? `CrowdStrike still shows these CVEs open on ${current.fixStillOpenCount} of the scoped devices as of ${new Date(current.fixVerifiedAt!).toLocaleString()}.`
         : "CrowdStrike fix verification has not been performed."}</p>}
+      {current.ticketId && <div className="mt-2">
+        {!editingPriority ? <p className={styles.resultNote}>Priority: {current.priorityName ?? "Unknown — check status to load it"}
+          <button type="button" className={`${styles.button} ml-2`} disabled={Boolean(busy)} onClick={() => { setPriorityDraft(current.priorityId ?? undefined); setEditingPriority(true); }}>Raise or lower</button></p>
+          : <div className="mt-2 flex flex-wrap items-end gap-2">
+            <div className="min-w-[12rem]"><ConnectWiseSelect label="Priority" kind="priorities" value={priorityDraft} onChange={setPriorityDraft} revision={settings?.revision} disabled={Boolean(busy)} /></div>
+            <button type="button" className={styles.primaryButton} disabled={Boolean(busy) || !priorityDraft} onClick={() => void action("set-priority", { priorityId: priorityDraft }).then(ok => { if (ok) setEditingPriority(false); })}>{busy === "set-priority" ? "Saving…" : "Save priority"}</button>
+            <button type="button" className={styles.button} disabled={Boolean(busy)} onClick={() => setEditingPriority(false)}>Cancel</button>
+          </div>}
+      </div>}
       <div className={styles.patchActions}>
         {current.ticketUrl && <a className={styles.button} href={current.ticketUrl} target="_blank" rel="noopener noreferrer">Open ticket #{current.ticketId}</a>}
         {current.state === "uncertain" && <button type="button" className={styles.button} disabled={Boolean(busy)} onClick={() => action("reconcile")}>Check creation outcome</button>}

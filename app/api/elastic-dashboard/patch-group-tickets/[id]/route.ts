@@ -1,5 +1,5 @@
 import { dashboardAccess, dashboardBody, dashboardFailure, dashboardJson } from "@/lib/elastic-dashboard-http";
-import { createGroupTicket, groupTicketAction, readGroupTicket, reviewGroupTicket } from "@/lib/patch-group-ticket-store";
+import { createGroupTicket, groupTicketAction, readGroupTicket, reviewGroupTicket, setGroupTicketPriority } from "@/lib/patch-group-ticket-store";
 export const dynamic = "force-dynamic";
 type Context = { params: Promise<{ id: string }> };
 export async function GET(request: Request, context: Context) {
@@ -11,6 +11,7 @@ export async function POST(request: Request, context: Context) {
     const body = await dashboardBody(request, 256 * 1024) as Record<string, unknown>;
     if (body?.action === "approve" || body?.action === "dismiss" || body?.action === "reopen")
       return dashboardJson(await reviewGroupTicket(id, body.action, actor));
+    if (body?.action === "set-priority") return dashboardJson(await setGroupTicketPriority(id, body.priorityId, actor));
     return dashboardJson(body?.action === "create" ? await createGroupTicket(id, body, actor) : await groupTicketAction(id, body?.action, actor), 202);
   } catch (error) { return dashboardFailure(error); }
 }

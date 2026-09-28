@@ -22,11 +22,14 @@ export async function patchTicketDatabase() {
     title TEXT, body TEXT, started_at TIMESTAMPTZ, ticket_id INT, ticket_url TEXT, ticket_status TEXT,
     closed BOOLEAN NOT NULL DEFAULT false, attachment_state TEXT NOT NULL DEFAULT 'not_started',
     attachment_started TIMESTAMPTZ, document_id INT, last_error TEXT,
-    fix_verified_at TIMESTAMPTZ, fix_verified_state TEXT, fix_still_open_count INT
+    fix_verified_at TIMESTAMPTZ, fix_verified_state TEXT, fix_still_open_count INT,
+    ticket_priority_id INT, ticket_priority_name TEXT
   );
   ALTER TABLE patch_ticket_requests ADD COLUMN IF NOT EXISTS fix_verified_at TIMESTAMPTZ;
   ALTER TABLE patch_ticket_requests ADD COLUMN IF NOT EXISTS fix_verified_state TEXT;
   ALTER TABLE patch_ticket_requests ADD COLUMN IF NOT EXISTS fix_still_open_count INT;
+  ALTER TABLE patch_ticket_requests ADD COLUMN IF NOT EXISTS ticket_priority_id INT;
+  ALTER TABLE patch_ticket_requests ADD COLUMN IF NOT EXISTS ticket_priority_name TEXT;
   CREATE INDEX IF NOT EXISTS patch_ticket_cve_date ON patch_ticket_requests(cve, prepared_at DESC);
   CREATE UNIQUE INDEX IF NOT EXISTS patch_ticket_active_scope ON patch_ticket_requests(cw_target,cve,company_id,scope_hash)
     WHERE state IN ('creating','uncertain','created') AND closed=false;
@@ -42,11 +45,14 @@ export async function patchTicketDatabase() {
     title TEXT, body TEXT, started_at TIMESTAMPTZ, ticket_id INT, ticket_url TEXT, ticket_status TEXT,
     closed BOOLEAN NOT NULL DEFAULT false, attachment_state TEXT NOT NULL DEFAULT 'not_started',
     attachment_started TIMESTAMPTZ, document_id INT, last_error TEXT,
-    fix_verified_at TIMESTAMPTZ, fix_verified_state TEXT, fix_still_open_count INT
+    fix_verified_at TIMESTAMPTZ, fix_verified_state TEXT, fix_still_open_count INT,
+    ticket_priority_id INT, ticket_priority_name TEXT
   );
   ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS fix_verified_at TIMESTAMPTZ;
   ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS fix_verified_state TEXT;
   ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS fix_still_open_count INT;
+  ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS ticket_priority_id INT;
+  ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS ticket_priority_name TEXT;
   ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS review_state TEXT NOT NULL DEFAULT 'pending';
   ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS reviewed_by TEXT;
   ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;
@@ -63,7 +69,7 @@ export async function patchTicketDatabase() {
   await ready;
   return db;
 }
-const fields = "id,cve,state,prepared_by,created_by,prepared_at,updated_at,host_count,tenant_ids,labels,ticket_id,ticket_url,ticket_status,closed,attachment_state,last_error,fix_verified_at,fix_verified_state,fix_still_open_count";
+const fields = "id,cve,state,prepared_by,created_by,prepared_at,updated_at,host_count,tenant_ids,labels,ticket_id,ticket_url,ticket_status,closed,attachment_state,last_error,fix_verified_at,fix_verified_state,fix_still_open_count,ticket_priority_id,ticket_priority_name";
 function summary(row: CWRecord): PatchTicketSummary {
   return { id: row.id, cve: row.cve, state: row.state, preparedBy: row.prepared_by, createdBy: row.created_by,
     preparedAt: new Date(row.prepared_at).toISOString(), updatedAt: new Date(row.updated_at).toISOString(), hostCount: row.host_count,
@@ -71,7 +77,8 @@ function summary(row: CWRecord): PatchTicketSummary {
     ticketId: row.ticket_id, ticketUrl: row.ticket_url, ticketStatus: row.ticket_status, closed: row.closed,
     attachmentState: row.attachment_state, error: row.last_error,
     fixVerifiedAt: row.fix_verified_at ? new Date(row.fix_verified_at).toISOString() : null,
-    fixVerifiedState: row.fix_verified_state ?? null, fixStillOpenCount: row.fix_still_open_count ?? null };
+    fixVerifiedState: row.fix_verified_state ?? null, fixStillOpenCount: row.fix_still_open_count ?? null,
+    priorityId: row.ticket_priority_id ?? null, priorityName: row.ticket_priority_name ?? null };
 }
 function requestId(id: string) { if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(id)) throw new DashboardError("Patch request not found.", 404); }
 export async function savedConnection(): Promise<{ value: ConnectWiseConnection; revision: number; target: string; defaults: CWDefaults }> {
@@ -315,8 +322,26 @@ export async function patchTicketAction(id: string, action: unknown, actor: stri
   if (!ticket) throw new DashboardError("No matching ticket is visible yet. Check ConnectWise and try this check again; another ticket has not been sent.", 409);
   if (ticket.company?.id !== row.company_id || ticket.externalXRef !== `GMI-${id}` || (row.ticket_id && ticket.id !== row.ticket_id)) throw new DashboardError("The ticket no longer matches this request's company and reference. Review it in ConnectWise.", 409);
   if (!row.ticket_id) await recordTicket(id, ticket, saved.value);
-  await db.query("UPDATE patch_ticket_requests SET ticket_status=$2,closed=$3,last_error=NULL,updated_at=now() WHERE id=$1", [id, ticket.status?.name ?? "Unknown", ticket.closedFlag === true]);
+  await db.query("UPDATE patch_ticket_requests SET ticket_status=$2,closed=$3,ticket_priority_id=$4,ticket_priority_name=$5,last_error=NULL,updated_at=now() WHERE id=$1",
+    [id, ticket.status?.name ?? "Unknown", ticket.closedFlag === true, cwId(ticket.priority?.id) ? ticket.priority.id : null, typeof ticket.priority?.name === "string" ? ticket.priority.name : null]);
   await db.query("INSERT INTO patch_ticket_audit(request_id,actor,action) VALUES($1,$2,$3)", [id, actor, action === "reconcile" ? "ticket.reconciled" : "ticket.status.checked"]);
+  return readPatchTicket(id);
+}
+// Raises or lowers an existing ticket's priority directly in ConnectWise — a
+// human still picks the value (fetched live from ConnectWise, same as the
+// board/team pickers), this just applies it without leaving the app.
+export async function setPatchTicketPriority(id: string, priorityId: unknown, actor: string) {
+  requestId(id); await recoverInterruptedRequests();
+  if (!cwId(priorityId)) throw new DashboardError("Choose a valid ConnectWise priority.");
+  const db = await patchTicketDatabase(), row = (await db.query("SELECT ticket_id,cw_target FROM patch_ticket_requests WHERE id=$1", [id])).rows[0];
+  if (!row) throw new DashboardError("Patch request not found.", 404);
+  if (!row.ticket_id) throw new DashboardError("Create the ConnectWise ticket before changing its priority.");
+  const saved = await savedConnection();
+  if (saved.target !== row.cw_target) throw new DashboardError("Connect the original ConnectWise account to change this ticket's priority.");
+  const ticket = await cwRequest(saved.value, `/service/tickets/${row.ticket_id}`, "PATCH", [{ op: "replace", path: "priority/id", value: priorityId }]);
+  await db.query("UPDATE patch_ticket_requests SET ticket_priority_id=$2,ticket_priority_name=$3,last_error=NULL,updated_at=now() WHERE id=$1",
+    [id, cwId(ticket.priority?.id) ? ticket.priority.id : priorityId, typeof ticket.priority?.name === "string" ? ticket.priority.name : null]);
+  await db.query("INSERT INTO patch_ticket_audit(request_id,actor,action) VALUES($1,$2,'ticket.priority.changed')", [id, actor]);
   return readPatchTicket(id);
 }
 export { automatedTicketBody };

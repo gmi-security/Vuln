@@ -8,7 +8,7 @@ import type { PatchConsolidation, PatchGroup } from "./patch-request";
 import { automatedGroupTicketBody, type PatchGroupTicketSummary } from "./patch-group-ticket-types";
 import { cwId, cwRequest, findCWRequest, CWRequestError, parseRouting, ticketUrl, uploadPatchCsv, validateCWRouting, type ConnectWiseConnection, type CWRecord, type TicketRouting } from "./connectwise-client";
 
-const fields = "id,cves,remediation_id,tenant_id,state,review_state,reviewed_by,reviewed_at,prepared_by,created_by,prepared_at,updated_at,host_count,finding_count,labels,ticket_id,ticket_url,ticket_status,closed,attachment_state,last_error,packet->>'title' AS remediation_title,packet->>'source' AS source,packet->>'companyName' AS company_name,fix_verified_at,fix_verified_state,fix_still_open_count";
+const fields = "id,cves,remediation_id,tenant_id,state,review_state,reviewed_by,reviewed_at,prepared_by,created_by,prepared_at,updated_at,host_count,finding_count,labels,ticket_id,ticket_url,ticket_status,closed,attachment_state,last_error,packet->>'title' AS remediation_title,packet->>'source' AS source,packet->>'companyName' AS company_name,fix_verified_at,fix_verified_state,fix_still_open_count,ticket_priority_id,ticket_priority_name";
 function summary(row: CWRecord): PatchGroupTicketSummary {
   return { id: row.id, cves: row.cves, remediationId: row.remediation_id, remediationTitle: row.remediation_title, tenantId: row.tenant_id, source: row.source === "stored-findings" ? "stored-findings" : "crowdstrike", companyName: row.company_name ?? null, state: row.state,
     reviewState: row.review_state, reviewedBy: row.reviewed_by, reviewedAt: row.reviewed_at ? new Date(row.reviewed_at).toISOString() : null,
@@ -17,7 +17,8 @@ function summary(row: CWRecord): PatchGroupTicketSummary {
     ticketId: row.ticket_id, ticketUrl: row.ticket_url, ticketStatus: row.ticket_status, closed: row.closed,
     attachmentState: row.attachment_state, error: row.last_error,
     fixVerifiedAt: row.fix_verified_at ? new Date(row.fix_verified_at).toISOString() : null,
-    fixVerifiedState: row.fix_verified_state ?? null, fixStillOpenCount: row.fix_still_open_count ?? null };
+    fixVerifiedState: row.fix_verified_state ?? null, fixStillOpenCount: row.fix_still_open_count ?? null,
+    priorityId: row.ticket_priority_id ?? null, priorityName: row.ticket_priority_name ?? null };
 }
 function requestId(id: string) { if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(id)) throw new DashboardError("Patch group request not found.", 404); }
 
@@ -239,8 +240,26 @@ export async function groupTicketAction(id: string, action: unknown, actor: stri
   if (!ticket) throw new DashboardError("No matching ticket is visible yet. Check ConnectWise and try this check again; another ticket has not been sent.", 409);
   if (ticket.company?.id !== row.company_id || ticket.externalXRef !== `GMI-GRP-${id}` || (row.ticket_id && ticket.id !== row.ticket_id)) throw new DashboardError("The ticket no longer matches this request's company and reference. Review it in ConnectWise.", 409);
   if (!row.ticket_id) await recordTicket(id, ticket, saved.value);
-  await db.query("UPDATE patch_group_ticket_requests SET ticket_status=$2,closed=$3,last_error=NULL,updated_at=now() WHERE id=$1", [id, ticket.status?.name ?? "Unknown", ticket.closedFlag === true]);
+  await db.query("UPDATE patch_group_ticket_requests SET ticket_status=$2,closed=$3,ticket_priority_id=$4,ticket_priority_name=$5,last_error=NULL,updated_at=now() WHERE id=$1",
+    [id, ticket.status?.name ?? "Unknown", ticket.closedFlag === true, cwId(ticket.priority?.id) ? ticket.priority.id : null, typeof ticket.priority?.name === "string" ? ticket.priority.name : null]);
   await db.query("INSERT INTO patch_group_ticket_audit(request_id,actor,action) VALUES($1,$2,$3)", [id, actor, action === "reconcile" ? "ticket.reconciled" : "ticket.status.checked"]);
+  return readGroupTicket(id);
+}
+// Raises or lowers an existing ticket's priority directly in ConnectWise — a
+// human still picks the value (fetched live from ConnectWise, same as the
+// board/team pickers), this just applies it without leaving the app.
+export async function setGroupTicketPriority(id: string, priorityId: unknown, actor: string) {
+  requestId(id); await recoverInterruptedRequests();
+  if (!cwId(priorityId)) throw new DashboardError("Choose a valid ConnectWise priority.");
+  const db = await patchTicketDatabase(), row = (await db.query("SELECT ticket_id,cw_target FROM patch_group_ticket_requests WHERE id=$1", [id])).rows[0];
+  if (!row) throw new DashboardError("Patch group request not found.", 404);
+  if (!row.ticket_id) throw new DashboardError("Create the ConnectWise ticket before changing its priority.");
+  const saved = await savedConnection();
+  if (saved.target !== row.cw_target) throw new DashboardError("Connect the original ConnectWise account to change this ticket's priority.");
+  const ticket = await cwRequest(saved.value, `/service/tickets/${row.ticket_id}`, "PATCH", [{ op: "replace", path: "priority/id", value: priorityId }]);
+  await db.query("UPDATE patch_group_ticket_requests SET ticket_priority_id=$2,ticket_priority_name=$3,last_error=NULL,updated_at=now() WHERE id=$1",
+    [id, cwId(ticket.priority?.id) ? ticket.priority.id : priorityId, typeof ticket.priority?.name === "string" ? ticket.priority.name : null]);
+  await db.query("INSERT INTO patch_group_ticket_audit(request_id,actor,action) VALUES($1,$2,'ticket.priority.changed')", [id, actor]);
   return readGroupTicket(id);
 }
 export { automatedGroupTicketBody };

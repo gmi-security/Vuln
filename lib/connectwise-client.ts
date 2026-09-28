@@ -86,7 +86,7 @@ export function cwFailure(status: number, value: unknown, connection: ConnectWis
 
 // DNS is validated and pinned for every request; redirects are never followed.
 // Never automatically retry writes: a timeout may have happened after creation.
-export async function cwRequest(connection: ConnectWiseConnection, path: string, method: "GET" | "POST" = "GET", body?: unknown): Promise<any> {
+export async function cwRequest(connection: ConnectWiseConnection, path: string, method: "GET" | "POST" | "PATCH" = "GET", body?: unknown): Promise<any> {
   const endpoint = normalizeCWEndpoint(connection.endpoint);
   if (!path.startsWith("/") || path.startsWith("//") || path.includes("..")) throw new DashboardError("Invalid ConnectWise resource.");
   let resolved: { address: string; family: number };
@@ -108,18 +108,18 @@ export async function cwRequest(connection: ConnectWiseConnection, path: string,
         clientId: connection.clientId, Accept: "application/json", "Content-Type": contentType, "Content-Length": payload.byteLength } }, res => {
       let bytes = 0; const chunks: Buffer[] = [];
       res.on("data", (chunk: Buffer) => { bytes += chunk.length; if (bytes > 8 * 1024 * 1024) req.destroy(); else chunks.push(chunk); });
-      res.on("error", () => reject(new CWRequestError("ConnectWise response was interrupted. Check the saved request before retrying.", method === "POST")));
+      res.on("error", () => reject(new CWRequestError("ConnectWise response was interrupted. Check the saved request before retrying.", method !== "GET")));
       res.on("end", () => {
         let parsed: unknown;
         try { parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
-        catch { reject(new CWRequestError(`ConnectWise returned an unreadable response (HTTP ${res.statusCode}).`, method === "POST")); return; }
+        catch { reject(new CWRequestError(`ConnectWise returned an unreadable response (HTTP ${res.statusCode}).`, method !== "GET")); return; }
         if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) { reject(cwFailure(res.statusCode ?? 502, parsed, connection)); return; }
         resolve(parsed);
       });
     });
     const timer = setTimeout(() => req.destroy(), 15_000);
     req.on("close", () => clearTimeout(timer));
-    req.on("error", () => reject(new CWRequestError("ConnectWise could not be reached or timed out. Check the saved request before retrying.", method === "POST")));
+    req.on("error", () => reject(new CWRequestError("ConnectWise could not be reached or timed out. Check the saved request before retrying.", method !== "GET")));
     req.end(payload);
   });
 }

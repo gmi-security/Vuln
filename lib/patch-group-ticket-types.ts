@@ -12,6 +12,7 @@ export type PatchGroupTicketSummary = {
   ticketId: number | null; ticketUrl: string | null; ticketStatus: string | null; closed: boolean;
   attachmentState: "not_started" | "uploading" | "pending" | "attached"; error: string | null;
   fixVerifiedAt: string | null; fixVerifiedState: FixVerifiedState; fixStillOpenCount: number | null;
+  priorityId: number | null; priorityName: string | null;
 };
 export type PatchGroupTicketDetail = { request: PatchGroupTicketSummary; group: PatchGroup };
 export function automatedGroupTicketBody(group: Pick<PatchGroup, "ticketBody" | "label">): string {
