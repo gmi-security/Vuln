@@ -75,10 +75,12 @@ export default function PatchReviewQueue({ companyId }: { companyId: string }) {
       <thead><tr><th>Customer / source</th><th>Remediation</th><th>CVEs</th><th>Assets</th><th>Findings</th><th>State</th><th>Prepared</th><th>Details</th></tr></thead>
       <tbody>{rows.map(row => {
         const isNext = row.id === rows.find(r => r.reviewState === "pending")?.id;
+        const shownCves = row.cves.slice(0, 4);
+        const moreCves = row.cves.length - shownCves.length;
         return <tr key={row.id}>
-        <td>{row.source === "stored-findings" ? row.companyName : `CrowdStrike tenant ${row.tenantId}`}</td>
+        <td>{row.companyName ?? (row.source === "stored-findings" ? "Unassigned" : `CrowdStrike tenant ${row.tenantId}`)}</td>
         <td>{isNext && <span className="mr-2 rounded-full border border-[rgba(179,14,20,0.4)] bg-[rgba(179,14,20,0.12)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#ff8f96]">Next</span>}{row.remediationTitle || "Recommended remediation"}</td>
-        <td>{row.cves.join(", ")}</td><td>{row.hostCount.toLocaleString()}</td><td>{row.findingCount.toLocaleString()}</td>
+        <td title={row.cves.join(", ")}>{shownCves.join(", ")}{moreCves > 0 && ` +${moreCves} more`}</td><td>{row.hostCount.toLocaleString()}</td><td>{row.findingCount.toLocaleString()}</td>
         <td>{patchGroupTicketState(row)}</td><td>{new Date(row.preparedAt).toLocaleString()}</td>
         <td><button type="button" className={styles.button} disabled={Boolean(busy)} onClick={() => void open(row.id)}>{busy === row.id ? "Opening…" : "Review"}</button></td>
       </tr>;
@@ -87,7 +89,9 @@ export default function PatchReviewQueue({ companyId }: { companyId: string }) {
     {more && <button type="button" className={`${styles.button} mt-4`} disabled={Boolean(busy)} onClick={() => void load(page + 1)}>Load more</button>}
     {selected && <div className="mt-6 rounded-xl border border-zinc-700 bg-zinc-950 p-5">
       <div className="flex flex-wrap justify-between gap-3"><div><h3 className="text-lg font-medium text-white">{selected.group.title || "Recommended remediation"}</h3>
-        <p className="mt-1 text-sm text-zinc-400">{selected.group.deviceCount.toLocaleString()} assets · {selected.group.findingCount.toLocaleString()} findings · {selected.group.source === "stored-findings" ? `${selected.group.companyName} · ${selected.group.connectors?.join(", ")}` : `CrowdStrike tenant ${selected.group.tenantId}`}</p></div>
+        <p className="mt-1 text-sm text-zinc-400">{selected.group.deviceCount.toLocaleString()} assets · {selected.group.findingCount.toLocaleString()} findings · {
+          selected.group.companyName ?? (selected.group.source === "stored-findings" ? "Unassigned" : `CrowdStrike tenant ${selected.group.tenantId}`)
+        }{selected.group.source === "stored-findings" && selected.group.connectors?.length ? ` · ${selected.group.connectors.join(", ")}` : ""}</p></div>
         <button type="button" className={styles.button} onClick={() => setSelected(null)}>Close</button></div>
       <p className="mt-4 whitespace-pre-wrap text-sm text-zinc-200">{selected.group.action || "No remediation action was supplied by the source."}</p>
       <p className="mt-3 text-xs text-zinc-400">Resolves {selected.group.cves.join(", ")}</p>
