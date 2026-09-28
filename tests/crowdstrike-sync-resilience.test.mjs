@@ -21,7 +21,7 @@ await module.link(async (name) => {
   return new SyntheticModule(Object.keys(values), function () { for (const key of Object.keys(values)) this.setExport(key, values[key]); });
 });
 await module.evaluate();
-const { falconListAssets } = module.namespace;
+const { falconListAssets, spotlightListFindings } = module.namespace;
 
 async function withFetch(handler, work) {
   const original = globalThis.fetch, calls = [];
@@ -71,3 +71,65 @@ test("hydration never exceeds the concurrency cap even with hundreds of batches"
     },
   );
 }, { timeout: 20_000 });
+
+const atlas = { clientId: "a", clientSecret: "b", baseUrl: "https://x", customerName: "Atlas Healthcare", label: "Atlas Healthcare" };
+const json = (body) => new Response(JSON.stringify(body), { status: 200 });
+
+test("Atlas Spotlight collects past the current 5,000-page guard instead of returning a partial scan", async () => {
+  await withFetch((url) => {
+    if (url.includes("/oauth2/token")) return json({ access_token: "tok" });
+    if (url.includes("/spotlight/queries/vulnerabilities/v1")) {
+      const page = Number(new URL(url).searchParams.get("after") || 0);
+      return json({ resources: [`id-${page}`], meta: { pagination: { after: page < 5000 ? String(page + 1) : "" } } });
+    }
+    const ids = new URL(url).searchParams.getAll("ids");
+    return json({ resources: ids.map(id => ({ id, cve: { id: "CVE-2026-1234" }, host_info: { hostname: id } })) });
+  }, async () => {
+    const result = await spotlightListFindings(atlas);
+    assert.equal(result.findings.length, 5001);
+    assert.equal(result.findings.at(-1).hostname, "id-5000");
+    assert.equal(result.truncated, false);
+  });
+});
+
+test("Spotlight rejects a repeated continuation cursor rather than completing a partial scan", async () => {
+  await withFetch((url) => {
+    if (url.includes("/oauth2/token")) return json({ access_token: "tok" });
+    if (url.includes("/spotlight/queries/vulnerabilities/v1"))
+      return json({ resources: ["id-1"], meta: { pagination: { after: "same" } } });
+    return json({ resources: [{ id: "id-1", cve: { id: "CVE-2026-1234" }, host_info: { hostname: "host-1" } }] });
+  }, async () => {
+    await assert.rejects(() => spotlightListFindings(atlas), /cursor.*repeat/i);
+  });
+});
+
+test("Spotlight rejects an empty page that still offers a continuation cursor", async () => {
+  await withFetch((url) => {
+    if (url.includes("/oauth2/token")) return json({ access_token: "tok" });
+    return json({ resources: [], meta: { pagination: { after: "next" } } });
+  }, async () => {
+    await assert.rejects(() => spotlightListFindings(atlas), /empty.*cursor/i);
+  });
+});
+
+test("Spotlight rejects incomplete entity hydration instead of reporting a smaller complete count", async () => {
+  await withFetch((url) => {
+    if (url.includes("/oauth2/token")) return json({ access_token: "tok" });
+    if (url.includes("/spotlight/queries/vulnerabilities/v1"))
+      return json({ resources: ["id-1", "id-2"], meta: { pagination: { after: "" } } });
+    return json({ resources: [{ id: "id-1", cve: { id: "CVE-2026-1234" }, host_info: { hostname: "host-1" } }] });
+  }, async () => {
+    await assert.rejects(() => spotlightListFindings(atlas), /hydrat.*incomplete/i);
+  });
+});
+
+test("Spotlight rejects a missing continuation cursor when the API total says more findings exist", async () => {
+  await withFetch((url) => {
+    if (url.includes("/oauth2/token")) return json({ access_token: "tok" });
+    if (url.includes("/spotlight/queries/vulnerabilities/v1"))
+      return json({ resources: ["id-1"], meta: { pagination: { after: "", total: 2 } } });
+    return json({ resources: [{ id: "id-1", cve: { id: "CVE-2026-1234" }, host_info: { hostname: "host-1" } }] });
+  }, async () => {
+    await assert.rejects(() => spotlightListFindings(atlas), /pagination incomplete/i);
+  });
+});

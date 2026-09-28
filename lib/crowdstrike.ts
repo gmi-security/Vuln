@@ -222,50 +222,6 @@ export async function spotlightListFindings(config: FalconTenant): Promise<Spotl
   const token = await falconToken(config);
   const authHeader = { Authorization: `Bearer ${token}`, Accept: "application/json" };
 
-  // Cursor-based ID pagination — must be sequential (each page depends on prior cursor).
-  // The guard exists only to stop a genuinely infinite loop (a misbehaving
-  // API endlessly handing back an `after` cursor) — it must NOT be low
-  // enough to double as a real-world result cap. It used to be 200 (200 x
-  // 400/page = exactly 80,000), which silently truncated a large tenant's
-  // real vulnerability count at that suspiciously round number instead of
-  // ever reaching the natural end of data. 5,000 pages = 2,000,000
-  // findings, far past any real Spotlight estate, while still bounding
-  // worst-case runtime.
-  const ids: string[] = [];
-  let after = "";
-  let guard = 0;
-  let truncated = false;
-  while (guard < 5000) {
-    guard += 1;
-    const url = new URL(`${config.baseUrl}/spotlight/queries/vulnerabilities/v1`);
-    url.searchParams.set("filter", "status:'open',status:'reopen'");
-    url.searchParams.set("limit", "400");
-    if (after) url.searchParams.set("after", after);
-    const r = await timedFetch(url.toString(), { headers: authHeader, cache: "no-store" });
-    if (!r.ok) {
-      throw new Error(`Spotlight query ${r.status}: ${await r.text().catch(() => r.statusText)}`);
-    }
-    const j: any = await r.json();
-    const batch: string[] = j?.resources ?? [];
-    ids.push(...batch);
-    after = j?.meta?.pagination?.after ?? "";
-    if (!after || !batch.length) break;
-    if (guard >= 5000) {
-      truncated = true;
-      console.error(
-        `[crowdstrike] Spotlight pagination guard hit for ${config.label} (${config.customerName ?? "GMI"}) ` +
-          `after ${ids.length} findings — more data exists past this point but was not fetched. ` +
-          "This should not happen under normal use; investigate before trusting this tenant's finding count.",
-      );
-    }
-  }
-
-  if (!ids.length) return { findings: [], truncated };
-
-  // Build entity-fetch tasks for all 400-ID batches, then run them in parallel.
-  const batches: string[][] = [];
-  for (let i = 0; i < ids.length; i += 400) batches.push(ids.slice(i, i + 400));
-
   const parseResource = (v: any): SpotlightFinding => {
     const cve = String(v?.cve?.id ?? "").toUpperCase() || `CS-${v?.id ?? "vuln"}`;
     const sev: Severity =
@@ -288,18 +244,59 @@ export async function spotlightListFindings(config: FalconTenant): Promise<Spotl
     };
   };
 
-  const results = await runWithConcurrency(batches, 8, async (batch) => {
-    const r = await timedFetch(
-      `${config.baseUrl}/spotlight/entities/vulnerabilities/v2?ids=${batch.join("&ids=")}`,
-      { headers: authHeader, cache: "no-store" },
-    );
-    if (!r.ok) {
-      throw new Error(`Spotlight entities ${r.status}: ${await r.text().catch(() => r.statusText)}`);
-    }
+  const findings: SpotlightFinding[] = [];
+  const seenCursors = new Set<string>();
+  let after = "";
+  let idsReceived = 0;
+  let batches: string[][] = [];
+
+  // Keep at most eight query pages of IDs in flight for hydration. The
+  // complete findings array is still needed by the current in-memory store,
+  // but a second estate-sized ID array and hydration result array are not.
+  async function hydrateBatches() {
+    if (!batches.length) return;
+    const results = await runWithConcurrency(batches, 8, async (batch) => {
+      const url = new URL(`${config.baseUrl}/spotlight/entities/vulnerabilities/v2`);
+      for (const id of batch) url.searchParams.append("ids", id);
+      const r = await timedFetch(url.toString(), { headers: authHeader, cache: "no-store" });
+      if (!r.ok) throw new Error(`Spotlight entities ${r.status}: ${await r.text().catch(() => r.statusText)}`);
+      const j: any = await r.json();
+      if (!Array.isArray(j?.resources) || j.resources.length !== batch.length)
+        throw new Error(`Spotlight entity hydration incomplete for ${config.label}: expected ${batch.length} findings.`);
+      return j.resources.map(parseResource) as SpotlightFinding[];
+    });
+    for (const result of results) findings.push(...result);
+    batches = [];
+  }
+
+  // A cursor must make progress. A broken response is an error, not a
+  // successful but capped scan. There is deliberately no page-count limit.
+  while (true) {
+    const url = new URL(`${config.baseUrl}/spotlight/queries/vulnerabilities/v1`);
+    url.searchParams.set("filter", "status:'open',status:'reopen'");
+    url.searchParams.set("limit", "400");
+    if (after) url.searchParams.set("after", after);
+    const r = await timedFetch(url.toString(), { headers: authHeader, cache: "no-store" });
+    if (!r.ok) throw new Error(`Spotlight query ${r.status}: ${await r.text().catch(() => r.statusText)}`);
     const j: any = await r.json();
-    return (j?.resources ?? []).map(parseResource) as SpotlightFinding[];
-  });
-  return { findings: results.flat(), truncated };
+    if (!Array.isArray(j?.resources) || j.resources.some((id: unknown) => typeof id !== "string" || !id))
+      throw new Error(`Spotlight query returned invalid IDs for ${config.label}.`);
+    const batch = j.resources as string[];
+    const next = j?.meta?.pagination?.after ?? "";
+    idsReceived += batch.length;
+    if (!batch.length && next) throw new Error(`Spotlight query returned an empty page with a cursor for ${config.label}.`);
+    const total = j?.meta?.pagination?.total;
+    if (!next && typeof total === "number" && Number.isSafeInteger(total) && total > idsReceived)
+      throw new Error(`Spotlight pagination incomplete for ${config.label}: received ${idsReceived} of ${total} IDs.`);
+    if (batch.length) batches.push(batch);
+    if (batches.length === 8) await hydrateBatches();
+    if (!next) break;
+    if (seenCursors.has(next)) throw new Error(`Spotlight pagination cursor repeated for ${config.label}.`);
+    seenCursors.add(next);
+    after = next;
+  }
+  await hydrateBatches();
+  return { findings, truncated: false };
 }
 
 // --- Falcon host inventory ---------------------------------------------------
