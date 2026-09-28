@@ -50,11 +50,15 @@ test("parseConsolidationInput carries a verified customer's appCompanyId and nam
   assert.equal(result.companyName, "Atlas Healthcare Partners");
 });
 
-test("parseConsolidationInput rejects a demo company, an internal company, and an unknown id", () => {
+test("parseConsolidationInput rejects a demo company and an unknown id, but allows GMI's own internal estate", () => {
   assert.throws(() => patchRequest.parseConsolidationInput({ cves: ["CVE-2026-1000", "CVE-2026-1001"], appCompanyId: "CO-2" }), /not found/i);
-  assert.throws(() => patchRequest.parseConsolidationInput({ cves: ["CVE-2026-1000", "CVE-2026-1001"], appCompanyId: "CO-3" }), /not found/i);
   assert.throws(() => patchRequest.parseConsolidationInput({ cves: ["CVE-2026-1000", "CVE-2026-1001"], appCompanyId: "CO-999" }), /not found/i);
   assert.throws(() => patchRequest.parseConsolidationInput({ cves: ["CVE-2026-1000", "CVE-2026-1001"], appCompanyId: "not-a-company-id" }), /valid customer/i);
+  // GMI's own estate (kind "internal") is a legitimate consolidation target,
+  // not a customer being billed — it just isn't a demo company.
+  const result = patchRequest.parseConsolidationInput({ cves: ["CVE-2026-1000", "CVE-2026-1001"], appCompanyId: "CO-3" });
+  assert.equal(result.appCompanyId, "CO-3");
+  assert.equal(result.companyName, "GMI");
 });
 
 test("parseConsolidationInput without appCompanyId omits it entirely (backward compatible)", () => {

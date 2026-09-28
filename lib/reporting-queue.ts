@@ -12,7 +12,9 @@ export async function refreshReportingQueue(): Promise<void> {
   const last = (await db.query("SELECT completed_at,scope_version FROM reporting_queue_runs WHERE id=1")).rows[0];
   if (last?.scope_version === 2 && Date.now() - new Date(last.completed_at).getTime() < 60 * 60_000) return;
   await ensureHydrated();
-  const companies = listCompanies().filter(company => company.kind === "client" && !company.isDemo);
+  // Includes GMI's own internal estate, not just client companies — see the
+  // matching note in lib/reporting-store.ts.
+  const companies = listCompanies().filter(company => !company.isDemo);
   const active = await activeTicketedPairs();
   const byCompany = new Map<string, ReturnType<typeof listFindings>>();
   const eligible = new Set(companies.map(company => company.id));

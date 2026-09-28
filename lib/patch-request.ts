@@ -53,7 +53,7 @@ export function parseConsolidationInput(value: unknown): { source: "crowdstrike"
   if (appCompanyId !== undefined) {
     if (typeof appCompanyId !== "string" || !/^CO-\d+$/.test(appCompanyId)) throw new DashboardError("Choose a valid customer.");
     const company = getCompany(appCompanyId);
-    if (!company || company.kind !== "client" || company.isDemo) throw new DashboardError("Customer not found.", 404);
+    if (!company || company.isDemo) throw new DashboardError("Customer not found.", 404);
     return { source: "crowdstrike", cves: unique, ...(typeof tenantId === "string" ? { tenantId: tenantId.toLowerCase() } : {}), appCompanyId, companyName: company.name };
   }
   return { source: "crowdstrike", cves: unique, ...(typeof tenantId === "string" ? { tenantId: tenantId.toLowerCase() } : {}) };
