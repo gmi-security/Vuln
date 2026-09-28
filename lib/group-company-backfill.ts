@@ -35,3 +35,34 @@ export async function backfillAppCompanyId(): Promise<{ updated: number }> {
   }
   return { updated };
 }
+
+// Routing (lib/group-auto-create.ts's patch_customer_routing) is only ever
+// learned the moment a ticket is *confirmed created*, from that ticket's own
+// row -- and only if that row's packet already had appCompanyId at that
+// exact moment. Every Atlas ticket created before backfillAppCompanyId
+// existed had no appCompanyId on its packet when it was created, so none of
+// them ever taught the routing table anything, no matter how many of them
+// now sit in ConnectWise as real, confirmed, correctly-routed tickets. This
+// seeds it directly from the most recently created one instead of waiting
+// on a brand new ticket -- same trust boundary as the routing-learning step
+// itself (a human explicitly picked this routing when they created that
+// ticket), just applied retroactively. Never overwrites an existing row: a
+// human-established routing from a normal ticket creation always wins.
+export async function backfillCustomerRouting(): Promise<{ seeded: boolean }> {
+  const db = await patchTicketDatabase();
+  const existing = await db.query("SELECT 1 FROM patch_customer_routing WHERE app_company_id=$1", [ATLAS_REPORTING_COMPANY_ID]);
+  if (existing.rows.length) return { seeded: false };
+  const verifiedTenantIds = customerFalconTenantIds(ATLAS_REPORTING_COMPANY_ID, process.env.ATLAS_CROWDSTRIKE_TENANT_IDS);
+  if (!verifiedTenantIds.length) return { seeded: false };
+  const row = (await db.query(`
+    SELECT company_id, (routing->>'boardId')::int AS board_id, (routing->>'teamId')::int AS team_id
+    FROM patch_group_ticket_requests
+    WHERE state='created' AND ticket_id IS NOT NULL AND company_id IS NOT NULL AND routing->>'boardId' IS NOT NULL
+      AND lower(tenant_id) = ANY($1::text[])
+    ORDER BY updated_at DESC LIMIT 1`, [verifiedTenantIds])).rows[0] as { company_id: number; board_id: number; team_id: number | null } | undefined;
+  if (!row) return { seeded: false };
+  await db.query(`INSERT INTO patch_customer_routing(app_company_id,company_id,board_id,team_id,updated_at,updated_by)
+    VALUES($1,$2,$3,$4,now(),$5) ON CONFLICT(app_company_id) DO NOTHING`,
+    [ATLAS_REPORTING_COMPANY_ID, row.company_id, row.board_id, row.team_id, "backfill-from-existing-ticket"]);
+  return { seeded: true };
+}

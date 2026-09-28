@@ -99,3 +99,62 @@ test("no rows missing appCompanyId means no writes", async () => {
     assert.equal(db.calls.length, 1); // only the initial SELECT
   } finally { delete process.env.ATLAS_CROWDSTRIKE_TENANT_IDS; }
 });
+
+// backfillCustomerRouting exercises three distinct queries in sequence
+// (existence check, existing-ticket lookup, seed insert), so it needs its
+// own fake that dispatches by which one is running rather than one fixed
+// canned SELECT response.
+function fakeRoutingDb({ existingRouting = [], matchingTicket = [] }) {
+  const calls = [];
+  return {
+    calls,
+    query: async (sql, params) => {
+      calls.push({ sql, params });
+      if (sql.includes("FROM patch_customer_routing")) return { rows: existingRouting };
+      if (sql.includes("FROM patch_group_ticket_requests")) return { rows: matchingTicket };
+      return { rows: [], rowCount: 1 }; // INSERT
+    },
+  };
+}
+
+test("seeds routing from the most recently created matching ticket when nothing is known yet", async () => {
+  process.env.ATLAS_CROWDSTRIKE_TENANT_IDS = ATLAS_CID;
+  try {
+    const db = fakeRoutingDb({ existingRouting: [], matchingTicket: [{ company_id: 55, board_id: 9, team_id: null }] });
+    const backfill = await loadBackfill({ db });
+    const result = await backfill.backfillCustomerRouting();
+    assert.deepEqual(result, { seeded: true });
+    const insert = db.calls.find((c) => c.sql.trim().startsWith("INSERT"));
+    assert.deepEqual(insert.params, ["CO-147284", 55, 9, null, "backfill-from-existing-ticket"]);
+  } finally { delete process.env.ATLAS_CROWDSTRIKE_TENANT_IDS; }
+});
+
+test("never overwrites a routing that's already known", async () => {
+  process.env.ATLAS_CROWDSTRIKE_TENANT_IDS = ATLAS_CID;
+  try {
+    const db = fakeRoutingDb({ existingRouting: [{ x: 1 }], matchingTicket: [{ company_id: 55, board_id: 9, team_id: null }] });
+    const backfill = await loadBackfill({ db });
+    const result = await backfill.backfillCustomerRouting();
+    assert.deepEqual(result, { seeded: false });
+    assert.equal(db.calls.length, 1); // only the existence check -- never even looked for a ticket to seed from
+  } finally { delete process.env.ATLAS_CROWDSTRIKE_TENANT_IDS; }
+});
+
+test("no ATLAS_CROWDSTRIKE_TENANT_IDS configured means nothing seeded", async () => {
+  delete process.env.ATLAS_CROWDSTRIKE_TENANT_IDS;
+  const db = fakeRoutingDb({ existingRouting: [], matchingTicket: [{ company_id: 55, board_id: 9, team_id: null }] });
+  const backfill = await loadBackfill({ db });
+  const result = await backfill.backfillCustomerRouting();
+  assert.deepEqual(result, { seeded: false });
+  assert.equal(db.calls.filter((c) => c.sql.trim().startsWith("INSERT")).length, 0);
+});
+
+test("no matching created ticket means nothing seeded", async () => {
+  process.env.ATLAS_CROWDSTRIKE_TENANT_IDS = ATLAS_CID;
+  try {
+    const db = fakeRoutingDb({ existingRouting: [], matchingTicket: [] });
+    const backfill = await loadBackfill({ db });
+    const result = await backfill.backfillCustomerRouting();
+    assert.deepEqual(result, { seeded: false });
+  } finally { delete process.env.ATLAS_CROWDSTRIKE_TENANT_IDS; }
+});

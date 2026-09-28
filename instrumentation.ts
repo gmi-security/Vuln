@@ -27,16 +27,18 @@ export async function register(): Promise<void> {
   const { startGroupDraftDedupScheduler } = await import("@/lib/group-draft-dedup");
   startGroupDraftDedupScheduler();
   // Backfills worst_severity and appCompanyId on drafts prepared before those
-  // existed / before ATLAS_CROWDSTRIKE_TENANT_IDS was configured, then starts
-  // auto-create -- sequenced so its first pass (which filters on both) already
+  // existed / before ATLAS_CROWDSTRIKE_TENANT_IDS was configured, and seeds
+  // patch_customer_routing from an already-created ticket if nothing taught
+  // it yet, then starts auto-create -- sequenced so its first pass already
   // sees the real values for the existing backlog, not just newly-prepared
   // drafts. Backfill errors never block the scheduler from starting;
   // register() itself is never blocked either.
   const { backfillWorstSeverity } = await import("@/lib/group-severity-backfill");
-  const { backfillAppCompanyId } = await import("@/lib/group-company-backfill");
+  const { backfillAppCompanyId, backfillCustomerRouting } = await import("@/lib/group-company-backfill");
   const backfill = Promise.all([
     backfillWorstSeverity().catch((err) => { console.error("[instrumentation] worst_severity backfill failed:", err); }),
     backfillAppCompanyId().catch((err) => { console.error("[instrumentation] appCompanyId backfill failed:", err); }),
+    backfillCustomerRouting().catch((err) => { console.error("[instrumentation] customer routing backfill failed:", err); }),
   ]);
   const { startGroupAutoCreateScheduler } = await import("@/lib/group-auto-create");
   void backfill.then(() => startGroupAutoCreateScheduler());
