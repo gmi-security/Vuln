@@ -225,6 +225,7 @@ function normalizeFalconHost(raw: any): FalconAsset {
 // --- Spotlight vulnerability findings ----------------------------------------
 
 export type SpotlightFinding = {
+  id: string;
   cve: string;
   hostname: string;
   localIp: string;
@@ -249,18 +250,21 @@ const EXPRT_SEV: Record<string, Severity> = {
 
 export type SpotlightListResult = { findings: SpotlightFinding[]; truncated: boolean };
 
-// CrowdStrike Spotlight API: query open vuln ids, hydrate in batches of 400.
-// Requires scope: spotlight-vulnerabilities:read.
-export async function spotlightListFindings(config: FalconTenant): Promise<SpotlightListResult> {
+// CrowdStrike Spotlight API: query open vuln ids and yield bounded hydrated
+// batches. Requires scope: spotlight-vulnerabilities:read.
+export async function* spotlightFindingBatches(config: FalconTenant): AsyncGenerator<SpotlightFinding[]> {
   const token = await falconToken(config);
   const authHeader = { Authorization: `Bearer ${token}`, Accept: "application/json" };
 
   const parseResource = (v: any): SpotlightFinding => {
+    const id = String(v?.id ?? "").trim();
+    if (!id) throw new Error(`Spotlight source vulnerability ID is missing for ${config.label}.`);
     const cve = String(v?.cve?.id ?? "").toUpperCase() || `CS-${v?.id ?? "vuln"}`;
     const sev: Severity =
       EXPRT_SEV[String(v?.cve?.exprt_rating ?? v?.severity ?? "").toUpperCase()] ?? "Medium";
     const cvss = Number(v?.cve?.cvss_v3 ?? v?.cve?.cvss_v2 ?? 5.0);
     return {
+      id,
       cve,
       hostname: String(v?.host_info?.hostname ?? ""),
       localIp: String(v?.host_info?.local_ip ?? ""),
@@ -277,17 +281,14 @@ export async function spotlightListFindings(config: FalconTenant): Promise<Spotl
     };
   };
 
-  const findings: SpotlightFinding[] = [];
   const seenCursors = new Set<string>();
   let after = "";
   let idsReceived = 0;
   let batches: string[][] = [];
 
-  // Keep at most eight query pages of IDs in flight for hydration. The
-  // complete findings array is still needed by the current in-memory store,
-  // but a second estate-sized ID array and hydration result array are not.
-  async function hydrateBatches() {
-    if (!batches.length) return;
+  // Keep at most eight query pages of IDs in flight for hydration.
+  async function hydrateBatches(): Promise<SpotlightFinding[]> {
+    if (!batches.length) return [];
     const results = await runWithConcurrency(batches, 8, async (batch) => {
       const url = new URL(`${config.baseUrl}/spotlight/entities/vulnerabilities/v2`);
       for (const id of batch) url.searchParams.append("ids", id);
@@ -298,8 +299,8 @@ export async function spotlightListFindings(config: FalconTenant): Promise<Spotl
         throw new Error(`Spotlight entity hydration incomplete for ${config.label}: expected ${batch.length} findings.`);
       return j.resources.map(parseResource) as SpotlightFinding[];
     });
-    for (const result of results) findings.push(...result);
     batches = [];
+    return results.flat();
   }
 
   // A cursor must make progress. A broken response is an error, not a
@@ -322,13 +323,20 @@ export async function spotlightListFindings(config: FalconTenant): Promise<Spotl
     if (!next && typeof total === "number" && Number.isSafeInteger(total) && total > idsReceived)
       throw new Error(`Spotlight pagination incomplete for ${config.label}: received ${idsReceived} of ${total} IDs.`);
     if (batch.length) batches.push(batch);
-    if (batches.length === 8) await hydrateBatches();
+    if (batches.length === 8) yield await hydrateBatches();
     if (!next) break;
     if (seenCursors.has(next)) throw new Error(`Spotlight pagination cursor repeated for ${config.label}.`);
     seenCursors.add(next);
     after = next;
   }
-  await hydrateBatches();
+  if (batches.length) yield await hydrateBatches();
+}
+
+// Compatibility collector for existing callers; large imports must consume
+// spotlightFindingBatches directly instead of materializing the whole tenant.
+export async function spotlightListFindings(config: FalconTenant): Promise<SpotlightListResult> {
+  const findings: SpotlightFinding[] = [];
+  for await (const batch of spotlightFindingBatches(config)) findings.push(...batch);
   return { findings, truncated: false };
 }
 

@@ -21,7 +21,7 @@ await module.link(async (name) => {
   return new SyntheticModule(Object.keys(values), function () { for (const key of Object.keys(values)) this.setExport(key, values[key]); });
 });
 await module.evaluate();
-const { falconListAssets, spotlightListFindings, falconProbeCounts } = module.namespace;
+const { falconListAssets, spotlightListFindings, spotlightFindingBatches, falconProbeCounts } = module.namespace;
 
 async function withFetch(handler, work) {
   const original = globalThis.fetch, calls = [];
@@ -89,6 +89,53 @@ test("debug count probe reads pagination totals without downloading assets or vu
     assert.equal(counts.spotlightFindingsAvailable, 120345);
     assert.equal(calls.length, 3, "token plus one query for each count");
     assert.ok(calls.every(({ url }) => !url.includes("/entities/")));
+  });
+});
+
+test("Spotlight streams more than 80,000 source records in bounded batches without merging a shared host and CVE", async () => {
+  await withFetch((url) => {
+    if (url.includes("/oauth2/token")) return json({ access_token: "tok" });
+    const request = new URL(url);
+    if (request.pathname.includes("/spotlight/queries/vulnerabilities/v1")) {
+      const page = Number(request.searchParams.get("after") || 0);
+      const ids = Array.from({ length: 400 }, (_, index) => `source-${page * 400 + index}`);
+      return json({ resources: ids, meta: { pagination: { after: page < 200 ? String(page + 1) : "", total: 80400 } } });
+    }
+    if (request.pathname.includes("/spotlight/entities/vulnerabilities/v2")) {
+      const ids = request.searchParams.getAll("ids");
+      return json({ resources: ids.map(id => ({
+        id, cve: { id: "CVE-2026-1234", description: "Issue" },
+        host_info: { hostname: "atlas-host", local_ip: "10.0.0.1", external_ip: "", os_version: "Windows" },
+        remediation: { entities: [{ action: "Apply patch" }] }, status: "open", severity: "HIGH",
+      })) });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  }, async () => {
+    let count = 0;
+    let batches = 0;
+    const firstIds = [];
+    for await (const batch of spotlightFindingBatches(atlas)) {
+      assert.ok(batch.length > 0 && batch.length <= 3200);
+      if (batches === 0) firstIds.push(batch[0].id, batch[1].id);
+      count += batch.length;
+      batches++;
+    }
+    assert.equal(count, 80400);
+    assert.deepEqual(firstIds, ["source-0", "source-1"]);
+    assert.ok(batches > 1);
+  });
+});
+
+test("Spotlight rejects a hydrated record without its source vulnerability ID", async () => {
+  await withFetch((url) => {
+    if (url.includes("/oauth2/token")) return json({ access_token: "tok" });
+    if (url.includes("/spotlight/queries/vulnerabilities/v1"))
+      return json({ resources: ["source-1"], meta: { pagination: { after: "", total: 1 } } });
+    return json({ resources: [{ cve: { id: "CVE-2026-1234" }, host_info: { hostname: "atlas-host" } }] });
+  }, async () => {
+    await assert.rejects(async () => {
+      for await (const _batch of spotlightFindingBatches(atlas)) { /* consume */ }
+    }, /source.*id/i);
   });
 });
 
