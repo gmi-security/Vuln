@@ -20,4 +20,6 @@ export async function register(): Promise<void> {
   });
   const { startReportingQueueScheduler } = await import("@/lib/reporting-queue");
   startReportingQueueScheduler();
+  const { startTicketStatusSyncScheduler } = await import("@/lib/ticket-status-sync");
+  startTicketStatusSyncScheduler();
 }
