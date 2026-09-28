@@ -3,6 +3,7 @@ import { createGroupTicket, readGroupTicket, reviewGroupTicket } from "./patch-g
 import { runWithConcurrency } from "./ticket-status-sync";
 import { elasticVulnEnabled } from "./elastic-vuln-server";
 import { DashboardError } from "./elastic-dashboard";
+import { ATLAS_REPORTING_COMPANY_ID } from "./reporting-direct-sources";
 
 // Critical/High severity remediations skip the human review queue and go
 // straight to a ConnectWise ticket -- always through the consolidated group
@@ -13,6 +14,9 @@ import { DashboardError } from "./elastic-dashboard";
 // store.ts). No mapping yet means no guess -- the draft is left for a human,
 // same as before. Low/Medium/Low-confidence severity is never touched here.
 const ACTOR = "auto-create";
+// Pilot scope: only this customer, by explicit request, while auto-create is
+// validated. Expand PILOT_COMPANY_IDS once it's proven out.
+const PILOT_COMPANY_IDS = new Set([ATLAS_REPORTING_COMPANY_ID]);
 
 type Counts = { checked: number; created: number; errors: number };
 
@@ -40,7 +44,8 @@ export async function autoCreateHighSeverityTickets(): Promise<Counts> {
   const routingByCompany = new Map(routings.map((r) => [r.app_company_id, r]));
   let created = 0, errors = 0;
   await runWithConcurrency(rows, 3, async (row) => {
-    const routing = row.app_company_id ? routingByCompany.get(row.app_company_id) : undefined;
+    if (!row.app_company_id || !PILOT_COMPANY_IDS.has(row.app_company_id)) return; // outside the pilot scope
+    const routing = routingByCompany.get(row.app_company_id);
     if (!routing) return; // no known-good routing for this customer yet -- leave it for a human
     try {
       await reviewGroupTicket(row.id, "approve", ACTOR);

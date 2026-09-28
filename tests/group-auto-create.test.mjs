@@ -5,9 +5,10 @@
 // reviewGroupTicket/readGroupTicket/createGroupTicket so this runs without a
 // live Postgres or ConnectWise account): a Critical/High draft for a
 // customer with a known-good routing gets auto-approved and auto-created; a
-// draft for a customer with no routing yet is left alone, never guessed; one
-// draft failing does not block the rest; and no eligible drafts or no
-// ConnectWise connection means no calls at all.
+// draft for a customer with no routing yet is left alone, never guessed; a
+// draft for a customer outside the pilot scope is left alone even with a
+// known routing; one draft failing does not block the rest; and no eligible
+// drafts or no ConnectWise connection means no calls at all.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { resolve, dirname } from "node:path";
@@ -70,8 +71,8 @@ async function loadAutoCreate({ db, savedConnection, reviewGroupTicket, readGrou
 
 test("a Critical draft with a known routing is auto-approved and auto-created", async () => {
   const db = fakeDb({
-    eligible: [{ id: "a", app_company_id: "CO-1" }],
-    routings: [{ app_company_id: "CO-1", company_id: 55, board_id: 9, team_id: null }],
+    eligible: [{ id: "a", app_company_id: "CO-147284" }],
+    routings: [{ app_company_id: "CO-147284", company_id: 55, board_id: 9, team_id: null }],
   });
   const calls = { review: [], read: [], create: [] };
   const autoCreate = await loadAutoCreate({
@@ -87,7 +88,22 @@ test("a Critical draft with a known routing is auto-approved and auto-created", 
 });
 
 test("a draft for a customer with no known routing yet is left alone -- never guessed", async () => {
-  const db = fakeDb({ eligible: [{ id: "a", app_company_id: "CO-1" }], routings: [] });
+  const db = fakeDb({ eligible: [{ id: "a", app_company_id: "CO-147284" }], routings: [] });
+  let called = false;
+  const autoCreate = await loadAutoCreate({
+    db,
+    reviewGroupTicket: async () => { called = true; },
+  });
+  const result = await autoCreate.autoCreateHighSeverityTickets();
+  assert.deepEqual(result, { checked: 1, created: 0, errors: 0 });
+  assert.equal(called, false);
+});
+
+test("a draft for a customer outside the pilot scope is left alone even with a known routing", async () => {
+  const db = fakeDb({
+    eligible: [{ id: "a", app_company_id: "CO-999999" }],
+    routings: [{ app_company_id: "CO-999999", company_id: 55, board_id: 9, team_id: null }],
+  });
   let called = false;
   const autoCreate = await loadAutoCreate({
     db,
@@ -100,8 +116,8 @@ test("a draft for a customer with no known routing yet is left alone -- never gu
 
 test("one draft failing does not block the others", async () => {
   const db = fakeDb({
-    eligible: [{ id: "a", app_company_id: "CO-1" }, { id: "b", app_company_id: "CO-1" }],
-    routings: [{ app_company_id: "CO-1", company_id: 55, board_id: 9, team_id: null }],
+    eligible: [{ id: "a", app_company_id: "CO-147284" }, { id: "b", app_company_id: "CO-147284" }],
+    routings: [{ app_company_id: "CO-147284", company_id: 55, board_id: 9, team_id: null }],
   });
   const autoCreate = await loadAutoCreate({
     db,

@@ -26,6 +26,15 @@ export async function register(): Promise<void> {
   startTicketSlaEscalationScheduler();
   const { startGroupDraftDedupScheduler } = await import("@/lib/group-draft-dedup");
   startGroupDraftDedupScheduler();
+  // Backfills worst_severity on drafts prepared before that column existed,
+  // then starts auto-create -- sequenced so its first pass (which filters on
+  // worst_severity) already sees the real severity for the existing backlog,
+  // not just newly-prepared drafts. Backfill errors never block the
+  // scheduler from starting; register() itself is never blocked either.
+  const { backfillWorstSeverity } = await import("@/lib/group-severity-backfill");
+  const backfill = backfillWorstSeverity().catch((err) => {
+    console.error("[instrumentation] worst_severity backfill failed:", err);
+  });
   const { startGroupAutoCreateScheduler } = await import("@/lib/group-auto-create");
-  startGroupAutoCreateScheduler();
+  void backfill.then(() => startGroupAutoCreateScheduler());
 }
