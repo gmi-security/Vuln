@@ -35,10 +35,14 @@ export async function register(): Promise<void> {
   // register() itself is never blocked either.
   const { backfillWorstSeverity } = await import("@/lib/group-severity-backfill");
   const { backfillAppCompanyId, backfillCustomerRouting } = await import("@/lib/group-company-backfill");
+  const { backfillTicketPriority } = await import("@/lib/group-priority-backfill");
   const backfill = Promise.all([
     backfillWorstSeverity().catch((err) => { console.error("[instrumentation] worst_severity backfill failed:", err); }),
     backfillAppCompanyId().catch((err) => { console.error("[instrumentation] appCompanyId backfill failed:", err); }),
     backfillCustomerRouting().catch((err) => { console.error("[instrumentation] customer routing backfill failed:", err); }),
+    // One-time catch-up for tickets created before auto-create started
+    // setting priority at creation time -- see group-priority-backfill.ts.
+    backfillTicketPriority().catch((err) => { console.error("[instrumentation] ticket priority backfill failed:", err); }),
   ]);
   const { startGroupAutoCreateScheduler } = await import("@/lib/group-auto-create");
   void backfill.then(() => startGroupAutoCreateScheduler());

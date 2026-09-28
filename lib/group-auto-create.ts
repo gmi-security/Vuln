@@ -5,6 +5,7 @@ import { elasticVulnEnabled } from "./elastic-vuln-server";
 import { DashboardError } from "./elastic-dashboard";
 import { ATLAS_REPORTING_COMPANY_ID } from "./reporting-direct-sources";
 import { cwPrioritiesBySort } from "./connectwise-client";
+import { targetPriorityFor } from "./group-ticket-priority";
 
 // Critical/High severity remediations skip the human review queue and go
 // straight to a ConnectWise ticket -- always through the consolidated group
@@ -81,8 +82,8 @@ export async function autoCreateHighSeverityTickets(): Promise<Counts> {
       // days for SLA escalation to notice. Critical -> the top priority;
       // High -> the next one down. Never lets a priority-setting problem
       // undo an otherwise-successful ticket creation.
-      if (priorities.length) {
-        const target = row.worst_severity === "Critical" ? priorities[0] : priorities[Math.min(1, priorities.length - 1)];
+      const target = targetPriorityFor(row.worst_severity, priorities);
+      if (target) {
         const ticketId = await waitForTicketId(row.id);
         if (ticketId) await setGroupTicketPriority(row.id, target.id, ACTOR).catch(() => {});
       }
