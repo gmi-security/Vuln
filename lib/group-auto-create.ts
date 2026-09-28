@@ -1,9 +1,10 @@
 import { patchTicketDatabase, savedConnection } from "./patch-ticket-store";
-import { createGroupTicket, readGroupTicket, reviewGroupTicket } from "./patch-group-ticket-store";
+import { createGroupTicket, readGroupTicket, reviewGroupTicket, setGroupTicketPriority } from "./patch-group-ticket-store";
 import { runWithConcurrency } from "./ticket-status-sync";
 import { elasticVulnEnabled } from "./elastic-vuln-server";
 import { DashboardError } from "./elastic-dashboard";
 import { ATLAS_REPORTING_COMPANY_ID } from "./reporting-direct-sources";
+import { cwPrioritiesBySort } from "./connectwise-client";
 
 // Critical/High severity remediations skip the human review queue and go
 // straight to a ConnectWise ticket -- always through the consolidated group
@@ -20,6 +21,21 @@ const PILOT_COMPANY_IDS = new Set([ATLAS_REPORTING_COMPANY_ID]);
 
 type Counts = { checked: number; created: number; errors: number };
 
+// Ticket creation is async (runCreation runs in the background); this polls
+// the draft's own row for a confirmed ticket_id before setting priority,
+// rather than guessing at timing. Gives up (not an error -- the ticket
+// itself may still be fine) if it never lands within the window.
+async function waitForTicketId(id: string, timeoutMs = 60_000): Promise<number | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const { request } = await readGroupTicket(id);
+    if (request.ticketId) return request.ticketId;
+    if (!["prepared", "creating"].includes(request.state)) return null; // failed/uncertain -- stop waiting
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  return null;
+}
+
 export async function autoCreateHighSeverityTickets(): Promise<Counts> {
   const saved = await savedConnection().catch(() => null);
   if (!saved) return { checked: 0, created: 0, errors: 0 };
@@ -30,18 +46,23 @@ export async function autoCreateHighSeverityTickets(): Promise<Counts> {
   // older duplicate at the same moment this auto-creates it.
   const rows = (await db.query(`
     WITH ranked AS (
-      SELECT id, packet->>'appCompanyId' AS app_company_id, ROW_NUMBER() OVER (
+      SELECT id, packet->>'appCompanyId' AS app_company_id, worst_severity, ROW_NUMBER() OVER (
         PARTITION BY remediation_id, tenant_id, packet->>'appCompanyId' ORDER BY prepared_at DESC
       ) AS rn
       FROM patch_group_ticket_requests
       WHERE state='prepared' AND review_state='pending' AND worst_severity IN ('Critical','High')
     )
-    SELECT id, app_company_id FROM ranked WHERE rn = 1
-  `)).rows as { id: string; app_company_id: string | null }[];
+    SELECT id, app_company_id, worst_severity FROM ranked WHERE rn = 1
+  `)).rows as { id: string; app_company_id: string | null; worst_severity: "Critical" | "High" }[];
   if (!rows.length) return { checked: 0, created: 0, errors: 0 };
   const routings = (await db.query("SELECT app_company_id, company_id, board_id, team_id FROM patch_customer_routing"))
     .rows as { app_company_id: string; company_id: number; board_id: number; team_id: number | null }[];
   const routingByCompany = new Map(routings.map((r) => [r.app_company_id, r]));
+  // Most-urgent-first; fetched once and reused for every ticket this pass.
+  // Missing/unreachable never blocks ticket creation -- it just means the
+  // priority stays whatever the board's default is, same as before this
+  // existed, rather than failing the whole thing.
+  const priorities = await cwPrioritiesBySort(saved.value).catch(() => []);
   let created = 0, errors = 0;
   await runWithConcurrency(rows, 3, async (row) => {
     if (!row.app_company_id || !PILOT_COMPANY_IDS.has(row.app_company_id)) return; // outside the pilot scope
@@ -56,6 +77,15 @@ export async function autoCreateHighSeverityTickets(): Promise<Counts> {
         title: read.group.ticketTitle, body: read.group.ticketBody, connectionRevision: saved.revision,
       }, ACTOR);
       created++;
+      // The ticket should assert its own severity immediately, not wait
+      // days for SLA escalation to notice. Critical -> the top priority;
+      // High -> the next one down. Never lets a priority-setting problem
+      // undo an otherwise-successful ticket creation.
+      if (priorities.length) {
+        const target = row.worst_severity === "Critical" ? priorities[0] : priorities[Math.min(1, priorities.length - 1)];
+        const ticketId = await waitForTicketId(row.id);
+        if (ticketId) await setGroupTicketPriority(row.id, target.id, ACTOR).catch(() => {});
+      }
     } catch {
       errors++; // one draft failing (routing went stale, connection changed) must not block the rest
     }

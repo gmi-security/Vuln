@@ -2,13 +2,18 @@
 //
 // Exercises autoCreateHighSeverityTickets's orchestration in isolation (a
 // fake db.query for the eligible-drafts/routing lookups, and mocked
-// reviewGroupTicket/readGroupTicket/createGroupTicket so this runs without a
-// live Postgres or ConnectWise account): a Critical/High draft for a
-// customer with a known-good routing gets auto-approved and auto-created; a
-// draft for a customer with no routing yet is left alone, never guessed; a
-// draft for a customer outside the pilot scope is left alone even with a
-// known routing; one draft failing does not block the rest; and no eligible
-// drafts or no ConnectWise connection means no calls at all.
+// reviewGroupTicket/readGroupTicket/createGroupTicket/setGroupTicketPriority/
+// cwPrioritiesBySort so this runs without a live Postgres or ConnectWise
+// account): a Critical/High draft for a customer with a known-good routing
+// gets auto-approved and auto-created; a draft for a customer with no
+// routing yet is left alone, never guessed; a draft for a customer outside
+// the pilot scope is left alone even with a known routing; one draft failing
+// does not block the rest; no eligible drafts or no ConnectWise connection
+// means no calls at all; and a successfully created ticket gets its
+// ConnectWise priority set to match its severity (Critical -> the top
+// priority, High -> the next one down), but never at the cost of the create
+// count -- missing priorities or a ticket id that never confirms just skips
+// that step silently.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { resolve, dirname } from "node:path";
@@ -56,16 +61,18 @@ function fakeDb({ eligible, routings }) {
   };
 }
 
-async function loadAutoCreate({ db, savedConnection, reviewGroupTicket, readGroupTicket, createGroupTicket }) {
+async function loadAutoCreate({ db, savedConnection, reviewGroupTicket, readGroupTicket, createGroupTicket, setGroupTicketPriority, cwPrioritiesBySort }) {
   return loader({
     "./patch-ticket-store": { patchTicketDatabase: async () => db, savedConnection: savedConnection ?? (async () => ({ revision: 7 })) },
     "./patch-group-ticket-store": {
       reviewGroupTicket: reviewGroupTicket ?? (async () => { throw new Error("not expected to be called"); }),
       readGroupTicket: readGroupTicket ?? (async () => { throw new Error("not expected to be called"); }),
       createGroupTicket: createGroupTicket ?? (async () => { throw new Error("not expected to be called"); }),
+      setGroupTicketPriority: setGroupTicketPriority ?? (async () => { throw new Error("not expected to be called"); }),
     },
     "./ticket-status-sync": { runWithConcurrency },
     "./elastic-vuln-server": { elasticVulnEnabled: () => false },
+    "./connectwise-client": { cwPrioritiesBySort: cwPrioritiesBySort ?? (async () => []) },
   })("lib/group-auto-create.ts");
 }
 
@@ -142,4 +149,108 @@ test("no ConnectWise connection configured means no db calls at all", async () =
   const result = await autoCreate.autoCreateHighSeverityTickets();
   assert.deepEqual(result, { checked: 0, created: 0, errors: 0 });
   assert.equal(db.calls.length, 0);
+});
+
+// readGroupTicket is reused for two different purposes here: once (with
+// withPacket=true) to read the packet's title/body before creation, and then
+// repeatedly (no second arg) by waitForTicketId polling for a confirmed
+// ticket id -- mirrors the real function's two call shapes.
+function readGroupTicketDualMode({ ticketId, state }) {
+  return async (id, withPacket) =>
+    withPacket ? { group: { ticketTitle: "T", ticketBody: "B" } } : { request: { ticketId, state } };
+}
+
+test("a Critical ticket gets ConnectWise's top priority set immediately after creation", async () => {
+  const db = fakeDb({
+    eligible: [{ id: "a", app_company_id: "CO-147284", worst_severity: "Critical" }],
+    routings: [{ app_company_id: "CO-147284", company_id: 55, board_id: 9, team_id: null }],
+  });
+  const priorityCalls = [];
+  const autoCreate = await loadAutoCreate({
+    db,
+    reviewGroupTicket: async () => {},
+    readGroupTicket: readGroupTicketDualMode({ ticketId: 999, state: "created" }),
+    createGroupTicket: async () => {},
+    setGroupTicketPriority: async (id, priorityId, actor) => { priorityCalls.push({ id, priorityId, actor }); },
+    cwPrioritiesBySort: async () => [{ id: 1, name: "Urgent" }, { id: 2, name: "High" }, { id: 3, name: "Medium" }],
+  });
+  const result = await autoCreate.autoCreateHighSeverityTickets();
+  assert.deepEqual(result, { checked: 1, created: 1, errors: 0 });
+  assert.deepEqual(priorityCalls, [{ id: "a", priorityId: 1, actor: "auto-create" }]);
+});
+
+test("a High ticket gets the next priority down, not the top one", async () => {
+  const db = fakeDb({
+    eligible: [{ id: "a", app_company_id: "CO-147284", worst_severity: "High" }],
+    routings: [{ app_company_id: "CO-147284", company_id: 55, board_id: 9, team_id: null }],
+  });
+  const priorityCalls = [];
+  const autoCreate = await loadAutoCreate({
+    db,
+    reviewGroupTicket: async () => {},
+    readGroupTicket: readGroupTicketDualMode({ ticketId: 999, state: "created" }),
+    createGroupTicket: async () => {},
+    setGroupTicketPriority: async (id, priorityId, actor) => { priorityCalls.push({ id, priorityId, actor }); },
+    cwPrioritiesBySort: async () => [{ id: 1, name: "Urgent" }, { id: 2, name: "High" }, { id: 3, name: "Medium" }],
+  });
+  const result = await autoCreate.autoCreateHighSeverityTickets();
+  assert.deepEqual(result, { checked: 1, created: 1, errors: 0 });
+  assert.deepEqual(priorityCalls, [{ id: "a", priorityId: 2, actor: "auto-create" }]);
+});
+
+test("a High ticket clamps to the only priority available when the board has just one", async () => {
+  const db = fakeDb({
+    eligible: [{ id: "a", app_company_id: "CO-147284", worst_severity: "High" }],
+    routings: [{ app_company_id: "CO-147284", company_id: 55, board_id: 9, team_id: null }],
+  });
+  const priorityCalls = [];
+  const autoCreate = await loadAutoCreate({
+    db,
+    reviewGroupTicket: async () => {},
+    readGroupTicket: readGroupTicketDualMode({ ticketId: 999, state: "created" }),
+    createGroupTicket: async () => {},
+    setGroupTicketPriority: async (id, priorityId, actor) => { priorityCalls.push({ id, priorityId, actor }); },
+    cwPrioritiesBySort: async () => [{ id: 1, name: "Only" }],
+  });
+  const result = await autoCreate.autoCreateHighSeverityTickets();
+  assert.deepEqual(result, { checked: 1, created: 1, errors: 0 });
+  assert.deepEqual(priorityCalls, [{ id: "a", priorityId: 1, actor: "auto-create" }]);
+});
+
+test("no ConnectWise priorities available never blocks the ticket from counting as created", async () => {
+  const db = fakeDb({
+    eligible: [{ id: "a", app_company_id: "CO-147284", worst_severity: "Critical" }],
+    routings: [{ app_company_id: "CO-147284", company_id: 55, board_id: 9, team_id: null }],
+  });
+  let priorityCalled = false;
+  const autoCreate = await loadAutoCreate({
+    db,
+    reviewGroupTicket: async () => {},
+    readGroupTicket: readGroupTicketDualMode({ ticketId: 999, state: "created" }),
+    createGroupTicket: async () => {},
+    setGroupTicketPriority: async () => { priorityCalled = true; },
+    cwPrioritiesBySort: async () => { throw new Error("ConnectWise unreachable"); },
+  });
+  const result = await autoCreate.autoCreateHighSeverityTickets();
+  assert.deepEqual(result, { checked: 1, created: 1, errors: 0 });
+  assert.equal(priorityCalled, false);
+});
+
+test("a ticket id that never confirms leaves priority unset without failing the create count", async () => {
+  const db = fakeDb({
+    eligible: [{ id: "a", app_company_id: "CO-147284", worst_severity: "Critical" }],
+    routings: [{ app_company_id: "CO-147284", company_id: 55, board_id: 9, team_id: null }],
+  });
+  let priorityCalled = false;
+  const autoCreate = await loadAutoCreate({
+    db,
+    reviewGroupTicket: async () => {},
+    readGroupTicket: readGroupTicketDualMode({ ticketId: null, state: "failed" }),
+    createGroupTicket: async () => {},
+    setGroupTicketPriority: async () => { priorityCalled = true; },
+    cwPrioritiesBySort: async () => [{ id: 1, name: "Urgent" }],
+  });
+  const result = await autoCreate.autoCreateHighSeverityTickets();
+  assert.deepEqual(result, { checked: 1, created: 1, errors: 0 });
+  assert.equal(priorityCalled, false);
 });
