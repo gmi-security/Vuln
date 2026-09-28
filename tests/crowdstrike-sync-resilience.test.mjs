@@ -116,7 +116,11 @@ test("Spotlight streams more than 80,000 source records in bounded batches witho
     const firstIds = [];
     for await (const batch of spotlightFindingBatches(atlas)) {
       assert.ok(batch.length > 0 && batch.length <= 3200);
-      if (batches === 0) firstIds.push(batch[0].id, batch[1].id);
+      if (batches === 0) {
+        firstIds.push(batch[0].id, batch[1].id);
+        assert.equal(batch[0].raw.id, "source-0", "the full vendor record must survive parsing for durable storage");
+        assert.equal(batch[0].raw.host_info.local_ip, "10.0.0.1");
+      }
       count += batch.length;
       batches++;
     }

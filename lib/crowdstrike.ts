@@ -226,6 +226,7 @@ function normalizeFalconHost(raw: any): FalconAsset {
 
 export type SpotlightFinding = {
   id: string;
+  raw: unknown;
   cve: string;
   hostname: string;
   localIp: string;
@@ -265,6 +266,7 @@ export async function* spotlightFindingBatches(config: FalconTenant): AsyncGener
     const cvss = Number(v?.cve?.cvss_v3 ?? v?.cve?.cvss_v2 ?? 5.0);
     return {
       id,
+      raw: v,
       cve,
       hostname: String(v?.host_info?.hostname ?? ""),
       localIp: String(v?.host_info?.local_ip ?? ""),

@@ -34,7 +34,7 @@
 
 **Files:** Modify `lib/crowdstrike.ts`; test `tests/crowdstrike-sync-resilience.test.mjs`.
 
-**Interfaces:** Produce `spotlightFindingBatches(config: FalconTenant): AsyncGenerator<SpotlightFinding[]>`, where `SpotlightFinding` has required `id: string` and each yielded batch contains at most eight hydrated query pages. Keep `spotlightListFindings` as a compatibility collector while the importer is migrated.
+**Interfaces:** Produce `spotlightFindingBatches(config: FalconTenant): AsyncGenerator<SpotlightFinding[]>`, where `SpotlightFinding` has required `id: string` and `raw: unknown` containing the full hydrated source payload, and each yielded batch contains at most eight hydrated query pages. Keep `spotlightListFindings` as a compatibility collector while the importer is migrated.
 
 - [ ] Add a failing test with two distinct IDs on one host/CVE and more than 80,000 mock query results; assert every ID is yielded once and no yield exceeds 3,200 records.
 - [ ] Add a failing test for a hydrated record with no ID; assert an explicit source-identity error.
@@ -46,7 +46,7 @@
 
 **Files:** Create `lib/spotlight-record-store.ts`; modify `lib/elastic-dashboard-store.ts` only as needed to reuse its Postgres pool; test `tests/spotlight-record-store.test.mjs`.
 
-**Interfaces:** Produce `beginSpotlightRun(tenantKey: string): Promise<string>`, `writeSpotlightBatch(runId: string, tenantKey: string, rows: SpotlightRecord[]): Promise<number>`, `completeSpotlightRun(runId: string, tenantKey: string): Promise<void>`, `failSpotlightRun(runId: string, error: string): Promise<void>`, `countCompletedSpotlightRecords(tenantKey: string): Promise<number>`, and a bounded internal `listCompletedSpotlightRecords` method. `SpotlightRecord` includes source ID, tenant key, Atlas company ID, host/IP/CVE/severity/status, description/remediation, and observed timestamp. A unique `(run_id, tenant_key, source_id)` constraint makes replay idempotent.
+**Interfaces:** Produce `beginSpotlightRun(tenantKey: string): Promise<string>`, `writeSpotlightBatch(runId: string, tenantKey: string, rows: SpotlightRecord[]): Promise<number>`, `completeSpotlightRun(runId: string, tenantKey: string): Promise<void>`, `failSpotlightRun(runId: string, error: string): Promise<void>`, `countCompletedSpotlightRecords(tenantKey: string): Promise<number>`, and a bounded internal `listCompletedSpotlightRecords` method. `SpotlightRecord` includes source ID, tenant key, Atlas company ID, host/IP/CVE/severity/status, description/remediation, full source JSON, and observed timestamp. A unique `(run_id, tenant_key, source_id)` constraint makes replay idempotent.
 
 - [ ] Add failing disposable-Postgres tests for same host/CVE with distinct IDs, duplicate batch replay, and exclusion of an incomplete first run from completed reads.
 - [ ] Add a failing test for promotion and for preserving the previous generation after failure.
