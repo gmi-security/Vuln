@@ -89,7 +89,8 @@ export default function ConnectWiseGroupTicket({ group, requestId }: { group: Pa
         : "CrowdStrike fix verification has not been performed."}</p>}
       {current.ticketId && <div className="mt-2">
         {!editingPriority ? <p className={styles.resultNote}>Priority: {current.priorityName ?? "Unknown — check status to load it"}
-          <button type="button" className={`${styles.button} ml-2`} disabled={Boolean(busy)} onClick={() => { setPriorityDraft(current.priorityId ?? undefined); setEditingPriority(true); }}>Raise or lower</button></p>
+          <button type="button" className={`${styles.button} ml-2`} disabled={Boolean(busy)} onClick={() => { setPriorityDraft(current.priorityId ?? undefined); setEditingPriority(true); }}>Raise or lower</button>
+          {current.slaEscalations > 0 && <span className="ml-2 text-[#ff8f96]">· auto-escalated ×{current.slaEscalations} for sitting open past SLA</span>}</p>
           : <div className="mt-2 flex flex-wrap items-end gap-2">
             <div className="min-w-[12rem]"><ConnectWiseSelect label="Priority" kind="priorities" value={priorityDraft} onChange={setPriorityDraft} revision={settings?.revision} disabled={Boolean(busy)} /></div>
             <button type="button" className={styles.primaryButton} disabled={Boolean(busy) || !priorityDraft} onClick={() => void action("set-priority", { priorityId: priorityDraft }).then(ok => { if (ok) setEditingPriority(false); })}>{busy === "set-priority" ? "Saving…" : "Save priority"}</button>

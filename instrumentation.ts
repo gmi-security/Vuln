@@ -22,4 +22,6 @@ export async function register(): Promise<void> {
   startReportingQueueScheduler();
   const { startTicketStatusSyncScheduler } = await import("@/lib/ticket-status-sync");
   startTicketStatusSyncScheduler();
+  const { startTicketSlaEscalationScheduler } = await import("@/lib/ticket-sla-escalation");
+  startTicketSlaEscalationScheduler();
 }

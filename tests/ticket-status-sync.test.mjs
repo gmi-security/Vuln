@@ -52,7 +52,7 @@ const connection = { endpoint: "https://api-na.myconnectwise.net/v4_6_release/ap
 async function loadWithConnectWise(handler) {
   return loader({
     "./patch-ticket-store": { patchTicketDatabase: async () => { throw new Error("not used by syncTable"); }, savedConnection: async () => { throw new Error("not used by syncTable"); } },
-    "./connectwise-client": { cwRequest: handler },
+    "./connectwise-client": { cwRequest: handler, cwId: (v) => typeof v === "number" && Number.isSafeInteger(v) && v > 0 },
     "./elastic-vuln-server": { elasticVulnEnabled: () => false },
   })("lib/ticket-status-sync.ts");
 }
@@ -89,6 +89,14 @@ test("no open tickets means no ConnectWise calls at all", async () => {
   assert.deepEqual(result, { checked: 0, updated: 0, errors: 0 });
   assert.equal(called, false);
   assert.equal(db.calls.length, 1, "only the initial SELECT should run");
+});
+
+test("priority is captured on every sync pass, not just on an explicit check-status click", async () => {
+  const sync = await loadWithConnectWise(async () => ({ status: { name: "Open" }, closedFlag: false, priority: { id: 11, name: "Priority 2 - High" } }));
+  const db = fakeDb({ rows: [{ id: "a", ticket_id: 1 }] });
+  await sync.syncTable(db, "patch_group_ticket_requests", "target", connection);
+  const update = db.calls.find((c) => c.sql.trim().startsWith("UPDATE"));
+  assert.deepEqual(update.params, ["a", "Open", false, 11, "Priority 2 - High"]);
 });
 
 test("the select is scoped to open, previously-created tickets on the current ConnectWise target", async () => {

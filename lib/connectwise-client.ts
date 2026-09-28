@@ -157,6 +157,22 @@ export async function cwOptions(connection: ConnectWiseConnection, kind: string,
   }
   return { options, more, page };
 }
+// ConnectWise orders its own priority picker by "sort" (lower = more urgent,
+// e.g. Priority 1 - Emergency sorts before Priority 4 - Low); cwOptions above
+// orders by name instead, which is right for a human picker but wrong for
+// deciding which direction is "more urgent" when escalating automatically.
+export async function cwPrioritiesBySort(connection: ConnectWiseConnection): Promise<CWOption[]> {
+  const rows = await cwRequest(connection, `/service/priorities?${new URLSearchParams({ pageSize: "100", orderBy: "sort asc" })}`);
+  if (!Array.isArray(rows)) throw new DashboardError("ConnectWise did not return a valid priority list.", 502);
+  const options: (CWOption & { sort: number })[] = [];
+  for (const row of rows) {
+    if (!cwId(row.id) || typeof row.name !== "string" || !row.name.trim()) continue;
+    if (row.inactiveFlag || row.inactive || row.deletedFlag) continue;
+    options.push({ id: row.id, name: row.name, sort: typeof row.sort === "number" ? row.sort : row.id });
+  }
+  options.sort((a, b) => a.sort - b.sort);
+  return options.map(({ id, name }) => ({ id, name }));
+}
 export async function validateCWRouting(connection: ConnectWiseConnection, routing: TicketRouting | Omit<TicketRouting, "companyId">) {
   const refs = { ...("companyId" in routing ? { company: `/company/companies/${routing.companyId}` } : {}), board: `/service/info/boards/${routing.boardId}`,
     ...(routing.teamId ? { team: `/service/boards/${routing.boardId}/teams/${routing.teamId}` } : {}) };

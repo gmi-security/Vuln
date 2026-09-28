@@ -8,7 +8,7 @@ import type { PatchConsolidation, PatchGroup } from "./patch-request";
 import { automatedGroupTicketBody, type PatchGroupTicketSummary } from "./patch-group-ticket-types";
 import { cwId, cwRequest, findCWRequest, CWRequestError, parseRouting, ticketUrl, uploadPatchCsv, validateCWRouting, type ConnectWiseConnection, type CWRecord, type TicketRouting } from "./connectwise-client";
 
-const fields = "id,cves,remediation_id,tenant_id,state,review_state,reviewed_by,reviewed_at,prepared_by,created_by,prepared_at,updated_at,host_count,finding_count,labels,ticket_id,ticket_url,ticket_status,closed,attachment_state,last_error,packet->>'title' AS remediation_title,packet->>'source' AS source,packet->>'companyName' AS company_name,fix_verified_at,fix_verified_state,fix_still_open_count,ticket_priority_id,ticket_priority_name";
+const fields = "id,cves,remediation_id,tenant_id,state,review_state,reviewed_by,reviewed_at,prepared_by,created_by,prepared_at,updated_at,host_count,finding_count,labels,ticket_id,ticket_url,ticket_status,closed,attachment_state,last_error,packet->>'title' AS remediation_title,packet->>'source' AS source,packet->>'companyName' AS company_name,fix_verified_at,fix_verified_state,fix_still_open_count,ticket_priority_id,ticket_priority_name,ticket_sla_escalations";
 function summary(row: CWRecord): PatchGroupTicketSummary {
   return { id: row.id, cves: row.cves, remediationId: row.remediation_id, remediationTitle: row.remediation_title, tenantId: row.tenant_id, source: row.source === "stored-findings" ? "stored-findings" : "crowdstrike", companyName: row.company_name ?? null, state: row.state,
     reviewState: row.review_state, reviewedBy: row.reviewed_by, reviewedAt: row.reviewed_at ? new Date(row.reviewed_at).toISOString() : null,
@@ -18,7 +18,8 @@ function summary(row: CWRecord): PatchGroupTicketSummary {
     attachmentState: row.attachment_state, error: row.last_error,
     fixVerifiedAt: row.fix_verified_at ? new Date(row.fix_verified_at).toISOString() : null,
     fixVerifiedState: row.fix_verified_state ?? null, fixStillOpenCount: row.fix_still_open_count ?? null,
-    priorityId: row.ticket_priority_id ?? null, priorityName: row.ticket_priority_name ?? null };
+    priorityId: row.ticket_priority_id ?? null, priorityName: row.ticket_priority_name ?? null,
+    slaEscalations: row.ticket_sla_escalations ?? 0 };
 }
 function requestId(id: string) { if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(id)) throw new DashboardError("Patch group request not found.", 404); }
 
