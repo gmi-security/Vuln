@@ -69,9 +69,16 @@ export async function listGroupTickets(reviewOnly = false, page = 1, appCompanyI
     ($${companyParam}::text IS NULL OR packet->>'appCompanyId'=$${companyParam} OR
       (lower(tenant_id) = ANY($${tenantParam}::text[]) AND COALESCE(packet->>'source','crowdstrike')='crowdstrike'))`;
   const params = [reviewOnly, (page - 1) * 100, appCompanyId ?? null, tenantIds];
+  // The review queue (reviewOnly) is where an analyst decides what to work
+  // on next, so its pending bucket is ranked by devices affected — the same
+  // "biggest bang for buck" measure used everywhere else this app ranks
+  // remediations — not by recency. Approved/other rows, and the full
+  // (non-review) tracker, keep the original prepared_at-newest-first order.
   const rows = await db.query(`SELECT ${fields} FROM patch_group_ticket_requests
     ${where(3, 4)}
     ORDER BY CASE WHEN $1::boolean THEN CASE review_state WHEN 'pending' THEN 0 WHEN 'approved' THEN 1 ELSE 2 END ELSE 0 END,
+      CASE WHEN $1::boolean AND review_state='pending' THEN host_count END DESC NULLS LAST,
+      CASE WHEN $1::boolean AND review_state='pending' THEN finding_count END DESC NULLS LAST,
       prepared_at DESC LIMIT 101 OFFSET $2`, params);
   const counts = await db.query(`SELECT COUNT(*)::int AS total,
     COUNT(*) FILTER (WHERE review_state='pending')::int AS pending,

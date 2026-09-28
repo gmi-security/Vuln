@@ -66,20 +66,23 @@ export default function PatchReviewQueue({ companyId }: { companyId: string }) {
     <div className="flex flex-wrap items-start justify-between gap-3"><div>
       <p className="text-xs uppercase tracking-[0.25em] text-red-500">Consolidation</p>
       <h2 className="mt-2 text-xl font-semibold text-white">Review queue</h2>
-      <p className="mt-2 max-w-2xl text-sm text-zinc-400">Saved patch candidates wait here for an analyst. Approval prepares a ticket; sending still requires the ConnectWise form.</p>
+      <p className="mt-2 max-w-2xl text-sm text-zinc-400">Awaiting review is ranked by devices affected — the biggest-impact remediation for this customer sits at the top. Approving the next one prepares its ticket; sending still requires the ConnectWise form.</p>
     </div><button type="button" className={styles.button} disabled={Boolean(busy)} onClick={() => void load()}>Refresh</button></div>
     <p className="mt-4 text-sm text-zinc-400">{counts.pending} awaiting review · {counts.approved} approved · {rows.length} of {counts.total} loaded</p>
     {error && <p role="alert" className={styles.patchError}>{error}</p>}
     {!rows.length && !busy && <p className="mt-5 text-sm text-zinc-400">No saved consolidation candidates yet.</p>}
     <div className={`${styles.tableScroll} mt-4`}><table className={styles.table}>
       <thead><tr><th>Customer / source</th><th>Remediation</th><th>CVEs</th><th>Assets</th><th>Findings</th><th>State</th><th>Prepared</th><th>Details</th></tr></thead>
-      <tbody>{rows.map(row => <tr key={row.id}>
+      <tbody>{rows.map(row => {
+        const isNext = row.id === rows.find(r => r.reviewState === "pending")?.id;
+        return <tr key={row.id}>
         <td>{row.source === "stored-findings" ? row.companyName : `CrowdStrike tenant ${row.tenantId}`}</td>
-        <td>{row.remediationTitle || "Recommended remediation"}</td>
+        <td>{isNext && <span className="mr-2 rounded-full border border-[rgba(179,14,20,0.4)] bg-[rgba(179,14,20,0.12)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#ff8f96]">Next</span>}{row.remediationTitle || "Recommended remediation"}</td>
         <td>{row.cves.join(", ")}</td><td>{row.hostCount.toLocaleString()}</td><td>{row.findingCount.toLocaleString()}</td>
         <td>{patchGroupTicketState(row)}</td><td>{new Date(row.preparedAt).toLocaleString()}</td>
         <td><button type="button" className={styles.button} disabled={Boolean(busy)} onClick={() => void open(row.id)}>{busy === row.id ? "Opening…" : "Review"}</button></td>
-      </tr>)}</tbody>
+      </tr>;
+      })}</tbody>
     </table></div>
     {more && <button type="button" className={`${styles.button} mt-4`} disabled={Boolean(busy)} onClick={() => void load(page + 1)}>Load more</button>}
     {selected && <div className="mt-6 rounded-xl border border-zinc-700 bg-zinc-950 p-5">
