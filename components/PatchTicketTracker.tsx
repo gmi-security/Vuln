@@ -29,6 +29,8 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [autoCreating, setAutoCreating] = useState(false);
+  const [autoCreateResult, setAutoCreateResult] = useState("");
 
   const reload = useCallback(async () => {
     setLoading(true); setError("");
@@ -52,6 +54,16 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
   }, [companyId]);
   useEffect(() => { void reload(); }, [reload]);
 
+  async function runAutoCreateNow() {
+    setAutoCreating(true); setAutoCreateResult(""); setError("");
+    try {
+      const result = await dashboardRequest<{ checked: number; created: number; errors: number }>("patch-group-tickets/auto-create", { method: "POST" });
+      setAutoCreateResult(`Checked ${result.checked} eligible draft${result.checked === 1 ? "" : "s"} · created ${result.created}${result.errors ? ` · ${result.errors} failed` : ""}.`);
+      await reload();
+    } catch (e) { setError(e instanceof Error ? e.message : "Could not run auto-create."); }
+    finally { setAutoCreating(false); }
+  }
+
   const buckets = { "cut-open": 0, "cut-closed": 0, attention: 0, draft: 0 };
   let devicesCovered = 0;
   const distinctCves = new Set<string>();
@@ -66,9 +78,13 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
   return <section className="rounded-2xl border border-[rgba(179,14,20,0.14)] bg-[#050505] p-5" aria-label="Patch ticket tracker">
     <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
       <h2 className="text-lg text-zinc-100">Patch ticket tracker</h2>
-      <button type="button" className={styles.button} disabled={loading} onClick={() => void reload()}>{loading ? "Loading…" : "Refresh"}</button>
+      <div className="flex flex-wrap gap-2">
+        <button type="button" className={styles.button} disabled={autoCreating} onClick={() => void runAutoCreateNow()}>{autoCreating ? "Running…" : "Run auto-create now"}</button>
+        <button type="button" className={styles.button} disabled={loading} onClick={() => void reload()}>{loading ? "Loading…" : "Refresh"}</button>
+      </div>
     </div>
     <p className={styles.resultNote}>Customer-linked consolidation plans prepared for review and their ConnectWise ticket status.</p>
+    {autoCreateResult && <p role="status" className={`${styles.resultNote} mt-1`}>{autoCreateResult}</p>}
     <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-5">
       <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3"><div className="text-2xl font-semibold text-white">{total}</div><div className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Prepared</div></div>
       <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3"><div className="text-2xl font-semibold text-white">{cut}</div><div className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Tickets cut</div></div>
