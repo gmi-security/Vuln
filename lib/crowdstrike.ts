@@ -132,8 +132,8 @@ async function runWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T)
   return results;
 }
 
-async function falconToken(config: FalconConfig): Promise<string> {
-  const res = await timedFetch(
+async function falconToken(config: FalconConfig, quick = false): Promise<string> {
+  const res = await (quick ? timedFetchOnce : timedFetch)(
     `${config.baseUrl}/oauth2/token`,
     {
       method: "POST",
@@ -144,7 +144,7 @@ async function falconToken(config: FalconConfig): Promise<string> {
       }),
       cache: "no-store",
     },
-    15_000,
+    quick ? 10_000 : 15_000,
   );
   if (!res.ok) {
     throw new Error(
@@ -154,6 +154,39 @@ async function falconToken(config: FalconConfig): Promise<string> {
   const data = (await res.json()) as { access_token?: string };
   if (!data.access_token) throw new Error("Falcon auth returned no token.");
   return data.access_token;
+}
+
+// A diagnostic request must never walk the full device or Spotlight estate.
+// Both query endpoints expose their total in pagination metadata, so one
+// bounded request per source is enough to show whether data is available.
+export async function falconProbeCounts(config: FalconConfig): Promise<{
+  hostsAvailable: number | null;
+  spotlightFindingsAvailable: number | null;
+  hostsError: string | null;
+  spotlightError: string | null;
+}> {
+  const token = await falconToken(config, true);
+  const headers = { Authorization: `Bearer ${token}`, Accept: "application/json" };
+  async function count(url: URL): Promise<number> {
+    const response = await timedFetchOnce(url.toString(), { headers, cache: "no-store" }, 10_000);
+    if (!response.ok) throw new Error(`Query returned HTTP ${response.status}`);
+    const json = await response.json();
+    const total = json?.meta?.pagination?.total;
+    if (!Number.isSafeInteger(total) || total < 0) throw new Error("Query omitted a valid pagination total");
+    return total;
+  }
+  const devicesUrl = new URL(`${config.baseUrl}/devices/queries/devices/v1`);
+  devicesUrl.searchParams.set("limit", "1");
+  const spotlightUrl = new URL(`${config.baseUrl}/spotlight/queries/vulnerabilities/v1`);
+  spotlightUrl.searchParams.set("filter", "status:'open',status:'reopen'");
+  spotlightUrl.searchParams.set("limit", "1");
+  const [devices, spotlight] = await Promise.allSettled([count(devicesUrl), count(spotlightUrl)]);
+  return {
+    hostsAvailable: devices.status === "fulfilled" ? devices.value : null,
+    spotlightFindingsAvailable: spotlight.status === "fulfilled" ? spotlight.value : null,
+    hostsError: devices.status === "rejected" ? String(devices.reason) : null,
+    spotlightError: spotlight.status === "rejected" ? String(spotlight.reason) : null,
+  };
 }
 
 function classifyHost(raw: any): {

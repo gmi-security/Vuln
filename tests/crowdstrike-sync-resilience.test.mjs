@@ -21,7 +21,7 @@ await module.link(async (name) => {
   return new SyntheticModule(Object.keys(values), function () { for (const key of Object.keys(values)) this.setExport(key, values[key]); });
 });
 await module.evaluate();
-const { falconListAssets, spotlightListFindings } = module.namespace;
+const { falconListAssets, spotlightListFindings, falconProbeCounts } = module.namespace;
 
 async function withFetch(handler, work) {
   const original = globalThis.fetch, calls = [];
@@ -74,6 +74,23 @@ test("hydration never exceeds the concurrency cap even with hundreds of batches"
 
 const atlas = { clientId: "a", clientSecret: "b", baseUrl: "https://x", customerName: "Atlas Healthcare", label: "Atlas Healthcare" };
 const json = (body) => new Response(JSON.stringify(body), { status: 200 });
+
+test("debug count probe reads pagination totals without downloading assets or vulnerabilities", async () => {
+  await withFetch((url) => {
+    if (url.includes("/oauth2/token")) return json({ access_token: "tok" });
+    if (url.includes("/devices/queries/devices/v1"))
+      return json({ resources: ["device-1"], meta: { pagination: { total: 1466 } } });
+    if (url.includes("/spotlight/queries/vulnerabilities/v1"))
+      return json({ resources: ["vuln-1"], meta: { pagination: { total: 120345 } } });
+    throw new Error(`Unexpected full-fetch request: ${url}`);
+  }, async (calls) => {
+    const counts = await falconProbeCounts(atlas);
+    assert.equal(counts.hostsAvailable, 1466);
+    assert.equal(counts.spotlightFindingsAvailable, 120345);
+    assert.equal(calls.length, 3, "token plus one query for each count");
+    assert.ok(calls.every(({ url }) => !url.includes("/entities/")));
+  });
+});
 
 test("Atlas Spotlight collects past the current 5,000-page guard instead of returning a partial scan", async () => {
   await withFetch((url) => {
