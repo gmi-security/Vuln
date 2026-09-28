@@ -5,18 +5,23 @@ import { dashboardRequest } from "@/lib/dashboard-browser-client";
 import type { PatchGroup } from "@/lib/patch-request";
 import { patchReviewRows } from "@/lib/patch-review-rows";
 import { ageDays, patchGroupTicketState, type PatchGroupTicketSummary } from "@/lib/patch-group-ticket-types";
+import { slaDaysFor } from "@/lib/vuln-sla";
+import type { SlaSettings } from "@/lib/types";
 import ConnectWiseGroupTicket from "@/components/ConnectWiseGroupTicket";
 import styles from "./QueryDashboard.module.css";
 
 type Detail = { request: PatchGroupTicketSummary; group: PatchGroup };
-function ageBadge(days: number, pending: boolean) {
-  if (!pending) return <span className="text-zinc-500">{days}d</span>;
-  const cls = days >= 7 ? "font-semibold text-[#ff8f96]" : days >= 3 ? "text-amber-400" : "text-zinc-400";
-  return <span className={cls}>{days}d{days >= 7 ? " · overdue" : ""}</span>;
+// slaDays is the org's real per-severity SLA (Settings > SLA) for this
+// row's worst CVE severity -- null only until it's loaded, in which case
+// the badge stays neutral rather than guessing a threshold.
+function ageBadge(days: number, pending: boolean, slaDays: number | null) {
+  if (!pending || slaDays === null) return <span className="text-zinc-500">{days}d</span>;
+  const cls = days >= slaDays ? "font-semibold text-[#ff8f96]" : days >= slaDays * 0.7 ? "text-amber-400" : "text-zinc-400";
+  return <span className={cls}>{days}d{days >= slaDays ? ` · overdue (SLA ${slaDays}d)` : ""}</span>;
 }
 type Page = { requests: PatchGroupTicketSummary[]; more: boolean; total: number; pending: number; approved: number };
 
-export default function PatchReviewQueue({ companyId }: { companyId: string }) {
+export default function PatchReviewQueue({ companyId, sla }: { companyId: string; sla: SlaSettings | null }) {
   const [rows, setRows] = useState<PatchGroupTicketSummary[]>([]);
   const [selected, setSelected] = useState<Detail | null>(null);
   const [page, setPage] = useState(1);
@@ -67,14 +72,14 @@ export default function PatchReviewQueue({ companyId }: { companyId: string }) {
   }
 
   const detailRows = useMemo(() => selected ? patchReviewRows(selected.group) : [], [selected]);
-  const overdueLoaded = rows.filter(row => row.reviewState === "pending" && ageDays(row.preparedAt) >= 7).length;
+  const overdueLoaded = sla ? rows.filter(row => row.reviewState === "pending" && ageDays(row.preparedAt) >= slaDaysFor(row.worstSeverity, sla)).length : 0;
   return <section aria-label="Consolidation review queue" className="rounded-2xl border border-zinc-800 bg-[#080808] p-5 sm:p-7">
     <div className="flex flex-wrap items-start justify-between gap-3"><div>
       <p className="text-xs uppercase tracking-[0.25em] text-red-500">Consolidation</p>
       <h2 className="mt-2 text-xl font-semibold text-white">Review queue</h2>
       <p className="mt-2 max-w-2xl text-sm text-zinc-400">Awaiting review is ranked by devices affected — the biggest-impact remediation for this customer sits at the top. Approving the next one prepares its ticket; sending still requires the ConnectWise form.</p>
     </div><button type="button" className={styles.button} disabled={Boolean(busy)} onClick={() => void load()}>Refresh</button></div>
-    <p className="mt-4 text-sm text-zinc-400">{counts.pending} awaiting review · {counts.approved} approved · {rows.length} of {counts.total} loaded{overdueLoaded > 0 && <span className="ml-2 font-medium text-[#ff8f96]">· {overdueLoaded} overdue 7+ days</span>}</p>
+    <p className="mt-4 text-sm text-zinc-400">{counts.pending} awaiting review · {counts.approved} approved · {rows.length} of {counts.total} loaded{overdueLoaded > 0 && <span className="ml-2 font-medium text-[#ff8f96]">· {overdueLoaded} past its severity's SLA</span>}</p>
     {error && <p role="alert" className={styles.patchError}>{error}</p>}
     {!rows.length && !busy && <p className="mt-5 text-sm text-zinc-400">No saved consolidation candidates yet.</p>}
     <div className={`${styles.tableScroll} mt-4`}><table className={styles.table}>
@@ -87,7 +92,7 @@ export default function PatchReviewQueue({ companyId }: { companyId: string }) {
         <td>{row.companyName ?? (row.source === "stored-findings" ? "Unassigned" : `CrowdStrike tenant ${row.tenantId}`)}</td>
         <td>{isNext && <span className="mr-2 rounded-full border border-[rgba(179,14,20,0.4)] bg-[rgba(179,14,20,0.12)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#ff8f96]">Next</span>}{row.remediationTitle || "Recommended remediation"}</td>
         <td title={row.cves.join(", ")}>{shownCves.join(", ")}{moreCves > 0 && ` +${moreCves} more`}</td><td>{row.hostCount.toLocaleString()}</td><td>{row.findingCount.toLocaleString()}</td>
-        <td>{patchGroupTicketState(row)}</td><td>{ageBadge(ageDays(row.preparedAt), row.reviewState === "pending")}</td><td>{new Date(row.preparedAt).toLocaleString()}</td>
+        <td>{patchGroupTicketState(row)}</td><td>{ageBadge(ageDays(row.preparedAt), row.reviewState === "pending", sla ? slaDaysFor(row.worstSeverity, sla) : null)}</td><td>{new Date(row.preparedAt).toLocaleString()}</td>
         <td><button type="button" className={styles.button} disabled={Boolean(busy)} onClick={() => void open(row.id)}>{busy === row.id ? "Opening…" : "Review"}</button></td>
       </tr>;
       })}</tbody>

@@ -23,7 +23,7 @@ export async function patchTicketDatabase() {
     closed BOOLEAN NOT NULL DEFAULT false, attachment_state TEXT NOT NULL DEFAULT 'not_started',
     attachment_started TIMESTAMPTZ, document_id INT, last_error TEXT,
     fix_verified_at TIMESTAMPTZ, fix_verified_state TEXT, fix_still_open_count INT,
-    ticket_priority_id INT, ticket_priority_name TEXT, ticket_sla_escalations INT NOT NULL DEFAULT 0
+    ticket_priority_id INT, ticket_priority_name TEXT, ticket_sla_escalations INT NOT NULL DEFAULT 0, worst_severity TEXT
   );
   ALTER TABLE patch_ticket_requests ADD COLUMN IF NOT EXISTS fix_verified_at TIMESTAMPTZ;
   ALTER TABLE patch_ticket_requests ADD COLUMN IF NOT EXISTS fix_verified_state TEXT;
@@ -31,6 +31,7 @@ export async function patchTicketDatabase() {
   ALTER TABLE patch_ticket_requests ADD COLUMN IF NOT EXISTS ticket_priority_id INT;
   ALTER TABLE patch_ticket_requests ADD COLUMN IF NOT EXISTS ticket_priority_name TEXT;
   ALTER TABLE patch_ticket_requests ADD COLUMN IF NOT EXISTS ticket_sla_escalations INT NOT NULL DEFAULT 0;
+  ALTER TABLE patch_ticket_requests ADD COLUMN IF NOT EXISTS worst_severity TEXT;
   CREATE INDEX IF NOT EXISTS patch_ticket_cve_date ON patch_ticket_requests(cve, prepared_at DESC);
   CREATE UNIQUE INDEX IF NOT EXISTS patch_ticket_active_scope ON patch_ticket_requests(cw_target,cve,company_id,scope_hash)
     WHERE state IN ('creating','uncertain','created') AND closed=false;
@@ -47,7 +48,7 @@ export async function patchTicketDatabase() {
     closed BOOLEAN NOT NULL DEFAULT false, attachment_state TEXT NOT NULL DEFAULT 'not_started',
     attachment_started TIMESTAMPTZ, document_id INT, last_error TEXT,
     fix_verified_at TIMESTAMPTZ, fix_verified_state TEXT, fix_still_open_count INT,
-    ticket_priority_id INT, ticket_priority_name TEXT, ticket_sla_escalations INT NOT NULL DEFAULT 0
+    ticket_priority_id INT, ticket_priority_name TEXT, ticket_sla_escalations INT NOT NULL DEFAULT 0, worst_severity TEXT
   );
   ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS fix_verified_at TIMESTAMPTZ;
   ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS fix_verified_state TEXT;
@@ -55,6 +56,7 @@ export async function patchTicketDatabase() {
   ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS ticket_priority_id INT;
   ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS ticket_priority_name TEXT;
   ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS ticket_sla_escalations INT NOT NULL DEFAULT 0;
+  ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS worst_severity TEXT;
   ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS review_state TEXT NOT NULL DEFAULT 'pending';
   ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS reviewed_by TEXT;
   ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;
@@ -71,7 +73,7 @@ export async function patchTicketDatabase() {
   await ready;
   return db;
 }
-const fields = "id,cve,state,prepared_by,created_by,prepared_at,updated_at,host_count,tenant_ids,labels,ticket_id,ticket_url,ticket_status,closed,attachment_state,last_error,fix_verified_at,fix_verified_state,fix_still_open_count,ticket_priority_id,ticket_priority_name,ticket_sla_escalations";
+const fields = "id,cve,state,prepared_by,created_by,prepared_at,updated_at,host_count,tenant_ids,labels,ticket_id,ticket_url,ticket_status,closed,attachment_state,last_error,fix_verified_at,fix_verified_state,fix_still_open_count,ticket_priority_id,ticket_priority_name,ticket_sla_escalations,worst_severity";
 function summary(row: CWRecord): PatchTicketSummary {
   return { id: row.id, cve: row.cve, state: row.state, preparedBy: row.prepared_by, createdBy: row.created_by,
     preparedAt: new Date(row.prepared_at).toISOString(), updatedAt: new Date(row.updated_at).toISOString(), hostCount: row.host_count,
@@ -81,7 +83,7 @@ function summary(row: CWRecord): PatchTicketSummary {
     fixVerifiedAt: row.fix_verified_at ? new Date(row.fix_verified_at).toISOString() : null,
     fixVerifiedState: row.fix_verified_state ?? null, fixStillOpenCount: row.fix_still_open_count ?? null,
     priorityId: row.ticket_priority_id ?? null, priorityName: row.ticket_priority_name ?? null,
-    slaEscalations: row.ticket_sla_escalations ?? 0 };
+    slaEscalations: row.ticket_sla_escalations ?? 0, worstSeverity: row.worst_severity ?? null };
 }
 function requestId(id: string) { if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(id)) throw new DashboardError("Patch request not found.", 404); }
 export async function savedConnection(): Promise<{ value: ConnectWiseConnection; revision: number; target: string; defaults: CWDefaults }> {
@@ -156,9 +158,9 @@ export async function persistPreparedPatch(id: string, packet: PatchRequest, act
     await client.query("BEGIN");
     const current = (await client.query("SELECT revision FROM dashboard_source_connections WHERE source='crowdstrike' FOR SHARE")).rows[0];
     if (current?.revision !== revision) throw new DashboardError("CrowdStrike connection changed. Prepare a fresh request.", 409);
-    await client.query(`INSERT INTO patch_ticket_requests(id,cve,prepared_by,prepared_at,crowdstrike_revision,packet,host_count,tenant_ids,scope_hash)
-      VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8::jsonb,$9) ON CONFLICT(id) DO NOTHING`,
-      [id, packet.cve, actor, packet.collectedAt, revision, JSON.stringify(packet), packet.hostCount, JSON.stringify(packet.tenantIds), createHash("sha256").update(JSON.stringify([...packet.hostScope].sort())).digest("hex")]);
+    await client.query(`INSERT INTO patch_ticket_requests(id,cve,prepared_by,prepared_at,crowdstrike_revision,packet,host_count,tenant_ids,scope_hash,worst_severity)
+      VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8::jsonb,$9,$10) ON CONFLICT(id) DO NOTHING`,
+      [id, packet.cve, actor, packet.collectedAt, revision, JSON.stringify(packet), packet.hostCount, JSON.stringify(packet.tenantIds), createHash("sha256").update(JSON.stringify([...packet.hostScope].sort())).digest("hex"), packet.worstSeverity]);
     await client.query("INSERT INTO patch_ticket_audit(request_id,actor,action) VALUES($1,$2,'report.prepared')", [id, actor]);
     await client.query("COMMIT");
   } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }

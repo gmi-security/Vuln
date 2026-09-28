@@ -8,7 +8,7 @@ import type { PatchConsolidation, PatchGroup } from "./patch-request";
 import { automatedGroupTicketBody, type PatchGroupTicketSummary } from "./patch-group-ticket-types";
 import { cwId, cwRequest, findCWRequest, CWRequestError, parseRouting, ticketUrl, uploadPatchCsv, validateCWRouting, type ConnectWiseConnection, type CWRecord, type TicketRouting } from "./connectwise-client";
 
-const fields = "id,cves,remediation_id,tenant_id,state,review_state,reviewed_by,reviewed_at,prepared_by,created_by,prepared_at,updated_at,host_count,finding_count,labels,ticket_id,ticket_url,ticket_status,closed,attachment_state,last_error,packet->>'title' AS remediation_title,packet->>'source' AS source,packet->>'companyName' AS company_name,fix_verified_at,fix_verified_state,fix_still_open_count,ticket_priority_id,ticket_priority_name,ticket_sla_escalations";
+const fields = "id,cves,remediation_id,tenant_id,state,review_state,reviewed_by,reviewed_at,prepared_by,created_by,prepared_at,updated_at,host_count,finding_count,labels,ticket_id,ticket_url,ticket_status,closed,attachment_state,last_error,packet->>'title' AS remediation_title,packet->>'source' AS source,packet->>'companyName' AS company_name,fix_verified_at,fix_verified_state,fix_still_open_count,ticket_priority_id,ticket_priority_name,ticket_sla_escalations,worst_severity";
 function summary(row: CWRecord): PatchGroupTicketSummary {
   return { id: row.id, cves: row.cves, remediationId: row.remediation_id, remediationTitle: row.remediation_title, tenantId: row.tenant_id, source: row.source === "stored-findings" ? "stored-findings" : "crowdstrike", companyName: row.company_name ?? null, state: row.state,
     reviewState: row.review_state, reviewedBy: row.reviewed_by, reviewedAt: row.reviewed_at ? new Date(row.reviewed_at).toISOString() : null,
@@ -19,7 +19,7 @@ function summary(row: CWRecord): PatchGroupTicketSummary {
     fixVerifiedAt: row.fix_verified_at ? new Date(row.fix_verified_at).toISOString() : null,
     fixVerifiedState: row.fix_verified_state ?? null, fixStillOpenCount: row.fix_still_open_count ?? null,
     priorityId: row.ticket_priority_id ?? null, priorityName: row.ticket_priority_name ?? null,
-    slaEscalations: row.ticket_sla_escalations ?? 0 };
+    slaEscalations: row.ticket_sla_escalations ?? 0, worstSeverity: row.worst_severity ?? null };
 }
 function requestId(id: string) { if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(id)) throw new DashboardError("Patch group request not found.", 404); }
 
@@ -50,10 +50,10 @@ export async function persistPreparedGroups(consolidation: PatchConsolidation, a
       const packet = group.appCompanyId
         ? group
         : atlasFalconReviewPacket(group, customerFalconTenantIds("CO-147284", process.env.ATLAS_CROWDSTRIKE_TENANT_IDS));
-      await client.query(`INSERT INTO patch_group_ticket_requests(id,cves,remediation_id,tenant_id,prepared_by,prepared_at,crowdstrike_revision,packet,host_count,finding_count,scope_hash)
-        VALUES($1,$2::jsonb,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11) ON CONFLICT(id) DO NOTHING`,
+      await client.query(`INSERT INTO patch_group_ticket_requests(id,cves,remediation_id,tenant_id,prepared_by,prepared_at,crowdstrike_revision,packet,host_count,finding_count,scope_hash,worst_severity)
+        VALUES($1,$2::jsonb,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12) ON CONFLICT(id) DO NOTHING`,
         [id, JSON.stringify(group.cves), group.remediationId, group.tenantId, actor, consolidation.collectedAt, revision,
-          JSON.stringify(packet), group.deviceCount, group.findingCount, scopeHash]);
+          JSON.stringify(packet), group.deviceCount, group.findingCount, scopeHash, group.worstSeverity]);
       await client.query("INSERT INTO patch_group_ticket_audit(request_id,actor,action) VALUES($1,$2,'group.prepared')", [id, actor]);
     }
     await client.query("COMMIT");

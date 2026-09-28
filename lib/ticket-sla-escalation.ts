@@ -2,17 +2,21 @@ import { patchTicketDatabase, savedConnection } from "./patch-ticket-store";
 import { cwPrioritiesBySort, cwRequest, type ConnectWiseConnection, type CWOption } from "./connectwise-client";
 import { runWithConcurrency } from "./ticket-status-sync";
 import { elasticVulnEnabled } from "./elastic-vuln-server";
+import { ensureHydrated, getSettings } from "./store";
+import { slaDaysFor } from "./vuln-sla";
+import type { SlaSettings } from "./types";
 
 // An open ConnectWise ticket that just sits there without closing is failing
-// its SLA the same way the "Age" badge on the ticket tracker already flags
-// it (14+ days open = "overdue" there too). Rather than only flagging it,
-// this bumps the ticket one ConnectWise priority level more urgent for every
-// full interval it stays open and unresolved, so a stalled ticket keeps
-// getting louder inside ConnectWise itself -- not just in our own UI.
-const ESCALATION_INTERVAL_DAYS = 14;
+// its SLA -- the org's real, configurable per-severity remediation SLA
+// (Settings > SLA), not a flat number. A ticket for a Critical CVE and one
+// for a Low CVE breach at different points, so each ticket's own worst CVE
+// severity picks its interval. This bumps the ticket one ConnectWise
+// priority level more urgent for every full interval it stays open and
+// unresolved, so a stalled ticket keeps getting louder inside ConnectWise
+// itself -- not just in our own UI.
 
 type EscalationCounts = { checked: number; escalated: number; errors: number };
-type Row = { id: string; ticket_id: number; prepared_at: string | Date; ticket_priority_id: number | null; ticket_sla_escalations: number };
+type Row = { id: string; ticket_id: number; prepared_at: string | Date; ticket_priority_id: number | null; ticket_sla_escalations: number; worst_severity: string | null };
 
 export async function escalateTable(
   db: Awaited<ReturnType<typeof patchTicketDatabase>>,
@@ -20,16 +24,17 @@ export async function escalateTable(
   target: string,
   connection: ConnectWiseConnection,
   priorities: CWOption[],
+  sla: SlaSettings,
 ): Promise<EscalationCounts> {
   const rows = (await db.query(
-    `SELECT id, ticket_id, prepared_at, ticket_priority_id, ticket_sla_escalations FROM ${table}
+    `SELECT id, ticket_id, prepared_at, ticket_priority_id, ticket_sla_escalations, worst_severity FROM ${table}
       WHERE state='created' AND closed=false AND ticket_id IS NOT NULL AND cw_target=$1`,
     [target],
   )).rows as Row[];
   if (!rows.length || !priorities.length) return { checked: rows.length, escalated: 0, errors: 0 };
   const due = rows.filter((row) => {
     const ageDays = Math.floor((Date.now() - new Date(row.prepared_at).getTime()) / 86_400_000);
-    return Math.floor(ageDays / ESCALATION_INTERVAL_DAYS) > row.ticket_sla_escalations;
+    return Math.floor(ageDays / slaDaysFor(row.worst_severity, sla)) > row.ticket_sla_escalations;
   });
   let escalated = 0, errors = 0;
   await runWithConcurrency(due, 5, async (row) => {
@@ -66,10 +71,14 @@ export async function escalateOverdueTickets(): Promise<EscalationCounts> {
   const saved = await savedConnection().catch(() => null);
   if (!saved) return { checked: 0, escalated: 0, errors: 0 };
   const db = await patchTicketDatabase();
-  const priorities = await cwPrioritiesBySort(saved.value).catch(() => []);
+  const [priorities] = await Promise.all([
+    cwPrioritiesBySort(saved.value).catch(() => []),
+    ensureHydrated(),
+  ]);
+  const sla = getSettings().sla;
   const [single, group] = await Promise.all([
-    escalateTable(db, "patch_ticket_requests", saved.target, saved.value, priorities),
-    escalateTable(db, "patch_group_ticket_requests", saved.target, saved.value, priorities),
+    escalateTable(db, "patch_ticket_requests", saved.target, saved.value, priorities, sla),
+    escalateTable(db, "patch_group_ticket_requests", saved.target, saved.value, priorities, sla),
   ]);
   return { checked: single.checked + group.checked, escalated: single.escalated + group.escalated, errors: single.errors + group.errors };
 }

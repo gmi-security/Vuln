@@ -1,14 +1,16 @@
 // node --experimental-vm-modules --test tests/ticket-sla-escalation.test.mjs
 //
 // Exercises escalateTable in isolation (a fake db.query, a mocked cwRequest,
-// a fixed most-urgent-first priority list) so this runs without a live
-// Postgres or ConnectWise account: a ticket open past a full 14-day interval
-// it hasn't already been escalated for gets bumped exactly one priority
-// level more urgent and audited; a ticket still within SLA is left alone; a
-// ticket already at the most urgent priority just has its tier recorded
-// without a ConnectWise call; an unrecognized current priority falls back to
-// the least-urgent slot; and one ticket's PATCH failing does not block the
-// rest.
+// a fixed most-urgent-first priority list, and the org's real per-severity
+// SLA table) so this runs without a live Postgres or ConnectWise account: a
+// ticket open past its own severity's SLA interval that hasn't already been
+// escalated for that interval gets bumped exactly one priority level more
+// urgent and audited; a ticket still within its severity's SLA is left
+// alone; a ticket already at the most urgent priority just has its tier
+// recorded without a ConnectWise call; an unrecognized current priority
+// falls back to the least-urgent slot; and one ticket's PATCH failing does
+// not block the rest. lib/vuln-sla.ts (the severity -> SLA-days mapping) is
+// real code here, not a mock -- it has no runtime dependencies of its own.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { resolve, dirname } from "node:path";
@@ -64,6 +66,8 @@ const priorities = [
   { id: 12, name: "Priority 3 - Medium" },
   { id: 13, name: "Priority 4 - Low" },
 ];
+// The org's real, configurable per-severity SLA (Settings > SLA defaults).
+const sla = { Critical: 7, High: 30, Medium: 60, Low: 90 };
 const DAY = 86_400_000;
 const daysAgo = (n) => new Date(Date.now() - n * DAY).toISOString();
 
@@ -73,14 +77,15 @@ async function loadWithConnectWise(handler) {
     "./connectwise-client": { cwRequest: handler, cwPrioritiesBySort: async () => { throw new Error("not used by escalateTable"); } },
     "./ticket-status-sync": { runWithConcurrency },
     "./elastic-vuln-server": { elasticVulnEnabled: () => false },
+    "./store": { ensureHydrated: async () => { throw new Error("not used by escalateTable"); }, getSettings: () => { throw new Error("not used by escalateTable"); } },
   })("lib/ticket-sla-escalation.ts");
 }
 
-test("a ticket past its first 14-day SLA interval is bumped one priority level and audited", async () => {
+test("a Critical ticket past its 7-day SLA interval is bumped one priority level and audited", async () => {
   const calls = [];
   const escalation = await loadWithConnectWise(async (_conn, path, method, body) => { calls.push({ path, method, body }); return {}; });
-  const db = fakeDb({ rows: [{ id: "a", ticket_id: 1, prepared_at: daysAgo(15), ticket_priority_id: 11, ticket_sla_escalations: 0 }] });
-  const result = await escalation.escalateTable(db, "patch_group_ticket_requests", "target", connection, priorities);
+  const db = fakeDb({ rows: [{ id: "a", ticket_id: 1, prepared_at: daysAgo(8), ticket_priority_id: 11, ticket_sla_escalations: 0, worst_severity: "Critical" }] });
+  const result = await escalation.escalateTable(db, "patch_group_ticket_requests", "target", connection, priorities, sla);
   assert.deepEqual(result, { checked: 1, escalated: 1, errors: 0 });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].method, "PATCH");
@@ -92,11 +97,21 @@ test("a ticket past its first 14-day SLA interval is bumped one priority level a
   assert.match(audit.sql, /'sla-escalation','ticket\.priority\.escalated'/);
 });
 
-test("a ticket still inside its SLA window is left alone", async () => {
+test("a Low ticket well inside its 90-day SLA window is left alone", async () => {
   let called = false;
   const escalation = await loadWithConnectWise(async () => { called = true; return {}; });
-  const db = fakeDb({ rows: [{ id: "a", ticket_id: 1, prepared_at: daysAgo(3), ticket_priority_id: 11, ticket_sla_escalations: 0 }] });
-  const result = await escalation.escalateTable(db, "patch_ticket_requests", "target", connection, priorities);
+  const db = fakeDb({ rows: [{ id: "a", ticket_id: 1, prepared_at: daysAgo(3), ticket_priority_id: 11, ticket_sla_escalations: 0, worst_severity: "Low" }] });
+  const result = await escalation.escalateTable(db, "patch_ticket_requests", "target", connection, priorities, sla);
+  assert.deepEqual(result, { checked: 1, escalated: 0, errors: 0 });
+  assert.equal(called, false);
+});
+
+test("a High ticket past its 30-day SLA that's still just High isn't the same as Critical breaching at 7", async () => {
+  let called = false;
+  const escalation = await loadWithConnectWise(async () => { called = true; return {}; });
+  // 10 days is well past Critical's 7-day SLA but nowhere near High's 30-day SLA.
+  const db = fakeDb({ rows: [{ id: "a", ticket_id: 1, prepared_at: daysAgo(10), ticket_priority_id: 11, ticket_sla_escalations: 0, worst_severity: "High" }] });
+  const result = await escalation.escalateTable(db, "patch_ticket_requests", "target", connection, priorities, sla);
   assert.deepEqual(result, { checked: 1, escalated: 0, errors: 0 });
   assert.equal(called, false);
 });
@@ -104,8 +119,8 @@ test("a ticket still inside its SLA window is left alone", async () => {
 test("a ticket already at the most urgent priority just has its tier recorded, no ConnectWise call", async () => {
   let called = false;
   const escalation = await loadWithConnectWise(async () => { called = true; return {}; });
-  const db = fakeDb({ rows: [{ id: "a", ticket_id: 1, prepared_at: daysAgo(20), ticket_priority_id: 10, ticket_sla_escalations: 0 }] });
-  const result = await escalation.escalateTable(db, "patch_ticket_requests", "target", connection, priorities);
+  const db = fakeDb({ rows: [{ id: "a", ticket_id: 1, prepared_at: daysAgo(40), ticket_priority_id: 10, ticket_sla_escalations: 0, worst_severity: "High" }] });
+  const result = await escalation.escalateTable(db, "patch_ticket_requests", "target", connection, priorities, sla);
   assert.deepEqual(result, { checked: 1, escalated: 0, errors: 0 });
   assert.equal(called, false);
   const update = db.calls.find((c) => c.sql.trim().startsWith("UPDATE"));
@@ -115,17 +130,27 @@ test("a ticket already at the most urgent priority just has its tier recorded, n
 test("an unrecognized current priority falls back to the least-urgent slot and still escalates one step", async () => {
   const calls = [];
   const escalation = await loadWithConnectWise(async (_conn, path, method, body) => { calls.push({ path, method, body }); return {}; });
-  const db = fakeDb({ rows: [{ id: "a", ticket_id: 1, prepared_at: daysAgo(15), ticket_priority_id: null, ticket_sla_escalations: 0 }] });
-  const result = await escalation.escalateTable(db, "patch_group_ticket_requests", "target", connection, priorities);
+  const db = fakeDb({ rows: [{ id: "a", ticket_id: 1, prepared_at: daysAgo(8), ticket_priority_id: null, ticket_sla_escalations: 0, worst_severity: "Critical" }] });
+  const result = await escalation.escalateTable(db, "patch_group_ticket_requests", "target", connection, priorities, sla);
   assert.deepEqual(result, { checked: 1, escalated: 1, errors: 0 });
   assert.deepEqual(calls[0].body, [{ op: "replace", path: "priority/id", value: 12 }]); // Low (idx 3, fallback) -> Medium (idx 2)
 });
 
-test("a ticket already escalated once this run does not escalate again until the next 14-day interval", async () => {
+test("a ticket with no CVE severity recorded falls back to the High SLA interval", async () => {
   let called = false;
   const escalation = await loadWithConnectWise(async () => { called = true; return {}; });
-  const db = fakeDb({ rows: [{ id: "a", ticket_id: 1, prepared_at: daysAgo(20), ticket_priority_id: 11, ticket_sla_escalations: 1 }] });
-  const result = await escalation.escalateTable(db, "patch_ticket_requests", "target", connection, priorities);
+  // 10 days is past nothing under the High (30-day) fallback.
+  const db = fakeDb({ rows: [{ id: "a", ticket_id: 1, prepared_at: daysAgo(10), ticket_priority_id: 11, ticket_sla_escalations: 0, worst_severity: null }] });
+  const result = await escalation.escalateTable(db, "patch_ticket_requests", "target", connection, priorities, sla);
+  assert.deepEqual(result, { checked: 1, escalated: 0, errors: 0 });
+  assert.equal(called, false);
+});
+
+test("a ticket already escalated once this run does not escalate again until the next SLA interval", async () => {
+  let called = false;
+  const escalation = await loadWithConnectWise(async () => { called = true; return {}; });
+  const db = fakeDb({ rows: [{ id: "a", ticket_id: 1, prepared_at: daysAgo(65), ticket_priority_id: 11, ticket_sla_escalations: 1, worst_severity: "Medium" }] });
+  const result = await escalation.escalateTable(db, "patch_ticket_requests", "target", connection, priorities, sla);
   assert.deepEqual(result, { checked: 1, escalated: 0, errors: 0 });
   assert.equal(called, false);
 });
@@ -136,10 +161,10 @@ test("one ticket's escalation failing does not stop the others", async () => {
     return {};
   });
   const db = fakeDb({ rows: [
-    { id: "a", ticket_id: 1, prepared_at: daysAgo(15), ticket_priority_id: 11, ticket_sla_escalations: 0 },
-    { id: "b", ticket_id: 2, prepared_at: daysAgo(15), ticket_priority_id: 11, ticket_sla_escalations: 0 },
+    { id: "a", ticket_id: 1, prepared_at: daysAgo(8), ticket_priority_id: 11, ticket_sla_escalations: 0, worst_severity: "Critical" },
+    { id: "b", ticket_id: 2, prepared_at: daysAgo(8), ticket_priority_id: 11, ticket_sla_escalations: 0, worst_severity: "Critical" },
   ] });
-  const result = await escalation.escalateTable(db, "patch_ticket_requests", "target", connection, priorities);
+  const result = await escalation.escalateTable(db, "patch_ticket_requests", "target", connection, priorities, sla);
   assert.deepEqual(result, { checked: 2, escalated: 1, errors: 1 });
 });
 
@@ -147,7 +172,7 @@ test("no open tickets means no ConnectWise calls at all", async () => {
   let called = false;
   const escalation = await loadWithConnectWise(async () => { called = true; return {}; });
   const db = fakeDb({ rows: [] });
-  const result = await escalation.escalateTable(db, "patch_ticket_requests", "target", connection, priorities);
+  const result = await escalation.escalateTable(db, "patch_ticket_requests", "target", connection, priorities, sla);
   assert.deepEqual(result, { checked: 0, escalated: 0, errors: 0 });
   assert.equal(called, false);
 });

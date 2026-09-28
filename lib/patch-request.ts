@@ -2,11 +2,12 @@ import { DashboardError, type QueryResult } from "./elastic-dashboard";
 import { normalizeVulnerability, type Vulnerability } from "./crowdstrike-dashboard";
 import { dashboardCsv } from "./dashboard-csv";
 import { getCompany } from "./store";
+import { worstSeverityOf } from "./vuln-sla";
 
 export type PatchRequest = {
   cve: string; collectedAt: string; region: string; hostCount: number; findingCount: number;
   csvRows: number; title: string; body: string; csv: string; warnings: string[];
-  tenantIds: string[]; hostScope: string[];
+  tenantIds: string[]; hostScope: string[]; worstSeverity: string | null;
 };
 export type Remediation = {
   id: string; title: string; action: string; link: string; vendorUrl: string;
@@ -76,6 +77,7 @@ export type PatchGroup = {
   cves: string[]; deviceCount: number; findingCount: number; hostScope: string[]; csv: string;
   deviceCves: { cid: string; hostId: string; cve: string }[];
   reviewRows?: { asset: string; cve: string; severity?: string; risk?: number; connectors?: string[]; findingId?: string; hostname?: string; ip?: string; os?: string; criticality?: string; exposure?: string }[];
+  worstSeverity: string | null;
   label: string; ticketTitle: string; ticketBody: string;
 };
 export type PatchConsolidation = {
@@ -186,7 +188,7 @@ export function buildPatchRequest(cve: string, records: PatchFinding[], region: 
     ...warnings, `Attach ${cve}-patch-request.csv. No ticket has been sent to ConnectWise.`].join("\n");
   const csv = dashboardCsv({ columns: names.map((name) => ({ name, type: "keyword" })), rows: csvRows, truncated: false });
   const packet: PatchRequest = { cve, collectedAt, region, hostCount: hosts.size, findingCount: records.length, csvRows: csvRows.length, title, body, csv, warnings: [...warnings],
-    tenantIds: [...new Set(ordered.map(row => row.cid))].sort(), hostScope: [...hosts.keys()].sort() };
+    tenantIds: [...new Set(ordered.map(row => row.cid))].sort(), hostScope: [...hosts.keys()].sort(), worstSeverity: worstSeverityOf(ordered) };
   if (new TextEncoder().encode(JSON.stringify(packet)).length > 32 * 1024 * 1024) throw new DashboardError("This patch request exceeds the 32 MiB export limit. No partial export was prepared.");
   return packet;
 }
@@ -254,6 +256,7 @@ export function buildPatchConsolidation(cves: string[], records: PatchFinding[],
       deviceCves: groupRows.map((r) => ({ cid: r.cid, hostId: r.hostId, cve: r.cve })),
       reviewRows: groupRows.map((r) => ({ asset: r.hostname || r.hostId, cve: r.cve, severity: r.severity, risk: r.risk, findingId: r.findingId,
         hostname: r.hostname, ip: r.ip, os: r.os, criticality: r.hostCriticality, exposure: r.exposure, connectors: ["CrowdStrike"] })),
+      worstSeverity: worstSeverityOf(groupRows),
       // The analyst's explicit customer selection at build time, when given —
       // this is what lets the prepared draft land in the right customer's
       // review queue without inferring ownership from the CrowdStrike tenant.

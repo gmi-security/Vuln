@@ -18,6 +18,7 @@ import styles from "./QueryDashboard.module.css";
 import { OPEN_VULN_TREND } from "@/lib/elastic-query-templates";
 import { inputClass, PanelCard, selectClass } from "@/components/ui";
 import { DEFAULT_CROWDSTRIKE, canShowMetrics, isChartDisplay, numericColumn, suggestChart, type CrowdStrikeOptions, type DashboardSource, type DashboardQuery, type ElasticDashboard, type QueryDefinition, type QueryResult } from "@/lib/elastic-dashboard";
+import type { SlaSettings } from "@/lib/types";
 
 type Draft = Omit<QueryDefinition, "id"> & { id?: string };
 const newDraft = (): Draft => ({ title: "", query: "", display: "auto", refreshMinutes: 15, enabled: true });
@@ -34,6 +35,7 @@ async function post(path: string, body?: unknown) {
 export default function ElasticQueryDashboard({ initial }: { initial: ElasticDashboard }) {
   const [dashboard, setDashboard] = useState(initial);
   const [companyId, setCompanyId] = useState("");
+  const [sla, setSla] = useState<SlaSettings | null>(null);
   const [customerRefresh, setCustomerRefresh] = useState(0);
   const [connectionOpen, setConnectionOpen] = useState(false);
   const [endpoint, setEndpoint] = useState(initial.endpoint ?? "");
@@ -77,6 +79,14 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
     const timer = setInterval(() => { setNow(Date.now()); void reload().catch((err) => setLoadError(err.message)); }, pending ? 3000 : 15_000);
     return () => clearInterval(timer);
   }, [reload, pending]);
+  // The org's real, configurable per-severity remediation SLA (Settings >
+  // SLA) -- fetched once here and threaded down so the review queue and
+  // ticket tracker judge "overdue" against it instead of a guessed number.
+  useEffect(() => {
+    let live = true;
+    fetch("/api/settings").then((r) => r.json()).then((data) => { if (live && data?.settings?.sla) setSla(data.settings.sla); }).catch(() => {});
+    return () => { live = false; };
+  }, []);
 
   async function action(name: string, work: () => Promise<void>) {
     const sequence = ++actionSequence.current;
@@ -181,7 +191,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
       <Link href={`/report/${companyId}`} target="_blank" rel="noopener noreferrer" className={`${primaryButtonClass} whitespace-nowrap`}><ExternalLink size={16} />Open executive report</Link>
     </div>}
     {companyId && <div className="mt-6"><TopFixes key={`top-fixes-${companyId}`} companyId={companyId} refreshToken={customerRefresh} /></div>}
-    {companyId && <div id="consolidation-review" className="mt-6 grid items-start gap-6 2xl:grid-cols-2"><PatchReviewQueue key={`review-${companyId}`} companyId={companyId} />{dashboard.canManage && <PatchTicketTracker key={`tickets-${companyId}`} companyId={companyId} />}</div>}
+    {companyId && <div id="consolidation-review" className="mt-6 grid items-start gap-6 2xl:grid-cols-2"><PatchReviewQueue key={`review-${companyId}`} companyId={companyId} sla={sla} />{dashboard.canManage && <PatchTicketTracker key={`tickets-${companyId}`} companyId={companyId} sla={sla} />}</div>}
     <div className="mt-8 mb-3"><h2 className="text-xl font-semibold text-white">Shared dashboard tiles</h2><p className="mt-1 text-sm text-zinc-400">Saved Elasticsearch and CrowdStrike results, visible to every organization member regardless of the customer selected above. Elasticsearch retained imports and CrowdStrike Falcon are separate measures; each tile shows its own data and refresh time.</p></div>
     <div className={styles.connections}>
       {[{ name: "CrowdStrike", connected: dashboard.crowdstrike?.connected }, { name: "Elasticsearch", connected: dashboard.connected }].map((source) => <span key={source.name} className={styles.connection}><span className={styles.dot} style={{ background: source.connected ? "#34d399" : "#71717a" }} />{source.name} · {source.connected ? "Configured" : "Not connected"}</span>)}

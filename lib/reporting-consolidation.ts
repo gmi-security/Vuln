@@ -3,6 +3,7 @@ import { dashboardCsv } from "./dashboard-csv";
 import type { Finding } from "./types";
 import type { PatchGroup } from "./patch-request";
 import { reportingFindingClass } from "./reporting-metrics";
+import { worstSeverityOf } from "./vuln-sla";
 
 const clean = (value: string) => value.trim().replace(/\s+/g, " ");
 const csvText = (value: string) => value.slice(0, 2000);
@@ -48,6 +49,7 @@ export function buildStoredFindingGroups(company: { id: string; name: string }, 
       deviceCves: rows.map(row => ({ cid: company.id, hostId: row.asset, cve: row.cve })),
       reviewRows: rows.map(row => ({ asset: row.asset, cve: row.cve, severity: row.severity, risk: row.realRisk,
         connectors: row.seenBy?.length ? row.seenBy : [row.connector], findingId: row.id })),
+      worstSeverity: worstSeverityOf(rows),
       csv, label, ticketTitle: `${company.name}: ${title}`.slice(0, 100), ticketBody });
     }
     return parts;
