@@ -1,0 +1,19 @@
+# Uncapped CrowdStrike Spotlight Record Storage
+
+## Evidence and scope
+
+The live debug probe reports 2,125,683 open Spotlight records for Atlas HealthCare and 517,069 for the primary tenant. The current Spotlight importer downloads each tenant into one array, indexes all existing findings, then processes records in one synchronous loop. It also merges records with the same company, host, and CVE. `SpotlightFinding` drops CrowdStrike's vulnerability ID. These behaviors cannot preserve every source record or reliably keep the single Node server responsive at this scale. The 80,000 page cap has already been removed; restoring it is not an acceptable outcome.
+
+The immediate target is the configured Atlas HealthCare tenant. Its 2,125,683 open Spotlight records must each be retained individually. The primary tenant's 517,069 Spotlight records are outside this import and must not be fetched as a side effect. This phase is a storage and sync change only: do not change the reporting page, reporting calculations, ticket review, ConnectWise pipeline, or other scanner connectors. A later project can decide how the stored records should appear in those views.
+
+## Data and lifecycle
+
+Use `ELASTIC_VULN_DATABASE_URL`, the app's transactional Postgres connection, for individual Spotlight records and run bookkeeping. Keep the existing `DATABASE_URL` snapshot and in-memory scanner findings untouched. The existing connector POST, which sends no body, selects the sole configured named customer tenant (Atlas today) and excludes the unnamed primary tenant. If more than one named tenant is configured, an explicit company ID is required rather than syncing an arbitrary tenant. Add a stable tenant key and keep the CrowdStrike vulnerability ID on every hydrated record. Atlas's current completed generation is the last fully successful run. Partial runs persist in batches but are excluded from completed-run reads. A retry can replay from the beginning safely using `(run_id, tenant_key, vulnerability_id)` uniqueness; source cursor continuity must not be assumed across restarts. A completed run replaces the active generation; old generations are pruned in bounded chunks after promotion. A failed run must not promote a partial generation or overwrite the previous completed data.
+
+Store the full hydrated CrowdStrike payload for each vulnerability ID, alongside indexed fields needed for later host/CVE review, severity, status, descriptions, remediation, external and local IP, and source provenance. Provide bounded internal database read/count methods for verification, but do not wire them into reporting or ticket views in this phase. Do not copy raw records into the in-memory finding map or its snapshot. Keep the existing host+CVE correlation model and existing scan rows unchanged.
+
+## Operations
+
+The sync processes bounded query and hydration pages, writes each batch, yields to the event loop, and reports tenant, phase, fetched, stored, and error state through the existing Spotlight status API. A restart or failure leaves the prior completed generation intact. Keep the connector page and the debug route's bounded count probe unchanged in this phase.
+
+Verification must use mocked CrowdStrike responses and a disposable Postgres database: more than the old 80,000 limit, duplicate host+CVE records with distinct vulnerability IDs, Atlas tenant selection without any primary-tenant requests, retry after interruption, and no partial run in completed-run reads. No production credentials are present locally, so a live million-record run and final storage sizing require deployment observation. Reporting and ticket behavior are explicitly outside this verification gate.

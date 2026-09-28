@@ -21,7 +21,7 @@ await module.link(async (name) => {
   return new SyntheticModule(Object.keys(values), function () { for (const key of Object.keys(values)) this.setExport(key, values[key]); });
 });
 await module.evaluate();
-const { falconListAssets, spotlightListFindings, falconProbeCounts } = module.namespace;
+const { falconListAssets, spotlightListFindings, spotlightFindingBatches, falconProbeCounts } = module.namespace;
 
 async function withFetch(handler, work) {
   const original = globalThis.fetch, calls = [];
@@ -92,6 +92,57 @@ test("debug count probe reads pagination totals without downloading assets or vu
   });
 });
 
+test("Spotlight streams more than 80,000 source records in bounded batches without merging a shared host and CVE", async () => {
+  await withFetch((url) => {
+    if (url.includes("/oauth2/token")) return json({ access_token: "tok" });
+    const request = new URL(url);
+    if (request.pathname.includes("/spotlight/queries/vulnerabilities/v1")) {
+      const page = Number(request.searchParams.get("after") || 0);
+      const ids = Array.from({ length: 400 }, (_, index) => `source-${page * 400 + index}`);
+      return json({ resources: ids, meta: { pagination: { after: page < 200 ? String(page + 1) : "", total: 80400 } } });
+    }
+    if (request.pathname.includes("/spotlight/entities/vulnerabilities/v2")) {
+      const ids = request.searchParams.getAll("ids");
+      return json({ resources: ids.map(id => ({
+        id, cve: { id: "CVE-2026-1234", description: "Issue" },
+        host_info: { hostname: "atlas-host", local_ip: "10.0.0.1", external_ip: "", os_version: "Windows" },
+        remediation: { entities: [{ action: "Apply patch" }] }, status: "open", severity: "HIGH",
+      })) });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  }, async () => {
+    let count = 0;
+    let batches = 0;
+    const firstIds = [];
+    for await (const batch of spotlightFindingBatches(atlas)) {
+      assert.ok(batch.length > 0 && batch.length <= 3200);
+      if (batches === 0) {
+        firstIds.push(batch[0].id, batch[1].id);
+        assert.equal(batch[0].raw.id, "source-0", "the full vendor record must survive parsing for durable storage");
+        assert.equal(batch[0].raw.host_info.local_ip, "10.0.0.1");
+      }
+      count += batch.length;
+      batches++;
+    }
+    assert.equal(count, 80400);
+    assert.deepEqual(firstIds, ["source-0", "source-1"]);
+    assert.ok(batches > 1);
+  });
+});
+
+test("Spotlight rejects a hydrated record without its source vulnerability ID", async () => {
+  await withFetch((url) => {
+    if (url.includes("/oauth2/token")) return json({ access_token: "tok" });
+    if (url.includes("/spotlight/queries/vulnerabilities/v1"))
+      return json({ resources: ["source-1"], meta: { pagination: { after: "", total: 1 } } });
+    return json({ resources: [{ cve: { id: "CVE-2026-1234" }, host_info: { hostname: "atlas-host" } }] });
+  }, async () => {
+    await assert.rejects(async () => {
+      for await (const _batch of spotlightFindingBatches(atlas)) { /* consume */ }
+    }, /source.*id/i);
+  });
+});
+
 test("Atlas Spotlight collects past the current 5,000-page guard instead of returning a partial scan", async () => {
   await withFetch((url) => {
     if (url.includes("/oauth2/token")) return json({ access_token: "tok" });
@@ -137,6 +188,17 @@ test("Spotlight rejects incomplete entity hydration instead of reporting a small
     return json({ resources: [{ id: "id-1", cve: { id: "CVE-2026-1234" }, host_info: { hostname: "host-1" } }] });
   }, async () => {
     await assert.rejects(() => spotlightListFindings(atlas), /hydrat.*incomplete/i);
+  });
+});
+
+test("Spotlight rejects entity hydration with the wrong IDs even when the count matches", async () => {
+  await withFetch((url) => {
+    if (url.includes("/oauth2/token")) return json({ access_token: "tok" });
+    if (url.includes("/spotlight/queries/vulnerabilities/v1"))
+      return json({ resources: ["id-1", "id-2"], meta: { pagination: { after: "", total: 2 } } });
+    return json({ resources: ["id-1", "id-1"].map(id => ({ id, cve: { id: "CVE-2026-1234" } })) });
+  }, async () => {
+    await assert.rejects(() => spotlightListFindings(atlas), /hydrat.*ids.*mismatch/i);
   });
 });
 
