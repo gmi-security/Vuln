@@ -1,13 +1,18 @@
 import { dashboardAccess, dashboardFailure, dashboardJson } from "@/lib/elastic-dashboard-http";
 import { readDashboard, triggerRefresh } from "@/lib/elastic-dashboard-store";
-import { directSourcesForCustomer, emptyReportingDashboard, hasDirectReportingSources } from "@/lib/reporting-direct-sources";
 export const dynamic = "force-dynamic";
-export async function GET(request: Request) {
+// The shared saved-tile dashboard (CVE-devices, patch-worklist, and the
+// patch-consolidation/ticket-cutting flow built on top of them) has always
+// been organization-wide, scoped by CrowdStrike tenant inside a query, not
+// by GMI customer — restoring it here after it was briefly narrowed to only
+// return data for one specific customer, which made ticket cutting and
+// tracking unreachable for every other customer. Atlas's own additionally
+// verified, customer-scoped saved tiles remain available separately via
+// /api/elastic-dashboard/customer-tiles.
+export async function GET() {
   try {
     const access = await dashboardAccess();
-    const companyId = new URL(request.url).searchParams.get("companyId") ?? "";
-    if (!hasDirectReportingSources(companyId)) return dashboardJson(emptyReportingDashboard(access.canManage));
     triggerRefresh();
-    return dashboardJson(directSourcesForCustomer(companyId, await readDashboard(access.canManage), process.env.ATLAS_REPORTING_TILE_IDS));
+    return dashboardJson(await readDashboard(access.canManage));
   } catch (error) { return dashboardFailure(error); }
 }
