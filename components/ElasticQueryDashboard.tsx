@@ -12,6 +12,7 @@ import PatchTicketRegister from "@/components/PatchTicketRegister";
 import PatchTicketTracker from "@/components/PatchTicketTracker";
 import ReportingCustomer from "@/components/ReportingCustomer";
 import PatchReviewQueue from "@/components/PatchReviewQueue";
+import TopFixes from "@/components/TopFixes";
 import styles from "./QueryDashboard.module.css";
 import { OPEN_VULN_TREND } from "@/lib/elastic-query-templates";
 import { inputClass, PanelCard, selectClass } from "@/components/ui";
@@ -174,6 +175,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
       </>}
     </div>}>
     <ReportingCustomer companyId={companyId} onCompanyChange={(id) => { setCompanyId(id); setLayoutIds(null); setConnectionOpen(false); setTicketsOpen(false); setDraft(null); setDeleting(null); setPreview(null); }} refreshToken={customerRefresh} />
+    {companyId && <div className="mt-6"><TopFixes key={`top-fixes-${companyId}`} companyId={companyId} refreshToken={customerRefresh} /></div>}
     {companyId && <div id="consolidation-review" className="mt-6 grid items-start gap-6 2xl:grid-cols-2"><PatchReviewQueue key={`review-${companyId}`} companyId={companyId} />{dashboard.canManage && <PatchTicketTracker key={`tickets-${companyId}`} companyId={companyId} />}</div>}
     <div className="mt-8 mb-3"><h2 className="text-xl font-semibold text-white">Shared dashboard tiles</h2><p className="mt-1 text-sm text-zinc-400">Saved Elasticsearch and CrowdStrike results, visible to every organization member regardless of the customer selected above. Elasticsearch retained imports and CrowdStrike Falcon are separate measures; each tile shows its own data and refresh time.</p></div>
     <div className={styles.connections}>
