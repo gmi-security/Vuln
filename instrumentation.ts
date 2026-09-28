@@ -24,4 +24,6 @@ export async function register(): Promise<void> {
   startTicketStatusSyncScheduler();
   const { startTicketSlaEscalationScheduler } = await import("@/lib/ticket-sla-escalation");
   startTicketSlaEscalationScheduler();
+  const { startGroupDraftDedupScheduler } = await import("@/lib/group-draft-dedup");
+  startGroupDraftDedupScheduler();
 }
