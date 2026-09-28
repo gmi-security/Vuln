@@ -7,6 +7,7 @@ import { randomBytes } from "node:crypto";
 import test from "node:test";
 import ts from "typescript";
 
+const ROOT = resolve(".");
 const modules = new Map();
 async function load(path) {
   path = resolve(path);
@@ -17,6 +18,7 @@ async function load(path) {
   const module = new SourceTextModule(code, { identifier: path }); modules.set(path, module);
   await module.link(async (name) => {
     if (name.startsWith(".")) return load(resolve(dirname(path), `${name}.ts`));
+    if (name.startsWith("@/")) return load(resolve(ROOT, `${name.slice(2)}.ts`));
     const values = await import(name);
     return new SyntheticModule(Object.keys(values), function () { for (const key of Object.keys(values)) this.setExport(key, values[key]); });
   });

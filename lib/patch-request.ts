@@ -1,6 +1,7 @@
 import { DashboardError, type QueryResult } from "./elastic-dashboard";
 import { normalizeVulnerability, type Vulnerability } from "./crowdstrike-dashboard";
 import { dashboardCsv } from "./dashboard-csv";
+import { getCompany } from "./store";
 
 export type PatchRequest = {
   cve: string; collectedAt: string; region: string; hostCount: number; findingCount: number;
@@ -31,7 +32,7 @@ export function parsePatchInput(value: unknown): { source: "crowdstrike"; cve: s
   return { source: "crowdstrike", cve: cve.toUpperCase(), ...(typeof tenantId === "string" ? { tenantId: tenantId.toLowerCase() } : {}) };
 }
 
-export function parseConsolidationInput(value: unknown): { source: "crowdstrike"; cves: string[]; tenantId?: string } {
+export function parseConsolidationInput(value: unknown): { source: "crowdstrike"; cves: string[]; tenantId?: string; appCompanyId?: string; companyName?: string } {
   const cves = (value as { cves?: unknown } | null)?.cves;
   // 100 matches the query dashboard's own highest "top N" setting for the
   // CrowdStrike CVE tiles — the largest set of CVEs a single tile can ever
@@ -43,6 +44,18 @@ export function parseConsolidationInput(value: unknown): { source: "crowdstrike"
   if (unique.length !== normalized.length) throw new DashboardError("Remove duplicate CVEs before consolidating.");
   const tenantId = (value as { tenantId?: unknown } | null)?.tenantId;
   if (tenantId !== undefined && (typeof tenantId !== "string" || !/^[a-f0-9]{32}$/i.test(tenantId))) throw new DashboardError("Choose a valid CrowdStrike tenant.");
+  // Optional: the customer the analyst had selected when building this plan.
+  // Trusting this explicit human choice (rather than inferring it from the
+  // CrowdStrike tenant) is what lets a consolidation land in the right
+  // customer's review queue without maintaining a separate tenant-to-company
+  // allowlist for every customer.
+  const appCompanyId = (value as { appCompanyId?: unknown } | null)?.appCompanyId;
+  if (appCompanyId !== undefined) {
+    if (typeof appCompanyId !== "string" || !/^CO-\d+$/.test(appCompanyId)) throw new DashboardError("Choose a valid customer.");
+    const company = getCompany(appCompanyId);
+    if (!company || company.kind !== "client" || company.isDemo) throw new DashboardError("Customer not found.", 404);
+    return { source: "crowdstrike", cves: unique, ...(typeof tenantId === "string" ? { tenantId: tenantId.toLowerCase() } : {}), appCompanyId, companyName: company.name };
+  }
   return { source: "crowdstrike", cves: unique, ...(typeof tenantId === "string" ? { tenantId: tenantId.toLowerCase() } : {}) };
 }
 
@@ -183,7 +196,7 @@ export function buildPatchRequest(cve: string, records: PatchFinding[], region: 
 // devices is not mistaken for several unrelated fixes. Ranked by devices
 // reached per remediation action (highest impact for one maintenance action
 // first), then by how many of the requested CVEs that same action clears.
-export function buildPatchConsolidation(cves: string[], records: PatchFinding[], region: string, startedAt: string, collectedAt: string, alreadyTicketed: Set<string> = new Set()): PatchConsolidation {
+export function buildPatchConsolidation(cves: string[], records: PatchFinding[], region: string, startedAt: string, collectedAt: string, alreadyTicketed: Set<string> = new Set(), customer?: { appCompanyId: string; companyName: string }): PatchConsolidation {
   if (!records.length) throw new DashboardError("CrowdStrike currently reports no open/reopened findings for these CVEs. No consolidation was prepared.");
   type GroupRow = { cid: string; hostId: string; hostname: string; ip: string; os: string; hostCriticality: string; exposure: string; cve: string; severity: string; risk: number; findingId: string };
   type GroupAcc = { tenantId: string; remediation: Remediation; cves: Set<string>; devices: Set<string>; findings: Set<string>; rows: Map<string, GroupRow> };
@@ -241,6 +254,10 @@ export function buildPatchConsolidation(cves: string[], records: PatchFinding[],
       deviceCves: groupRows.map((r) => ({ cid: r.cid, hostId: r.hostId, cve: r.cve })),
       reviewRows: groupRows.map((r) => ({ asset: r.hostname || r.hostId, cve: r.cve, severity: r.severity, risk: r.risk, findingId: r.findingId,
         hostname: r.hostname, ip: r.ip, os: r.os, criticality: r.hostCriticality, exposure: r.exposure, connectors: ["CrowdStrike"] })),
+      // The analyst's explicit customer selection at build time, when given —
+      // this is what lets the prepared draft land in the right customer's
+      // review queue without inferring ownership from the CrowdStrike tenant.
+      ...(customer ? { appCompanyId: customer.appCompanyId, companyName: customer.companyName } : {}),
       csv, label, ticketTitle, ticketBody };
   }).sort((a, b) => b.deviceCount - a.deviceCount || b.cves.length - a.cves.length || a.remediationId.localeCompare(b.remediationId));
   const unmapped = cves.filter((c) => !mappedCves.has(c)).map((c) => ({ cve: c, deviceCount: devicesByCve.get(c)?.size ?? 0 }));

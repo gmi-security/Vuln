@@ -42,11 +42,16 @@ export async function persistPreparedGroups(consolidation: PatchConsolidation, a
         AND state='prepared' AND review_state IN ('pending','approved') ORDER BY prepared_at DESC LIMIT 1`,
         [group.remediationId, group.tenantId, scopeHash, JSON.stringify(group.cves)])).rows[0];
       if (existing) { ids[index] = existing.id; continue; }
+      // An analyst's explicit customer selection at build time always wins.
+      // Only fall back to the legacy Atlas tenant-CID allowlist for groups
+      // built with no customer selected (e.g. an org-wide, unscoped query).
+      const packet = group.appCompanyId
+        ? group
+        : atlasFalconReviewPacket(group, customerFalconTenantIds("CO-147284", process.env.ATLAS_CROWDSTRIKE_TENANT_IDS));
       await client.query(`INSERT INTO patch_group_ticket_requests(id,cves,remediation_id,tenant_id,prepared_by,prepared_at,crowdstrike_revision,packet,host_count,finding_count,scope_hash)
         VALUES($1,$2::jsonb,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11) ON CONFLICT(id) DO NOTHING`,
         [id, JSON.stringify(group.cves), group.remediationId, group.tenantId, actor, consolidation.collectedAt, revision,
-          JSON.stringify(atlasFalconReviewPacket(group, customerFalconTenantIds("CO-147284", process.env.ATLAS_CROWDSTRIKE_TENANT_IDS))),
-          group.deviceCount, group.findingCount, scopeHash]);
+          JSON.stringify(packet), group.deviceCount, group.findingCount, scopeHash]);
       await client.query("INSERT INTO patch_group_ticket_audit(request_id,actor,action) VALUES($1,$2,'group.prepared')", [id, actor]);
     }
     await client.query("COMMIT");

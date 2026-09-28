@@ -26,8 +26,8 @@ export function formatResultValue(value: string | number | boolean | null, colum
   return String(value);
 }
 
-export default function QueryDashboardResults({ result, display, chart, preparePatch = false }: {
-  result: QueryResult; display: QueryDefinition["display"]; chart?: QueryDefinition["chart"]; preparePatch?: boolean;
+export default function QueryDashboardResults({ result, display, chart, preparePatch = false, companyId = "" }: {
+  result: QueryResult; display: QueryDefinition["display"]; chart?: QueryDefinition["chart"]; preparePatch?: boolean; companyId?: string;
 }) {
   const [selected, setSelected] = useState<{ cve: string; row?: QueryResult["rows"][number] } | null>(null);
   const [consolidating, setConsolidating] = useState(false);
@@ -47,7 +47,7 @@ export default function QueryDashboardResults({ result, display, chart, prepareP
         <div className={styles.detailTop}><span>Patch consolidation</span><button type="button" className={styles.button} onClick={() => consolidationDialog.current?.close()}><X size={15} />Close</button></div>
         <h2 id={consolidationTitleId}>{consolidationCves.length} CVEs</h2>
         <p className={styles.resultNote}>{consolidationCves.join(", ")}</p>
-        {consolidating && <PatchConsolidationPanel key={consolidationCves.join(",")} cves={consolidationCves} />}
+        {consolidating && <PatchConsolidationPanel key={`${companyId}-${consolidationCves.join(",")}`} cves={consolidationCves} companyId={companyId} />}
       </div>
     </dialog>
   );

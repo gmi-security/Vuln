@@ -294,7 +294,7 @@ export async function executePatchRequest(connection: CrowdStrikeConnection, val
 }
 
 export async function executePatchConsolidation(connection: CrowdStrikeConnection, value: unknown, alreadyTicketed: Set<string> = new Set(), budgetMs = 600_000): Promise<PatchConsolidation> {
-  const { cves, tenantId } = parseConsolidationInput(value), startedAt = new Date().toISOString();
+  const { cves, tenantId, appCompanyId, companyName } = parseConsolidationInput(value), startedAt = new Date().toISOString();
   const deadline = Date.now() + budgetMs, auth = await session(connection, deadline);
   const all: PatchFinding[] = [];
   for (const cve of cves) {
@@ -304,7 +304,8 @@ export async function executePatchConsolidation(connection: CrowdStrikeConnectio
   }
   await hydrateRemediations(auth, deadline, all);
   if (Date.now() >= deadline) throw new DashboardError("Consolidation collection exceeded the time budget. Retry; no partial export was prepared.");
-  return buildPatchConsolidation(cves, all, connection.region, startedAt, new Date().toISOString(), alreadyTicketed);
+  return buildPatchConsolidation(cves, all, connection.region, startedAt, new Date().toISOString(), alreadyTicketed,
+    appCompanyId && companyName ? { appCompanyId, companyName } : undefined);
 }
 
 // Closed-loop check: re-collects each CVE's currently open/reopened findings

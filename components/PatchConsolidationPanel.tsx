@@ -7,7 +7,7 @@ import styles from "./QueryDashboard.module.css";
 
 type Job = { jobId: string; status: string; error?: string; consolidation?: PatchConsolidation; groupTicketIds?: string[] };
 
-export default function PatchConsolidationPanel({ cves }: { cves: string[] }) {
+export default function PatchConsolidationPanel({ cves, companyId = "" }: { cves: string[]; companyId?: string }) {
   const [packet, setPacket] = useState<PatchConsolidation | null>(null);
   const [groupTicketIds, setGroupTicketIds] = useState<string[]>([]);
   const [tenantId, setTenantId] = useState("");
@@ -22,7 +22,7 @@ export default function PatchConsolidationPanel({ cves }: { cves: string[] }) {
     const current = ++generation.current;
     setBusy(true); setError(""); setMessage("Collecting all matching CrowdStrike pages for each CVE. This can take several minutes.");
     try {
-      let job = await dashboardRequest<Job>("consolidations", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cves, ...(tenantId ? { tenantId } : {}) }) });
+      let job = await dashboardRequest<Job>("consolidations", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cves, ...(tenantId ? { tenantId } : {}), ...(companyId ? { appCompanyId: companyId } : {}) }) });
       const deadline = Date.now() + 15 * 60_000;
       while (["queued", "running"].includes(job.status)) {
         await new Promise((resolve) => setTimeout(resolve, 2000));
@@ -57,12 +57,13 @@ export default function PatchConsolidationPanel({ cves }: { cves: string[] }) {
   return <section className={styles.patchSection} aria-label="Consolidate patch plan">
     <h3>Consolidate into a patch plan</h3>
     <p className={styles.resultNote}>Group {cves.length} CVEs by the CrowdStrike remediation that actually resolves them, ranked by devices cleared per patch action — the most bang for the buck first.</p>
+    {!companyId && <p role="alert" className={styles.patchError}>Select a customer above first. The plan is saved to that customer's review queue so it can be approved and ticketed from there.</p>}
     {tenants.length > 1 && <label className={`${styles.patchLabel} block`}>CrowdStrike tenant
       <select className="mt-2 block w-full rounded-lg border border-zinc-600 bg-zinc-900 p-3 text-zinc-100" value={tenantId} onChange={e => setTenantId(e.target.value)} disabled={busy}>
         <option value="">All visible tenants</option>{tenants.map(id => <option key={id} value={id}>{id}</option>)}
       </select>
     </label>}
-    <button type="button" className={styles.button} disabled={busy} onClick={prepare}>{busy ? "Building plan…" : packet ? "Rebuild plan" : "Build consolidated patch plan"}</button>
+    <button type="button" className={styles.button} disabled={busy || !companyId} onClick={prepare}>{busy ? "Building plan…" : packet ? "Rebuild plan" : "Build consolidated patch plan"}</button>
     {message && <p role="status" className={styles.resultNote}>{message}</p>}
     {error && <p role="alert" className={styles.patchError}>{error}</p>}
     {packet && <>
