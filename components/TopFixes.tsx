@@ -34,9 +34,10 @@ export default function TopFixes({ companyId, refreshToken }: { companyId: strin
   const totalDevices = pending.reduce((sum, row) => sum + row.hostCount, 0);
   const totalFindings = pending.reduce((sum, row) => sum + row.findingCount, 0);
   const distinctCves = new Set(pending.flatMap(row => row.cves)).size;
-  const top = pending.slice(0, TOP_N);
-  const topDevices = top.reduce((sum, row) => sum + row.hostCount, 0);
-  const topShare = totalDevices > 0 ? Math.round((topDevices / totalDevices) * 100) : 0;
+  const topTen = pending.slice(0, TOP_N);
+  const topTenDevices = topTen.reduce((sum, row) => sum + row.hostCount, 0);
+  const topTenShare = totalDevices > 0 ? Math.round((topTenDevices / totalDevices) * 100) : 0;
+  const top = pending;
   const maxDevices = Math.max(1, ...top.map(row => row.hostCount));
 
   return <section className="rounded-2xl border border-[rgba(179,14,20,0.3)] bg-[#050505] p-5 sm:p-7" aria-label="Patching posture — top fixes">
@@ -66,12 +67,13 @@ export default function TopFixes({ companyId, refreshToken }: { companyId: strin
       </div>
       <div className="rounded-xl border border-[rgba(179,14,20,0.4)] bg-[rgba(179,14,20,0.08)] p-4">
         <p className="text-xs text-zinc-400">Top {Math.min(TOP_N, pending.length)} fixes alone close</p>
-        <strong className="mt-2 block text-3xl font-semibold tabular-nums text-[#ff8f96]">{pending.length ? `${topShare}%` : "—"}</strong>
+        <strong className="mt-2 block text-3xl font-semibold tabular-nums text-[#ff8f96]">{pending.length ? `${topTenShare}%` : "—"}</strong>
         <p className="mt-2 text-xs text-zinc-500">Of all devices needing a fix, from this many actions</p>
       </div>
     </div>
 
     {!loading && !pending.length && <p className="mt-6 text-sm text-zinc-400">No remediations awaiting review. Everything pending is either approved or there is nothing to patch right now.</p>}
+    {pending.length > 0 && <p className="mt-6 text-sm text-zinc-400">Every pending remediation, full picture — 100% ranked by devices affected, no cutoff.</p>}
 
     {top.length > 0 && <ol className="mt-6 space-y-3">
       {top.map((row, index) => {
@@ -100,6 +102,5 @@ export default function TopFixes({ companyId, refreshToken }: { companyId: strin
         </li>;
       })}
     </ol>}
-    {pending.length > TOP_N && <p className="mt-4 text-xs text-zinc-500">{format(pending.length - TOP_N)} more remediation{pending.length - TOP_N === 1 ? "" : "s"} awaiting review — see the full ranked queue below.</p>}
   </section>;
 }
