@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Download, GripVertical, LayoutGrid, Pencil, Plus, RadioTower, RefreshCw, Settings2, Trash2 } from "lucide-react";
+import Link from "next/link";
+import { ArrowDown, ArrowUp, Download, ExternalLink, GripVertical, LayoutGrid, Pencil, Plus, RadioTower, RefreshCw, Settings2, Trash2 } from "lucide-react";
 import { applyTileOrder, moveTileIds } from "@/lib/dashboard-layout";
 import { dashboardCsv } from "@/lib/dashboard-csv";
 import { dashboardRequest } from "@/lib/dashboard-browser-client";
@@ -175,6 +176,10 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
       </>}
     </div>}>
     <ReportingCustomer companyId={companyId} onCompanyChange={(id) => { setCompanyId(id); setLayoutIds(null); setConnectionOpen(false); setTicketsOpen(false); setDraft(null); setDeleting(null); setPreview(null); }} refreshToken={customerRefresh} />
+    {companyId && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[rgba(179,14,20,0.25)] bg-[rgba(179,14,20,0.06)] px-4 py-3">
+      <p className="text-sm text-zinc-300">180-day posture trend, SLA burndown and financial exposure, plus one-click email to the customer contact.</p>
+      <Link href={`/report/${companyId}`} target="_blank" rel="noopener noreferrer" className={`${primaryButtonClass} whitespace-nowrap`}><ExternalLink size={16} />Open executive report</Link>
+    </div>}
     {companyId && <div className="mt-6"><TopFixes key={`top-fixes-${companyId}`} companyId={companyId} refreshToken={customerRefresh} /></div>}
     {companyId && <div id="consolidation-review" className="mt-6 grid items-start gap-6 2xl:grid-cols-2"><PatchReviewQueue key={`review-${companyId}`} companyId={companyId} />{dashboard.canManage && <PatchTicketTracker key={`tickets-${companyId}`} companyId={companyId} />}</div>}
     <div className="mt-8 mb-3"><h2 className="text-xl font-semibold text-white">Shared dashboard tiles</h2><p className="mt-1 text-sm text-zinc-400">Saved Elasticsearch and CrowdStrike results, visible to every organization member regardless of the customer selected above. Elasticsearch retained imports and CrowdStrike Falcon are separate measures; each tile shows its own data and refresh time.</p></div>

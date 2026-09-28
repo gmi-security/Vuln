@@ -15,6 +15,9 @@ export type PatchGroupTicketSummary = {
   priorityId: number | null; priorityName: string | null;
 };
 export type PatchGroupTicketDetail = { request: PatchGroupTicketSummary; group: PatchGroup };
+export function ageDays(iso: string): number {
+  return Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 86_400_000));
+}
 export function automatedGroupTicketBody(group: Pick<PatchGroup, "ticketBody" | "label">): string {
   return group.ticketBody.replace("PATCH REQUEST — MANUAL CONNECTWISE ENTRY", "PATCH REQUEST")
     .replace(`Attach ${group.label}-patch-request.csv. No ticket has been sent to ConnectWise.`, `Affected assets are in ${group.label}-patch-request.csv.`);
