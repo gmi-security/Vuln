@@ -55,6 +55,24 @@ export async function persistPreparedGroups(consolidation: PatchConsolidation, a
         [id, JSON.stringify(group.cves), group.remediationId, group.tenantId, actor, consolidation.collectedAt, revision,
           JSON.stringify(packet), group.deviceCount, group.findingCount, scopeHash, group.worstSeverity]);
       await client.query("INSERT INTO patch_group_ticket_audit(request_id,actor,action) VALUES($1,$2,'group.prepared')", [id, actor]);
+      // The same remediation on the same tenant can be re-collected with a
+      // slightly different CVE/device set as CrowdStrike discovers more --
+      // that no longer exact-matches the check above, so it used to pile up
+      // as a near-duplicate "awaiting review" draft. This fresh draft always
+      // reflects the most current collection, so any older *still-pending*
+      // draft for the same remediation+tenant(+customer) is now stale and is
+      // auto-dismissed (never an already-approved one -- that's a human
+      // decision this doesn't override). Dismissed drafts stay visible and
+      // reopenable in the review queue, they just stop counting as pending.
+      const superseded = await client.query(`SELECT id FROM patch_group_ticket_requests
+        WHERE remediation_id=$1 AND tenant_id=$2 AND id<>$3 AND state='prepared' AND review_state='pending'
+          AND ($4::text IS NULL OR packet->>'appCompanyId'=$4)`,
+        [group.remediationId, group.tenantId, id, packet.appCompanyId ?? null]);
+      for (const stale of superseded.rows) {
+        await client.query(`UPDATE patch_group_ticket_requests SET review_state='dismissed',reviewed_by=$2,reviewed_at=now(),updated_at=now() WHERE id=$1`,
+          [stale.id, "auto-dedup"]);
+        await client.query("INSERT INTO patch_group_ticket_audit(request_id,actor,action) VALUES($1,$2,'group.dismissed.superseded')", [stale.id, "auto-dedup"]);
+      }
     }
     await client.query("COMMIT");
   } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
