@@ -196,6 +196,18 @@ async function runCreation(id: string) {
       board: { id: row.routing.boardId }, company: { id: row.routing.companyId },
       ...(row.routing.teamId ? { team: { id: row.routing.teamId } } : {}), externalXRef: `GMI-GRP-${id}` });
     await recordTicket(id, ticket, saved.value); ticketSaved = true;
+    // Once a ConnectWise ticket is confirmed created for a customer, this
+    // routing (company/board/team) is known-good -- remember it so a future
+    // High/Critical draft for the same customer can auto-create without a
+    // human re-picking routing every time (see lib/group-auto-create.ts).
+    const appCompanyId = (row.packet as PatchGroup).appCompanyId;
+    if (appCompanyId) {
+      const routing = row.routing as TicketRouting;
+      await db.query(`INSERT INTO patch_customer_routing(app_company_id,company_id,board_id,team_id,updated_at,updated_by)
+        VALUES($1,$2,$3,$4,now(),$5)
+        ON CONFLICT(app_company_id) DO UPDATE SET company_id=$2,board_id=$3,team_id=$4,updated_at=now(),updated_by=$5`,
+        [appCompanyId, routing.companyId, routing.boardId, routing.teamId ?? null, row.created_by]);
+    }
     await db.query("INSERT INTO patch_group_ticket_audit(request_id,actor,action) VALUES($1,$2,'ticket.created')", [id, row.created_by]);
     await attachCsv(id, row.created_by);
   } catch (error) {
