@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { Pool } from "pg";
+import type { Pool } from "pg";
+import { applicationDatabase } from "./persist";
 
 // Spotlight source records are deliberately separate from the snapshot-backed
 // scanner store. A run becomes visible only when its completed pointer moves.
@@ -204,17 +205,16 @@ export function createSpotlightRecordStore(db: Database) {
     pruneSpotlightRuns };
 }
 
-let pool: Pool | undefined;
 let runtimeStore: ReturnType<typeof createSpotlightRecordStore> | undefined;
+let runtimePool: Pool | undefined;
 
 function configuredStore() {
-  if (runtimeStore) return runtimeStore;
-  const url = process.env.ELASTIC_VULN_DATABASE_URL;
-  if (!url) throw new Error("ELASTIC_VULN_DATABASE_URL is required for complete Spotlight record storage.");
-  pool = new Pool({ connectionString: url, max: 2, connectionTimeoutMillis: 5000,
-    idleTimeoutMillis: 30_000, statement_timeout: 30_000 });
-  pool.on("error", error => { console.error("[spotlight] database pool error:", error); });
-  runtimeStore = createSpotlightRecordStore(pool);
+  const db = applicationDatabase();
+  if (!db) throw new Error("DATABASE_URL is required for complete Spotlight record storage.");
+  if (!runtimeStore || runtimePool !== db) {
+    runtimePool = db;
+    runtimeStore = createSpotlightRecordStore(db);
+  }
   return runtimeStore;
 }
 
