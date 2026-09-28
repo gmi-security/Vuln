@@ -299,6 +299,11 @@ export async function* spotlightFindingBatches(config: FalconTenant): AsyncGener
       const j: any = await r.json();
       if (!Array.isArray(j?.resources) || j.resources.length !== batch.length)
         throw new Error(`Spotlight entity hydration incomplete for ${config.label}: expected ${batch.length} findings.`);
+      if (j.resources.some((item: any) => !String(item?.id ?? "").trim()))
+        throw new Error(`Spotlight source vulnerability ID is missing for ${config.label}.`);
+      const returnedIds = new Set(j.resources.map((item: any) => String(item?.id ?? "").trim()));
+      if (returnedIds.size !== batch.length || batch.some(id => !returnedIds.has(id)))
+        throw new Error(`Spotlight entity hydration IDs mismatch for ${config.label}.`);
       return j.resources.map(parseResource) as SpotlightFinding[];
     });
     batches = [];

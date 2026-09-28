@@ -56,8 +56,6 @@ export function createSpotlightRecordStore(db: Database) {
           raw JSONB NOT NULL,
           PRIMARY KEY (run_id, tenant_key, source_id)
         );
-        CREATE INDEX IF NOT EXISTS spotlight_records_company_cve_host
-          ON spotlight_import_records (company_id, cve, hostname);
         CREATE INDEX IF NOT EXISTS spotlight_runs_tenant_status
           ON spotlight_import_runs (tenant_key, status, started_at DESC);
       `).then(() => undefined).catch(error => {
@@ -71,6 +69,9 @@ export function createSpotlightRecordStore(db: Database) {
   async function beginSpotlightRun(tenantKey: string): Promise<string> {
     await ensureSchema();
     const id = randomUUID();
+    await db.query(`UPDATE spotlight_import_runs SET status = 'failed',
+      finished_at = now(), error = 'Interrupted by replacement run'
+      WHERE tenant_key = $1 AND status = 'running'`, [tenantKey]);
     await db.query("INSERT INTO spotlight_import_runs (id, tenant_key, status) VALUES ($1::uuid, $2, 'running')", [id, tenantKey]);
     return id;
   }
@@ -111,11 +112,17 @@ export function createSpotlightRecordStore(db: Database) {
     return result.rowCount ?? distinct.size;
   }
 
-  async function completeSpotlightRun(runId: string, tenantKey: string): Promise<void> {
+  async function completeSpotlightRun(runId: string, tenantKey: string, expectedCount: number): Promise<number> {
     await ensureSchema();
     const client = await db.connect();
     try {
       await client.query("BEGIN");
+      const counted = await client.query(`SELECT COUNT(*)::text AS count FROM spotlight_import_records
+        WHERE run_id = $1::uuid AND tenant_key = $2`, [runId, tenantKey]);
+      const recordCount = Number(counted.rows[0]?.count ?? 0);
+      if (recordCount !== expectedCount) {
+        throw new Error(`Spotlight source ID count mismatch: fetched ${expectedCount}, stored ${recordCount}.`);
+      }
       const updated = await client.query(`UPDATE spotlight_import_runs
         SET status = 'completed', finished_at = now(), error = NULL
         WHERE id = $1::uuid AND tenant_key = $2 AND status = 'running' RETURNING id`, [runId, tenantKey]);
@@ -124,6 +131,7 @@ export function createSpotlightRecordStore(db: Database) {
         VALUES ($1, $2::uuid) ON CONFLICT (tenant_key) DO UPDATE
         SET run_id = EXCLUDED.run_id, promoted_at = now()`, [tenantKey, runId]);
       await client.query("COMMIT");
+      return recordCount;
     } catch (error) {
       await client.query("ROLLBACK").catch(() => {});
       throw error;
@@ -164,8 +172,36 @@ export function createSpotlightRecordStore(db: Database) {
     }));
   }
 
+  // Keep only the active completed generation. Delete old or interrupted runs
+  // in small transactions so one cleanup query cannot monopolize Postgres.
+  async function pruneSpotlightRuns(tenantKey: string): Promise<void> {
+    await ensureSchema();
+    const active = await db.query("SELECT run_id FROM spotlight_import_current WHERE tenant_key = $1", [tenantKey]);
+    const activeId = active.rows[0]?.run_id ?? null;
+    const old = await db.query(`SELECT id FROM spotlight_import_runs
+      WHERE tenant_key = $1 AND status <> 'running'
+        AND ($2::uuid IS NULL OR id <> $2::uuid)`, [tenantKey, activeId]);
+    for (const { id } of old.rows) {
+      while (true) {
+        const deleted = await db.query(`WITH doomed AS (
+          SELECT r.ctid FROM spotlight_import_records r
+          WHERE r.run_id = $1::uuid AND r.tenant_key = $2
+            AND NOT EXISTS (SELECT 1 FROM spotlight_import_current c
+              WHERE c.tenant_key = r.tenant_key AND c.run_id = r.run_id)
+          LIMIT 10000
+        ) DELETE FROM spotlight_import_records r USING doomed
+          WHERE r.ctid = doomed.ctid`, [id, tenantKey]);
+        if ((deleted.rowCount ?? 0) < 10000) break;
+        await new Promise<void>(resolve => setImmediate(resolve));
+      }
+      await db.query(`DELETE FROM spotlight_import_runs r WHERE r.id = $1::uuid
+        AND NOT EXISTS (SELECT 1 FROM spotlight_import_current c WHERE c.run_id = r.id)`, [id]);
+    }
+  }
+
   return { beginSpotlightRun, writeSpotlightBatch, completeSpotlightRun,
-    failSpotlightRun, countCompletedSpotlightRecords, listCompletedSpotlightRecords };
+    failSpotlightRun, countCompletedSpotlightRecords, listCompletedSpotlightRecords,
+    pruneSpotlightRuns };
 }
 
 let pool: Pool | undefined;
@@ -185,11 +221,12 @@ function configuredStore() {
 export const beginSpotlightRun = (tenantKey: string) => configuredStore().beginSpotlightRun(tenantKey);
 export const writeSpotlightBatch = (runId: string, tenantKey: string, rows: SpotlightRecord[]) =>
   configuredStore().writeSpotlightBatch(runId, tenantKey, rows);
-export const completeSpotlightRun = (runId: string, tenantKey: string) =>
-  configuredStore().completeSpotlightRun(runId, tenantKey);
+export const completeSpotlightRun = (runId: string, tenantKey: string, expectedCount: number) =>
+  configuredStore().completeSpotlightRun(runId, tenantKey, expectedCount);
 export const failSpotlightRun = (runId: string, error: string) =>
   configuredStore().failSpotlightRun(runId, error);
 export const countCompletedSpotlightRecords = (tenantKey: string) =>
   configuredStore().countCompletedSpotlightRecords(tenantKey);
 export const listCompletedSpotlightRecords = (tenantKey: string, limit?: number, offset?: number) =>
   configuredStore().listCompletedSpotlightRecords(tenantKey, limit, offset);
+export const pruneSpotlightRuns = (tenantKey: string) => configuredStore().pruneSpotlightRuns(tenantKey);

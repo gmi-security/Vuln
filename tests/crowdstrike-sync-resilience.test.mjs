@@ -191,6 +191,17 @@ test("Spotlight rejects incomplete entity hydration instead of reporting a small
   });
 });
 
+test("Spotlight rejects entity hydration with the wrong IDs even when the count matches", async () => {
+  await withFetch((url) => {
+    if (url.includes("/oauth2/token")) return json({ access_token: "tok" });
+    if (url.includes("/spotlight/queries/vulnerabilities/v1"))
+      return json({ resources: ["id-1", "id-2"], meta: { pagination: { after: "", total: 2 } } });
+    return json({ resources: ["id-1", "id-1"].map(id => ({ id, cve: { id: "CVE-2026-1234" } })) });
+  }, async () => {
+    await assert.rejects(() => spotlightListFindings(atlas), /hydrat.*ids.*mismatch/i);
+  });
+});
+
 test("Spotlight rejects a missing continuation cursor when the API total says more findings exist", async () => {
   await withFetch((url) => {
     if (url.includes("/oauth2/token")) return json({ access_token: "tok" });

@@ -33,7 +33,9 @@ import {
   type TidalProgress,
 } from "@/lib/tidal";
 import { intuneConfig, intuneListAssets } from "@/lib/intune";
-import { falconConfigs, falconListAssets, spotlightListFindings } from "@/lib/crowdstrike";
+import { falconConfigs, falconListAssets, spotlightFindingBatches } from "@/lib/crowdstrike";
+import { runSpotlightImport, selectSpotlightTenant, type SpotlightTenantSelection } from "@/lib/spotlight-import";
+import { beginSpotlightRun, writeSpotlightBatch, completeSpotlightRun, failSpotlightRun, pruneSpotlightRuns } from "@/lib/spotlight-record-store";
 import { recordVulnersEnrichment } from "@/lib/reporting-source-activity";
 import { defenderConfig, defenderListFindings } from "@/lib/defender";
 import { burpConfig, burpListIssues, type BurpFinding } from "@/lib/burp";
@@ -5149,6 +5151,9 @@ export function startTidalSync(): { started: boolean; error?: string } {
 export type CsSyncStatus = {
   running: boolean;
   phase: string;
+  tenant?: string;
+  fetched?: number;
+  stored?: number;
   startedAt: number;
   finishedAt: number | null;
   result: unknown;
@@ -5196,13 +5201,19 @@ export function startCsDevicesSync(): { started: boolean; error?: string } {
   return { started: true };
 }
 
-export function startCsSpotlightSync(): { started: boolean; error?: string } {
-  if (!falconConfigs().length) return { started: false, error: "CrowdStrike is not configured." };
+export function startCsSpotlightSync(companyId?: string): { started: boolean; error?: string } {
+  let selection: SpotlightTenantSelection;
+  try {
+    selection = selectSpotlightTenant(falconConfigs(), [...store().companies.values()], companyId);
+  } catch (error) {
+    return { started: false, error: error instanceof Error ? error.message : "CrowdStrike tenant selection failed." };
+  }
   if (csSpotlightSync().running) return { started: false, error: "Spotlight sync already running." };
-  syncJobGlobal.__vulnCsSpotlightSync = { running: true, phase: "Syncing", startedAt: Date.now(), finishedAt: null, result: null, error: null };
+  syncJobGlobal.__vulnCsSpotlightSync = { running: true, phase: "Starting", tenant: selection.config.label,
+    fetched: 0, stored: 0, startedAt: Date.now(), finishedAt: null, result: null, error: null };
   void (async () => {
     try {
-      const r = await importFromCrowdstrikeSpotlight();
+      const r = await importFromCrowdstrikeSpotlight(selection);
       if ("error" in r) {
         syncJobGlobal.__vulnCsSpotlightSync = { ...csSpotlightSync(), running: false, phase: "Error", error: r.error, finishedAt: Date.now() };
       } else {
@@ -5476,227 +5487,51 @@ export type SpotlightImportResult = {
   findingsImported: number;
   hostsAffected: number;
   skipped: number;
-  // Set when CrowdStrike had more open vulnerabilities than this sync
-  // fetched (the pagination safety guard was hit) — the finding count above
-  // is a floor, not the real total, for at least one of these tenants.
-  truncatedTenants?: string[];
 };
 
-// Import CrowdStrike Spotlight vulnerabilities as vuln-class findings.
-// Each finding is matched to a company via host lookup (prefers CrowdStrike
-// device assets already in inventory). Requires spotlight-vulnerabilities:read.
-export async function importFromCrowdstrikeSpotlight(): Promise<
-  SpotlightImportResult | { error: string }
-> {
-  const configs = falconConfigs();
-  if (!configs.length) {
-    return {
-      error:
-        "CrowdStrike is not configured. Set FALCON_CLIENT_ID, FALCON_CLIENT_SECRET, and FALCON_CLOUD.",
-    };
-  }
-  const s = store();
-
-  const nowIso = new Date().toISOString();
-  let findingsImported = 0;
-  let skipped = 0;
-  const hosts = new Set<string>();
-  const scanByCompany = new Map<string, InternalScan>();
-
-  // Build a correlation index once — O(n) — instead of scanning all findings
-  // per item. Keys are company-scoped so customers sharing asset strings
-  // never swallow each other's findings, and cross-connector so a CVE
-  // another scanner already reported on the same host correlates instead of
-  // duplicating.
-  const existingFindingByKey = buildCorrelationIndex(s);
-
-  // Reuse existing spotlight scan per company (upsert by externalRef).
-  const existingScanByCompany = new Map<string, InternalScan>();
-  for (const scan of s.scans.values()) {
-    if (scan.externalRef?.startsWith("spotlight:")) {
-      existingScanByCompany.set(scan.companyId, scan);
-    }
+// Store every source record from the selected customer tenant in transactional
+// Postgres. Existing in-memory findings and reporting remain unchanged.
+export async function importFromCrowdstrikeSpotlight(
+  selected?: SpotlightTenantSelection,
+): Promise<SpotlightImportResult | { error: string }> {
+  let selection: SpotlightTenantSelection;
+  try {
+    selection = selected ?? selectSpotlightTenant(falconConfigs(), [...store().companies.values()]);
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : "CrowdStrike tenant selection failed." };
   }
 
-  const tenantErrors: string[] = [];
-  const truncatedTenants: string[] = [];
-  // Fetch every tenant's Spotlight findings concurrently. Each tenant's own
-  // pagination must stay sequential internally (cursor-based, each page
-  // depends on the last — enforced inside spotlightListFindings), but
-  // there's no reason one tenant's up-to-5000-page walk should block another
-  // tenant's walk from even starting: a large primary estate (tens of
-  // thousands of findings) was serializing behind every additional tenant,
-  // and vice versa, turning what should be independent fetches into one
-  // long chain.
-  const fetched = await Promise.all(
-    configs.map(async (config) => {
-      try {
-        const { findings, truncated } = await spotlightListFindings(config);
-        return { config, items: findings, truncated, error: null as string | null };
-      } catch (err) {
-        return {
-          config,
-          items: null,
-          truncated: false,
-          error: err instanceof Error ? err.message : "Failed to reach the CrowdStrike Spotlight API.",
-        };
-      }
-    }),
-  );
-
-  for (const { config, items, truncated, error } of fetched) {
-    if (error || !items) {
-      tenantErrors.push(`${config.label}: ${error ?? "Failed to reach the CrowdStrike Spotlight API."}`);
-      continue;
-    }
-    if (truncated) truncatedTenants.push(config.label);
-
-    for (const item of items) {
-      const assetKey = item.hostname || item.localIp;
-      if (!assetKey) { skipped += 1; continue; }
-
-      // Customer segmentation: a named tenant (its own separate CrowdStrike
-      // CID, e.g. an MSSP client distinct from GMI's own estate) pins
-      // directly to that company — no fuzzy matching, since the tenant
-      // itself already tells us unambiguously whose data this is. Only the
-      // unnamed primary tenant (GMI's own shared estate) uses the looser
-      // asset-owner / hostname-match / internal-org fallback chain.
-      let companyId: string | null | undefined;
-      if (config.customerName) {
-        let c = Array.from(s.companies.values()).find(
-          (co) => co.name.toLowerCase() === config.customerName!.toLowerCase(),
-        );
-        if (!c) {
-          const cr = createCompany({ name: config.customerName });
-          if (!("error" in cr)) c = s.companies.get(cr.id);
-        }
-        companyId = c?.id;
-      } else {
-        const owners = assetOwners(s, item.hostname, item.localIp);
-        companyId = owners.size === 1 ? owners.values().next().value : undefined;
-        if (!companyId) companyId = matchCompanyForScan(s, item.hostname, item.localIp);
-        if (!companyId) {
-          companyId = Array.from(s.companies.values()).find((c) => c.kind === "internal")?.id;
-        }
-      }
-      if (!companyId) { skipped += 1; continue; }
-      hosts.add(assetKey);
-
-      // Reuse an existing scan for this company rather than creating a new one each sync.
-      let scan = scanByCompany.get(companyId) ?? existingScanByCompany.get(companyId);
-      if (!scan) {
-        const company = s.companies.get(companyId)!;
-        const folder = ensureFolder(s, companyId, "Spotlight");
-        const scanId = nextId(s, "SCAN");
-        scan = {
-          id: scanId,
-          name: `CrowdStrike Spotlight — ${company.name}`,
-          companyId: company.id,
-          companyName: company.name,
-          folderId: folder.id,
-          folderName: folder.name,
-          connector: "crowdstrike",
-          profile: "agent-sync",
-          targets: [assetKey],
-          status: "Completed",
-          createdAt: nowIso,
-          startedAt: nowIso,
-          completedAt: nowIso,
-          findingsCount: 0,
-          severityCounts: emptySeverityCounts(),
-          hostsScanned: 0,
-          requestedBy: "imported@crowdstrike-spotlight",
-          durationMs: 1,
-          progressFrozenAt: 100,
-          seed: hashSeed(scanId),
-          vendor: null,
-          externalRef: `spotlight:${companyId}`,
-        };
-        s.scans.set(scanId, scan);
-      }
-      scan.completedAt = nowIso;
-      scanByCompany.set(companyId, scan);
-
-      // CrowdStrike reports a host's internal and external IP together with
-      // its hostname — link them now so an external scanner's finding on
-      // this device's public IP correlates with this one even if the asset
-      // inventory never recorded that IP against this host.
-      linkIdentities(s, companyId, [item.hostname, item.localIp, item.externalIp]);
-      const dedupeKey = correlationKey(s, companyId, item.cve, assetKey);
-      const existingFinding = existingFindingByKey.get(dedupeKey);
-      if (existingFinding) {
-        correlateFinding(s, existingFinding, {
-          connector: "crowdstrike", cvss: item.cvss, cvssV3: item.cvss, cvssV2: 0, vpr: 0, epss: 0,
-          exploitAvailable: item.exploitAvailable, severity: item.severity, lastSeen: nowIso,
-        });
-        continue;
-      }
-
-      const created: Finding = {
-        id: `VLN-${(s.counter += 1)}`,
-        scanId: scan.id,
-        companyId: scan.companyId,
-        companyName: scan.companyName,
-        connector: "crowdstrike",
-        cve: item.cve,
-        title: item.title,
-        severity: item.severity,
-        cvss: item.cvss,
-        cvssV3: item.cvss,
-        cvssV2: 0,
-        vpr: 0,
-        epss: 0,
-        asset: item.hostname || item.localIp,
-        port: "N/A",
-        category: "Endpoint",
-        description: `${item.description}${item.exprRating ? `\n\nExPRT Rating: ${item.exprRating}` : ""}`,
-        remediation: item.remediation,
-        status: "Open",
-        assignee: null,
-        firstSeen: nowIso,
-        lastSeen: nowIso,
-        resolvedAt: null,
-        exploitAvailable: item.exploitAvailable,
-        ...riskFields(s, {
-          cve: item.cve,
-          cvss: item.cvss,
-          epss: 0,
-          exploitAvailable: item.exploitAvailable,
-          asset: item.hostname || item.localIp,
-          companyId: scan.companyId,
-        }),
+  let lastLogged = 0;
+  console.info("[spotlight] starting record import for", selection.config.label);
+  try {
+    const result = await runSpotlightImport(selection, {
+      batches: spotlightFindingBatches,
+      begin: beginSpotlightRun,
+      write: writeSpotlightBatch,
+      complete: completeSpotlightRun,
+      fail: failSpotlightRun,
+      prune: pruneSpotlightRuns,
+    }, (progress) => {
+      syncJobGlobal.__vulnCsSpotlightSync = {
+        ...csSpotlightSync(),
+        phase: progress.phase,
+        tenant: progress.tenant,
+        fetched: progress.fetched,
+        stored: progress.stored,
       };
-      s.findings.set(created.id, created);
-      existingFindingByKey.set(dedupeKey, created);
-      findingsImported += 1;
-    }
+      if (progress.fetched - lastLogged >= 100_000) {
+        lastLogged = progress.fetched;
+        console.info("[spotlight] progress", progress.tenant, progress.fetched, progress.stored);
+      }
+    });
+    console.info("[spotlight] completed", selection.config.label, result.findingsImported);
+    return result;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Spotlight record import failed.";
+    console.error("[spotlight] import failed for", selection.config.label, message);
+    return { error: message };
   }
-
-  // Every tenant failed — surface as a top-level error rather than a silent
-  // "0 findings" result. A partial failure (some tenants ok) still returns
-  // normally; that tenant's sync simply contributed nothing this round.
-  if (tenantErrors.length === configs.length) {
-    return { error: tenantErrors.join("; ") };
-  }
-
-  for (const scan of scanByCompany.values()) {
-    const all = Array.from(s.findings.values()).filter((f) => f.scanId === scan.id);
-    scan.findingsCount = all.length;
-    const counts = emptySeverityCounts();
-    for (const f of all) counts[f.severity] += 1;
-    scan.severityCounts = counts;
-    scan.hostsScanned = new Set(all.map((f) => f.asset)).size;
-  }
-
-  await flushNow();
-  return {
-    findingsImported,
-    hostsAffected: hosts.size,
-    skipped,
-    ...(truncatedTenants.length ? { truncatedTenants } : {}),
-  };
 }
-
 export type DefenderImportResult = {
   findingsImported: number;
   hostsAffected: number;
