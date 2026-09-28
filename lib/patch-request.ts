@@ -7,7 +7,7 @@ import { worstSeverityOf } from "./vuln-sla";
 export type PatchRequest = {
   cve: string; collectedAt: string; region: string; hostCount: number; findingCount: number;
   csvRows: number; title: string; body: string; csv: string; warnings: string[];
-  tenantIds: string[]; hostScope: string[]; worstSeverity: string | null;
+  tenantIds: string[]; hostScope: string[]; worstSeverity: string | null; alreadyTicketedFindings: number;
 };
 export type Remediation = {
   id: string; title: string; action: string; link: string; vendorUrl: string;
@@ -120,8 +120,19 @@ export function normalizePatchFinding(raw: Json, cve: string): PatchFinding {
     remediations: (raw.remediation?.entities ?? []).map(normalizeRemediation) };
 }
 
-export function buildPatchRequest(cve: string, records: PatchFinding[], region: string, startedAt: string, collectedAt: string): PatchRequest {
+export function buildPatchRequest(cve: string, records: PatchFinding[], region: string, startedAt: string, collectedAt: string, alreadyTicketed: Set<string> = new Set()): PatchRequest {
   if (!records.length) throw new DashboardError("CrowdStrike currently reports no open/reopened findings for this CVE. No patch request was prepared.");
+  // Excludes any device+CVE pair that already has an active ticket in
+  // progress -- via this same single-CVE flow or the grouped consolidation
+  // flow, either one -- so the same host/CVE never gets ticketed twice
+  // through two different paths.
+  let alreadyTicketedFindings = 0;
+  const scoped = records.filter((row) => {
+    if (!alreadyTicketed.has(JSON.stringify([row.cid, row.hostId, cve]))) return true;
+    alreadyTicketedFindings++; return false;
+  });
+  if (!scoped.length) throw new DashboardError("Every open/reopened finding for this CVE already has an active ticket in progress. No patch request was prepared.");
+  records = scoped;
   const hosts = new Map<string, PatchFinding>(), remedies = new Map<string, Remediation>();
   const warnings = new Set<string>(), csvRows: QueryResult["rows"] = [];
   const names = ["cve", "tenant_id", "host_id", "hostname", "local_ip", "operating_system", "host_criticality", "internet_exposure", "finding_id", "status", "suppressed",
@@ -185,10 +196,11 @@ export function buildPatchRequest(cve: string, records: PatchFinding[], region: 
     "", "RECOMMENDED REMEDIATIONS FROM CROWDSTRIKE", remediationText.join("\n\n") || "No recommended remediation was supplied. Manual investigation is required.",
     "", "AFFECTED ASSETS", `See the attached ${cve}-patch-request.csv for the complete asset list and per-application recommended remediations.`, "", "SOURCE REFERENCES", references.join("\n") || "Not supplied.",
     "", "COLLECTION NOTES", "All matching pages were collected. This is a paginated observation, not an atomic CrowdStrike snapshot. Counts can differ from the cached dashboard.",
+    ...(alreadyTicketedFindings ? [`${alreadyTicketedFindings.toLocaleString()} finding(s) already covered by an active ConnectWise ticket (from this CVE or a grouped consolidation) were excluded — see the ticket tracker for their status.`] : []),
     ...warnings, `Attach ${cve}-patch-request.csv. No ticket has been sent to ConnectWise.`].join("\n");
   const csv = dashboardCsv({ columns: names.map((name) => ({ name, type: "keyword" })), rows: csvRows, truncated: false });
   const packet: PatchRequest = { cve, collectedAt, region, hostCount: hosts.size, findingCount: records.length, csvRows: csvRows.length, title, body, csv, warnings: [...warnings],
-    tenantIds: [...new Set(ordered.map(row => row.cid))].sort(), hostScope: [...hosts.keys()].sort(), worstSeverity: worstSeverityOf(ordered) };
+    tenantIds: [...new Set(ordered.map(row => row.cid))].sort(), hostScope: [...hosts.keys()].sort(), worstSeverity: worstSeverityOf(ordered), alreadyTicketedFindings };
   if (new TextEncoder().encode(JSON.stringify(packet)).length > 32 * 1024 * 1024) throw new DashboardError("This patch request exceeds the 32 MiB export limit. No partial export was prepared.");
   return packet;
 }

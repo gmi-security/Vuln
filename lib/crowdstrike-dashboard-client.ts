@@ -284,13 +284,13 @@ async function hydrateRemediations(auth: Awaited<ReturnType<typeof session>>, de
   }
 }
 
-export async function executePatchRequest(connection: CrowdStrikeConnection, value: unknown, budgetMs = 300_000): Promise<PatchRequest> {
+export async function executePatchRequest(connection: CrowdStrikeConnection, value: unknown, alreadyTicketed: Set<string> = new Set(), budgetMs = 300_000): Promise<PatchRequest> {
   const { cve, tenantId } = parsePatchInput(value), startedAt = new Date().toISOString();
   const deadline = Date.now() + budgetMs, auth = await session(connection, deadline);
   const records = await collectPatchFindings(auth, deadline, cve, tenantId);
   await hydrateRemediations(auth, deadline, records.values());
   if (Date.now() >= deadline) throw new DashboardError("Patch request collection exceeded five minutes. Retry; no partial export was prepared.");
-  return buildPatchRequest(cve, [...records.values()], connection.region, startedAt, new Date().toISOString());
+  return buildPatchRequest(cve, [...records.values()], connection.region, startedAt, new Date().toISOString(), alreadyTicketed);
 }
 
 export async function executePatchConsolidation(connection: CrowdStrikeConnection, value: unknown, alreadyTicketed: Set<string> = new Set(), budgetMs = 600_000): Promise<PatchConsolidation> {

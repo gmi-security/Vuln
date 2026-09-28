@@ -383,6 +383,26 @@ test("patch output escapes CSV formulas and reports suppressed and missing detai
   assert.doesNotMatch(packet.csv, /"Unmapped application","","patch-1"/);
 });
 
+test("patch export excludes device/CVE pairs that already have an active ticket, whether from this CVE or a grouped consolidation", () => {
+  const rows = [
+    patchModel.normalizePatchFinding(patchRaw("a", { host_info: { hostname: "already-ticketed" } }), patchCve),
+    patchModel.normalizePatchFinding(patchRaw("b", { aid: "host-2", host_info: { hostname: "still-open" } }), patchCve),
+  ];
+  const alreadyTicketed = new Set([JSON.stringify(["tenant-a", "host-1", patchCve])]);
+  const packet = patchModel.buildPatchRequest(patchCve, rows, "us-1", "start", "end", alreadyTicketed);
+  assert.equal(packet.hostCount, 1);
+  assert.equal(packet.alreadyTicketedFindings, 1);
+  assert.match(packet.csv, /still-open/);
+  assert.doesNotMatch(packet.csv, /already-ticketed/);
+  assert.match(packet.body, /1 finding\(s\) already covered by an active ConnectWise ticket/);
+});
+
+test("patch export refuses to prepare when every finding for the CVE already has an active ticket", () => {
+  const row = patchModel.normalizePatchFinding(patchRaw("a"), patchCve);
+  const alreadyTicketed = new Set([JSON.stringify(["tenant-a", "host-1", patchCve])]);
+  assert.throws(() => patchModel.buildPatchRequest(patchCve, [row], "us-1", "start", "end", alreadyTicketed), /already has an active ticket/);
+});
+
 
 test("recommendations exclude minimum-only alternatives, preserve missing hosts, and respect app mapping", () => {
   const rows = [patchRaw("first", { apps: [

@@ -77,7 +77,8 @@ async function work() {
         await saveQuery(job.input, job.actor, { id: job.id, connectionRevision: job.connection_revision, queryRevision: job.query_revision });
         result = { saved: true };
       } else if (job.kind === "patch") {
-        const patchRequest = await preparePatchRequest(job.input, job.connection_revision);
+        const excluded = await activeTicketedPairs();
+        const patchRequest = await preparePatchRequest(job.input, job.connection_revision, excluded);
         const patchRequestId = await persistPreparedPatch(job.id, patchRequest, job.actor, job.connection_revision);
         result = { patchRequest, patchRequestId };
       } else if (job.kind === "consolidate") {
