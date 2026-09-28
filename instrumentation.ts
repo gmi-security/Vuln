@@ -46,4 +46,9 @@ export async function register(): Promise<void> {
   ]);
   const { startGroupAutoCreateScheduler } = await import("@/lib/group-auto-create");
   void backfill.then(() => startGroupAutoCreateScheduler());
+  // Independent of the backfills above -- re-checks every closed Atlas
+  // ticket against CrowdStrike and reopens anything closed without a
+  // verified fix. Runs on its own schedule regardless of backfill outcome.
+  const { startClosureValidationScheduler } = await import("@/lib/group-closure-validation");
+  startClosureValidationScheduler();
 }

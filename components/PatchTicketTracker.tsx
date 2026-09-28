@@ -31,6 +31,8 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
   const [error, setError] = useState("");
   const [autoCreating, setAutoCreating] = useState(false);
   const [autoCreateResult, setAutoCreateResult] = useState("");
+  const [validating, setValidating] = useState(false);
+  const [validateResult, setValidateResult] = useState("");
 
   const reload = useCallback(async () => {
     setLoading(true); setError("");
@@ -66,6 +68,16 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
     finally { setAutoCreating(false); }
   }
 
+  async function runValidateClosuresNow() {
+    setValidating(true); setValidateResult(""); setError("");
+    try {
+      const result = await dashboardRequest<{ checked: number; reopened: number; confirmedFixed: number; errors: number }>("patch-group-tickets/validate-closures", { method: "POST" });
+      setValidateResult(`Checked ${result.checked} closed ticket${result.checked === 1 ? "" : "s"} · reopened ${result.reopened} unverified · confirmed ${result.confirmedFixed} fixed${result.errors ? ` · ${result.errors} failed` : ""}.`);
+      await reload();
+    } catch (e) { setError(e instanceof Error ? e.message : "Could not run closure validation."); }
+    finally { setValidating(false); }
+  }
+
   const buckets = { "cut-open": 0, "cut-closed": 0, attention: 0, draft: 0 };
   let devicesCovered = 0;
   const distinctCves = new Set<string>();
@@ -82,11 +94,13 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
       <h2 className="text-lg text-zinc-100">Patch ticket tracker</h2>
       <div className="flex flex-wrap gap-2">
         <button type="button" className={styles.button} disabled={autoCreating} onClick={() => void runAutoCreateNow()}>{autoCreating ? "Running…" : "Run auto-create now"}</button>
+        <button type="button" className={styles.button} disabled={validating} onClick={() => void runValidateClosuresNow()}>{validating ? "Validating…" : "Validate closures now"}</button>
         <button type="button" className={styles.button} disabled={loading} onClick={() => void reload()}>{loading ? "Loading…" : "Refresh"}</button>
       </div>
     </div>
     <p className={styles.resultNote}>Customer-linked consolidation plans prepared for review and their ConnectWise ticket status.</p>
     {autoCreateResult && <p role="status" className={`${styles.resultNote} mt-1`}>{autoCreateResult}</p>}
+    {validateResult && <p role="status" className={`${styles.resultNote} mt-1`}>{validateResult}</p>}
     <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-5">
       <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3"><div className="text-2xl font-semibold text-white">{total}</div><div className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Prepared</div></div>
       <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3"><div className="text-2xl font-semibold text-white">{cut}</div><div className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Tickets cut</div></div>

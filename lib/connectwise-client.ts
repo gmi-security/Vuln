@@ -173,6 +173,27 @@ export async function cwPrioritiesBySort(connection: ConnectWiseConnection): Pro
   options.sort((a, b) => a.sort - b.sort);
   return options.map(({ id, name }) => ({ id, name }));
 }
+// A board marks exactly one status as its default for new tickets
+// (defaultFlag) -- the closest thing ConnectWise has to "where a ticket
+// starts." That's a better signal for "reopen to" than sort order, which
+// only tells you relative position, not which end is the entry point. Falls
+// back to the first non-closed status if no board has one flagged, rather
+// than failing outright -- still directionally correct even if not
+// guaranteed to match the board's intended starting point.
+export async function cwDefaultOpenStatus(connection: ConnectWiseConnection, boardId: number): Promise<CWOption> {
+  const rows = await cwRequest(connection, `/service/boards/${boardId}/statuses?${new URLSearchParams({ pageSize: "100" })}`);
+  if (!Array.isArray(rows)) throw new DashboardError("ConnectWise did not return a valid status list.", 502);
+  const open = rows.filter((row: CWRecord) => cwId(row.id) && typeof row.name === "string" && row.name.trim()
+    && !row.inactiveFlag && !row.inactive && !row.deletedFlag && !row.closedStatus && !row.closedFlag);
+  if (!open.length) throw new DashboardError("This board has no open status configured.", 502);
+  const chosen = open.find((row: CWRecord) => row.defaultFlag === true) ?? open[0];
+  return { id: chosen.id, name: chosen.name };
+}
+// A visible, dated explanation directly on the ticket -- the client should be
+// able to see why it reopened the same way they'd see it get closed.
+export async function cwAddTicketNote(connection: ConnectWiseConnection, ticketId: number, text: string): Promise<void> {
+  await cwRequest(connection, `/service/tickets/${ticketId}/notes`, "POST", { text, detailDescriptionFlag: true });
+}
 export async function validateCWRouting(connection: ConnectWiseConnection, routing: TicketRouting | Omit<TicketRouting, "companyId">) {
   const refs = { ...("companyId" in routing ? { company: `/company/companies/${routing.companyId}` } : {}), board: `/service/info/boards/${routing.boardId}`,
     ...(routing.teamId ? { team: `/service/boards/${routing.boardId}/teams/${routing.teamId}` } : {}) };

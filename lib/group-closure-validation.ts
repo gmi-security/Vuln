@@ -1,0 +1,99 @@
+import { patchTicketDatabase, savedConnection } from "./patch-ticket-store";
+import { dashboardConnectionRevision, verifyAgainstCrowdStrike } from "./elastic-dashboard-store";
+import { cwDefaultOpenStatus, cwAddTicketNote, cwRequest } from "./connectwise-client";
+import { runWithConcurrency } from "./ticket-status-sync";
+import { elasticVulnEnabled } from "./elastic-vuln-server";
+import { ATLAS_REPORTING_COMPANY_ID } from "./reporting-direct-sources";
+import type { PatchGroup } from "./patch-request";
+
+const ACTOR = "closure-validation";
+// Same pilot scope as group-auto-create.ts and group-priority-backfill.ts.
+const PILOT_COMPANY_IDS = [ATLAS_REPORTING_COMPANY_ID];
+
+type Counts = { checked: number; reopened: number; confirmedFixed: number; errors: number };
+type VerifyResult = { checkedAt: string; stillOpenHosts: string[] };
+type ClosedRow = { id: string; tenant_id: string; routing: { boardId?: number } | null; packet: PatchGroup };
+
+async function recordVerification(id: string, result: VerifyResult, state: "verified" | "still_open") {
+  const db = await patchTicketDatabase();
+  await db.query("UPDATE patch_group_ticket_requests SET fix_verified_at=$2,fix_verified_state=$3,fix_still_open_count=$4,updated_at=now() WHERE id=$1",
+    [id, result.checkedAt, state, result.stillOpenHosts.length]);
+  await db.query("INSERT INTO patch_group_ticket_audit(request_id,actor,action) VALUES($1,$2,'fix.verified')", [id, ACTOR]);
+}
+
+// Closing a ConnectWise ticket and a CVE actually being gone are two
+// different facts, and only CrowdStrike's own sensor telemetry -- the same
+// source that raised the finding in the first place -- can confirm the
+// second one. This puts the ticket back the way it would have looked had it
+// never been closed: reopened, with a visible note explaining why, so the
+// client sees the correction the same way they saw the closure.
+async function reopenTicket(id: string, boardId: number, result: VerifyResult) {
+  const db = await patchTicketDatabase();
+  const row = (await db.query("SELECT ticket_id,cw_target FROM patch_group_ticket_requests WHERE id=$1", [id])).rows[0];
+  if (!row?.ticket_id) throw new Error("Missing ticket to reopen.");
+  const saved = await savedConnection();
+  if (saved.target !== row.cw_target) throw new Error("ConnectWise connection changed before reopening; retry next pass.");
+  const status = await cwDefaultOpenStatus(saved.value, boardId);
+  await cwRequest(saved.value, `/service/tickets/${row.ticket_id}`, "PATCH", [{ op: "replace", path: "status/id", value: status.id }]);
+  await cwAddTicketNote(saved.value, row.ticket_id,
+    `Reopened automatically: a rescan on ${new Date(result.checkedAt).toLocaleString()} found this vulnerability still present on ${result.stillOpenHosts.length} host(s). This ticket was closed before the fix was verified and does not reflect completed remediation.`);
+  await db.query("UPDATE patch_group_ticket_requests SET closed=false,ticket_status=$2,fix_verified_at=$3,fix_verified_state='still_open',fix_still_open_count=$4,updated_at=now() WHERE id=$1",
+    [id, status.name, result.checkedAt, result.stillOpenHosts.length]);
+  await db.query("INSERT INTO patch_group_ticket_audit(request_id,actor,action) VALUES($1,$2,'ticket.reopened.unverified_closure')", [id, ACTOR]);
+}
+
+// Re-checks every closed Atlas ticket that hasn't already been confirmed
+// fixed, and reopens anything closed without a real remediation behind it.
+// Once a ticket is confirmed verified it's left alone for good (a
+// legitimately fixed ticket has no reason to be re-queried every pass); a
+// reopened ticket naturally drops out on its own (closed=false) until
+// someone closes it again, at which point this checks it fresh.
+export async function validateClosedGroupTickets(): Promise<Counts> {
+  const saved = await savedConnection().catch(() => null);
+  if (!saved) return { checked: 0, reopened: 0, confirmedFixed: 0, errors: 0 };
+  const db = await patchTicketDatabase();
+  const rows = (await db.query(`
+    SELECT id, tenant_id, routing, packet FROM patch_group_ticket_requests
+    WHERE state='created' AND closed=true AND ticket_id IS NOT NULL AND cw_target=$1
+      AND packet->>'appCompanyId' = ANY($2::text[])
+      AND fix_verified_state IS DISTINCT FROM 'verified'
+  `, [saved.target, PILOT_COMPANY_IDS])).rows as ClosedRow[];
+  if (!rows.length) return { checked: 0, reopened: 0, confirmedFixed: 0, errors: 0 };
+  const crowdstrikeRevision = await dashboardConnectionRevision("crowdstrike");
+  if (crowdstrikeRevision === null) return { checked: rows.length, reopened: 0, confirmedFixed: 0, errors: 0 };
+  let reopened = 0, confirmedFixed = 0, errors = 0;
+  await runWithConcurrency(rows, 2, async (row) => {
+    const packet = row.packet;
+    if (packet.source === "stored-findings" || !packet.hostScope?.length || !row.routing?.boardId) return; // no CrowdStrike scope, or no board, to act on
+    try {
+      const result = await verifyAgainstCrowdStrike(packet.cves, packet.hostScope, row.tenant_id, crowdstrikeRevision);
+      if (result.stillOpenHosts.length === 0) {
+        await recordVerification(row.id, result, "verified");
+        confirmedFixed++;
+        return;
+      }
+      await reopenTicket(row.id, row.routing.boardId, result);
+      reopened++;
+    } catch {
+      errors++; // one ticket's connection mismatch or ConnectWise rejection must not block the rest
+    }
+  });
+  return { checked: rows.length, reopened, confirmedFixed, errors };
+}
+
+const runtime = globalThis as typeof globalThis & { __groupClosureValidation?: { timer?: ReturnType<typeof setInterval>; working?: Promise<void> } };
+const state = runtime.__groupClosureValidation ??= {};
+
+export function startClosureValidationScheduler(): void {
+  if (state.timer || !elasticVulnEnabled() || process.env.VULN_DISABLE_SCHEDULER === "true") return;
+  const trigger = () => {
+    if (state.working) return;
+    state.working = validateClosedGroupTickets().then(
+      () => {},
+      (err) => console.error("[group-closure-validation] Could not complete:", err instanceof Error ? err.message : err),
+    ).finally(() => { state.working = undefined; });
+  };
+  state.timer = setInterval(trigger, 15 * 60_000);
+  state.timer.unref();
+  trigger();
+}
