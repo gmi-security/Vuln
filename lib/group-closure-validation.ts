@@ -114,8 +114,13 @@ export async function validateClosedGroupTickets(): Promise<Counts> {
       await reopenTicket(row.id, row.routing.boardId, result, row.worst_severity, priorities);
       reopened++;
     } catch (err) {
-      if (err instanceof MergedTicketError) needsManualUnmerge++;
-      else errors++; // one ticket's connection mismatch or ConnectWise rejection must not block the rest
+      if (err instanceof MergedTicketError) { needsManualUnmerge++; return; } // already recorded its own last_error inside reopenTicket
+      errors++; // one ticket's connection mismatch or ConnectWise rejection must not block the rest
+      // A bare error count told no one *why* -- 23 failures with no recorded
+      // reason each meant re-diagnosing from scratch. Best-effort: a failure
+      // writing this must never mask the original error by throwing instead.
+      const message = err instanceof Error ? err.message : String(err);
+      await db.query("UPDATE patch_group_ticket_requests SET last_error=$2,updated_at=now() WHERE id=$1", [row.id, message]).catch(() => {});
     }
   });
   return { checked: rows.length, reopened, confirmedFixed, needsManualUnmerge, errors };

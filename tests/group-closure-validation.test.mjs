@@ -123,7 +123,7 @@ test("ConnectWise rejecting the reopen with a merge-related error is flagged for
   assert.ok(audit, "expected a ticket.reopen.blocked_merged audit entry");
 });
 
-test("a reopen failing for an unrelated ConnectWise error is a normal error, not needsManualUnmerge", async () => {
+test("a reopen failing for an unrelated ConnectWise error is a normal error, not needsManualUnmerge, and the reason is recorded on the row", async () => {
   const db = fakeDb({ closedRows: [baseRow], ticketRows: { a: { ticket_id: 555, cw_target: "cw-1" } } });
   const validate = await loadValidation({
     db,
@@ -133,6 +133,23 @@ test("a reopen failing for an unrelated ConnectWise error is a normal error, not
   });
   const result = await validate.validateClosedGroupTickets();
   assert.deepEqual(result, { checked: 1, reopened: 0, confirmedFixed: 0, needsManualUnmerge: 0, errors: 1 });
+  const update = db.calls.find((c) => c.sql.includes("SET last_error"));
+  assert.deepEqual(update.params, ["a", "ConnectWise returned HTTP 500. Internal error."]);
+});
+
+test("recording the error reason itself failing does not throw or block the rest", async () => {
+  const rowA = { ...baseRow, id: "a" }, rowB = { ...baseRow, id: "b" };
+  const db = fakeDb({ closedRows: [rowA, rowB], ticketRows: { a: { ticket_id: 555, cw_target: "cw-1" }, b: { ticket_id: 556, cw_target: "cw-1" } } });
+  const realQuery = db.query;
+  db.query = async (sql, params) => { if (sql.includes("SET last_error") && params[0] === "a") throw new Error("db unavailable"); return realQuery(sql, params); };
+  const validate = await loadValidation({
+    db,
+    verifyAgainstCrowdStrike: async () => ({ checkedAt: "2026-09-28T00:00:00.000Z", stillOpenHosts: ["host-1"] }),
+    cwDefaultOpenStatus: async () => ({ id: 42, name: "New" }),
+    cwRequest: async () => { throw new Error("ConnectWise returned HTTP 500. Internal error."); },
+  });
+  const result = await validate.validateClosedGroupTickets();
+  assert.deepEqual(result, { checked: 2, reopened: 0, confirmedFixed: 0, needsManualUnmerge: 0, errors: 2 });
 });
 
 test("a reopened Critical ticket has its priority reasserted to the top slot", async () => {
