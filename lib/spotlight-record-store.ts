@@ -31,6 +31,13 @@ export type SpotlightCheckpoint = {
   hydratedCount: number;
 };
 
+export type SpotlightRunState = SpotlightCheckpoint & {
+  status: "running" | "completed" | "failed";
+  startedAt: string;
+  finishedAt: string | null;
+  error: string | null;
+};
+
 function checkpoint(row: any): SpotlightCheckpoint {
   return {
     id: String(row.id), tenantKey: String(row.tenant_key), phase: row.phase,
@@ -112,6 +119,37 @@ export function createSpotlightRecordStore(db: Database) {
     return id;
   }
 
+  async function acquireSpotlightWorkerLock(tenantKey: string): Promise<{
+    assertHeld: () => void;
+    release: () => Promise<void>;
+  }> {
+    const client = await db.connect();
+    try {
+      const result = await client.query("SELECT pg_try_advisory_lock(1701, hashtext($1)) AS locked", [tenantKey]);
+      if (result.rows[0]?.locked !== true)
+        throw new Error("Spotlight import is already running for this customer.");
+    } catch (error) {
+      client.release();
+      throw error;
+    }
+    let lost = false;
+    let released = false;
+    const onError = () => { lost = true; };
+    client.on?.("error", onError);
+    return {
+      assertHeld: () => {
+        if (lost || released) throw new Error("Spotlight worker lost its database lock; resume the import.");
+      },
+      release: async () => {
+        if (released) return;
+        released = true;
+        client.off?.("error", onError);
+        if (!lost) await client.query("SELECT pg_advisory_unlock(1701, hashtext($1))", [tenantKey]).catch(() => {});
+        client.release();
+      },
+    };
+  }
+
   async function beginOrResumeSpotlightRun(tenantKey: string): Promise<SpotlightCheckpoint> {
     await ensureSchema();
     const client = await db.connect();
@@ -152,6 +190,29 @@ export function createSpotlightRecordStore(db: Database) {
     }
   }
 
+  async function getLatestSpotlightRunState(): Promise<SpotlightRunState | null> {
+    let result;
+    try {
+      result = await db.query(`SELECT id, tenant_key, phase, query_cursor,
+      hydration_cursor, discovered_count, expected_count, hydrated_count,
+      status, started_at, finished_at, error FROM spotlight_import_runs
+      WHERE checkpoint_version = 2 AND phase IN ('discovering', 'hydrating')
+      ORDER BY started_at DESC LIMIT 1`);
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error &&
+          (error.code === "42703" || error.code === "42P01")) return null;
+      throw error;
+    }
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      ...checkpoint(row), status: row.status,
+      startedAt: new Date(row.started_at).toISOString(),
+      finishedAt: row.finished_at ? new Date(row.finished_at).toISOString() : null,
+      error: row.error ?? null,
+    };
+  }
+
   async function saveSpotlightIdPage(runId: string, tenantKey: string, priorCursor: string,
     ids: string[], nextCursor: string, reportedTotal: number | null): Promise<SpotlightCheckpoint> {
     if (ids.some(id => !id?.trim())) throw new Error("Spotlight discovery returned an invalid source ID.");
@@ -170,7 +231,8 @@ export function createSpotlightRecordStore(db: Database) {
       if (!nextCursor && reportedTotal != null && seenCount < reportedTotal)
         throw new Error(`Spotlight pagination incomplete: received ${seenCount} of ${reportedTotal} IDs.`);
       if (ids.length) await client.query(`INSERT INTO spotlight_import_ids (run_id, tenant_key, source_id)
-        SELECT $1::uuid, $2, value FROM jsonb_array_elements_text($3::jsonb) AS value
+        SELECT $1::uuid, $2, source.source_id
+        FROM jsonb_array_elements_text($3::jsonb) AS source(source_id)
         ON CONFLICT (run_id, tenant_key, source_id) DO NOTHING`, [runId, tenantKey, JSON.stringify(ids)]);
       const updated = await client.query(`UPDATE spotlight_import_runs SET
         query_cursor = $3, discovered_count = $4,
@@ -447,7 +509,8 @@ export function createSpotlightRecordStore(db: Database) {
     }
   }
 
-  return { beginSpotlightRun, beginOrResumeSpotlightRun, saveSpotlightIdPage,
+  return { beginSpotlightRun, acquireSpotlightWorkerLock, beginOrResumeSpotlightRun,
+    getLatestSpotlightRunState, saveSpotlightIdPage,
     nextSpotlightHydrationIds, writeSpotlightHydrationBatch, abandonSpotlightDiscovery,
     completeResumableSpotlightRun, writeSpotlightBatch, completeSpotlightRun,
     failSpotlightRun, countCompletedSpotlightRecords, listCompletedSpotlightRecords,
@@ -468,7 +531,9 @@ function configuredStore() {
 }
 
 export const beginSpotlightRun = (tenantKey: string) => configuredStore().beginSpotlightRun(tenantKey);
+export const acquireSpotlightWorkerLock = (tenantKey: string) => configuredStore().acquireSpotlightWorkerLock(tenantKey);
 export const beginOrResumeSpotlightRun = (tenantKey: string) => configuredStore().beginOrResumeSpotlightRun(tenantKey);
+export const getLatestSpotlightRunState = () => configuredStore().getLatestSpotlightRunState();
 export const saveSpotlightIdPage = (runId: string, tenantKey: string, priorCursor: string,
   ids: string[], nextCursor: string, reportedTotal: number | null) =>
   configuredStore().saveSpotlightIdPage(runId, tenantKey, priorCursor, ids, nextCursor, reportedTotal);

@@ -72,6 +72,16 @@ test("resumable run reuses a failed hydration checkpoint instead of inserting a 
   assert.ok(calls.some(call => call.sql.trim() === "COMMIT"));
 });
 
+test("a second Spotlight worker cannot claim the same tenant lock", async () => {
+  let released = false;
+  const client = { query: async sql => String(sql).includes("pg_try_advisory_lock")
+    ? { rows: [{ locked: false }], rowCount: 1 } : { rows: [], rowCount: 0 },
+  release: () => { released = true; } };
+  const db = { query: async () => ({ rows: [], rowCount: 0 }), connect: async () => client };
+  await assert.rejects(() => createSpotlightRecordStore(db).acquireSpotlightWorkerLock("CO-147284"), /already running/i);
+  assert.equal(released, true);
+});
+
 test("ID page and continuation cursor commit in one transaction", async () => {
   const calls = [];
   const client = { query: async (sql, values) => {

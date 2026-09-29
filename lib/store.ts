@@ -33,9 +33,12 @@ import {
   type TidalProgress,
 } from "@/lib/tidal";
 import { intuneConfig, intuneListAssets } from "@/lib/intune";
-import { falconConfigs, falconListAssets, spotlightFindingBatches } from "@/lib/crowdstrike";
-import { runSpotlightImport, selectSpotlightTenant, type SpotlightTenantSelection } from "@/lib/spotlight-import";
-import { beginSpotlightRun, writeSpotlightBatch, completeSpotlightRun, failSpotlightRun, pruneSpotlightRuns } from "@/lib/spotlight-record-store";
+import { falconConfigs, falconListAssets, createSpotlightSession } from "@/lib/crowdstrike";
+import { selectSpotlightTenant, type SpotlightTenantSelection } from "@/lib/spotlight-import";
+import { runResumableSpotlightImport } from "@/lib/spotlight-resumable-import";
+import { acquireSpotlightWorkerLock, beginOrResumeSpotlightRun, saveSpotlightIdPage, nextSpotlightHydrationIds,
+  writeSpotlightHydrationBatch, abandonSpotlightDiscovery, completeResumableSpotlightRun,
+  failSpotlightRun, pruneSpotlightRuns, getLatestSpotlightRunState } from "@/lib/spotlight-record-store";
 import { recordVulnersEnrichment } from "@/lib/reporting-source-activity";
 import { defenderConfig, defenderListFindings } from "@/lib/defender";
 import { burpConfig, burpListIssues, type BurpFinding } from "@/lib/burp";
@@ -5182,6 +5185,29 @@ function csSpotlightSync(): CsSyncStatus {
 export function getCsDevicesSyncStatus(): CsSyncStatus { return csDevicesSync(); }
 export function getCsSpotlightSyncStatus(): CsSyncStatus { return csSpotlightSync(); }
 
+export async function getCsSpotlightSyncStatusDurable(): Promise<CsSyncStatus & { resumeAvailable?: boolean }> {
+  const local = csSpotlightSync();
+  if (local.phase !== "idle") return local;
+  try {
+    const saved = await getLatestSpotlightRunState();
+    if (!saved) return local;
+    return {
+      running: false,
+      phase: saved.status === "completed" ? "Done" : saved.status === "running" ? "Interrupted" : "Error",
+      tenant: saved.tenantKey,
+      fetched: saved.discoveredCount,
+      stored: saved.hydratedCount,
+      startedAt: new Date(saved.startedAt).getTime(),
+      finishedAt: saved.finishedAt ? new Date(saved.finishedAt).getTime() : null,
+      result: saved.status === "completed" ? { findingsImported: saved.hydratedCount } : null,
+      error: saved.status === "running" ? "Import worker stopped; start again to resume." : saved.error,
+      resumeAvailable: saved.status !== "completed",
+    };
+  } catch {
+    return local;
+  }
+}
+
 export function startCsDevicesSync(): { started: boolean; error?: string } {
   if (!falconConfigs().length) return { started: false, error: "CrowdStrike is not configured." };
   if (csDevicesSync().running) return { started: false, error: "Devices sync already running." };
@@ -5504,12 +5530,16 @@ export async function importFromCrowdstrikeSpotlight(
   let lastLogged = 0;
   console.info("[spotlight] starting record import for", selection.config.label);
   try {
-    const result = await runSpotlightImport(selection, {
-      batches: spotlightFindingBatches,
-      begin: beginSpotlightRun,
-      write: writeSpotlightBatch,
-      complete: completeSpotlightRun,
+    const result = await runResumableSpotlightImport(selection, {
+      acquire: acquireSpotlightWorkerLock,
+      createSession: createSpotlightSession,
+      begin: beginOrResumeSpotlightRun,
+      savePage: saveSpotlightIdPage,
+      nextIds: nextSpotlightHydrationIds,
+      write: writeSpotlightHydrationBatch,
+      complete: completeResumableSpotlightRun,
       fail: failSpotlightRun,
+      abandon: abandonSpotlightDiscovery,
       prune: pruneSpotlightRuns,
     }, (progress) => {
       syncJobGlobal.__vulnCsSpotlightSync = {
