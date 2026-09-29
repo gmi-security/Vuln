@@ -101,27 +101,38 @@ test("a closed ticket still vulnerable per CrowdStrike is reopened with a note a
   assert.match(noteCalls[0].text, /still present on 1 host/);
 });
 
-test("a ticket already merged into a parent ticket is flagged for manual separation, not guessed at", async () => {
+test("ConnectWise rejecting the reopen with a merge-related error is flagged for manual separation, not treated as a generic failure", async () => {
   const db = fakeDb({ closedRows: [baseRow], ticketRows: { a: { ticket_id: 555, cw_target: "cw-1" } } });
-  let statusPicked = false; let notePosted = false; let priorityCalled = false;
+  let notePosted = false; let priorityCalled = false;
   const validate = await loadValidation({
     db,
     verifyAgainstCrowdStrike: async () => ({ checkedAt: "2026-09-28T00:00:00.000Z", stillOpenHosts: ["host-1"] }),
-    cwRequest: async () => ({ status: { name: "Closed Merged" } }),
-    cwDefaultOpenStatus: async () => { statusPicked = true; return { id: 42, name: "New" }; },
+    cwDefaultOpenStatus: async () => ({ id: 42, name: "New" }),
+    cwRequest: async () => { throw new Error("ConnectWise returned HTTP 400. This ticket has been combined into a parent ticket and cannot be modified."); },
     cwAddTicketNote: async () => { notePosted = true; },
     cwPrioritiesBySort: async () => [{ id: 1, name: "Urgent" }],
     setGroupTicketPriority: async () => { priorityCalled = true; },
   });
   const result = await validate.validateClosedGroupTickets();
   assert.deepEqual(result, { checked: 1, reopened: 0, confirmedFixed: 0, needsManualUnmerge: 1, errors: 0 });
-  assert.equal(statusPicked, false);
   assert.equal(notePosted, false);
   assert.equal(priorityCalled, false);
   const update = db.calls.find((c) => c.sql.includes("SET last_error"));
-  assert.match(update.params[1], /merged into a parent ticket/);
+  assert.match(update.params[1], /combined into a parent ticket/);
   const audit = db.calls.find((c) => c.sql.includes("ticket.reopen.blocked_merged"));
   assert.ok(audit, "expected a ticket.reopen.blocked_merged audit entry");
+});
+
+test("a reopen failing for an unrelated ConnectWise error is a normal error, not needsManualUnmerge", async () => {
+  const db = fakeDb({ closedRows: [baseRow], ticketRows: { a: { ticket_id: 555, cw_target: "cw-1" } } });
+  const validate = await loadValidation({
+    db,
+    verifyAgainstCrowdStrike: async () => ({ checkedAt: "2026-09-28T00:00:00.000Z", stillOpenHosts: ["host-1"] }),
+    cwDefaultOpenStatus: async () => ({ id: 42, name: "New" }),
+    cwRequest: async () => { throw new Error("ConnectWise returned HTTP 500. Internal error."); },
+  });
+  const result = await validate.validateClosedGroupTickets();
+  assert.deepEqual(result, { checked: 1, reopened: 0, confirmedFixed: 0, needsManualUnmerge: 0, errors: 1 });
 });
 
 test("a reopened Critical ticket has its priority reasserted to the top slot", async () => {

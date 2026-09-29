@@ -43,15 +43,25 @@ async function reopenTicket(id: string, boardId: number, result: VerifyResult, s
   if (!row?.ticket_id) throw new Error("Missing ticket to reopen.");
   const saved = await savedConnection();
   if (saved.target !== row.cw_target) throw new Error("ConnectWise connection changed before reopening; retry next pass.");
-  const current = await cwRequest(saved.value, `/service/tickets/${row.ticket_id}`);
-  if (typeof current?.status?.name === "string" && /merged/i.test(current.status.name)) {
-    await db.query("UPDATE patch_group_ticket_requests SET last_error=$2,updated_at=now() WHERE id=$1",
-      [id, "This ticket is merged into a parent ticket in ConnectWise and cannot be reopened automatically -- separate it from its parent in ConnectWise first."]);
-    await db.query("INSERT INTO patch_group_ticket_audit(request_id,actor,action) VALUES($1,$2,'ticket.reopen.blocked_merged')", [id, ACTOR]);
-    throw new MergedTicketError("Ticket is merged; needs manual separation in ConnectWise.");
-  }
   const status = await cwDefaultOpenStatus(saved.value, boardId);
-  await cwRequest(saved.value, `/service/tickets/${row.ticket_id}`, "PATCH", [{ op: "replace", path: "status/id", value: status.id }]);
+  // A ticket merged into a parent might still accept a normal status change
+  // even though the UI blocks other edits -- there's no confirmed separate
+  // "unmerge" API call to guess at, so this just reuses the same PATCH every
+  // other reopen uses and lets ConnectWise's own response be the judge. Only
+  // a rejection that actually mentions merge/combine is treated as needing
+  // manual separation; any other failure is a normal error.
+  try {
+    await cwRequest(saved.value, `/service/tickets/${row.ticket_id}`, "PATCH", [{ op: "replace", path: "status/id", value: status.id }]);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (/merg|combin/i.test(message)) {
+      await db.query("UPDATE patch_group_ticket_requests SET last_error=$2,updated_at=now() WHERE id=$1",
+        [id, `ConnectWise refused to reopen this ticket: ${message} It may need to be separated from its parent ticket first.`]);
+      await db.query("INSERT INTO patch_group_ticket_audit(request_id,actor,action) VALUES($1,$2,'ticket.reopen.blocked_merged')", [id, ACTOR]);
+      throw new MergedTicketError(message);
+    }
+    throw err;
+  }
   await cwAddTicketNote(saved.value, row.ticket_id,
     `Reopened automatically: a rescan on ${new Date(result.checkedAt).toLocaleString()} found this vulnerability still present on ${result.stillOpenHosts.length} host(s). This ticket was closed before the fix was verified and does not reflect completed remediation.`);
   await db.query("UPDATE patch_group_ticket_requests SET closed=false,ticket_status=$2,fix_verified_at=$3,fix_verified_state='still_open',fix_still_open_count=$4,updated_at=now() WHERE id=$1",
