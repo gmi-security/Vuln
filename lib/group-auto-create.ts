@@ -19,14 +19,15 @@ const ACTOR = "auto-create";
 // Pilot scope: only this customer, by explicit request, while auto-create is
 // validated. Expand PILOT_COMPANY_IDS once it's proven out.
 const PILOT_COMPANY_IDS = new Set([ATLAS_REPORTING_COMPANY_ID]);
-// Atlas asked to stop receiving new tickets until Automate/patching is
-// confirmed live (2026-09-29) -- flip to false to resume. Gates both entry
-// points (the 15-minute scheduler and "Run auto-create now"), not the
-// autoCreateHighSeverityTickets logic itself, so the underlying behavior
-// stays fully intact and tested for when this flips back. Priority backfill
-// and closure-validation are untouched -- neither of those creates a new
-// ticket, so nothing about "no more tickets for them" applies to them.
-export const ATLAS_AUTO_CREATE_PAUSED = true;
+// Paused 2026-09-29 while Atlas asked to hold new tickets until Automate
+// caught up; unpaused the same day 4:22pm on Jim/Mark's direction -- client
+// visibility into open vulns creates an obligation to ticket them, patching
+// readiness doesn't change that. Gates both entry points (the 15-minute
+// scheduler and "Run auto-create now"), not the autoCreateHighSeverityTickets
+// logic itself, so flipping this is the only thing that changes. Priority
+// backfill and closure-validation were never gated by this -- neither of
+// those creates a new ticket.
+export const ATLAS_AUTO_CREATE_PAUSED = false;
 
 type Counts = { checked: number; created: number; errors: number };
 
