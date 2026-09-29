@@ -10,19 +10,19 @@ import type { PatchGroup } from "./patch-request";
 export type UntrackedTicket = { id: number; summary: string; status: string; closed: boolean; url: string };
 const ACTOR = "ticket-reconciliation";
 
-// The exact 36 tickets Eddy's Combine absorbed into parent #2655137 and
-// closed on 9/28 before patching happened -- read directly off that
-// parent's own "Combined Tickets: 37" list and its 37 UUID-tagged CSV
-// attachments (see #2655137 in ConnectWise). #2655138 is the one child
-// deliberately left out of this 37: it was created the same minute as the
-// parent itself (9/26, part of the original rollout), not the later
-// manual-paste batches this incident is actually about. abandonAndReplace-
-// UntrackedAtlasTickets only ever writes to a ticket number in this list --
-// a hard ceiling on top of the closed/untracked/patch-board filters, not a
-// replacement for them, so a future unrelated closed/untracked ticket can
-// never be swept in by this same action without a deliberate code change.
+// The 37 tickets absorbed into parent #2655137's Combine and closed on 9/28
+// before patching happened -- read directly off that parent's own "Combined
+// Tickets: 37" list and its 37 UUID-tagged CSV attachments (see #2655137 in
+// ConnectWise). #2655138 was originally left out (created the same minute as
+// the parent, 9/26, looked like the original rollout rather than the later
+// manual-paste incident) -- confirmed 9/29 it's the same story: still closed,
+// still untracked, 1285 devices with no fix behind it, so it's included.
+// abandonAndReplaceUntrackedAtlasTickets only ever writes to a ticket number
+// in this list -- a hard ceiling on top of the closed/untracked/patch-board
+// filters, not a replacement for them, so a future unrelated closed/untracked
+// ticket can never be swept in by this same action without a deliberate code change.
 const KNOWN_LOST_ATLAS_TICKET_IDS = new Set([
-  2655148, 2655170, 2655171, 2655172, 2655173, 2655174, 2655175,
+  2655138, 2655148, 2655170, 2655171, 2655172, 2655173, 2655174, 2655175,
   2655990, 2655991, 2655996, 2656104, 2656130,
   2656151, 2656152, 2656153, 2656154, 2656155, 2656156, 2656157, 2656158, 2656159,
   2656160, 2656161, 2656162, 2656163, 2656164, 2656165, 2656166, 2656167, 2656168, 2656169,
@@ -31,23 +31,31 @@ const KNOWN_LOST_ATLAS_TICKET_IDS = new Set([
 
 // Shared by findUntrackedAtlasTickets and adoptManualAtlasTickets: every live
 // Atlas *patch* ticket in ConnectWise (paginated, full raw rows), and the set
-// of ticket_ids already tracked by a row in patch_group_ticket_requests for
-// the current ConnectWise connection. Scoped to the Atlas patch board and to
-// ticket summaries containing "Patch " -- every group ticket this app has
-// ever produced (auto-created or a manually-pasted draft) starts its title
-// with exactly that (see ticketTitle in patch-request.ts). Without both
-// filters this pulls every ticket ever opened for the company across every
-// board -- sales quotes, HR requests, monitoring alerts, hardware orders --
-// which is not what "untracked Atlas ticket" means here.
+// of ticket_ids already tracked by a row in EITHER ticket table for the
+// current ConnectWise connection -- the group-consolidation table this file
+// otherwise deals in, and the single-CVE table (patch_ticket_requests), whose
+// own tickets use the same "Patch "-prefixed board and can just as easily be
+// pasted in by hand. #2655137 is a real example: its body is the single-CVE
+// draft template, not the group one, so it's tracked over there -- checking
+// only the group table would wrongly call an already-tracked ticket
+// "untracked." Scoped to the Atlas patch board and to ticket summaries
+// containing "Patch " -- every ticket this app has ever produced (auto-
+// created or a manually-pasted draft, from either flow) starts its title
+// with exactly that (see ticketTitle in patch-request.ts and buildPatchRequest's
+// own title). Without both filters this pulls every ticket ever opened for
+// the company across every board -- sales quotes, HR requests, monitoring
+// alerts, hardware orders -- which is not what "untracked Atlas ticket" means here.
 async function liveAtlasTickets(): Promise<{ saved: Awaited<ReturnType<typeof savedConnection>>; tracked: Set<number>; rows: CWRecord[] }> {
   const saved = await savedConnection();
   const db = await patchTicketDatabase();
   const routing = (await db.query("SELECT company_id, board_id FROM patch_customer_routing WHERE app_company_id=$1", [ATLAS_REPORTING_COMPANY_ID]))
     .rows[0] as { company_id: number; board_id: number } | undefined;
   if (!routing) return { saved, tracked: new Set(), rows: [] };
-  const trackedRows = (await db.query("SELECT ticket_id FROM patch_group_ticket_requests WHERE ticket_id IS NOT NULL AND cw_target=$1", [saved.target]))
-    .rows as { ticket_id: number }[];
-  const tracked = new Set(trackedRows.map((r) => r.ticket_id));
+  const [groupTracked, singleTracked] = await Promise.all([
+    db.query("SELECT ticket_id FROM patch_group_ticket_requests WHERE ticket_id IS NOT NULL AND cw_target=$1", [saved.target]),
+    db.query("SELECT ticket_id FROM patch_ticket_requests WHERE ticket_id IS NOT NULL AND cw_target=$1", [saved.target]),
+  ]);
+  const tracked = new Set([...groupTracked.rows, ...singleTracked.rows].map((r) => (r as { ticket_id: number }).ticket_id));
   const rows: CWRecord[] = [];
   for (let page = 1; page <= 20; page++) {
     const batch = await cwRequest(saved.value, `/service/tickets?${new URLSearchParams({

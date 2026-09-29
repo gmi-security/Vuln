@@ -32,14 +32,15 @@ function loader(overrides = {}) {
   return async (path) => { const mod = await load(path); await mod.evaluate(); return mod.namespace; };
 }
 
-function fakeDb({ routing, trackedTicketIds = [], preparedDraftIds = [], draftPackets = {}, abandonBlocked = new Set() }) {
+function fakeDb({ routing, trackedTicketIds = [], singleTrackedTicketIds = [], preparedDraftIds = [], draftPackets = {}, abandonBlocked = new Set() }) {
   const calls = [];
   return {
     calls,
     query: async (sql, params) => {
       calls.push({ sql, params });
       if (sql.includes("FROM patch_customer_routing")) return { rows: routing ? [routing] : [] };
-      if (sql.includes("ticket_id IS NOT NULL AND cw_target")) return { rows: trackedTicketIds.map((id) => ({ ticket_id: id })) };
+      if (sql.includes("FROM patch_group_ticket_requests") && sql.includes("ticket_id IS NOT NULL AND cw_target")) return { rows: trackedTicketIds.map((id) => ({ ticket_id: id })) };
+      if (sql.includes("FROM patch_ticket_requests") && sql.includes("ticket_id IS NOT NULL AND cw_target")) return { rows: singleTrackedTicketIds.map((id) => ({ ticket_id: id })) };
       if (sql.includes("state='prepared'") && sql.trim().startsWith("SELECT id")) return { rows: preparedDraftIds.includes(params[0]) ? [{ id: params[0] }] : [] };
       if (sql.trim().startsWith("SELECT packet, tenant_id")) { const row = draftPackets[params[0]]; return { rows: row ? [row] : [] }; }
       if (sql.includes("SET state='abandoned'")) return { rows: [], rowCount: abandonBlocked.has(params[0]) ? 0 : 1 };
@@ -102,6 +103,16 @@ test("a ticket already tracked by a ticket_id in our own table is excluded", asy
   const reconciliation = await loadReconciliation({
     db,
     cwRequest: async () => [{ id: 2656161, summary: "Tracked", status: { name: "New" }, closedFlag: false }],
+  });
+  const result = await reconciliation.findUntrackedAtlasTickets();
+  assert.deepEqual(result, []);
+});
+
+test("a ticket tracked only in the single-CVE table (patch_ticket_requests), not the group table, is still excluded -- e.g. #2655137, whose body is the single-CVE draft template", async () => {
+  const db = fakeDb({ routing, trackedTicketIds: [], singleTrackedTicketIds: [2655137] });
+  const reconciliation = await loadReconciliation({
+    db,
+    cwRequest: async () => [{ id: 2655137, summary: "Patch CVE-2026-68839 | 1286 affected devices", status: { name: "Re-Opened" }, closedFlag: false }],
   });
   const result = await reconciliation.findUntrackedAtlasTickets();
   assert.deepEqual(result, []);
@@ -334,12 +345,12 @@ test("an untracked closed ticket with no resolvable draft origin is left complet
   assert.equal(db.calls.some((c) => c.sql.includes("SET state='abandoned'")), false);
 });
 
-test("a closed untracked ticket that matches every other filter but isn't in the confirmed list of 36 is never touched", async () => {
+test("a closed untracked ticket that matches every other filter but isn't in the confirmed list of 37 is never touched", async () => {
   const db = fakeDb({ routing, trackedTicketIds: [], draftPackets: { [UUID]: draftPacket } });
   const reconciliation = await loadReconciliation({
     db,
     cwRequest: async (connection, path) => {
-      // Some other closed, untracked, "Patch " ticket on the same board -- not one of the 36.
+      // Some other closed, untracked, "Patch " ticket on the same board -- not one of the 37.
       if (path.startsWith("/service/tickets?")) return [{ id: 9999999, summary: "Patch CVE-2024-1 | 1 affected devices", status: { name: "Closed" }, closedFlag: true, board: { id: 9 }, company: { id: 55 } }];
       throw new Error(`unexpected path ${path}`);
     },
@@ -349,15 +360,15 @@ test("a closed untracked ticket that matches every other filter but isn't in the
   assert.equal(db.calls.some((c) => c.sql.includes("SELECT packet, tenant_id") || c.sql.includes("SET state='abandoned'")), false); // never even looked up its attachments or draft
 });
 
-test("every one of the 36 confirmed ticket numbers is accepted by the allowlist", async () => {
+test("every one of the 37 confirmed ticket numbers is accepted by the allowlist", async () => {
   const KNOWN_LOST_ATLAS_TICKET_IDS = [
-    2655148, 2655170, 2655171, 2655172, 2655173, 2655174, 2655175,
+    2655138, 2655148, 2655170, 2655171, 2655172, 2655173, 2655174, 2655175,
     2655990, 2655991, 2655996, 2656104, 2656130,
     2656151, 2656152, 2656153, 2656154, 2656155, 2656156, 2656157, 2656158, 2656159,
     2656160, 2656161, 2656162, 2656163, 2656164, 2656165, 2656166, 2656167, 2656168, 2656169,
     2656170, 2656171, 2656172, 2656173, 2656174,
   ];
-  assert.equal(new Set(KNOWN_LOST_ATLAS_TICKET_IDS).size, 36);
+  assert.equal(new Set(KNOWN_LOST_ATLAS_TICKET_IDS).size, 37);
   for (const id of KNOWN_LOST_ATLAS_TICKET_IDS) {
     const db = fakeDb({ routing, trackedTicketIds: [], draftPackets: { [UUID]: draftPacket } });
     const reconciliation = await loadReconciliation({
