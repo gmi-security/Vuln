@@ -46,16 +46,20 @@ async function runWithConcurrency(items, limit, fn) {
   return results;
 }
 
-function fakeDb({ closedRows, ticketRows = {} }) {
+function fakeDb({ closedRows, ticketRows = {}, lockAcquired = true }) {
   const calls = [];
+  const query = async (sql, params) => {
+    calls.push({ sql, params });
+    if (sql.includes("pg_try_advisory_lock")) return { rows: [{ locked: lockAcquired }] };
+    if (sql.includes("pg_advisory_unlock")) return { rows: [{}] };
+    if (sql.includes("FROM patch_group_ticket_requests") && sql.includes("closed=true")) return { rows: closedRows };
+    if (sql.trim().startsWith("SELECT ticket_id,cw_target")) return { rows: [ticketRows[params[0]] ?? { ticket_id: null, cw_target: null }] };
+    return { rows: [], rowCount: 1 }; // UPDATE / INSERT
+  };
   return {
     calls,
-    query: async (sql, params) => {
-      calls.push({ sql, params });
-      if (sql.includes("FROM patch_group_ticket_requests") && sql.includes("closed=true")) return { rows: closedRows };
-      if (sql.trim().startsWith("SELECT ticket_id,cw_target")) return { rows: [ticketRows[params[0]] ?? { ticket_id: null, cw_target: null }] };
-      return { rows: [], rowCount: 1 }; // UPDATE / INSERT
-    },
+    query,
+    connect: async () => ({ query, release: () => {} }),
   };
 }
 
@@ -305,4 +309,29 @@ test("syncAndValidateClosedGroupTickets with no ConnectWise connection does noth
   const validate = await loadValidation({ db, savedConnection: async () => { throw new Error("not configured"); } });
   const result = await validate.syncAndValidateClosedGroupTickets();
   assert.deepEqual(result, { checked: 0, reopened: 0, confirmedFixed: 0, needsManualUnmerge: 0, errors: 0, synced: 0 });
+});
+
+test("a pass already running elsewhere (advisory lock held by another instance) backs off instead of duplicating work", async () => {
+  const db = fakeDb({ closedRows: [baseRow], ticketRows: { a: { ticket_id: 555, cw_target: "cw-1" } }, lockAcquired: false });
+  let verifyCalled = false;
+  const validate = await loadValidation({
+    db,
+    verifyAgainstCrowdStrike: async () => { verifyCalled = true; return { checkedAt: "x", stillOpenHosts: [] }; },
+  });
+  const result = await validate.validateClosedGroupTickets();
+  assert.deepEqual(result, { checked: 0, reopened: 0, confirmedFixed: 0, needsManualUnmerge: 0, errors: 0 });
+  assert.equal(verifyCalled, false);
+  assert.equal(db.calls.some((c) => c.sql.includes("FROM patch_group_ticket_requests") && c.sql.includes("closed=true")), false);
+});
+
+test("the advisory lock is released after a successful pass, so the next pass can acquire it", async () => {
+  const db = fakeDb({ closedRows: [baseRow], ticketRows: { a: { ticket_id: 555, cw_target: "cw-1" } } });
+  const validate = await loadValidation({
+    db,
+    verifyAgainstCrowdStrike: async () => ({ checkedAt: "2026-09-28T00:00:00.000Z", stillOpenHosts: [] }),
+  });
+  await validate.validateClosedGroupTickets();
+  const lockCall = db.calls.findIndex((c) => c.sql.includes("pg_try_advisory_lock"));
+  const unlockCall = db.calls.findIndex((c) => c.sql.includes("pg_advisory_unlock"));
+  assert.ok(lockCall >= 0 && unlockCall > lockCall, "expected the lock to be acquired then released");
 });

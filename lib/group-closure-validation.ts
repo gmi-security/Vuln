@@ -77,25 +77,55 @@ async function reopenTicket(id: string, boardId: number, result: VerifyResult, s
   }
 }
 
+const ZERO_COUNTS: Counts = { checked: 0, reopened: 0, confirmedFixed: 0, needsManualUnmerge: 0, errors: 0 };
+// Advisory-lock key for validateClosedGroupTickets -- see the pg_advisory
+// numbering already in use across elastic-dashboard-store.ts (804201),
+// elastic-dashboard-jobs.ts (804202), patch-ticket-store.ts (804205),
+// patch-group-ticket-store.ts (804206, 804207), reporting-queue.ts (804208).
+const VALIDATE_LOCK_KEY = 804209;
+
 // Re-checks every closed Atlas ticket that hasn't already been confirmed
 // fixed, and reopens anything closed without a real remediation behind it.
 // Once a ticket is confirmed verified it's left alone for good (a
 // legitimately fixed ticket has no reason to be re-queried every pass); a
 // reopened ticket naturally drops out on its own (closed=false) until
 // someone closes it again, at which point this checks it fresh.
+//
+// The 5-minute scheduler and the manual "Validate closures now" trigger
+// only dedup within one Node process (globalThis.__groupClosureValidation)
+// -- on more than one app instance, or a manual trigger landing while the
+// scheduler is already mid-run on a different instance, both would fetch
+// the same closed rows before either had reopened them, and each would
+// post its own "reopened automatically" note (seen live on #2656163: two
+// near-identical notes three seconds apart). A Postgres advisory lock is
+// the one thing every instance actually shares, so this backs off
+// immediately (same zero-result as "nothing to do") rather than let a
+// second concurrent pass duplicate work already in flight.
 export async function validateClosedGroupTickets(): Promise<Counts> {
   const saved = await savedConnection().catch(() => null);
-  if (!saved) return { checked: 0, reopened: 0, confirmedFixed: 0, needsManualUnmerge: 0, errors: 0 };
+  if (!saved) return ZERO_COUNTS;
   const db = await patchTicketDatabase();
+  const lockClient = await db.connect();
+  const acquired = (await lockClient.query(`SELECT pg_try_advisory_lock(${VALIDATE_LOCK_KEY}) AS locked`)).rows[0].locked as boolean;
+  if (!acquired) { lockClient.release(); return ZERO_COUNTS; }
+  try {
+    return await runValidation(saved, db);
+  } finally {
+    await lockClient.query(`SELECT pg_advisory_unlock(${VALIDATE_LOCK_KEY})`).catch(() => {});
+    lockClient.release();
+  }
+}
+
+async function runValidation(saved: Awaited<ReturnType<typeof savedConnection>>, db: Awaited<ReturnType<typeof patchTicketDatabase>>): Promise<Counts> {
   const rows = (await db.query(`
     SELECT id, tenant_id, routing, packet, worst_severity FROM patch_group_ticket_requests
     WHERE state='created' AND closed=true AND ticket_id IS NOT NULL AND cw_target=$1
       AND packet->>'appCompanyId' = ANY($2::text[])
       AND fix_verified_state IS DISTINCT FROM 'verified'
   `, [saved.target, PILOT_COMPANY_IDS])).rows as ClosedRow[];
-  if (!rows.length) return { checked: 0, reopened: 0, confirmedFixed: 0, needsManualUnmerge: 0, errors: 0 };
+  if (!rows.length) return ZERO_COUNTS;
   const crowdstrikeRevision = await dashboardConnectionRevision("crowdstrike");
-  if (crowdstrikeRevision === null) return { checked: rows.length, reopened: 0, confirmedFixed: 0, needsManualUnmerge: 0, errors: 0 };
+  if (crowdstrikeRevision === null) return { ...ZERO_COUNTS, checked: rows.length };
   // Most-urgent-first; fetched once and reused for every ticket this pass,
   // same as group-auto-create.ts. Missing/unreachable never blocks the
   // reopen -- it just means priority stays whatever it already was.

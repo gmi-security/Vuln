@@ -179,9 +179,29 @@ function isNothingLeftToReplace(error: unknown): boolean {
 // a single leftover CVE has no group auto-create path, so it's left as a
 // single-CVE draft for a human to finish. A ticket with no resolvable
 // origin is left completely untouched, same as adoptManualAtlasTickets.
+// Advisory-lock key -- same reasoning and numbering scheme as
+// VALIDATE_LOCK_KEY in group-closure-validation.ts (804209): the
+// UPDATE ... WHERE ticket_id IS NULL guard already stops two concurrent
+// passes from double-abandoning the same ticket, but nothing stopped two
+// instances from both re-collecting the same CVEs from CrowdStrike at once
+// -- wasted work, not a correctness bug, but avoidable the same way.
+const ABANDON_LOCK_KEY = 804210;
+
 export async function abandonAndReplaceUntrackedAtlasTickets(): Promise<AbandonResult> {
-  const { saved, tracked, rows } = await liveAtlasTickets();
   const db = await patchTicketDatabase();
+  const lockClient = await db.connect();
+  const acquired = (await lockClient.query(`SELECT pg_try_advisory_lock(${ABANDON_LOCK_KEY}) AS locked`)).rows[0].locked as boolean;
+  if (!acquired) { lockClient.release(); return { checked: 0, abandoned: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0 }; }
+  try {
+    return await runAbandonAndReplace(db);
+  } finally {
+    await lockClient.query(`SELECT pg_advisory_unlock(${ABANDON_LOCK_KEY})`).catch(() => {});
+    lockClient.release();
+  }
+}
+
+async function runAbandonAndReplace(db: Awaited<ReturnType<typeof patchTicketDatabase>>): Promise<AbandonResult> {
+  const { saved, tracked, rows } = await liveAtlasTickets();
   let checked = 0, abandoned = 0, unresolved = 0, errors = 0;
   const cvesByTenant = new Map<string, Set<string>>();
   for (const row of rows) {

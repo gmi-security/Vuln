@@ -32,20 +32,24 @@ function loader(overrides = {}) {
   return async (path) => { const mod = await load(path); await mod.evaluate(); return mod.namespace; };
 }
 
-function fakeDb({ routing, trackedTicketIds = [], singleTrackedTicketIds = [], preparedDraftIds = [], draftPackets = {}, abandonBlocked = new Set() }) {
+function fakeDb({ routing, trackedTicketIds = [], singleTrackedTicketIds = [], preparedDraftIds = [], draftPackets = {}, abandonBlocked = new Set(), lockAcquired = true }) {
   const calls = [];
+  const query = async (sql, params) => {
+    calls.push({ sql, params });
+    if (sql.includes("pg_try_advisory_lock")) return { rows: [{ locked: lockAcquired }] };
+    if (sql.includes("pg_advisory_unlock")) return { rows: [{}] };
+    if (sql.includes("FROM patch_customer_routing")) return { rows: routing ? [routing] : [] };
+    if (sql.includes("FROM patch_group_ticket_requests") && sql.includes("ticket_id IS NOT NULL AND cw_target")) return { rows: trackedTicketIds.map((id) => ({ ticket_id: id })) };
+    if (sql.includes("FROM patch_ticket_requests") && sql.includes("ticket_id IS NOT NULL AND cw_target")) return { rows: singleTrackedTicketIds.map((id) => ({ ticket_id: id })) };
+    if (sql.includes("state='prepared'") && sql.trim().startsWith("SELECT id")) return { rows: preparedDraftIds.includes(params[0]) ? [{ id: params[0] }] : [] };
+    if (sql.trim().startsWith("SELECT packet, tenant_id")) { const row = draftPackets[params[0]]; return { rows: row ? [row] : [] }; }
+    if (sql.includes("SET state='abandoned'")) return { rows: [], rowCount: abandonBlocked.has(params[0]) ? 0 : 1 };
+    return { rows: [], rowCount: 1 }; // UPDATE / INSERT
+  };
   return {
     calls,
-    query: async (sql, params) => {
-      calls.push({ sql, params });
-      if (sql.includes("FROM patch_customer_routing")) return { rows: routing ? [routing] : [] };
-      if (sql.includes("FROM patch_group_ticket_requests") && sql.includes("ticket_id IS NOT NULL AND cw_target")) return { rows: trackedTicketIds.map((id) => ({ ticket_id: id })) };
-      if (sql.includes("FROM patch_ticket_requests") && sql.includes("ticket_id IS NOT NULL AND cw_target")) return { rows: singleTrackedTicketIds.map((id) => ({ ticket_id: id })) };
-      if (sql.includes("state='prepared'") && sql.trim().startsWith("SELECT id")) return { rows: preparedDraftIds.includes(params[0]) ? [{ id: params[0] }] : [] };
-      if (sql.trim().startsWith("SELECT packet, tenant_id")) { const row = draftPackets[params[0]]; return { rows: row ? [row] : [] }; }
-      if (sql.includes("SET state='abandoned'")) return { rows: [], rowCount: abandonBlocked.has(params[0]) ? 0 : 1 };
-      return { rows: [], rowCount: 1 }; // UPDATE / INSERT
-    },
+    query,
+    connect: async () => ({ query, release: () => {} }),
   };
 }
 
@@ -384,4 +388,13 @@ test("every one of the 37 confirmed ticket numbers is accepted by the allowlist"
     const result = await reconciliation.abandonAndReplaceUntrackedAtlasTickets();
     assert.equal(result.abandoned, 1, `ticket #${id} should have been abandoned`);
   }
+});
+
+test("a pass already running elsewhere (advisory lock held by another instance) backs off instead of duplicating work", async () => {
+  const db = fakeDb({ routing, trackedTicketIds: [], draftPackets: { [UUID]: draftPacket }, lockAcquired: false });
+  let cwCalled = false;
+  const reconciliation = await loadReconciliation({ db, cwRequest: async () => { cwCalled = true; return []; } });
+  const result = await reconciliation.abandonAndReplaceUntrackedAtlasTickets();
+  assert.deepEqual(result, { checked: 0, abandoned: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0 });
+  assert.equal(cwCalled, false);
 });
