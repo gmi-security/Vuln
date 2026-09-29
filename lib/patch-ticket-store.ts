@@ -75,6 +75,10 @@ export async function patchTicketDatabase() {
   CREATE TABLE IF NOT EXISTS patch_customer_routing (
     app_company_id TEXT PRIMARY KEY, company_id INT NOT NULL, board_id INT NOT NULL, team_id INT,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_by TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS background_job_runs (
+    job TEXT PRIMARY KEY, status TEXT NOT NULL, result JSONB, error TEXT,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT now(), finished_at TIMESTAMPTZ
   )`).then(() => {}).catch(error => { ready = undefined; throw error; });
   await ready;
   return db;

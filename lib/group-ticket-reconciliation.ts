@@ -5,6 +5,7 @@ import { dashboardConnectionRevision, prepareConsolidation, preparePatchRequest 
 import { cwRequest, cwId, ticketUrl, cwDefaultClosedStatus, cwAddTicketNote, type CWRecord, type ConnectWiseConnection } from "./connectwise-client";
 import { ATLAS_REPORTING_COMPANY_ID } from "./reporting-direct-sources";
 import { DashboardError } from "./elastic-dashboard";
+import { recordJobRun } from "./background-job-runs";
 import type { PatchGroup } from "./patch-request";
 
 export type UntrackedTicket = { id: number; summary: string; status: string; closed: boolean; url: string };
@@ -295,11 +296,17 @@ const abandonState = abandonRuntime.__groupTicketAbandon ??= {};
 // to do. This starts the pass and returns immediately without waiting for
 // it; `started: false` just means a pass was already running, not a
 // failure -- that pass covers this request too.
+const ABANDON_JOB = "abandon-and-replace";
 export function triggerAbandonAndReplaceNow(): { started: boolean } {
   if (abandonState.working) return { started: false };
+  recordJobRun(ABANDON_JOB, "running").catch(() => {});
   abandonState.working = abandonAndReplaceUntrackedAtlasTickets().then(
-    () => {},
-    (err) => console.error("[group-ticket-reconciliation] Abandon-and-replace pass could not complete:", err instanceof Error ? err.message : err),
+    (result) => { recordJobRun(ABANDON_JOB, "succeeded", result).catch(() => {}); },
+    (err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("[group-ticket-reconciliation] Abandon-and-replace pass could not complete:", message);
+      recordJobRun(ABANDON_JOB, "failed", undefined, message).catch(() => {});
+    },
   ).finally(() => { abandonState.working = undefined; });
   return { started: true };
 }
@@ -392,11 +399,17 @@ const recutState = recutRuntime.__groupTicketRecut ??= {};
 // Same reasoning as triggerAbandonAndReplaceNow: closing 38 tickets plus a
 // live CrowdStrike re-collection is reliably past the dashboard's
 // 20-second request timeout. Starts the pass and returns immediately.
+const RECUT_JOB = "close-and-recut";
 export function triggerCloseAndRecutNow(): { started: boolean } {
   if (recutState.working) return { started: false };
+  recordJobRun(RECUT_JOB, "running").catch(() => {});
   recutState.working = closeAndRecutMergedAtlasTickets().then(
-    () => {},
-    (err) => console.error("[group-ticket-reconciliation] Close-and-recut pass could not complete:", err instanceof Error ? err.message : err),
+    (result) => { recordJobRun(RECUT_JOB, "succeeded", result).catch(() => {}); },
+    (err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("[group-ticket-reconciliation] Close-and-recut pass could not complete:", message);
+      recordJobRun(RECUT_JOB, "failed", undefined, message).catch(() => {});
+    },
   ).finally(() => { recutState.working = undefined; });
   return { started: true };
 }

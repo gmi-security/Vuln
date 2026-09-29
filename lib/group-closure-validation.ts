@@ -6,6 +6,7 @@ import { targetPriorityFor } from "./group-ticket-priority";
 import { runWithConcurrency, syncTable } from "./ticket-status-sync";
 import { elasticVulnEnabled } from "./elastic-vuln-server";
 import { ATLAS_REPORTING_COMPANY_ID } from "./reporting-direct-sources";
+import { recordJobRun } from "./background-job-runs";
 import type { PatchGroup } from "./patch-request";
 
 const ACTOR = "closure-validation";
@@ -184,11 +185,17 @@ export async function syncAndValidateClosedGroupTickets(): Promise<Counts & { sy
 const runtime = globalThis as typeof globalThis & { __groupClosureValidation?: { timer?: ReturnType<typeof setInterval>; working?: Promise<void> } };
 const state = runtime.__groupClosureValidation ??= {};
 
+const VALIDATE_JOB = "validate-closures";
 function trigger(): boolean {
   if (state.working) return false; // already running -- this pass will cover whatever prompted the new call too
+  recordJobRun(VALIDATE_JOB, "running").catch(() => {});
   state.working = syncAndValidateClosedGroupTickets().then(
-    () => {},
-    (err) => console.error("[group-closure-validation] Could not complete:", err instanceof Error ? err.message : err),
+    (result) => { recordJobRun(VALIDATE_JOB, "succeeded", result).catch(() => {}); },
+    (err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("[group-closure-validation] Could not complete:", message);
+      recordJobRun(VALIDATE_JOB, "failed", undefined, message).catch(() => {});
+    },
   ).finally(() => { state.working = undefined; });
   return true;
 }
