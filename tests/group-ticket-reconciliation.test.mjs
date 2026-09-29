@@ -57,7 +57,7 @@ async function loadReconciliation({ db, savedConnection, cwRequest }) {
   })("lib/group-ticket-reconciliation.ts");
 }
 
-const routing = { company_id: 55 };
+const routing = { company_id: 55, board_id: 9 };
 
 test("a live Atlas ticket with no tracked row is returned as untracked", async () => {
   const db = fakeDb({ routing, trackedTicketIds: [] });
@@ -67,6 +67,19 @@ test("a live Atlas ticket with no tracked row is returned as untracked", async (
   });
   const result = await reconciliation.findUntrackedAtlasTickets();
   assert.deepEqual(result, [{ id: 2656161, summary: "Patch CVE-2024-29059 | 1 affected devices", status: "Closed Merged", closed: true, url: "https://example.myconnectwise.net/ticket/2656161" }]);
+});
+
+test("the ConnectWise query is scoped to the Atlas patch board and to summaries containing \"Patch \" -- not every ticket for the company", async () => {
+  const db = fakeDb({ routing, trackedTicketIds: [] });
+  let sentConditions = "";
+  const reconciliation = await loadReconciliation({
+    db,
+    cwRequest: async (connection, path) => { sentConditions = new URL(`https://x${path}`).searchParams.get("conditions") ?? ""; return []; },
+  });
+  await reconciliation.findUntrackedAtlasTickets();
+  assert.match(sentConditions, /company\/id=55/);
+  assert.match(sentConditions, /board\/id=9/);
+  assert.match(sentConditions, /summary contains "Patch "/);
 });
 
 test("a ticket already tracked by a ticket_id in our own table is excluded", async () => {

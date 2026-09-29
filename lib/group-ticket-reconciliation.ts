@@ -6,14 +6,20 @@ export type UntrackedTicket = { id: number; summary: string; status: string; clo
 const ACTOR = "ticket-reconciliation";
 
 // Shared by findUntrackedAtlasTickets and adoptManualAtlasTickets: every live
-// Atlas ticket in ConnectWise (paginated, full raw rows), and the set of
-// ticket_ids already tracked by a row in patch_group_ticket_requests for the
-// current ConnectWise connection.
+// Atlas *patch* ticket in ConnectWise (paginated, full raw rows), and the set
+// of ticket_ids already tracked by a row in patch_group_ticket_requests for
+// the current ConnectWise connection. Scoped to the Atlas patch board and to
+// ticket summaries containing "Patch " -- every group ticket this app has
+// ever produced (auto-created or a manually-pasted draft) starts its title
+// with exactly that (see ticketTitle in patch-request.ts). Without both
+// filters this pulls every ticket ever opened for the company across every
+// board -- sales quotes, HR requests, monitoring alerts, hardware orders --
+// which is not what "untracked Atlas ticket" means here.
 async function liveAtlasTickets(): Promise<{ saved: Awaited<ReturnType<typeof savedConnection>>; tracked: Set<number>; rows: CWRecord[] }> {
   const saved = await savedConnection();
   const db = await patchTicketDatabase();
-  const routing = (await db.query("SELECT company_id FROM patch_customer_routing WHERE app_company_id=$1", [ATLAS_REPORTING_COMPANY_ID]))
-    .rows[0] as { company_id: number } | undefined;
+  const routing = (await db.query("SELECT company_id, board_id FROM patch_customer_routing WHERE app_company_id=$1", [ATLAS_REPORTING_COMPANY_ID]))
+    .rows[0] as { company_id: number; board_id: number } | undefined;
   if (!routing) return { saved, tracked: new Set(), rows: [] };
   const trackedRows = (await db.query("SELECT ticket_id FROM patch_group_ticket_requests WHERE ticket_id IS NOT NULL AND cw_target=$1", [saved.target]))
     .rows as { ticket_id: number }[];
@@ -21,7 +27,8 @@ async function liveAtlasTickets(): Promise<{ saved: Awaited<ReturnType<typeof sa
   const rows: CWRecord[] = [];
   for (let page = 1; page <= 20; page++) {
     const batch = await cwRequest(saved.value, `/service/tickets?${new URLSearchParams({
-      conditions: `company/id=${routing.company_id}`, pageSize: "100", page: String(page),
+      conditions: `company/id=${routing.company_id} AND board/id=${routing.board_id} AND summary contains "Patch "`,
+      pageSize: "100", page: String(page),
     })}`);
     if (!Array.isArray(batch) || !batch.length) break;
     rows.push(...batch);
