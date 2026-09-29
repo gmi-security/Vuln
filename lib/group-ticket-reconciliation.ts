@@ -162,7 +162,7 @@ export async function adoptManualAtlasTickets(): Promise<AdoptResult> {
   return { checked, adopted, noMatch, errors };
 }
 
-export type AbandonResult = { checked: number; abandoned: number; cvesReplaced: number; cvesNeedsReview: number; cvesAlreadyCovered: number; unresolved: number; errors: number };
+export type AbandonResult = { checked: number; abandoned: number; cvesReplaced: number; cvesNeedsReview: number; cvesAlreadyCovered: number; unresolved: number; errors: number; firstError: string | null };
 // buildPatchRequest/buildPatchConsolidation raise exactly this shape of
 // DashboardError when a fresh CrowdStrike collection finds nothing left to
 // act on -- either no open findings at all (already patched since the
@@ -203,7 +203,7 @@ export async function abandonAndReplaceUntrackedAtlasTickets(): Promise<AbandonR
   const db = await patchTicketDatabase();
   const lockClient = await db.connect();
   const acquired = (await lockClient.query(`SELECT pg_try_advisory_lock(${ABANDON_LOCK_KEY}) AS locked`)).rows[0].locked as boolean;
-  if (!acquired) { lockClient.release(); return { checked: 0, abandoned: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0 }; }
+  if (!acquired) { lockClient.release(); return { checked: 0, abandoned: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0, firstError: null }; }
   try {
     return await runAbandonAndReplace(db);
   } finally {
@@ -215,6 +215,7 @@ export async function abandonAndReplaceUntrackedAtlasTickets(): Promise<AbandonR
 async function runAbandonAndReplace(db: Awaited<ReturnType<typeof patchTicketDatabase>>): Promise<AbandonResult> {
   const { saved, tracked, rows } = await liveAtlasTickets();
   let checked = 0, abandoned = 0, unresolved = 0, errors = 0;
+  let firstError: string | null = null;
   const cvesByTenant = new Map<string, Set<string>>();
   for (const row of rows) {
     if (!cwId(row.id) || tracked.has(row.id) || row.closedFlag !== true) continue; // only closed, untracked tickets are "lost"
@@ -236,17 +237,18 @@ async function runAbandonAndReplace(db: Awaited<ReturnType<typeof patchTicketDat
       const cves = cvesByTenant.get(draft.tenant_id) ?? new Set<string>();
       for (const cve of draft.packet.cves) cves.add(cve);
       cvesByTenant.set(draft.tenant_id, cves);
-    } catch {
+    } catch (err) {
       errors++; // one ticket's lookup or update failing must not block the rest
+      firstError ??= `#${row.id}: ${err instanceof Error ? err.message : String(err)}`;
     }
   }
-  if (!cvesByTenant.size) return { checked, abandoned, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved, errors };
+  if (!cvesByTenant.size) return { checked, abandoned, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved, errors, firstError };
   const replaced = await replaceCvesWithFreshDrafts(cvesByTenant);
-  if (!replaced) return { checked, abandoned, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved, errors }; // no CrowdStrike connection to re-collect from -- abandonment still stands, replacement waits
-  return { checked, abandoned, ...replaced, errors: errors + replaced.errors, unresolved };
+  if (!replaced) return { checked, abandoned, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved, errors, firstError }; // no CrowdStrike connection to re-collect from -- abandonment still stands, replacement waits
+  return { checked, abandoned, ...replaced, errors: errors + replaced.errors, unresolved, firstError: firstError ?? replaced.firstError };
 }
 
-type ReplaceCounts = { cvesReplaced: number; cvesNeedsReview: number; cvesAlreadyCovered: number; errors: number };
+type ReplaceCounts = { cvesReplaced: number; cvesNeedsReview: number; cvesAlreadyCovered: number; errors: number; firstError: string | null };
 
 // Shared by runAbandonAndReplace and runCloseAndRecut: given every CVE that
 // needs a fresh ticket, grouped by CrowdStrike tenant (never mixed across
@@ -264,6 +266,7 @@ async function replaceCvesWithFreshDrafts(cvesByTenant: Map<string, Set<string>>
   if (revision === null) return null;
   const alreadyTicketed = await activeTicketedPairs();
   let cvesReplaced = 0, cvesNeedsReview = 0, cvesAlreadyCovered = 0, errors = 0;
+  let firstError: string | null = null;
   for (const [tenantId, cveSet] of cvesByTenant) {
     const cves = [...cveSet];
     try {
@@ -279,11 +282,12 @@ async function replaceCvesWithFreshDrafts(cvesByTenant: Map<string, Set<string>>
         cvesNeedsReview++;
       }
     } catch (err) {
-      if (isNothingLeftToReplace(err)) cvesAlreadyCovered += cves.length;
-      else errors++; // one tenant's re-collection failing must not block the rest
+      if (isNothingLeftToReplace(err)) { cvesAlreadyCovered += cves.length; continue; }
+      errors++; // one tenant's re-collection failing must not block the rest
+      firstError ??= `tenant ${tenantId}: ${err instanceof Error ? err.message : String(err)}`;
     }
   }
-  return { cvesReplaced, cvesNeedsReview, cvesAlreadyCovered, errors };
+  return { cvesReplaced, cvesNeedsReview, cvesAlreadyCovered, errors, firstError };
 }
 
 const abandonRuntime = globalThis as typeof globalThis & { __groupTicketAbandon?: { working?: Promise<void> } };
@@ -417,7 +421,7 @@ async function runCloseAndRecut(db: Awaited<ReturnType<typeof patchTicketDatabas
   if (!cvesByTenant.size) return { checked, closed, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved, errors, firstError };
   const replaced = await replaceCvesWithFreshDrafts(cvesByTenant);
   if (!replaced) return { checked, closed, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved, errors, firstError }; // closures still stand -- replacement waits for a CrowdStrike connection
-  return { checked, closed, ...replaced, errors: errors + replaced.errors, unresolved, firstError };
+  return { checked, closed, ...replaced, errors: errors + replaced.errors, unresolved, firstError: firstError ?? replaced.firstError };
 }
 
 const recutRuntime = globalThis as typeof globalThis & { __groupTicketRecut?: { working?: Promise<void> } };

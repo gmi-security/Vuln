@@ -243,7 +243,7 @@ test("a closed untracked ticket whose draft resolves is abandoned and its CVEs a
     persistPreparedGroups: async () => ["new-id"],
   });
   const result = await reconciliation.abandonAndReplaceUntrackedAtlasTickets();
-  assert.deepEqual(result, { checked: 1, abandoned: 1, cvesReplaced: 2, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0 });
+  assert.deepEqual(result, { checked: 1, abandoned: 1, cvesReplaced: 2, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0, firstError: null });
   assert.deepEqual(consolidationInput, { cves: ["CVE-2024-1", "CVE-2024-2"], tenantId: "tenant-abc", appCompanyId: "CO-147284" });
   const update = db.calls.find((c) => c.sql.includes("SET state='abandoned'"));
   assert.equal(update.params[0], UUID);
@@ -262,7 +262,7 @@ test("an untracked ticket that's still open in ConnectWise is left alone -- only
     },
   });
   const result = await reconciliation.abandonAndReplaceUntrackedAtlasTickets();
-  assert.deepEqual(result, { checked: 0, abandoned: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0 });
+  assert.deepEqual(result, { checked: 0, abandoned: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0, firstError: null });
   assert.equal(db.calls.some((c) => c.sql.includes("SET state='abandoned'")), false);
 });
 
@@ -281,7 +281,7 @@ test("a single leftover CVE (no group to join) is drafted through the single-CVE
     persistPreparedPatch: async () => "new-id",
   });
   const result = await reconciliation.abandonAndReplaceUntrackedAtlasTickets();
-  assert.deepEqual(result, { checked: 1, abandoned: 1, cvesReplaced: 0, cvesNeedsReview: 1, cvesAlreadyCovered: 0, unresolved: 0, errors: 0 });
+  assert.deepEqual(result, { checked: 1, abandoned: 1, cvesReplaced: 0, cvesNeedsReview: 1, cvesAlreadyCovered: 0, unresolved: 0, errors: 0, firstError: null });
   assert.deepEqual(patchInput, { cve: "CVE-2024-1", tenantId: "tenant-abc" });
 });
 
@@ -297,7 +297,7 @@ test("CrowdStrike reporting nothing left to replace (already patched or already 
     prepareConsolidation: async () => { throw new FakeDashboardError("Every open/reopened finding for this CVE already has an active ticket in progress. No patch request was prepared."); },
   });
   const result = await reconciliation.abandonAndReplaceUntrackedAtlasTickets();
-  assert.deepEqual(result, { checked: 1, abandoned: 1, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 2, unresolved: 0, errors: 0 });
+  assert.deepEqual(result, { checked: 1, abandoned: 1, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 2, unresolved: 0, errors: 0, firstError: null });
 });
 
 test("a genuine failure re-collecting from CrowdStrike is a normal error, not counted as already covered", async () => {
@@ -312,7 +312,7 @@ test("a genuine failure re-collecting from CrowdStrike is a normal error, not co
     prepareConsolidation: async () => { throw new Error("ConnectWise unreachable"); },
   });
   const result = await reconciliation.abandonAndReplaceUntrackedAtlasTickets();
-  assert.deepEqual(result, { checked: 1, abandoned: 1, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 1 });
+  assert.deepEqual(result, { checked: 1, abandoned: 1, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 1, firstError: "tenant tenant-abc: ConnectWise unreachable" });
 });
 
 test("no CrowdStrike connection configured still abandons the ticket, but leaves replacement for later", async () => {
@@ -327,7 +327,7 @@ test("no CrowdStrike connection configured still abandons the ticket, but leaves
     dashboardConnectionRevision: async () => null,
   });
   const result = await reconciliation.abandonAndReplaceUntrackedAtlasTickets();
-  assert.deepEqual(result, { checked: 1, abandoned: 1, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0 });
+  assert.deepEqual(result, { checked: 1, abandoned: 1, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0, firstError: null });
 });
 
 test("a ticket already abandoned or adopted by a concurrent pass (the update matches nothing) is left as unresolved, not double-counted", async () => {
@@ -341,7 +341,7 @@ test("a ticket already abandoned or adopted by a concurrent pass (the update mat
     },
   });
   const result = await reconciliation.abandonAndReplaceUntrackedAtlasTickets();
-  assert.deepEqual(result, { checked: 1, abandoned: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 1, errors: 0 });
+  assert.deepEqual(result, { checked: 1, abandoned: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 1, errors: 0, firstError: null });
 });
 
 test("an untracked closed ticket with no resolvable draft origin is left completely untouched", async () => {
@@ -355,7 +355,7 @@ test("an untracked closed ticket with no resolvable draft origin is left complet
     },
   });
   const result = await reconciliation.abandonAndReplaceUntrackedAtlasTickets();
-  assert.deepEqual(result, { checked: 1, abandoned: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 1, errors: 0 });
+  assert.deepEqual(result, { checked: 1, abandoned: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 1, errors: 0, firstError: null });
   assert.equal(db.calls.some((c) => c.sql.includes("SET state='abandoned'")), false);
 });
 
@@ -370,7 +370,7 @@ test("a closed untracked ticket that matches every other filter but isn't in the
     },
   });
   const result = await reconciliation.abandonAndReplaceUntrackedAtlasTickets();
-  assert.deepEqual(result, { checked: 0, abandoned: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0 });
+  assert.deepEqual(result, { checked: 0, abandoned: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0, firstError: null });
   assert.equal(db.calls.some((c) => c.sql.includes("SELECT packet, tenant_id") || c.sql.includes("SET state='abandoned'")), false); // never even looked up its attachments or draft
 });
 
@@ -405,7 +405,7 @@ test("a pass already running elsewhere (advisory lock held by another instance) 
   let cwCalled = false;
   const reconciliation = await loadReconciliation({ db, cwRequest: async () => { cwCalled = true; return []; } });
   const result = await reconciliation.abandonAndReplaceUntrackedAtlasTickets();
-  assert.deepEqual(result, { checked: 0, abandoned: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0 });
+  assert.deepEqual(result, { checked: 0, abandoned: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0, firstError: null });
   assert.equal(cwCalled, false);
 });
 
@@ -554,4 +554,17 @@ test("firstError surfaces the first failure's ticket number and message directly
   const result = await reconciliation.closeAndRecutMergedAtlasTickets();
   assert.equal(result.errors, 2);
   assert.match(result.firstError, /^#\d+: This board has no closed status configured\.$/);
+});
+
+test("a CVE-replacement failure (the live bug: 0 ticket-loop errors but the tenant re-collection itself failing) surfaces in firstError too, not just a bare count", async () => {
+  const db = fakeDb({
+    trackedRows: { [CHILD_ID]: { table: "group", id: "draft-child", cves: ["CVE-2024-1", "CVE-2024-2"], tenantId: "tenant-a", boardId: 9, state: "superseded" } },
+  });
+  const reconciliation = await loadReconciliation({
+    db,
+    prepareConsolidation: async () => { throw new Error("ConnectWise session expired"); },
+  });
+  const result = await reconciliation.closeAndRecutMergedAtlasTickets();
+  assert.equal(result.errors, 1);
+  assert.equal(result.firstError, "tenant tenant-a: ConnectWise session expired");
 });
