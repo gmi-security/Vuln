@@ -568,3 +568,33 @@ test("a CVE-replacement failure (the live bug: 0 ticket-loop errors but the tena
   assert.equal(result.errors, 1);
   assert.equal(result.firstError, "tenant tenant-a: ConnectWise session expired");
 });
+
+test("a tenant's combined CVEs exceeding parseConsolidationInput's 100-CVE cap are batched, not sent in one failing call -- the live bug (116 distinct CVEs, one tenant)", async () => {
+  // Every one of the 38 tracked tickets (the confirmed 37 plus the parent)
+  // contributes 3 unique CVEs to the same tenant: 114 total, comfortably
+  // over the 100-CVE cap.
+  const ids = [
+    2655138, 2655148, 2655170, 2655171, 2655172, 2655173, 2655174, 2655175,
+    2655990, 2655991, 2655996, 2656104, 2656130,
+    2656151, 2656152, 2656153, 2656154, 2656155, 2656156, 2656157, 2656158, 2656159,
+    2656160, 2656161, 2656162, 2656163, 2656164, 2656165, 2656166, 2656167, 2656168, 2656169,
+    2656170, 2656171, 2656172, 2656173, 2656174, PARENT_ID,
+  ];
+  assert.equal(new Set(ids).size, 38);
+  const trackedRows = {};
+  ids.forEach((id, index) => {
+    trackedRows[id] = { table: "group", id: `draft-${id}`, cves: [`CVE-${index}-1`, `CVE-${index}-2`, `CVE-${index}-3`], tenantId: "tenant-a", boardId: 9, state: "superseded" };
+  });
+  const db = fakeDb({ trackedRows });
+  const batchSizes = [];
+  const reconciliation = await loadReconciliation({
+    db,
+    prepareConsolidation: async (input) => { batchSizes.push(input.cves.length); return { groups: [] }; },
+    persistPreparedGroups: async () => ["new-id"],
+  });
+  const result = await reconciliation.closeAndRecutMergedAtlasTickets();
+  assert.equal(result.errors, 0);
+  assert.ok(batchSizes.every((n) => n <= 100), `every batch must be <= 100 CVEs, got ${batchSizes}`);
+  assert.equal(batchSizes.reduce((a, b) => a + b, 0), 114);
+  assert.equal(result.cvesReplaced, 114);
+});

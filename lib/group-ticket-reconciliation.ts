@@ -267,24 +267,33 @@ async function replaceCvesWithFreshDrafts(cvesByTenant: Map<string, Set<string>>
   const alreadyTicketed = await activeTicketedPairs();
   let cvesReplaced = 0, cvesNeedsReview = 0, cvesAlreadyCovered = 0, errors = 0;
   let firstError: string | null = null;
+  // parseConsolidationInput hard-caps a single consolidation at 100 CVEs --
+  // fine for the normal one-analyst-picks-some-CVEs flow it was built for,
+  // but one CrowdStrike tenant here can easily aggregate CVEs from all 38
+  // tickets past that cap (live: 116 distinct CVEs, one tenant). Batched so
+  // every CVE still gets queued instead of the whole tenant failing outright.
+  const CONSOLIDATION_BATCH_SIZE = 100;
   for (const [tenantId, cveSet] of cvesByTenant) {
-    const cves = [...cveSet];
-    try {
-      if (cves.length >= 2) {
-        const consolidation = await prepareConsolidation({ cves, tenantId, appCompanyId: ATLAS_REPORTING_COMPANY_ID }, revision, alreadyTicketed);
-        await persistPreparedGroups(consolidation, ACTOR, revision);
-        cvesReplaced += cves.length;
-      } else {
-        // No group to consolidate into and no single-CVE auto-create path --
-        // drafted for a human to review and cut by hand.
-        const patchRequest = await preparePatchRequest({ cve: cves[0], tenantId }, revision, alreadyTicketed);
-        await persistPreparedPatch(randomUUID(), patchRequest, ACTOR, revision);
-        cvesNeedsReview++;
+    const allCves = [...cveSet];
+    for (let i = 0; i < allCves.length; i += CONSOLIDATION_BATCH_SIZE) {
+      const cves = allCves.slice(i, i + CONSOLIDATION_BATCH_SIZE);
+      try {
+        if (cves.length >= 2) {
+          const consolidation = await prepareConsolidation({ cves, tenantId, appCompanyId: ATLAS_REPORTING_COMPANY_ID }, revision, alreadyTicketed);
+          await persistPreparedGroups(consolidation, ACTOR, revision);
+          cvesReplaced += cves.length;
+        } else {
+          // No group to consolidate into and no single-CVE auto-create path --
+          // drafted for a human to review and cut by hand.
+          const patchRequest = await preparePatchRequest({ cve: cves[0], tenantId }, revision, alreadyTicketed);
+          await persistPreparedPatch(randomUUID(), patchRequest, ACTOR, revision);
+          cvesNeedsReview++;
+        }
+      } catch (err) {
+        if (isNothingLeftToReplace(err)) { cvesAlreadyCovered += cves.length; continue; }
+        errors++; // one batch's re-collection failing must not block the rest
+        firstError ??= `tenant ${tenantId}: ${err instanceof Error ? err.message : String(err)}`;
       }
-    } catch (err) {
-      if (isNothingLeftToReplace(err)) { cvesAlreadyCovered += cves.length; continue; }
-      errors++; // one tenant's re-collection failing must not block the rest
-      firstError ??= `tenant ${tenantId}: ${err instanceof Error ? err.message : String(err)}`;
     }
   }
   return { cvesReplaced, cvesNeedsReview, cvesAlreadyCovered, errors, firstError };
