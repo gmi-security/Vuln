@@ -333,3 +333,44 @@ test("an untracked closed ticket with no resolvable draft origin is left complet
   assert.deepEqual(result, { checked: 1, abandoned: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 1, errors: 0 });
   assert.equal(db.calls.some((c) => c.sql.includes("SET state='abandoned'")), false);
 });
+
+test("a closed untracked ticket that matches every other filter but isn't in the confirmed list of 36 is never touched", async () => {
+  const db = fakeDb({ routing, trackedTicketIds: [], draftPackets: { [UUID]: draftPacket } });
+  const reconciliation = await loadReconciliation({
+    db,
+    cwRequest: async (connection, path) => {
+      // Some other closed, untracked, "Patch " ticket on the same board -- not one of the 36.
+      if (path.startsWith("/service/tickets?")) return [{ id: 9999999, summary: "Patch CVE-2024-1 | 1 affected devices", status: { name: "Closed" }, closedFlag: true, board: { id: 9 }, company: { id: 55 } }];
+      throw new Error(`unexpected path ${path}`);
+    },
+  });
+  const result = await reconciliation.abandonAndReplaceUntrackedAtlasTickets();
+  assert.deepEqual(result, { checked: 0, abandoned: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0 });
+  assert.equal(db.calls.some((c) => c.sql.includes("SELECT packet, tenant_id") || c.sql.includes("SET state='abandoned'")), false); // never even looked up its attachments or draft
+});
+
+test("every one of the 36 confirmed ticket numbers is accepted by the allowlist", async () => {
+  const KNOWN_LOST_ATLAS_TICKET_IDS = [
+    2655148, 2655170, 2655171, 2655172, 2655173, 2655174, 2655175,
+    2655990, 2655991, 2655996, 2656104, 2656130,
+    2656151, 2656152, 2656153, 2656154, 2656155, 2656156, 2656157, 2656158, 2656159,
+    2656160, 2656161, 2656162, 2656163, 2656164, 2656165, 2656166, 2656167, 2656168, 2656169,
+    2656170, 2656171, 2656172, 2656173, 2656174,
+  ];
+  assert.equal(new Set(KNOWN_LOST_ATLAS_TICKET_IDS).size, 36);
+  for (const id of KNOWN_LOST_ATLAS_TICKET_IDS) {
+    const db = fakeDb({ routing, trackedTicketIds: [], draftPackets: { [UUID]: draftPacket } });
+    const reconciliation = await loadReconciliation({
+      db,
+      cwRequest: async (connection, path) => {
+        if (path.startsWith("/service/tickets?")) return [{ id, summary: "T", status: { name: "Closed Merged" }, closedFlag: true, board: { id: 9 }, company: { id: 55 } }];
+        if (path.startsWith("/system/documents?")) return [{ title: `CVE-2024-1 patch request ${UUID}` }];
+        throw new Error(`unexpected path ${path}`);
+      },
+      prepareConsolidation: async () => ({ groups: [] }),
+      persistPreparedGroups: async () => ["new-id"],
+    });
+    const result = await reconciliation.abandonAndReplaceUntrackedAtlasTickets();
+    assert.equal(result.abandoned, 1, `ticket #${id} should have been abandoned`);
+  }
+});

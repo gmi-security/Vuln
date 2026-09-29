@@ -10,6 +10,25 @@ import type { PatchGroup } from "./patch-request";
 export type UntrackedTicket = { id: number; summary: string; status: string; closed: boolean; url: string };
 const ACTOR = "ticket-reconciliation";
 
+// The exact 36 tickets Eddy's Combine absorbed into parent #2655137 and
+// closed on 9/28 before patching happened -- read directly off that
+// parent's own "Combined Tickets: 37" list and its 37 UUID-tagged CSV
+// attachments (see #2655137 in ConnectWise). #2655138 is the one child
+// deliberately left out of this 37: it was created the same minute as the
+// parent itself (9/26, part of the original rollout), not the later
+// manual-paste batches this incident is actually about. abandonAndReplace-
+// UntrackedAtlasTickets only ever writes to a ticket number in this list --
+// a hard ceiling on top of the closed/untracked/patch-board filters, not a
+// replacement for them, so a future unrelated closed/untracked ticket can
+// never be swept in by this same action without a deliberate code change.
+const KNOWN_LOST_ATLAS_TICKET_IDS = new Set([
+  2655148, 2655170, 2655171, 2655172, 2655173, 2655174, 2655175,
+  2655990, 2655991, 2655996, 2656104, 2656130,
+  2656151, 2656152, 2656153, 2656154, 2656155, 2656156, 2656157, 2656158, 2656159,
+  2656160, 2656161, 2656162, 2656163, 2656164, 2656165, 2656166, 2656167, 2656168, 2656169,
+  2656170, 2656171, 2656172, 2656173, 2656174,
+]);
+
 // Shared by findUntrackedAtlasTickets and adoptManualAtlasTickets: every live
 // Atlas *patch* ticket in ConnectWise (paginated, full raw rows), and the set
 // of ticket_ids already tracked by a row in patch_group_ticket_requests for
@@ -159,6 +178,7 @@ export async function abandonAndReplaceUntrackedAtlasTickets(): Promise<AbandonR
   const cvesByTenant = new Map<string, Set<string>>();
   for (const row of rows) {
     if (!cwId(row.id) || tracked.has(row.id) || row.closedFlag !== true) continue; // only closed, untracked tickets are "lost"
+    if (!KNOWN_LOST_ATLAS_TICKET_IDS.has(row.id)) continue; // never touch anything outside the confirmed list, even if it matches every other filter
     checked++;
     try {
       const uuid = await draftUuidForTicket(saved.value, row.id);
