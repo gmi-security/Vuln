@@ -71,8 +71,9 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
   async function runValidateClosuresNow() {
     setValidating(true); setValidateResult(""); setError("");
     try {
-      const result = await dashboardRequest<{ checked: number; reopened: number; confirmedFixed: number; errors: number }>("patch-group-tickets/validate-closures", { method: "POST" });
-      setValidateResult(`Checked ${result.checked} closed ticket${result.checked === 1 ? "" : "s"} · reopened ${result.reopened} unverified · confirmed ${result.confirmedFixed} fixed${result.errors ? ` · ${result.errors} failed` : ""}.`);
+      const result = await dashboardRequest<{ checked: number; reopened: number; confirmedFixed: number; needsManualUnmerge: number; errors: number }>("patch-group-tickets/validate-closures", { method: "POST" });
+      const unmergeNote = result.needsManualUnmerge ? ` · ${result.needsManualUnmerge} merged into a parent ticket and need manual separation in ConnectWise first` : "";
+      setValidateResult(`Checked ${result.checked} closed ticket${result.checked === 1 ? "" : "s"} · reopened ${result.reopened} unverified · confirmed ${result.confirmedFixed} fixed${unmergeNote}${result.errors ? ` · ${result.errors} failed` : ""}.`);
       await reload();
     } catch (e) { setError(e instanceof Error ? e.message : "Could not run closure validation."); }
     finally { setValidating(false); }

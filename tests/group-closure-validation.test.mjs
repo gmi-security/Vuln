@@ -5,11 +5,13 @@
 // verifyAgainstCrowdStrike/cwDefaultOpenStatus/cwAddTicketNote/cwRequest):
 // a closed ticket whose CVE is still open per CrowdStrike gets reopened with
 // a note and marked still_open; a closed ticket that's genuinely fixed gets
-// marked verified and is left alone in ConnectWise; a ticket with no
-// CrowdStrike scope (stored-findings or no hostScope/board) is skipped; one
-// ticket's ConnectWise call failing does not block the rest; and no
-// candidates, no ConnectWise connection, or no CrowdStrike connection all
-// mean no downstream calls at all.
+// marked verified and is left alone in ConnectWise; a ticket already merged
+// into a parent ticket in ConnectWise (detected from its own current status
+// name) is flagged for manual separation instead of guessed at; a ticket
+// with no CrowdStrike scope (stored-findings or no hostScope/board) is
+// skipped; one ticket's ConnectWise call failing does not block the rest;
+// and no candidates, no ConnectWise connection, or no CrowdStrike connection
+// all mean no downstream calls at all.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { resolve, dirname } from "node:path";
@@ -82,20 +84,44 @@ const baseRow = { id: "a", tenant_id: "tenant-1", routing: { boardId: 9 }, packe
 
 test("a closed ticket still vulnerable per CrowdStrike is reopened with a note and marked still_open", async () => {
   const db = fakeDb({ closedRows: [baseRow], ticketRows: { a: { ticket_id: 555, cw_target: "cw-1" } } });
-  const noteCalls = []; const patchCalls = [];
+  const noteCalls = []; const cwCalls = [];
   const validate = await loadValidation({
     db,
     verifyAgainstCrowdStrike: async () => ({ checkedAt: "2026-09-28T00:00:00.000Z", stillOpenHosts: ["host-1"] }),
     cwDefaultOpenStatus: async () => ({ id: 42, name: "New" }),
     cwAddTicketNote: async (connection, ticketId, text) => { noteCalls.push({ ticketId, text }); },
-    cwRequest: async (connection, path, method, body) => { patchCalls.push({ path, method, body }); return {}; },
+    cwRequest: async (connection, path, method, body) => { cwCalls.push({ path, method, body }); return {}; },
   });
   const result = await validate.validateClosedGroupTickets();
-  assert.deepEqual(result, { checked: 1, reopened: 1, confirmedFixed: 0, errors: 0 });
-  assert.deepEqual(patchCalls, [{ path: "/service/tickets/555", method: "PATCH", body: [{ op: "replace", path: "status/id", value: 42 }] }]);
+  assert.deepEqual(result, { checked: 1, reopened: 1, confirmedFixed: 0, needsManualUnmerge: 0, errors: 0 });
+  const patchCall = cwCalls.find((c) => c.method === "PATCH");
+  assert.deepEqual(patchCall, { path: "/service/tickets/555", method: "PATCH", body: [{ op: "replace", path: "status/id", value: 42 }] });
   assert.equal(noteCalls.length, 1);
   assert.equal(noteCalls[0].ticketId, 555);
   assert.match(noteCalls[0].text, /still present on 1 host/);
+});
+
+test("a ticket already merged into a parent ticket is flagged for manual separation, not guessed at", async () => {
+  const db = fakeDb({ closedRows: [baseRow], ticketRows: { a: { ticket_id: 555, cw_target: "cw-1" } } });
+  let statusPicked = false; let notePosted = false; let priorityCalled = false;
+  const validate = await loadValidation({
+    db,
+    verifyAgainstCrowdStrike: async () => ({ checkedAt: "2026-09-28T00:00:00.000Z", stillOpenHosts: ["host-1"] }),
+    cwRequest: async () => ({ status: { name: "Closed Merged" } }),
+    cwDefaultOpenStatus: async () => { statusPicked = true; return { id: 42, name: "New" }; },
+    cwAddTicketNote: async () => { notePosted = true; },
+    cwPrioritiesBySort: async () => [{ id: 1, name: "Urgent" }],
+    setGroupTicketPriority: async () => { priorityCalled = true; },
+  });
+  const result = await validate.validateClosedGroupTickets();
+  assert.deepEqual(result, { checked: 1, reopened: 0, confirmedFixed: 0, needsManualUnmerge: 1, errors: 0 });
+  assert.equal(statusPicked, false);
+  assert.equal(notePosted, false);
+  assert.equal(priorityCalled, false);
+  const update = db.calls.find((c) => c.sql.includes("SET last_error"));
+  assert.match(update.params[1], /merged into a parent ticket/);
+  const audit = db.calls.find((c) => c.sql.includes("ticket.reopen.blocked_merged"));
+  assert.ok(audit, "expected a ticket.reopen.blocked_merged audit entry");
 });
 
 test("a reopened Critical ticket has its priority reasserted to the top slot", async () => {
@@ -111,7 +137,7 @@ test("a reopened Critical ticket has its priority reasserted to the top slot", a
     setGroupTicketPriority: async (id, priorityId, actor) => { priorityCalls.push({ id, priorityId, actor }); },
   });
   const result = await validate.validateClosedGroupTickets();
-  assert.deepEqual(result, { checked: 1, reopened: 1, confirmedFixed: 0, errors: 0 });
+  assert.deepEqual(result, { checked: 1, reopened: 1, confirmedFixed: 0, needsManualUnmerge: 0, errors: 0 });
   assert.deepEqual(priorityCalls, [{ id: "a", priorityId: 1, actor: "closure-validation" }]);
 });
 
@@ -129,7 +155,7 @@ test("a reopened High ticket gets the next priority down, not the top one", asyn
     setGroupTicketPriority: async (id, priorityId, actor) => { priorityCalls.push({ id, priorityId, actor }); },
   });
   const result = await validate.validateClosedGroupTickets();
-  assert.deepEqual(result, { checked: 1, reopened: 1, confirmedFixed: 0, errors: 0 });
+  assert.deepEqual(result, { checked: 1, reopened: 1, confirmedFixed: 0, needsManualUnmerge: 0, errors: 0 });
   assert.deepEqual(priorityCalls, [{ id: "a", priorityId: 2, actor: "closure-validation" }]);
 });
 
@@ -146,7 +172,7 @@ test("no ConnectWise priorities available still reopens the ticket, just without
     setGroupTicketPriority: async () => { priorityCalled = true; },
   });
   const result = await validate.validateClosedGroupTickets();
-  assert.deepEqual(result, { checked: 1, reopened: 1, confirmedFixed: 0, errors: 0 });
+  assert.deepEqual(result, { checked: 1, reopened: 1, confirmedFixed: 0, needsManualUnmerge: 0, errors: 0 });
   assert.equal(priorityCalled, false);
 });
 
@@ -160,7 +186,7 @@ test("a closed ticket that's genuinely fixed is marked verified and ConnectWise 
     cwRequest: async () => { cwTouched = true; return {}; },
   });
   const result = await validate.validateClosedGroupTickets();
-  assert.deepEqual(result, { checked: 1, reopened: 0, confirmedFixed: 1, errors: 0 });
+  assert.deepEqual(result, { checked: 1, reopened: 0, confirmedFixed: 1, needsManualUnmerge: 0, errors: 0 });
   assert.equal(cwTouched, false);
 });
 
@@ -170,7 +196,7 @@ test("a ticket with no CrowdStrike scope (stored-findings) is skipped entirely",
   let verifyCalled = false;
   const validate = await loadValidation({ db, verifyAgainstCrowdStrike: async () => { verifyCalled = true; return { checkedAt: "x", stillOpenHosts: [] }; } });
   const result = await validate.validateClosedGroupTickets();
-  assert.deepEqual(result, { checked: 1, reopened: 0, confirmedFixed: 0, errors: 0 });
+  assert.deepEqual(result, { checked: 1, reopened: 0, confirmedFixed: 0, needsManualUnmerge: 0, errors: 0 });
   assert.equal(verifyCalled, false);
 });
 
@@ -180,7 +206,7 @@ test("a ticket with no board on its routing is skipped entirely", async () => {
   let verifyCalled = false;
   const validate = await loadValidation({ db, verifyAgainstCrowdStrike: async () => { verifyCalled = true; return { checkedAt: "x", stillOpenHosts: [] }; } });
   const result = await validate.validateClosedGroupTickets();
-  assert.deepEqual(result, { checked: 1, reopened: 0, confirmedFixed: 0, errors: 0 });
+  assert.deepEqual(result, { checked: 1, reopened: 0, confirmedFixed: 0, needsManualUnmerge: 0, errors: 0 });
   assert.equal(verifyCalled, false);
 });
 
@@ -196,21 +222,21 @@ test("one ticket's ConnectWise call failing does not block the rest", async () =
     cwRequest: async (connection, path) => { if (path.includes("555")) throw new Error("ConnectWise rejected the request"); return {}; },
   });
   const result = await validate.validateClosedGroupTickets();
-  assert.deepEqual(result, { checked: 2, reopened: 1, confirmedFixed: 0, errors: 1 });
+  assert.deepEqual(result, { checked: 2, reopened: 1, confirmedFixed: 0, needsManualUnmerge: 0, errors: 1 });
 });
 
 test("no closed candidate tickets means no CrowdStrike or ConnectWise calls at all", async () => {
   const db = fakeDb({ closedRows: [] });
   const validate = await loadValidation({ db });
   const result = await validate.validateClosedGroupTickets();
-  assert.deepEqual(result, { checked: 0, reopened: 0, confirmedFixed: 0, errors: 0 });
+  assert.deepEqual(result, { checked: 0, reopened: 0, confirmedFixed: 0, needsManualUnmerge: 0, errors: 0 });
 });
 
 test("no ConnectWise connection configured means no db calls at all", async () => {
   const db = fakeDb({ closedRows: [] });
   const validate = await loadValidation({ db, savedConnection: async () => { throw new Error("not configured"); } });
   const result = await validate.validateClosedGroupTickets();
-  assert.deepEqual(result, { checked: 0, reopened: 0, confirmedFixed: 0, errors: 0 });
+  assert.deepEqual(result, { checked: 0, reopened: 0, confirmedFixed: 0, needsManualUnmerge: 0, errors: 0 });
   assert.equal(db.calls.length, 0);
 });
 
@@ -223,6 +249,6 @@ test("no CrowdStrike connection configured leaves candidates checked but nothing
     verifyAgainstCrowdStrike: async () => { verifyCalled = true; return { checkedAt: "x", stillOpenHosts: [] }; },
   });
   const result = await validate.validateClosedGroupTickets();
-  assert.deepEqual(result, { checked: 1, reopened: 0, confirmedFixed: 0, errors: 0 });
+  assert.deepEqual(result, { checked: 1, reopened: 0, confirmedFixed: 0, needsManualUnmerge: 0, errors: 0 });
   assert.equal(verifyCalled, false);
 });

@@ -12,9 +12,17 @@ const ACTOR = "closure-validation";
 // Same pilot scope as group-auto-create.ts and group-priority-backfill.ts.
 const PILOT_COMPANY_IDS = [ATLAS_REPORTING_COMPANY_ID];
 
-type Counts = { checked: number; reopened: number; confirmedFixed: number; errors: number };
+type Counts = { checked: number; reopened: number; confirmedFixed: number; needsManualUnmerge: number; errors: number };
 type VerifyResult = { checkedAt: string; stillOpenHosts: string[] };
 type ClosedRow = { id: string; tenant_id: string; routing: { boardId?: number } | null; packet: PatchGroup; worst_severity: "Critical" | "High" | null };
+
+// ConnectWise's native ticket-merge/combine feature locks a child ticket and
+// redirects activity to its parent (confirmed from a live ticket: status
+// "Closed Merged", "absorbed as a Child of Ticket #...", edits refused). A
+// plain status change can't undo that, and guessing at an unmerge call
+// against real production tickets isn't worth the risk -- this is a
+// distinct, named outcome so it's never silently folded into "errors".
+class MergedTicketError extends Error {}
 
 async function recordVerification(id: string, result: VerifyResult, state: "verified" | "still_open") {
   const db = await patchTicketDatabase();
@@ -35,6 +43,13 @@ async function reopenTicket(id: string, boardId: number, result: VerifyResult, s
   if (!row?.ticket_id) throw new Error("Missing ticket to reopen.");
   const saved = await savedConnection();
   if (saved.target !== row.cw_target) throw new Error("ConnectWise connection changed before reopening; retry next pass.");
+  const current = await cwRequest(saved.value, `/service/tickets/${row.ticket_id}`);
+  if (typeof current?.status?.name === "string" && /merged/i.test(current.status.name)) {
+    await db.query("UPDATE patch_group_ticket_requests SET last_error=$2,updated_at=now() WHERE id=$1",
+      [id, "This ticket is merged into a parent ticket in ConnectWise and cannot be reopened automatically -- separate it from its parent in ConnectWise first."]);
+    await db.query("INSERT INTO patch_group_ticket_audit(request_id,actor,action) VALUES($1,$2,'ticket.reopen.blocked_merged')", [id, ACTOR]);
+    throw new MergedTicketError("Ticket is merged; needs manual separation in ConnectWise.");
+  }
   const status = await cwDefaultOpenStatus(saved.value, boardId);
   await cwRequest(saved.value, `/service/tickets/${row.ticket_id}`, "PATCH", [{ op: "replace", path: "status/id", value: status.id }]);
   await cwAddTicketNote(saved.value, row.ticket_id,
@@ -60,7 +75,7 @@ async function reopenTicket(id: string, boardId: number, result: VerifyResult, s
 // someone closes it again, at which point this checks it fresh.
 export async function validateClosedGroupTickets(): Promise<Counts> {
   const saved = await savedConnection().catch(() => null);
-  if (!saved) return { checked: 0, reopened: 0, confirmedFixed: 0, errors: 0 };
+  if (!saved) return { checked: 0, reopened: 0, confirmedFixed: 0, needsManualUnmerge: 0, errors: 0 };
   const db = await patchTicketDatabase();
   const rows = (await db.query(`
     SELECT id, tenant_id, routing, packet, worst_severity FROM patch_group_ticket_requests
@@ -68,14 +83,14 @@ export async function validateClosedGroupTickets(): Promise<Counts> {
       AND packet->>'appCompanyId' = ANY($2::text[])
       AND fix_verified_state IS DISTINCT FROM 'verified'
   `, [saved.target, PILOT_COMPANY_IDS])).rows as ClosedRow[];
-  if (!rows.length) return { checked: 0, reopened: 0, confirmedFixed: 0, errors: 0 };
+  if (!rows.length) return { checked: 0, reopened: 0, confirmedFixed: 0, needsManualUnmerge: 0, errors: 0 };
   const crowdstrikeRevision = await dashboardConnectionRevision("crowdstrike");
-  if (crowdstrikeRevision === null) return { checked: rows.length, reopened: 0, confirmedFixed: 0, errors: 0 };
+  if (crowdstrikeRevision === null) return { checked: rows.length, reopened: 0, confirmedFixed: 0, needsManualUnmerge: 0, errors: 0 };
   // Most-urgent-first; fetched once and reused for every ticket this pass,
   // same as group-auto-create.ts. Missing/unreachable never blocks the
   // reopen -- it just means priority stays whatever it already was.
   const priorities = await cwPrioritiesBySort(saved.value).catch(() => []);
-  let reopened = 0, confirmedFixed = 0, errors = 0;
+  let reopened = 0, confirmedFixed = 0, needsManualUnmerge = 0, errors = 0;
   await runWithConcurrency(rows, 2, async (row) => {
     const packet = row.packet;
     if (packet.source === "stored-findings" || !packet.hostScope?.length || !row.routing?.boardId) return; // no CrowdStrike scope, or no board, to act on
@@ -88,11 +103,12 @@ export async function validateClosedGroupTickets(): Promise<Counts> {
       }
       await reopenTicket(row.id, row.routing.boardId, result, row.worst_severity, priorities);
       reopened++;
-    } catch {
-      errors++; // one ticket's connection mismatch or ConnectWise rejection must not block the rest
+    } catch (err) {
+      if (err instanceof MergedTicketError) needsManualUnmerge++;
+      else errors++; // one ticket's connection mismatch or ConnectWise rejection must not block the rest
     }
   });
-  return { checked: rows.length, reopened, confirmedFixed, errors };
+  return { checked: rows.length, reopened, confirmedFixed, needsManualUnmerge, errors };
 }
 
 const runtime = globalThis as typeof globalThis & { __groupClosureValidation?: { timer?: ReturnType<typeof setInterval>; working?: Promise<void> } };
