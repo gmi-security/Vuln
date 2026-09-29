@@ -324,12 +324,15 @@ async function findTrackedRow(
   if (group) return { table: "patch_group_ticket_requests", row: { id: group.id, cves: group.packet.cves, tenantId: group.tenant_id, boardId: group.routing?.boardId ?? null } };
   // #2655137 (the parent) went through the single-CVE flow, not the group one
   // -- see the note on liveAtlasTickets above -- so a ticket in this 38-set
-  // can just as easily be tracked over here.
+  // can just as easily be tracked over here. Unlike the group table, this
+  // one has no single tenant_id column -- a single-CVE request can span
+  // several tenants, so it's tenant_ids (plural, JSONB array); the first is
+  // used here since every ticket seen in this incident only ever had one.
   const single = (await db.query(
-    "SELECT id, packet, tenant_id, routing FROM patch_ticket_requests WHERE ticket_id=$1 AND cw_target=$2 AND state='created'",
+    "SELECT id, packet, tenant_ids, routing FROM patch_ticket_requests WHERE ticket_id=$1 AND cw_target=$2 AND state='created'",
     [ticketId, target],
-  )).rows[0] as { id: string; packet: { cve: string }; tenant_id: string; routing: { boardId?: number } | null } | undefined;
-  if (single) return { table: "patch_ticket_requests", row: { id: single.id, cves: [single.packet.cve], tenantId: single.tenant_id, boardId: single.routing?.boardId ?? null } };
+  )).rows[0] as { id: string; packet: { cve: string }; tenant_ids: string[]; routing: { boardId?: number } | null } | undefined;
+  if (single) return { table: "patch_ticket_requests", row: { id: single.id, cves: [single.packet.cve], tenantId: single.tenant_ids?.[0] ?? "", boardId: single.routing?.boardId ?? null } };
   return null;
 }
 

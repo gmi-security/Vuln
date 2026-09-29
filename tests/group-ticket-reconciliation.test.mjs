@@ -43,9 +43,9 @@ function fakeDb({ routing, trackedTicketIds = [], singleTrackedTicketIds = [], p
       const row = trackedRows[params[0]];
       return { rows: row?.table === "group" ? [{ id: row.id, packet: { cves: row.cves }, tenant_id: row.tenantId, routing: { boardId: row.boardId } }] : [] };
     }
-    if (sql.includes("SELECT id, packet, tenant_id, routing FROM patch_ticket_requests")) {
+    if (sql.includes("SELECT id, packet, tenant_ids, routing FROM patch_ticket_requests")) {
       const row = trackedRows[params[0]];
-      return { rows: row?.table === "single" ? [{ id: row.id, packet: { cve: row.cves[0] }, tenant_id: row.tenantId, routing: { boardId: row.boardId } }] : [] };
+      return { rows: row?.table === "single" ? [{ id: row.id, packet: { cve: row.cves[0] }, tenant_ids: [row.tenantId], routing: { boardId: row.boardId } }] : [] };
     }
     if (sql.includes("FROM patch_group_ticket_requests") && sql.includes("ticket_id IS NOT NULL AND cw_target")) return { rows: trackedTicketIds.map((id) => ({ ticket_id: id })) };
     if (sql.includes("FROM patch_ticket_requests") && sql.includes("ticket_id IS NOT NULL AND cw_target")) return { rows: singleTrackedTicketIds.map((id) => ({ ticket_id: id })) };
