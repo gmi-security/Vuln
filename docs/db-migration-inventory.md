@@ -44,9 +44,15 @@ This is an observed baseline, not a cutover reconciliation. Snapshot contents ma
 | Table owners and migration privileges | `gmi_vuln` owns reported tables; explicit migration privilege test pending |
 | App Platform and Droplet worker/scheduler ownership | Pending live inventory |
 | Backup timestamp, size, isolated restore result and duration | Pending live inventory |
-| Duplicate IDs, orphan references, ID suffix maxima and per-company totals | Pending deeper read-only audit |
+| Duplicate IDs, orphan references, ID suffix maxima and per-company totals | Audit tool ready; live/restore result pending |
 
-The inventory script is intentionally narrow. The deeper audit and full comparison tool belong to Phase 2 of the migration plan. A mismatch between the old and new stores must be resolved against one frozen snapshot revision; comparing two moving targets can produce false differences.
+The basic inventory is intentionally narrow. For a deeper read-only check, `scripts/audit-snapshot.mjs` reads one sharded bucket at a time in a consistent snapshot. It reports duplicate or malformed IDs, missing company/scan/folder references, maximum ID suffix, and per-company/source/status/severity totals. It transfers snapshot payloads to the one-off Node process but prints only IDs and aggregate counts. Prefer running it against an isolated restored copy before running it against the live database. With a securely supplied `RESTORE_DATABASE_URL` environment variable:
+
+```sh
+DATABASE_URL="$RESTORE_DATABASE_URL" node scripts/audit-snapshot.mjs
+```
+
+A mismatch between the old and new stores must be resolved against one frozen snapshot revision; comparing two moving targets can produce false differences. The full row-by-row parity tool belongs to Phase 2.
 
 ## Explicit schema command
 
