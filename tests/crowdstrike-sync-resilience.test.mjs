@@ -21,7 +21,7 @@ await module.link(async (name) => {
   return new SyntheticModule(Object.keys(values), function () { for (const key of Object.keys(values)) this.setExport(key, values[key]); });
 });
 await module.evaluate();
-const { falconListAssets, spotlightListFindings, spotlightFindingBatches, falconProbeCounts } = module.namespace;
+const { falconListAssets, spotlightListFindings, spotlightFindingBatches, falconProbeCounts, createSpotlightSession } = module.namespace;
 
 async function withFetch(handler, work) {
   const original = globalThis.fetch, calls = [];
@@ -166,6 +166,27 @@ test("hydration never exceeds the concurrency cap even with hundreds of batches"
 
 const atlas = { clientId: "a", clientSecret: "b", baseUrl: "https://x", customerName: "Atlas Healthcare", label: "Atlas Healthcare" };
 const json = (body) => new Response(JSON.stringify(body), { status: 200 });
+
+test("Spotlight session returns bounded ID pages and hydrates their exact source IDs", async () => {
+  await withFetch((url) => {
+    if (url.includes("/oauth2/token")) return json({ access_token: "tok" });
+    const request = new URL(url);
+    if (request.pathname.includes("/spotlight/queries/vulnerabilities/v1")) {
+      assert.equal(request.searchParams.get("limit"), "400");
+      assert.equal(request.searchParams.get("filter"), "status:'open',status:'reopen'");
+      return json({ resources: ["source-1"], meta: { pagination: { after: "next", total: 2 } } });
+    }
+    if (request.pathname.includes("/spotlight/entities/vulnerabilities/v2"))
+      return json({ resources: [{ id: "source-1", cve: { id: "CVE-2026-1234" }, host_info: { hostname: "atlas-host" } }] });
+    throw new Error(`Unexpected request: ${url}`);
+  }, async () => {
+    const session = await createSpotlightSession(atlas);
+    assert.deepEqual(await session.queryPage(""), { ids: ["source-1"], next: "next", total: 2 });
+    const records = await session.hydrateIds(["source-1"]);
+    assert.deepEqual(records.map(record => record.id), ["source-1"]);
+    assert.equal(records[0].raw.host_info.hostname, "atlas-host");
+  });
+});
 
 test("debug count probe reads pagination totals without downloading assets or vulnerabilities", async () => {
   await withFetch((url) => {
