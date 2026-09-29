@@ -314,14 +314,21 @@ export function triggerAbandonAndReplaceNow(): { started: boolean } {
 export type RecutResult = { checked: number; closed: number; cvesReplaced: number; cvesNeedsReview: number; cvesAlreadyCovered: number; unresolved: number; errors: number; firstError: string | null };
 type TrackedRow = { id: string; cves: string[]; tenantId: string; boardId: number | null };
 
+// needsClosing is false for a ticket a previous pass already closed and
+// superseded -- included here (not just state='created') so a run that's
+// only ever collected CVEs from tickets it closes *this* pass can still
+// pick up where an earlier, interrupted pass left off. Closing itself is
+// still only ever attempted once per ticket; CVE collection downstream
+// happens every time, safe to repeat since persistPreparedGroups/
+// activeTicketedPairs already dedup a CVE that's already been queued.
 async function findTrackedRow(
   db: Awaited<ReturnType<typeof patchTicketDatabase>>, ticketId: number, target: string,
-): Promise<{ table: "patch_group_ticket_requests" | "patch_ticket_requests"; row: TrackedRow } | null> {
+): Promise<{ table: "patch_group_ticket_requests" | "patch_ticket_requests"; row: TrackedRow; needsClosing: boolean } | null> {
   const group = (await db.query(
-    "SELECT id, packet, tenant_id, routing FROM patch_group_ticket_requests WHERE ticket_id=$1 AND cw_target=$2 AND state='created'",
+    "SELECT id, packet, tenant_id, routing, state FROM patch_group_ticket_requests WHERE ticket_id=$1 AND cw_target=$2 AND state IN ('created','superseded')",
     [ticketId, target],
-  )).rows[0] as { id: string; packet: PatchGroup; tenant_id: string; routing: { boardId?: number } | null } | undefined;
-  if (group) return { table: "patch_group_ticket_requests", row: { id: group.id, cves: group.packet.cves, tenantId: group.tenant_id, boardId: group.routing?.boardId ?? null } };
+  )).rows[0] as { id: string; packet: PatchGroup; tenant_id: string; routing: { boardId?: number } | null; state: string } | undefined;
+  if (group) return { table: "patch_group_ticket_requests", row: { id: group.id, cves: group.packet.cves, tenantId: group.tenant_id, boardId: group.routing?.boardId ?? null }, needsClosing: group.state === "created" };
   // #2655137 (the parent) went through the single-CVE flow, not the group one
   // -- see the note on liveAtlasTickets above -- so a ticket in this 38-set
   // can just as easily be tracked over here. Unlike the group table, this
@@ -329,10 +336,10 @@ async function findTrackedRow(
   // several tenants, so it's tenant_ids (plural, JSONB array); the first is
   // used here since every ticket seen in this incident only ever had one.
   const single = (await db.query(
-    "SELECT id, packet, tenant_ids, routing FROM patch_ticket_requests WHERE ticket_id=$1 AND cw_target=$2 AND state='created'",
+    "SELECT id, packet, tenant_ids, routing, state FROM patch_ticket_requests WHERE ticket_id=$1 AND cw_target=$2 AND state IN ('created','superseded')",
     [ticketId, target],
-  )).rows[0] as { id: string; packet: { cve: string }; tenant_ids: string[]; routing: { boardId?: number } | null } | undefined;
-  if (single) return { table: "patch_ticket_requests", row: { id: single.id, cves: [single.packet.cve], tenantId: single.tenant_ids?.[0] ?? "", boardId: single.routing?.boardId ?? null } };
+  )).rows[0] as { id: string; packet: { cve: string }; tenant_ids: string[]; routing: { boardId?: number } | null; state: string } | undefined;
+  if (single) return { table: "patch_ticket_requests", row: { id: single.id, cves: [single.packet.cve], tenantId: single.tenant_ids?.[0] ?? "", boardId: single.routing?.boardId ?? null }, needsClosing: single.state === "created" };
   return null;
 }
 
@@ -374,17 +381,22 @@ async function runCloseAndRecut(db: Awaited<ReturnType<typeof patchTicketDatabas
     let found: Awaited<ReturnType<typeof findTrackedRow>> = null;
     try {
       found = await findTrackedRow(db, ticketId, saved.target);
-      if (!found) { unresolved++; continue; } // already superseded by a previous pass, or not actually tracked yet -- leave it alone
-      const { table, row } = found;
-      if (!row.boardId) { unresolved++; continue; } // no board on record to look up a closed status for -- do not guess
-      const closedStatus = await cwDefaultClosedStatus(saved.value, row.boardId);
-      await cwRequest(saved.value, `/service/tickets/${ticketId}`, "PATCH", [{ op: "replace", path: "status/id", value: closedStatus.id }]);
-      await cwAddTicketNote(saved.value, ticketId,
-        "Closed and replaced by a new standalone ticket: this ticket was part of a Combined/merged parent-child group, which can't be reliably separated through the ConnectWise API. Its CVE(s) are being recut as a clean, independent ticket instead so nothing is left tracked under a merged structure.");
-      const auditTable = table === "patch_group_ticket_requests" ? "patch_group_ticket_audit" : "patch_ticket_audit";
-      await db.query(`UPDATE ${table} SET state='superseded',closed=true,ticket_status=$2,last_error=NULL,updated_at=now() WHERE id=$1`, [row.id, closedStatus.name]);
-      await db.query(`INSERT INTO ${auditTable}(request_id,actor,action) VALUES($1,$2,'ticket.superseded')`, [row.id, ACTOR]);
-      closed++;
+      if (!found) { unresolved++; continue; } // not actually tracked -- leave it alone
+      const { table, row, needsClosing } = found;
+      if (needsClosing) {
+        if (!row.boardId) { unresolved++; continue; } // no board on record to look up a closed status for -- do not guess
+        const closedStatus = await cwDefaultClosedStatus(saved.value, row.boardId);
+        await cwRequest(saved.value, `/service/tickets/${ticketId}`, "PATCH", [{ op: "replace", path: "status/id", value: closedStatus.id }]);
+        await cwAddTicketNote(saved.value, ticketId,
+          "Closed and replaced by a new standalone ticket: this ticket was part of a Combined/merged parent-child group, which can't be reliably separated through the ConnectWise API. Its CVE(s) are being recut as a clean, independent ticket instead so nothing is left tracked under a merged structure.");
+        const auditTable = table === "patch_group_ticket_requests" ? "patch_group_ticket_audit" : "patch_ticket_audit";
+        await db.query(`UPDATE ${table} SET state='superseded',closed=true,ticket_status=$2,last_error=NULL,updated_at=now() WHERE id=$1`, [row.id, closedStatus.name]);
+        await db.query(`INSERT INTO ${auditTable}(request_id,actor,action) VALUES($1,$2,'ticket.superseded')`, [row.id, ACTOR]);
+        closed++;
+      }
+      // Collected every pass, closed-this-time or already closed earlier --
+      // see findTrackedRow's note. Without this, a ticket closed by an
+      // earlier interrupted pass would never get its CVEs queued at all.
       const cves = cvesByTenant.get(row.tenantId) ?? new Set<string>();
       for (const cve of row.cves) cves.add(cve);
       cvesByTenant.set(row.tenantId, cves);

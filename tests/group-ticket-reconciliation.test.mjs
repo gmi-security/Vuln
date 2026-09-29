@@ -39,13 +39,13 @@ function fakeDb({ routing, trackedTicketIds = [], singleTrackedTicketIds = [], p
     if (sql.includes("pg_try_advisory_lock")) return { rows: [{ locked: lockAcquired }] };
     if (sql.includes("pg_advisory_unlock")) return { rows: [{}] };
     if (sql.includes("FROM patch_customer_routing")) return { rows: routing ? [routing] : [] };
-    if (sql.includes("SELECT id, packet, tenant_id, routing FROM patch_group_ticket_requests")) {
+    if (sql.includes("SELECT id, packet, tenant_id, routing, state FROM patch_group_ticket_requests")) {
       const row = trackedRows[params[0]];
-      return { rows: row?.table === "group" ? [{ id: row.id, packet: { cves: row.cves }, tenant_id: row.tenantId, routing: { boardId: row.boardId } }] : [] };
+      return { rows: row?.table === "group" ? [{ id: row.id, packet: { cves: row.cves }, tenant_id: row.tenantId, routing: { boardId: row.boardId }, state: row.state ?? "created" }] : [] };
     }
-    if (sql.includes("SELECT id, packet, tenant_ids, routing FROM patch_ticket_requests")) {
+    if (sql.includes("SELECT id, packet, tenant_ids, routing, state FROM patch_ticket_requests")) {
       const row = trackedRows[params[0]];
-      return { rows: row?.table === "single" ? [{ id: row.id, packet: { cve: row.cves[0] }, tenant_ids: [row.tenantId], routing: { boardId: row.boardId } }] : [] };
+      return { rows: row?.table === "single" ? [{ id: row.id, packet: { cve: row.cves[0] }, tenant_ids: [row.tenantId], routing: { boardId: row.boardId }, state: row.state ?? "created" }] : [] };
     }
     if (sql.includes("FROM patch_group_ticket_requests") && sql.includes("ticket_id IS NOT NULL AND cw_target")) return { rows: trackedTicketIds.map((id) => ({ ticket_id: id })) };
     if (sql.includes("FROM patch_ticket_requests") && sql.includes("ticket_id IS NOT NULL AND cw_target")) return { rows: singleTrackedTicketIds.map((id) => ({ ticket_id: id })) };
@@ -439,6 +439,25 @@ test("a group-tracked child is closed in ConnectWise, superseded, and its CVEs q
   assert.deepEqual(update.params, ["draft-child", "Closed"]);
   const audit = db.calls.find((c) => c.sql.includes("ticket.superseded"));
   assert.ok(audit && audit.sql.includes("patch_group_ticket_audit"), "expected the audit row in the group table's audit log");
+  assert.deepEqual(consolidationInput, { cves: ["CVE-2024-1", "CVE-2024-2"], tenantId: "tenant-a", appCompanyId: "CO-147284" });
+});
+
+test("a ticket an earlier pass already closed (state='superseded') is not touched in ConnectWise again, but its CVEs are still collected for replacement -- the exact gap live behind the 38/38 failures", async () => {
+  const db = fakeDb({
+    trackedRows: { [CHILD_ID]: { table: "group", id: "draft-child", cves: ["CVE-2024-1", "CVE-2024-2"], tenantId: "tenant-a", boardId: 9, state: "superseded" } },
+  });
+  let cwCalled = false; let consolidationInput = null;
+  const reconciliation = await loadReconciliation({
+    db,
+    cwRequest: async () => { cwCalled = true; return {}; },
+    prepareConsolidation: async (input) => { consolidationInput = input; return { groups: [] }; },
+    persistPreparedGroups: async () => ["new-id"],
+  });
+  const result = await reconciliation.closeAndRecutMergedAtlasTickets();
+  assert.equal(result.closed, 0); // nothing closed this pass -- it already was
+  assert.equal(result.cvesReplaced, 2); // but its CVEs still got queued
+  assert.equal(cwCalled, false, "no status PATCH or note -- it's already closed");
+  assert.equal(db.calls.some((c) => c.sql.includes("SET state='superseded'")), false);
   assert.deepEqual(consolidationInput, { cves: ["CVE-2024-1", "CVE-2024-2"], tenantId: "tenant-a", appCompanyId: "CO-147284" });
 });
 
