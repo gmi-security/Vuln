@@ -74,14 +74,21 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
     finally { setAutoCreating(false); }
   }
 
+  // A full pass can mean a live CrowdStrike re-collection for every closed
+  // ticket -- some of this pilot's consolidated tickets carry 40+ CVEs each
+  // -- which can run for minutes, well past this app's 20-second request
+  // timeout. This only starts the pass (the same one the 5-minute background
+  // scheduler runs) and returns right away; it does not wait for or report
+  // counts. Check the table below (or click Refresh) after a bit to see the
+  // result -- per-ticket failures show as a note under that ticket's state.
   async function runValidateClosuresNow() {
     setValidating(true); setValidateResult(""); setError("");
     try {
-      const result = await dashboardRequest<{ checked: number; reopened: number; confirmedFixed: number; needsManualUnmerge: number; errors: number }>("patch-group-tickets/validate-closures", { method: "POST" });
-      const unmergeNote = result.needsManualUnmerge ? ` · ${result.needsManualUnmerge} merged into a parent ticket and need manual separation in ConnectWise first` : "";
-      setValidateResult(`Checked ${result.checked} closed ticket${result.checked === 1 ? "" : "s"} · reopened ${result.reopened} unverified · confirmed ${result.confirmedFixed} fixed${unmergeNote}${result.errors ? ` · ${result.errors} failed` : ""}.`);
-      await reload();
-    } catch (e) { setError(e instanceof Error ? e.message : "Could not run closure validation."); }
+      const result = await dashboardRequest<{ started: boolean }>("patch-group-tickets/validate-closures", { method: "POST" });
+      setValidateResult(result.started
+        ? "Started -- this can take a few minutes for tickets with many CVEs. Click Refresh shortly to see results."
+        : "Already running from a previous trigger -- that pass covers this too. Click Refresh shortly to see results.");
+    } catch (e) { setError(e instanceof Error ? e.message : "Could not start closure validation."); }
     finally { setValidating(false); }
   }
 
@@ -119,14 +126,19 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
   // has nothing to reopen it into -- this writes it off instead and queues
   // its CVEs for a fresh ticket, skipping any CVE a different tracked
   // ticket already covers.
+  // Replacing a CVE means a live CrowdStrike re-collection (up to a
+  // 10-minute budget per tenant) -- reliably past this app's 20-second
+  // request timeout the moment there's real work to do. This only starts
+  // the pass and returns right away, same as validate-closures above.
   async function abandonUntrackedNow() {
     setAbandoning(true); setAbandonResult(""); setError("");
     try {
-      const result = await dashboardRequest<{ checked: number; abandoned: number; cvesReplaced: number; cvesNeedsReview: number; cvesAlreadyCovered: number; unresolved: number; errors: number }>("patch-group-tickets/abandon-untracked", { method: "POST" });
-      setAbandonResult(`Checked ${result.checked} closed untracked ticket${result.checked === 1 ? "" : "s"} · abandoned ${result.abandoned} · ${result.cvesReplaced} CVE${result.cvesReplaced === 1 ? "" : "s"} queued for a fresh ticket · ${result.cvesAlreadyCovered} already covered by another tracked ticket · ${result.cvesNeedsReview} need manual review (single CVE, no group to join)${result.unresolved ? ` · ${result.unresolved} had no matching draft` : ""}${result.errors ? ` · ${result.errors} failed` : ""}.`);
+      const result = await dashboardRequest<{ started: boolean }>("patch-group-tickets/abandon-untracked", { method: "POST" });
+      setAbandonResult(result.started
+        ? "Started -- this can take several minutes if any CVEs need a fresh CrowdStrike collection. Click Refresh shortly to see results."
+        : "Already running from a previous trigger -- that pass covers this too. Click Refresh shortly to see results.");
       setUntracked(null);
-      await reload();
-    } catch (e) { setError(e instanceof Error ? e.message : "Could not abandon untracked tickets."); }
+    } catch (e) { setError(e instanceof Error ? e.message : "Could not start the abandon-and-replace pass."); }
     finally { setAbandoning(false); }
   }
 

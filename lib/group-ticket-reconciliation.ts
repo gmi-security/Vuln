@@ -234,3 +234,22 @@ export async function abandonAndReplaceUntrackedAtlasTickets(): Promise<AbandonR
   }
   return { checked, abandoned, cvesReplaced, cvesNeedsReview, cvesAlreadyCovered, unresolved, errors };
 }
+
+const abandonRuntime = globalThis as typeof globalThis & { __groupTicketAbandon?: { working?: Promise<void> } };
+const abandonState = abandonRuntime.__groupTicketAbandon ??= {};
+
+// A live CrowdStrike re-collection (prepareConsolidation/preparePatchRequest,
+// up to a 10-minute budget each) can run per tenant here -- the dashboard's
+// request client aborts after a flat 20 seconds, so a button click that
+// awaited this whole function would time out the moment there was real work
+// to do. This starts the pass and returns immediately without waiting for
+// it; `started: false` just means a pass was already running, not a
+// failure -- that pass covers this request too.
+export function triggerAbandonAndReplaceNow(): { started: boolean } {
+  if (abandonState.working) return { started: false };
+  abandonState.working = abandonAndReplaceUntrackedAtlasTickets().then(
+    () => {},
+    (err) => console.error("[group-ticket-reconciliation] Abandon-and-replace pass could not complete:", err instanceof Error ? err.message : err),
+  ).finally(() => { abandonState.working = undefined; });
+  return { started: true };
+}

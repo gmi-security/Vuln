@@ -154,15 +154,29 @@ export async function syncAndValidateClosedGroupTickets(): Promise<Counts & { sy
 const runtime = globalThis as typeof globalThis & { __groupClosureValidation?: { timer?: ReturnType<typeof setInterval>; working?: Promise<void> } };
 const state = runtime.__groupClosureValidation ??= {};
 
+function trigger(): boolean {
+  if (state.working) return false; // already running -- this pass will cover whatever prompted the new call too
+  state.working = syncAndValidateClosedGroupTickets().then(
+    () => {},
+    (err) => console.error("[group-closure-validation] Could not complete:", err instanceof Error ? err.message : err),
+  ).finally(() => { state.working = undefined; });
+  return true;
+}
+
+// A full pass can mean a live CrowdStrike re-collection for every closed
+// ticket -- some of this pilot's consolidated tickets carry 40+ CVEs each --
+// which can run for minutes. The dashboard's request client aborts after a
+// flat 20 seconds, so a "Validate closures now" click that awaited the whole
+// pass would reliably time out as ticket/CVE volume grew (it did). This
+// starts the same pass the 5-minute scheduler runs and returns immediately
+// without waiting for it -- `started: false` just means a pass was already
+// in flight, not a failure, since that pass covers this request too.
+export function triggerClosureValidationNow(): { started: boolean } {
+  return { started: trigger() };
+}
+
 export function startClosureValidationScheduler(): void {
   if (state.timer || !elasticVulnEnabled() || process.env.VULN_DISABLE_SCHEDULER === "true") return;
-  const trigger = () => {
-    if (state.working) return;
-    state.working = syncAndValidateClosedGroupTickets().then(
-      () => {},
-      (err) => console.error("[group-closure-validation] Could not complete:", err instanceof Error ? err.message : err),
-    ).finally(() => { state.working = undefined; });
-  };
   // Tighter than the general 15-minute sync schedulers on purpose: this is
   // the loop that stands between a premature closure and a client seeing it
   // as done, so the gap needs to be minutes, not up to half an hour.
