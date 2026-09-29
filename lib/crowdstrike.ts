@@ -108,7 +108,15 @@ function timedFetchOnce(url: string, init: RequestInit, timeoutMs: number): Prom
 // it) instead of failing the whole sync over a single throttled request.
 async function timedFetch(url: string, init: RequestInit, timeoutMs = 60_000): Promise<Response> {
   for (let attempt = 0; ; attempt++) {
-    const res = await timedFetchOnce(url, init, timeoutMs);
+    let res: Response;
+    try {
+      res = await timedFetchOnce(url, init, timeoutMs);
+    } catch (error) {
+      if ((init.method ?? "GET").toUpperCase() !== "GET" ||
+          !(error instanceof Error && error.name === "AbortError") || attempt >= 4) throw error;
+      await new Promise(resolve => setTimeout(resolve, Math.min(500 * 2 ** attempt, 8_000)));
+      continue;
+    }
     if (res.ok || ![429, 500, 502, 503, 504].includes(res.status) || attempt >= 4) return res;
     const retryAfter = Number(res.headers.get("retry-after"));
     const delayMs = Number.isFinite(retryAfter) && retryAfter > 0

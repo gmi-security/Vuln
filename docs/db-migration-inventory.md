@@ -42,6 +42,8 @@ The diagnostic returned one Atlas run (`f1faff2c-9b2d-4f4b-ad59-d0021d9b5a73`), 
 
 The replacement Atlas run (`2bb494ad-10ba-4a3f-a4c5-0f1b39dcb566`) advanced to 284,800 fetched and stored records, then failed at `2026-09-29T19:07:15.813Z` with Spotlight query HTTP 401, `access denied, invalid bearer token` (trace ID `7c164bc2-d137-4712-882c-2f1b952accde`). The importer acquired its token only once at run start. Its long pagination therefore outlived the token. Spotlight query and hydration requests now renew the token once on 401 and retry the same request; concurrent hydration shares the renewal. A second 401 remains an error. No generation has yet been promoted in the supplied production evidence.
 
+A later Atlas run reached 32,000 fetched and stored records, then failed with `This operation was aborted` after about four minutes. The CrowdStrike client imposes a 60-second timeout on each fetch, but its retry loop previously handled only HTTP responses. It now retries an aborted GET request up to the existing bounded retry limit without advancing the pagination cursor or restarting the import. This treats an individual stalled request; it does not make the whole import resumable after a process restart or persistent upstream failure. That remains an architectural risk for a multi-million-record import.
+
 This is an observed baseline, not a cutover reconciliation. Snapshot contents may have changed since the command ran; the exact Spotlight active count, backup restore, ID/relationship audit, worker ownership and final write-freeze timing remain open.
 
 ## Production facts to record before backfill

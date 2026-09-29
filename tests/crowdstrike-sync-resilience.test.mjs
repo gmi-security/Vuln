@@ -67,6 +67,26 @@ test("Spotlight query retries a transient 500 and imports the returned finding",
   });
 });
 
+test("Spotlight retries an aborted query request without restarting pagination", async () => {
+  let queryAttempts = 0;
+  await withFetch((url) => {
+    if (url.includes("/oauth2/token")) return json({ access_token: "tok" });
+    const request = new URL(url);
+    if (request.pathname.includes("/spotlight/queries/vulnerabilities/v1")) {
+      queryAttempts++;
+      if (queryAttempts === 1) throw new DOMException("This operation was aborted", "AbortError");
+      return json({ resources: ["source-1"], meta: { pagination: { after: "", total: 1 } } });
+    }
+    if (request.pathname.includes("/spotlight/entities/vulnerabilities/v2"))
+      return json({ resources: [{ id: "source-1", cve: { id: "CVE-2026-1234" }, host_info: { hostname: "atlas-host" } }] });
+    throw new Error(`Unexpected request: ${url}`);
+  }, async () => {
+    const result = await spotlightListFindings(atlas);
+    assert.equal(queryAttempts, 2);
+    assert.deepEqual(result.findings.map(finding => finding.id), ["source-1"]);
+  });
+});
+
 test("Spotlight renews an expired token on a later query page without losing earlier findings", async () => {
   let tokenRequests = 0;
   let expiredPageAttempts = 0;
