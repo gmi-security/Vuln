@@ -13,7 +13,13 @@ try {
   const client = await pool.connect();
   try {
     const inventory = await collectSnapshotInventory(client);
-    console.log(JSON.stringify({ connectionTarget: safeConnectionTarget(process.env.DATABASE_URL), ...inventory }, null, 2));
+    console.log(JSON.stringify({
+      connectionTarget: safeConnectionTarget(process.env.DATABASE_URL),
+      dashboardDatabaseMode: process.env.ELASTIC_VULN_DATABASE_URL
+        ? "ELASTIC_VULN_DATABASE_URL configured"
+        : "DATABASE_URL fallback",
+      ...inventory,
+    }, null, 2));
   } finally {
     client.release();
   }
