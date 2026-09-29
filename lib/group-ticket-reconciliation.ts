@@ -2,9 +2,10 @@ import { randomUUID } from "node:crypto";
 import { patchTicketDatabase, savedConnection, activeTicketedPairs, persistPreparedPatch } from "./patch-ticket-store";
 import { persistPreparedGroups } from "./patch-group-ticket-store";
 import { dashboardConnectionRevision, prepareConsolidation, preparePatchRequest } from "./elastic-dashboard-store";
-import { cwRequest, cwId, ticketUrl, type CWRecord, type ConnectWiseConnection } from "./connectwise-client";
+import { cwRequest, cwId, ticketUrl, cwDefaultClosedStatus, cwAddTicketNote, type CWRecord, type ConnectWiseConnection } from "./connectwise-client";
 import { ATLAS_REPORTING_COMPANY_ID } from "./reporting-direct-sources";
 import { DashboardError } from "./elastic-dashboard";
+import { recordJobRun } from "./background-job-runs";
 import type { PatchGroup } from "./patch-request";
 
 export type UntrackedTicket = { id: number; summary: string; status: string; closed: boolean; url: string };
@@ -28,6 +29,17 @@ const KNOWN_LOST_ATLAS_TICKET_IDS = new Set([
   2656160, 2656161, 2656162, 2656163, 2656164, 2656165, 2656166, 2656167, 2656168, 2656169,
   2656170, 2656171, 2656172, 2656173, 2656174,
 ]);
+
+// The confirmed 37 above plus the parent they were merged into (#2655137,
+// CVE-2026-68839, 1286 devices) -- the full set closeAndRecutMergedAtlas-
+// Tickets is allowed to touch, by explicit request: given ConnectWise
+// permissions to Combine/Merge tickets aren't changing, the fix here isn't
+// to unmerge (not reliably possible via the API) but to stop using this
+// specific parent/child structure at all -- close every one of the 38 and
+// recut its CVEs as clean, standalone tickets through the normal
+// consolidated-patch-plan pipeline, ranked by device impact same as
+// everywhere else in this app.
+const KNOWN_MERGED_ATLAS_TICKET_IDS = new Set([...KNOWN_LOST_ATLAS_TICKET_IDS, 2655137]);
 
 // Shared by findUntrackedAtlasTickets and adoptManualAtlasTickets: every live
 // Atlas *patch* ticket in ConnectWise (paginated, full raw rows), and the set
@@ -229,10 +241,29 @@ async function runAbandonAndReplace(db: Awaited<ReturnType<typeof patchTicketDat
     }
   }
   if (!cvesByTenant.size) return { checked, abandoned, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved, errors };
+  const replaced = await replaceCvesWithFreshDrafts(cvesByTenant);
+  if (!replaced) return { checked, abandoned, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved, errors }; // no CrowdStrike connection to re-collect from -- abandonment still stands, replacement waits
+  return { checked, abandoned, ...replaced, errors: errors + replaced.errors, unresolved };
+}
+
+type ReplaceCounts = { cvesReplaced: number; cvesNeedsReview: number; cvesAlreadyCovered: number; errors: number };
+
+// Shared by runAbandonAndReplace and runCloseAndRecut: given every CVE that
+// needs a fresh ticket, grouped by CrowdStrike tenant (never mixed across
+// tenants -- see liveAtlasTickets), re-collects each tenant's current live
+// findings and queues a normal consolidated draft, same as any other ticket
+// in this app -- ranked by devices reached per remediation action, i.e. the
+// biggest reduction in risk per patch, which is how this pipeline already
+// prioritizes everywhere else. activeTicketedPairs excludes anything a
+// still-open tracked ticket elsewhere already covers, so nothing here is
+// ever duplicated. Returns null only when there's no CrowdStrike connection
+// to collect from at all -- the caller's own state (abandoned/superseded)
+// still stands either way; replacement just has to wait for one.
+async function replaceCvesWithFreshDrafts(cvesByTenant: Map<string, Set<string>>): Promise<ReplaceCounts | null> {
   const revision = await dashboardConnectionRevision("crowdstrike");
-  if (revision === null) return { checked, abandoned, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved, errors }; // no CrowdStrike connection to re-collect from -- abandonment still stands, replacement waits
+  if (revision === null) return null;
   const alreadyTicketed = await activeTicketedPairs();
-  let cvesReplaced = 0, cvesNeedsReview = 0, cvesAlreadyCovered = 0;
+  let cvesReplaced = 0, cvesNeedsReview = 0, cvesAlreadyCovered = 0, errors = 0;
   for (const [tenantId, cveSet] of cvesByTenant) {
     const cves = [...cveSet];
     try {
@@ -252,7 +283,7 @@ async function runAbandonAndReplace(db: Awaited<ReturnType<typeof patchTicketDat
       else errors++; // one tenant's re-collection failing must not block the rest
     }
   }
-  return { checked, abandoned, cvesReplaced, cvesNeedsReview, cvesAlreadyCovered, unresolved, errors };
+  return { cvesReplaced, cvesNeedsReview, cvesAlreadyCovered, errors };
 }
 
 const abandonRuntime = globalThis as typeof globalThis & { __groupTicketAbandon?: { working?: Promise<void> } };
@@ -265,11 +296,128 @@ const abandonState = abandonRuntime.__groupTicketAbandon ??= {};
 // to do. This starts the pass and returns immediately without waiting for
 // it; `started: false` just means a pass was already running, not a
 // failure -- that pass covers this request too.
+const ABANDON_JOB = "abandon-and-replace";
 export function triggerAbandonAndReplaceNow(): { started: boolean } {
   if (abandonState.working) return { started: false };
+  recordJobRun(ABANDON_JOB, "running").catch(() => {});
   abandonState.working = abandonAndReplaceUntrackedAtlasTickets().then(
-    () => {},
-    (err) => console.error("[group-ticket-reconciliation] Abandon-and-replace pass could not complete:", err instanceof Error ? err.message : err),
+    (result) => { recordJobRun(ABANDON_JOB, "succeeded", result).catch(() => {}); },
+    (err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("[group-ticket-reconciliation] Abandon-and-replace pass could not complete:", message);
+      recordJobRun(ABANDON_JOB, "failed", undefined, message).catch(() => {});
+    },
   ).finally(() => { abandonState.working = undefined; });
+  return { started: true };
+}
+
+export type RecutResult = { checked: number; closed: number; cvesReplaced: number; cvesNeedsReview: number; cvesAlreadyCovered: number; unresolved: number; errors: number };
+type TrackedRow = { id: string; cves: string[]; tenantId: string; boardId: number | null };
+
+async function findTrackedRow(
+  db: Awaited<ReturnType<typeof patchTicketDatabase>>, ticketId: number, target: string,
+): Promise<{ table: "patch_group_ticket_requests" | "patch_ticket_requests"; row: TrackedRow } | null> {
+  const group = (await db.query(
+    "SELECT id, packet, tenant_id, routing FROM patch_group_ticket_requests WHERE ticket_id=$1 AND cw_target=$2 AND state='created'",
+    [ticketId, target],
+  )).rows[0] as { id: string; packet: PatchGroup; tenant_id: string; routing: { boardId?: number } | null } | undefined;
+  if (group) return { table: "patch_group_ticket_requests", row: { id: group.id, cves: group.packet.cves, tenantId: group.tenant_id, boardId: group.routing?.boardId ?? null } };
+  // #2655137 (the parent) went through the single-CVE flow, not the group one
+  // -- see the note on liveAtlasTickets above -- so a ticket in this 38-set
+  // can just as easily be tracked over here.
+  const single = (await db.query(
+    "SELECT id, packet, tenant_id, routing FROM patch_ticket_requests WHERE ticket_id=$1 AND cw_target=$2 AND state='created'",
+    [ticketId, target],
+  )).rows[0] as { id: string; packet: { cve: string }; tenant_id: string; routing: { boardId?: number } | null } | undefined;
+  if (single) return { table: "patch_ticket_requests", row: { id: single.id, cves: [single.packet.cve], tenantId: single.tenant_id, boardId: single.routing?.boardId ?? null } };
+  return null;
+}
+
+// Advisory-lock key -- same numbering scheme as VALIDATE_LOCK_KEY (804209)
+// and ABANDON_LOCK_KEY (804210).
+const RECUT_LOCK_KEY = 804211;
+
+export async function closeAndRecutMergedAtlasTickets(): Promise<RecutResult> {
+  const db = await patchTicketDatabase();
+  const lockClient = await db.connect();
+  const acquired = (await lockClient.query(`SELECT pg_try_advisory_lock(${RECUT_LOCK_KEY}) AS locked`)).rows[0].locked as boolean;
+  if (!acquired) { lockClient.release(); return { checked: 0, closed: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0 }; }
+  try {
+    return await runCloseAndRecut(db);
+  } finally {
+    await lockClient.query(`SELECT pg_advisory_unlock(${RECUT_LOCK_KEY})`).catch(() => {});
+    lockClient.release();
+  }
+}
+
+// Explicit, by request: rather than leaving these 38 tickets under a
+// parent/child structure that can't be reliably undone through the API,
+// this closes every one of them for real in ConnectWise -- with a note
+// explaining why, immediately replaced, never left closed with nothing
+// tracking the underlying risk the way the original incident did -- and
+// queues every CVE they covered for a fresh, standalone ticket through the
+// normal consolidated-patch-plan pipeline (see replaceCvesWithFreshDrafts).
+// Closing happens before the row is marked superseded, so a ConnectWise
+// failure leaves the row exactly as it was: tracked, untouched, still
+// covered by the normal closure-validation loop.
+async function runCloseAndRecut(db: Awaited<ReturnType<typeof patchTicketDatabase>>): Promise<RecutResult> {
+  const saved = await savedConnection().catch(() => null);
+  if (!saved) return { checked: 0, closed: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0 };
+  let checked = 0, closed = 0, unresolved = 0, errors = 0;
+  const cvesByTenant = new Map<string, Set<string>>();
+  for (const ticketId of KNOWN_MERGED_ATLAS_TICKET_IDS) {
+    checked++;
+    let found: Awaited<ReturnType<typeof findTrackedRow>> = null;
+    try {
+      found = await findTrackedRow(db, ticketId, saved.target);
+      if (!found) { unresolved++; continue; } // already superseded by a previous pass, or not actually tracked yet -- leave it alone
+      const { table, row } = found;
+      if (!row.boardId) { unresolved++; continue; } // no board on record to look up a closed status for -- do not guess
+      const closedStatus = await cwDefaultClosedStatus(saved.value, row.boardId);
+      await cwRequest(saved.value, `/service/tickets/${ticketId}`, "PATCH", [{ op: "replace", path: "status/id", value: closedStatus.id }]);
+      await cwAddTicketNote(saved.value, ticketId,
+        "Closed and replaced by a new standalone ticket: this ticket was part of a Combined/merged parent-child group, which can't be reliably separated through the ConnectWise API. Its CVE(s) are being recut as a clean, independent ticket instead so nothing is left tracked under a merged structure.");
+      const auditTable = table === "patch_group_ticket_requests" ? "patch_group_ticket_audit" : "patch_ticket_audit";
+      await db.query(`UPDATE ${table} SET state='superseded',closed=true,ticket_status=$2,last_error=NULL,updated_at=now() WHERE id=$1`, [row.id, closedStatus.name]);
+      await db.query(`INSERT INTO ${auditTable}(request_id,actor,action) VALUES($1,$2,'ticket.superseded')`, [row.id, ACTOR]);
+      closed++;
+      const cves = cvesByTenant.get(row.tenantId) ?? new Set<string>();
+      for (const cve of row.cves) cves.add(cve);
+      cvesByTenant.set(row.tenantId, cves);
+    } catch (err) {
+      errors++; // one ticket's lookup or ConnectWise call failing must not block the rest
+      // 38/38 failing with nothing recorded meant no way to tell why -- see
+      // the same fix already shipped for closure-validation. Best-effort:
+      // never let a failure writing this mask the original error.
+      if (found) {
+        const message = err instanceof Error ? err.message : String(err);
+        await db.query(`UPDATE ${found.table} SET last_error=$2,updated_at=now() WHERE id=$1`, [found.row.id, message]).catch(() => {});
+      }
+    }
+  }
+  if (!cvesByTenant.size) return { checked, closed, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved, errors };
+  const replaced = await replaceCvesWithFreshDrafts(cvesByTenant);
+  if (!replaced) return { checked, closed, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved, errors }; // closures still stand -- replacement waits for a CrowdStrike connection
+  return { checked, closed, ...replaced, errors: errors + replaced.errors, unresolved };
+}
+
+const recutRuntime = globalThis as typeof globalThis & { __groupTicketRecut?: { working?: Promise<void> } };
+const recutState = recutRuntime.__groupTicketRecut ??= {};
+
+// Same reasoning as triggerAbandonAndReplaceNow: closing 38 tickets plus a
+// live CrowdStrike re-collection is reliably past the dashboard's
+// 20-second request timeout. Starts the pass and returns immediately.
+const RECUT_JOB = "close-and-recut";
+export function triggerCloseAndRecutNow(): { started: boolean } {
+  if (recutState.working) return { started: false };
+  recordJobRun(RECUT_JOB, "running").catch(() => {});
+  recutState.working = closeAndRecutMergedAtlasTickets().then(
+    (result) => { recordJobRun(RECUT_JOB, "succeeded", result).catch(() => {}); },
+    (err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("[group-ticket-reconciliation] Close-and-recut pass could not complete:", message);
+      recordJobRun(RECUT_JOB, "failed", undefined, message).catch(() => {});
+    },
+  ).finally(() => { recutState.working = undefined; });
   return { started: true };
 }

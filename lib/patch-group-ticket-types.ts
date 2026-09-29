@@ -13,6 +13,7 @@ export type PatchGroupTicketSummary = {
   attachmentState: "not_started" | "uploading" | "pending" | "attached"; error: string | null;
   fixVerifiedAt: string | null; fixVerifiedState: FixVerifiedState; fixStillOpenCount: number | null;
   priorityId: number | null; priorityName: string | null; slaEscalations: number; worstSeverity: string | null;
+  mergedParentId: number | null;
 };
 export type PatchGroupTicketDetail = { request: PatchGroupTicketSummary; group: PatchGroup };
 export function ageDays(iso: string): number {

@@ -189,6 +189,20 @@ export async function cwDefaultOpenStatus(connection: ConnectWiseConnection, boa
   const chosen = open.find((row: CWRecord) => row.defaultFlag === true) ?? open[0];
   return { id: chosen.id, name: chosen.name };
 }
+// The closed-status mirror of cwDefaultOpenStatus -- used when this app
+// itself intentionally closes a ticket (e.g. superseding it with a
+// replacement), not just reading one someone else already closed. Prefers
+// the board's own defaultFlag closed status; falls back to the first
+// closed status found if none is flagged.
+export async function cwDefaultClosedStatus(connection: ConnectWiseConnection, boardId: number): Promise<CWOption> {
+  const rows = await cwRequest(connection, `/service/boards/${boardId}/statuses?${new URLSearchParams({ pageSize: "100" })}`);
+  if (!Array.isArray(rows)) throw new DashboardError("ConnectWise did not return a valid status list.", 502);
+  const closedOptions = rows.filter((row: CWRecord) => cwId(row.id) && typeof row.name === "string" && row.name.trim()
+    && !row.inactiveFlag && !row.inactive && !row.deletedFlag && (row.closedStatus || row.closedFlag));
+  if (!closedOptions.length) throw new DashboardError("This board has no closed status configured.", 502);
+  const chosen = closedOptions.find((row: CWRecord) => row.defaultFlag === true) ?? closedOptions[0];
+  return { id: chosen.id, name: chosen.name };
+}
 // A visible, dated explanation directly on the ticket -- the client should be
 // able to see why it reopened the same way they'd see it get closed.
 export async function cwAddTicketNote(connection: ConnectWiseConnection, ticketId: number, text: string): Promise<void> {

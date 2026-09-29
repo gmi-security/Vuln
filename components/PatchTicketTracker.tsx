@@ -39,6 +39,10 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
   const [adoptResult, setAdoptResult] = useState("");
   const [abandoning, setAbandoning] = useState(false);
   const [abandonResult, setAbandonResult] = useState("");
+  const [recutting, setRecutting] = useState(false);
+  const [recutResult, setRecutResult] = useState("");
+  const [checkingJob, setCheckingJob] = useState("");
+  const [jobStatus, setJobStatus] = useState("");
 
   const reload = useCallback(async () => {
     setLoading(true); setError("");
@@ -142,6 +146,43 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
     finally { setAbandoning(false); }
   }
 
+  // Closes the confirmed 37 Combined children of #2655137 plus the parent
+  // itself for real in ConnectWise (with a note explaining why), then
+  // recuts every CVE they covered as a fresh, standalone ticket through the
+  // normal consolidated-patch-plan pipeline -- since Combine/Merge
+  // permissions in ConnectWise aren't changing and a merged ticket can't be
+  // reliably separated through the API, this is the reset instead. Same
+  // background-trigger pattern as the other slow actions above.
+  async function closeAndRecutNow() {
+    if (!window.confirm("Close all 38 tickets (the 37 Combined children and parent #2655137) in ConnectWise and recut their CVEs as new standalone tickets? This closes real, currently-tracked tickets -- continue?")) return;
+    setRecutting(true); setRecutResult(""); setError("");
+    try {
+      const result = await dashboardRequest<{ started: boolean }>("patch-group-tickets/close-and-recut", { method: "POST" });
+      setRecutResult(result.started
+        ? "Started -- closing 38 tickets and recollecting CrowdStrike findings can take several minutes. Click Refresh shortly to see results."
+        : "Already running from a previous trigger -- that pass covers this too. Click Refresh shortly to see results.");
+    } catch (e) { setError(e instanceof Error ? e.message : "Could not start the close-and-recut pass."); }
+    finally { setRecutting(false); }
+  }
+
+  // The trigger-and-return pattern above means a "Started" click gives no
+  // eventual result -- this is the only way to tell a still-running pass
+  // apart from one that failed silently, without guessing from whether
+  // "Prepared" happened to go up yet.
+  async function checkJobStatus(job: string, label: string) {
+    setCheckingJob(job); setJobStatus(""); setError("");
+    try {
+      const result = await dashboardRequest<{ run: { status: "running" | "succeeded" | "failed"; result: unknown; error: string | null; startedAt: string; finishedAt: string | null } | null }>(`patch-group-tickets/job-status?job=${encodeURIComponent(job)}`);
+      const run = result.run;
+      if (!run) { setJobStatus(`${label}: never run yet.`); return; }
+      const when = run.finishedAt ? new Date(run.finishedAt).toLocaleString() : `started ${new Date(run.startedAt).toLocaleString()}`;
+      if (run.status === "running") setJobStatus(`${label}: still running (${when}).`);
+      else if (run.status === "failed") setJobStatus(`${label}: failed at ${when} -- ${run.error}`);
+      else setJobStatus(`${label}: finished ${when} -- ${JSON.stringify(run.result)}`);
+    } catch (e) { setError(e instanceof Error ? e.message : "Could not check job status."); }
+    finally { setCheckingJob(""); }
+  }
+
   const buckets = { "cut-open": 0, "cut-closed": 0, attention: 0, draft: 0 };
   let devicesCovered = 0;
   const distinctCves = new Set<string>();
@@ -162,14 +203,17 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
         <button type="button" className={styles.button} disabled={findingUntracked} onClick={() => void findUntrackedNow()}>{findingUntracked ? "Checking…" : "Find untracked Atlas tickets"}</button>
         <button type="button" className={styles.button} disabled={adopting} onClick={() => void adoptUntrackedNow()}>{adopting ? "Adopting…" : "Adopt untracked tickets"}</button>
         <button type="button" className={styles.button} disabled={abandoning} onClick={() => void abandonUntrackedNow()}>{abandoning ? "Abandoning…" : "Abandon closed untracked + cut replacements"}</button>
+        <button type="button" className={styles.button} disabled={recutting} onClick={() => void closeAndRecutNow()}>{recutting ? "Closing…" : "Close merged parent/children + recut as new"}</button>
         <button type="button" className={styles.button} disabled={loading} onClick={() => void reload()}>{loading ? "Loading…" : "Refresh"}</button>
       </div>
     </div>
     <p className={styles.resultNote}>Customer-linked consolidation plans prepared for review and their ConnectWise ticket status.</p>
     {autoCreateResult && <p role="status" className={`${styles.resultNote} mt-1`}>{autoCreateResult}</p>}
-    {validateResult && <p role="status" className={`${styles.resultNote} mt-1`}>{validateResult}</p>}
+    {validateResult && <p role="status" className={`${styles.resultNote} mt-1`}>{validateResult} <button type="button" className="underline" disabled={!!checkingJob} onClick={() => void checkJobStatus("validate-closures", "Validate closures")}>{checkingJob === "validate-closures" ? "Checking…" : "Check status"}</button></p>}
     {adoptResult && <p role="status" className={`${styles.resultNote} mt-1`}>{adoptResult} Adopted tickets will be reopened on the next "Validate closures now" run.</p>}
-    {abandonResult && <p role="status" className={`${styles.resultNote} mt-1`}>{abandonResult} New drafts appear below under "Awaiting review"; Critical/High ones are cut automatically by "Run auto-create now".</p>}
+    {abandonResult && <p role="status" className={`${styles.resultNote} mt-1`}>{abandonResult} New drafts appear below under "Awaiting review"; Critical/High ones are cut automatically by "Run auto-create now". <button type="button" className="underline" disabled={!!checkingJob} onClick={() => void checkJobStatus("abandon-and-replace", "Abandon + replace")}>{checkingJob === "abandon-and-replace" ? "Checking…" : "Check status"}</button></p>}
+    {recutResult && <p role="status" className={`${styles.resultNote} mt-1`}>{recutResult} Closed tickets show "Closed in ConnectWise" above; new drafts appear below under "Awaiting review". <button type="button" className="underline" disabled={!!checkingJob} onClick={() => void checkJobStatus("close-and-recut", "Close + recut")}>{checkingJob === "close-and-recut" ? "Checking…" : "Check status"}</button></p>}
+    {jobStatus && <p role="status" className={`${styles.resultNote} mt-1 font-medium`}>{jobStatus}</p>}
     {untracked && (untracked.length
       ? <div className="mt-2 rounded-lg border border-amber-800/60 bg-amber-950/10 p-3">
           <p className={styles.resultNote}>{untracked.length} Atlas ticket{untracked.length === 1 ? "" : "s"} in ConnectWise have no tracked row -- not created through this app, so no automation here can see or act on {untracked.length === 1 ? "it" : "them"} yet. Click "Adopt untracked tickets" to relink the ones whose original draft can still be matched. For any that are already closed with no fix behind them, "Abandon closed untracked + cut replacements" writes them off and queues their CVEs for a fresh ticket instead. Otherwise, handle these by hand:</p>
@@ -196,7 +240,8 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
         <td>{r.row.ticketUrl && <a href={r.row.ticketUrl} target="_blank" rel="noopener noreferrer" className="text-sky-300 underline">#{r.row.ticketId}</a>}<div>{patchGroupTicketState(r.row)}</div>
           {r.row.createdBy === "auto-create" && <div className="mt-0.5 text-[11px] font-medium text-emerald-400">Auto-created (Critical/High)</div>}
           {r.row.slaEscalations > 0 && <div className="mt-0.5 text-[11px] font-medium text-[#ff8f96]">Auto-escalated ×{r.row.slaEscalations} (SLA breach)</div>}
-          {r.row.error && <div className="mt-0.5 text-[11px] font-medium text-[#ff8f96]" title={r.row.error}>{r.row.error.length > 90 ? `${r.row.error.slice(0, 90)}…` : r.row.error}</div>}</td>
+          {r.row.error && <div className="mt-0.5 text-[11px] font-medium text-[#ff8f96]" title={r.row.error}>{r.row.error.length > 90 ? `${r.row.error.slice(0, 90)}…` : r.row.error}</div>}
+          {r.row.mergedParentId && <div className="mt-0.5 text-[11px] font-medium text-amber-400">Merged into #{r.row.mergedParentId} in ConnectWise -- won't show as its own row on ConnectWise's board list, but is still tracked here</div>}</td>
         <td>{r.row.company ?? r.row.companyName ?? "Draft"}</td>
         <td>{r.row.hostCount.toLocaleString()}</td>
         <td>{trackerAgeBadge(r.row, sla ? slaDaysFor(r.row.worstSeverity, sla) : null)}</td>

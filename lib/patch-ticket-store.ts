@@ -32,6 +32,7 @@ export async function patchTicketDatabase() {
   ALTER TABLE patch_ticket_requests ADD COLUMN IF NOT EXISTS ticket_priority_name TEXT;
   ALTER TABLE patch_ticket_requests ADD COLUMN IF NOT EXISTS ticket_sla_escalations INT NOT NULL DEFAULT 0;
   ALTER TABLE patch_ticket_requests ADD COLUMN IF NOT EXISTS worst_severity TEXT;
+  ALTER TABLE patch_ticket_requests ADD COLUMN IF NOT EXISTS merged_parent_id INT;
   CREATE INDEX IF NOT EXISTS patch_ticket_cve_date ON patch_ticket_requests(cve, prepared_at DESC);
   CREATE UNIQUE INDEX IF NOT EXISTS patch_ticket_active_scope ON patch_ticket_requests(cw_target,cve,company_id,scope_hash)
     WHERE state IN ('creating','uncertain','created') AND closed=false;
@@ -60,6 +61,7 @@ export async function patchTicketDatabase() {
   ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS review_state TEXT NOT NULL DEFAULT 'pending';
   ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS reviewed_by TEXT;
   ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;
+  ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS merged_parent_id INT;
   CREATE INDEX IF NOT EXISTS patch_group_ticket_date ON patch_group_ticket_requests(prepared_at DESC);
   CREATE UNIQUE INDEX IF NOT EXISTS patch_group_ticket_active_scope ON patch_group_ticket_requests(cw_target,remediation_id,tenant_id,company_id,scope_hash)
     WHERE state IN ('creating','uncertain','created') AND closed=false;
@@ -73,6 +75,10 @@ export async function patchTicketDatabase() {
   CREATE TABLE IF NOT EXISTS patch_customer_routing (
     app_company_id TEXT PRIMARY KEY, company_id INT NOT NULL, board_id INT NOT NULL, team_id INT,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_by TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS background_job_runs (
+    job TEXT PRIMARY KEY, status TEXT NOT NULL, result JSONB, error TEXT,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT now(), finished_at TIMESTAMPTZ
   )`).then(() => {}).catch(error => { ready = undefined; throw error; });
   await ready;
   return db;

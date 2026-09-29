@@ -39,9 +39,9 @@ export async function syncTable(
   if (!options.includeClosed) conditions.push("closed=false");
   if (options.companyIds?.length) { params.push(options.companyIds); conditions.push(`packet->>'appCompanyId' = ANY($${params.length}::text[])`); }
   const rows = (await db.query(
-    `SELECT id, ticket_id FROM ${table} WHERE ${conditions.join(" AND ")}`,
+    `SELECT id, ticket_id, merged_parent_id FROM ${table} WHERE ${conditions.join(" AND ")}`,
     params,
-  )).rows as { id: string; ticket_id: number }[];
+  )).rows as { id: string; ticket_id: number; merged_parent_id: number | null }[];
   if (!rows.length) return { checked: 0, updated: 0, errors: 0 };
   let updated = 0, errors = 0;
   await runWithConcurrency(rows, 5, async (row) => {
@@ -51,15 +51,30 @@ export async function syncTable(
       const closed = ticket?.closedFlag === true;
       const priorityId = cwId(ticket?.priority?.id) ? ticket.priority.id : null;
       const priorityName = typeof ticket?.priority?.name === "string" ? ticket.priority.name : null;
+      // ConnectWise's Combine/Merge action links a child ticket to its parent
+      // through the same field the platform uses for any ticket hierarchy
+      // (parentTicketId) -- this comes along for free on the same GET this
+      // sync already makes, no extra call. Captured defensively: if this
+      // field name turns out wrong for this instance, it just never
+      // populates (null), same as if merging never happened -- no error.
+      const mergedParentId = cwId(ticket?.parentTicketId) ? ticket.parentTicketId : null;
       const result = await db.query(
-        `UPDATE ${table} SET ticket_status=$2, closed=$3, ticket_priority_id=$4, ticket_priority_name=$5, updated_at=now() WHERE id=$1
-          AND (ticket_status IS DISTINCT FROM $2 OR closed IS DISTINCT FROM $3 OR ticket_priority_id IS DISTINCT FROM $4 OR ticket_priority_name IS DISTINCT FROM $5)`,
-        [row.id, status, closed, priorityId, priorityName],
+        `UPDATE ${table} SET ticket_status=$2, closed=$3, ticket_priority_id=$4, ticket_priority_name=$5, merged_parent_id=$6, updated_at=now() WHERE id=$1
+          AND (ticket_status IS DISTINCT FROM $2 OR closed IS DISTINCT FROM $3 OR ticket_priority_id IS DISTINCT FROM $4 OR ticket_priority_name IS DISTINCT FROM $5 OR merged_parent_id IS DISTINCT FROM $6)`,
+        [row.id, status, closed, priorityId, priorityName, mergedParentId],
       );
       if (result.rowCount) {
         updated++;
         const auditTable = table === "patch_ticket_requests" ? "patch_ticket_audit" : "patch_group_ticket_audit";
         await db.query(`INSERT INTO ${auditTable}(request_id,actor,action) VALUES($1,'automatic sync','ticket.status.synced')`, [row.id]);
+        // A ticket newly showing a parent it didn't have last sync means
+        // someone just Combined it -- worth its own searchable entry (and,
+        // longer term, its own alert) rather than blending into the general
+        // status-synced noise, since board permissions restricting this
+        // aren't changing and it will keep happening.
+        if (mergedParentId !== null && row.merged_parent_id === null) {
+          await db.query(`INSERT INTO ${auditTable}(request_id,actor,action) VALUES($1,'automatic sync','ticket.merged.detected')`, [row.id]);
+        }
       }
     } catch {
       errors++; // A single ticket's lookup failing (deleted, permissions changed) must not block the rest.

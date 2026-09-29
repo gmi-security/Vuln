@@ -63,7 +63,7 @@ test("changed tickets are written and audited; unchanged tickets are left alone"
     if (path.endsWith("/2")) return { status: { name: "Waiting" }, closedFlag: false }; // unchanged (see updateMatches)
     throw new Error("unexpected ticket id");
   });
-  const db = fakeDb({ rows: [{ id: "a", ticket_id: 1 }, { id: "b", ticket_id: 2 }], updateMatches: (params) => params[0] === "a" });
+  const db = fakeDb({ rows: [{ id: "a", ticket_id: 1, merged_parent_id: null }, { id: "b", ticket_id: 2, merged_parent_id: null }], updateMatches: (params) => params[0] === "a" });
   const result = await sync.syncTable(db, "patch_ticket_requests", "target", connection);
   assert.deepEqual(result, { checked: 2, updated: 1, errors: 0 });
   const audits = db.calls.filter((c) => c.sql.includes("patch_ticket_audit"));
@@ -76,7 +76,7 @@ test("one ticket's lookup failing does not stop the others from syncing", async 
     if (path.endsWith("/1")) throw new Error("ConnectWise timed out");
     return { status: { name: "Open" }, closedFlag: false };
   });
-  const db = fakeDb({ rows: [{ id: "a", ticket_id: 1 }, { id: "b", ticket_id: 2 }, { id: "c", ticket_id: 3 }] });
+  const db = fakeDb({ rows: [{ id: "a", ticket_id: 1, merged_parent_id: null }, { id: "b", ticket_id: 2, merged_parent_id: null }, { id: "c", ticket_id: 3, merged_parent_id: null }] });
   const result = await sync.syncTable(db, "patch_group_ticket_requests", "target", connection);
   assert.deepEqual(result, { checked: 3, updated: 2, errors: 1 });
 });
@@ -93,10 +93,29 @@ test("no open tickets means no ConnectWise calls at all", async () => {
 
 test("priority is captured on every sync pass, not just on an explicit check-status click", async () => {
   const sync = await loadWithConnectWise(async () => ({ status: { name: "Open" }, closedFlag: false, priority: { id: 11, name: "Priority 2 - High" } }));
-  const db = fakeDb({ rows: [{ id: "a", ticket_id: 1 }] });
+  const db = fakeDb({ rows: [{ id: "a", ticket_id: 1, merged_parent_id: null }] });
   await sync.syncTable(db, "patch_group_ticket_requests", "target", connection);
   const update = db.calls.find((c) => c.sql.trim().startsWith("UPDATE"));
-  assert.deepEqual(update.params, ["a", "Open", false, 11, "Priority 2 - High"]);
+  assert.deepEqual(update.params, ["a", "Open", false, 11, "Priority 2 - High", null]);
+});
+
+test("a ticket newly showing a parentTicketId it didn't have before gets a distinct ticket.merged.detected audit entry", async () => {
+  const sync = await loadWithConnectWise(async () => ({ status: { name: "Not Acknowledged" }, closedFlag: false, parentTicketId: 2655137 }));
+  const db = fakeDb({ rows: [{ id: "a", ticket_id: 2656163, merged_parent_id: null }] });
+  await sync.syncTable(db, "patch_group_ticket_requests", "target", connection);
+  const update = db.calls.find((c) => c.sql.trim().startsWith("UPDATE"));
+  assert.deepEqual(update.params, ["a", "Not Acknowledged", false, null, null, 2655137]);
+  const mergedAudit = db.calls.find((c) => c.sql.includes("ticket.merged.detected"));
+  assert.ok(mergedAudit, "expected a ticket.merged.detected audit entry");
+  assert.equal(mergedAudit.params[0], "a");
+});
+
+test("a ticket whose parentTicketId is unchanged from last sync is not re-flagged as newly merged", async () => {
+  const sync = await loadWithConnectWise(async () => ({ status: { name: "Not Acknowledged" }, closedFlag: false, parentTicketId: 2655137, priority: { id: 9, name: "New" } }));
+  const db = fakeDb({ rows: [{ id: "a", ticket_id: 2656163, merged_parent_id: 2655137 }] });
+  await sync.syncTable(db, "patch_group_ticket_requests", "target", connection); // priority changing forces an update, but merge status did not change
+  const mergedAudit = db.calls.find((c) => c.sql.includes("ticket.merged.detected"));
+  assert.equal(mergedAudit, undefined, "no new merge to flag -- it was already known");
 });
 
 test("the select is scoped to open, previously-created tickets on the current ConnectWise target", async () => {
@@ -108,6 +127,7 @@ test("the select is scoped to open, previously-created tickets on the current Co
   assert.match(select.sql, /closed=false/);
   assert.match(select.sql, /ticket_id IS NOT NULL/);
   assert.match(select.sql, /cw_target=\$1/);
+  assert.match(select.sql, /merged_parent_id/);
   assert.deepEqual(select.params, ["my-target"]);
 });
 

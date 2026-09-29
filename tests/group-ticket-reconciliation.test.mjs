@@ -32,13 +32,21 @@ function loader(overrides = {}) {
   return async (path) => { const mod = await load(path); await mod.evaluate(); return mod.namespace; };
 }
 
-function fakeDb({ routing, trackedTicketIds = [], singleTrackedTicketIds = [], preparedDraftIds = [], draftPackets = {}, abandonBlocked = new Set(), lockAcquired = true }) {
+function fakeDb({ routing, trackedTicketIds = [], singleTrackedTicketIds = [], preparedDraftIds = [], draftPackets = {}, abandonBlocked = new Set(), lockAcquired = true, trackedRows = {} }) {
   const calls = [];
   const query = async (sql, params) => {
     calls.push({ sql, params });
     if (sql.includes("pg_try_advisory_lock")) return { rows: [{ locked: lockAcquired }] };
     if (sql.includes("pg_advisory_unlock")) return { rows: [{}] };
     if (sql.includes("FROM patch_customer_routing")) return { rows: routing ? [routing] : [] };
+    if (sql.includes("SELECT id, packet, tenant_id, routing FROM patch_group_ticket_requests")) {
+      const row = trackedRows[params[0]];
+      return { rows: row?.table === "group" ? [{ id: row.id, packet: { cves: row.cves }, tenant_id: row.tenantId, routing: { boardId: row.boardId } }] : [] };
+    }
+    if (sql.includes("SELECT id, packet, tenant_id, routing FROM patch_ticket_requests")) {
+      const row = trackedRows[params[0]];
+      return { rows: row?.table === "single" ? [{ id: row.id, packet: { cve: row.cves[0] }, tenant_id: row.tenantId, routing: { boardId: row.boardId } }] : [] };
+    }
     if (sql.includes("FROM patch_group_ticket_requests") && sql.includes("ticket_id IS NOT NULL AND cw_target")) return { rows: trackedTicketIds.map((id) => ({ ticket_id: id })) };
     if (sql.includes("FROM patch_ticket_requests") && sql.includes("ticket_id IS NOT NULL AND cw_target")) return { rows: singleTrackedTicketIds.map((id) => ({ ticket_id: id })) };
     if (sql.includes("state='prepared'") && sql.trim().startsWith("SELECT id")) return { rows: preparedDraftIds.includes(params[0]) ? [{ id: params[0] }] : [] };
@@ -55,7 +63,7 @@ function fakeDb({ routing, trackedTicketIds = [], singleTrackedTicketIds = [], p
 
 class FakeDashboardError extends Error {}
 
-async function loadReconciliation({ db, savedConnection, cwRequest, activeTicketedPairs, persistPreparedPatch, persistPreparedGroups, dashboardConnectionRevision, prepareConsolidation, preparePatchRequest }) {
+async function loadReconciliation({ db, savedConnection, cwRequest, activeTicketedPairs, persistPreparedPatch, persistPreparedGroups, dashboardConnectionRevision, prepareConsolidation, preparePatchRequest, cwDefaultClosedStatus, cwAddTicketNote }) {
   return loader({
     "./patch-ticket-store": {
       patchTicketDatabase: async () => db, savedConnection: savedConnection ?? (async () => ({ revision: 7, value: {}, target: "cw-1" })),
@@ -73,6 +81,8 @@ async function loadReconciliation({ db, savedConnection, cwRequest, activeTicket
       cwRequest: cwRequest ?? (async () => { throw new Error("not expected to be called"); }),
       cwId: (v) => typeof v === "number" && Number.isSafeInteger(v) && v > 0,
       ticketUrl: (connection, id) => `https://example.myconnectwise.net/ticket/${id}`,
+      cwDefaultClosedStatus: cwDefaultClosedStatus ?? (async () => { throw new Error("not expected to be called"); }),
+      cwAddTicketNote: cwAddTicketNote ?? (async () => { throw new Error("not expected to be called"); }),
     },
   })("lib/group-ticket-reconciliation.ts");
 }
@@ -397,4 +407,116 @@ test("a pass already running elsewhere (advisory lock held by another instance) 
   const result = await reconciliation.abandonAndReplaceUntrackedAtlasTickets();
   assert.deepEqual(result, { checked: 0, abandoned: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0 });
   assert.equal(cwCalled, false);
+});
+
+// closeAndRecutMergedAtlasTickets: closes every ticket in the confirmed
+// 38-member set (37 children + parent #2655137) for real in ConnectWise and
+// recuts its CVEs as fresh standalone tickets. #2655137 and #2656163 stand
+// in for the two tracking shapes it has to handle -- the parent tracked via
+// the single-CVE table, a child tracked via the group table.
+const PARENT_ID = 2655137, CHILD_ID = 2656163;
+
+test("a group-tracked child is closed in ConnectWise, superseded, and its CVEs queued for a fresh ticket", async () => {
+  const db = fakeDb({
+    trackedRows: { [CHILD_ID]: { table: "group", id: "draft-child", cves: ["CVE-2024-1", "CVE-2024-2"], tenantId: "tenant-a", boardId: 9 } },
+  });
+  const patchCalls = []; const notes = []; let consolidationInput = null;
+  const reconciliation = await loadReconciliation({
+    db,
+    cwRequest: async (connection, path, method, body) => { if (method === "PATCH") patchCalls.push({ path, body }); return {}; },
+    cwDefaultClosedStatus: async () => ({ id: 99, name: "Closed" }),
+    cwAddTicketNote: async (connection, ticketId, text) => { notes.push({ ticketId, text }); },
+    prepareConsolidation: async (input) => { consolidationInput = input; return { groups: [] }; },
+    persistPreparedGroups: async () => ["new-id"],
+  });
+  const result = await reconciliation.closeAndRecutMergedAtlasTickets();
+  assert.equal(result.closed, 1);
+  assert.equal(result.cvesReplaced, 2);
+  assert.deepEqual(patchCalls[0], { path: `/service/tickets/${CHILD_ID}`, body: [{ op: "replace", path: "status/id", value: 99 }] });
+  assert.equal(notes[0].ticketId, CHILD_ID);
+  assert.match(notes[0].text, /Combined\/merged parent-child group/);
+  const update = db.calls.find((c) => c.sql.includes("SET state='superseded'"));
+  assert.deepEqual(update.params, ["draft-child", "Closed"]);
+  const audit = db.calls.find((c) => c.sql.includes("ticket.superseded"));
+  assert.ok(audit && audit.sql.includes("patch_group_ticket_audit"), "expected the audit row in the group table's audit log");
+  assert.deepEqual(consolidationInput, { cves: ["CVE-2024-1", "CVE-2024-2"], tenantId: "tenant-a", appCompanyId: "CO-147284" });
+});
+
+test("the parent, tracked via the single-CVE table, is closed and recut the same way", async () => {
+  const db = fakeDb({
+    trackedRows: { [PARENT_ID]: { table: "single", id: "draft-parent", cves: ["CVE-2026-68839"], tenantId: "tenant-a", boardId: 9 } },
+  });
+  let patchInput = null;
+  const reconciliation = await loadReconciliation({
+    db,
+    cwRequest: async () => ({}),
+    cwDefaultClosedStatus: async () => ({ id: 99, name: "Closed" }),
+    cwAddTicketNote: async () => {},
+    preparePatchRequest: async (input) => { patchInput = input; return { cve: "CVE-2026-68839" }; },
+    persistPreparedPatch: async () => "new-id",
+  });
+  const result = await reconciliation.closeAndRecutMergedAtlasTickets();
+  assert.equal(result.closed, 1);
+  assert.equal(result.cvesNeedsReview, 1); // a single CVE alone has no group auto-create path
+  assert.deepEqual(patchInput, { cve: "CVE-2026-68839", tenantId: "tenant-a" });
+  const audit = db.calls.find((c) => c.sql.includes("ticket.superseded"));
+  assert.ok(audit && audit.sql.includes("patch_ticket_audit"), "expected the audit row in the single-CVE table's audit log");
+});
+
+test("a ticket in the 38-set with no tracked row anywhere is left unresolved, not touched", async () => {
+  const db = fakeDb({ trackedRows: {} });
+  let cwCalled = false;
+  const reconciliation = await loadReconciliation({ db, cwRequest: async () => { cwCalled = true; return {}; } });
+  const result = await reconciliation.closeAndRecutMergedAtlasTickets();
+  assert.equal(result.checked, 38);
+  assert.equal(result.closed, 0);
+  assert.equal(result.unresolved, 38);
+  assert.equal(cwCalled, false);
+});
+
+test("a tracked row with no board on its routing is left unresolved rather than guessing a status", async () => {
+  const db = fakeDb({ trackedRows: { [CHILD_ID]: { table: "group", id: "draft-child", cves: ["CVE-2024-1", "CVE-2024-2"], tenantId: "tenant-a", boardId: null } } });
+  const reconciliation = await loadReconciliation({ db, cwRequest: async () => { throw new Error("not expected to be called"); } });
+  const result = await reconciliation.closeAndRecutMergedAtlasTickets();
+  assert.equal(result.closed, 0);
+  assert.equal(result.unresolved, 38);
+});
+
+test("one ticket's ConnectWise close failing does not block the rest", async () => {
+  const db = fakeDb({
+    trackedRows: {
+      [PARENT_ID]: { table: "single", id: "draft-parent", cves: ["CVE-2026-68839"], tenantId: "tenant-a", boardId: 9 },
+      [CHILD_ID]: { table: "group", id: "draft-child", cves: ["CVE-2024-1", "CVE-2024-2"], tenantId: "tenant-a", boardId: 9 },
+    },
+  });
+  const reconciliation = await loadReconciliation({
+    db,
+    cwRequest: async (connection, path) => { if (path.includes(String(PARENT_ID))) throw new Error("ConnectWise rejected the request"); return {}; },
+    cwDefaultClosedStatus: async () => ({ id: 99, name: "Closed" }),
+    cwAddTicketNote: async () => {},
+    preparePatchRequest: async () => { throw new Error("not expected to be called"); },
+    prepareConsolidation: async () => ({ groups: [] }),
+    persistPreparedGroups: async () => ["new-id"],
+  });
+  const result = await reconciliation.closeAndRecutMergedAtlasTickets();
+  assert.equal(result.closed, 1);
+  assert.equal(result.errors, 1);
+  const update = db.calls.find((c) => c.sql.includes("SET last_error") && c.sql.includes("patch_ticket_requests"));
+  assert.deepEqual(update.params, ["draft-parent", "ConnectWise rejected the request"]);
+});
+
+test("closeAndRecutMergedAtlasTickets: a pass already running elsewhere backs off instead of duplicating work", async () => {
+  const db = fakeDb({ trackedRows: {}, lockAcquired: false });
+  let cwCalled = false;
+  const reconciliation = await loadReconciliation({ db, cwRequest: async () => { cwCalled = true; return {}; } });
+  const result = await reconciliation.closeAndRecutMergedAtlasTickets();
+  assert.deepEqual(result, { checked: 0, closed: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0 });
+  assert.equal(cwCalled, false);
+});
+
+test("closeAndRecutMergedAtlasTickets: no ConnectWise connection means nothing happens", async () => {
+  const db = fakeDb({ trackedRows: {} });
+  const reconciliation = await loadReconciliation({ db, savedConnection: async () => { throw new Error("not configured"); } });
+  const result = await reconciliation.closeAndRecutMergedAtlasTickets();
+  assert.deepEqual(result, { checked: 0, closed: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0 });
 });
