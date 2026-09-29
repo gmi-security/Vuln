@@ -134,7 +134,14 @@ export async function syncAndValidateClosedGroupTickets(): Promise<Counts & { sy
   const saved = await savedConnection().catch(() => null);
   if (!saved) return { checked: 0, reopened: 0, confirmedFixed: 0, needsManualUnmerge: 0, errors: 0, synced: 0 };
   const db = await patchTicketDatabase();
-  const sync = await syncTable(db, "patch_group_ticket_requests", saved.target, saved.value);
+  // includeClosed: a ticket someone reopens by hand straight in ConnectWise
+  // (as happened to #2655137) needs to fall out of "closed" here too, not
+  // just tickets closed since the last check -- otherwise it stays
+  // incorrectly marked closed=true forever and looks free for a new
+  // consolidated ticket to duplicate. Scoped to the pilot's own tickets
+  // (companyIds) precisely because that's only safe to do for a small,
+  // known set -- not the whole portfolio on this tighter timer.
+  const sync = await syncTable(db, "patch_group_ticket_requests", saved.target, saved.value, { includeClosed: true, companyIds: PILOT_COMPANY_IDS });
   const validation = await validateClosedGroupTickets();
   return { ...validation, synced: sync.updated };
 }

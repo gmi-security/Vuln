@@ -110,3 +110,21 @@ test("the select is scoped to open, previously-created tickets on the current Co
   assert.match(select.sql, /cw_target=\$1/);
   assert.deepEqual(select.params, ["my-target"]);
 });
+
+test("includeClosed drops the closed=false filter, so an already-closed ticket is checked again too", async () => {
+  const sync = await loadWithConnectWise(async () => ({ status: { name: "Open" }, closedFlag: false }));
+  const db = fakeDb({ rows: [] });
+  await sync.syncTable(db, "patch_group_ticket_requests", "my-target", connection, { includeClosed: true });
+  const select = db.calls[0];
+  assert.doesNotMatch(select.sql, /closed=false/);
+  assert.deepEqual(select.params, ["my-target"]);
+});
+
+test("companyIds scopes the select to just those tenants' tickets", async () => {
+  const sync = await loadWithConnectWise(async () => ({ status: { name: "Open" }, closedFlag: false }));
+  const db = fakeDb({ rows: [] });
+  await sync.syncTable(db, "patch_group_ticket_requests", "my-target", connection, { companyIds: ["CO-147284"] });
+  const select = db.calls[0];
+  assert.match(select.sql, /packet->>'appCompanyId' = ANY\(\$2::text\[\]\)/);
+  assert.deepEqual(select.params, ["my-target", ["CO-147284"]]);
+});

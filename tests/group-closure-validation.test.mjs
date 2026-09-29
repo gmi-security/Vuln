@@ -267,9 +267,10 @@ test("no CrowdStrike connection configured leaves candidates checked but nothing
 test("syncAndValidateClosedGroupTickets refreshes ConnectWise status before validating, so a ticket closed since the last slow sync is still caught this pass", async () => {
   const db = fakeDb({ closedRows: [baseRow], ticketRows: { a: { ticket_id: 555, cw_target: "cw-1" } } });
   const calls = [];
+  let syncArgs = null;
   const validate = await loadValidation({
     db,
-    syncTable: async () => { calls.push("sync"); return { checked: 3, updated: 1, errors: 0 }; },
+    syncTable: async (...args) => { calls.push("sync"); syncArgs = args; return { checked: 3, updated: 1, errors: 0 }; },
     verifyAgainstCrowdStrike: async () => { calls.push("validate"); return { checkedAt: "2026-09-28T00:00:00.000Z", stillOpenHosts: ["host-1"] }; },
     cwDefaultOpenStatus: async () => ({ id: 42, name: "New" }),
     cwAddTicketNote: async () => {},
@@ -278,6 +279,8 @@ test("syncAndValidateClosedGroupTickets refreshes ConnectWise status before vali
   const result = await validate.syncAndValidateClosedGroupTickets();
   assert.deepEqual(result, { checked: 1, reopened: 1, confirmedFixed: 0, needsManualUnmerge: 0, errors: 0, synced: 1 });
   assert.deepEqual(calls, ["sync", "validate"]);
+  assert.equal(syncArgs[1], "patch_group_ticket_requests");
+  assert.deepEqual(syncArgs[4], { includeClosed: true, companyIds: ["CO-147284"] });
 });
 
 test("syncAndValidateClosedGroupTickets with no ConnectWise connection does nothing", async () => {

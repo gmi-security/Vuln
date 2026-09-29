@@ -27,10 +27,20 @@ export async function syncTable(
   table: "patch_ticket_requests" | "patch_group_ticket_requests",
   target: string,
   connection: ConnectWiseConnection,
+  // includeClosed: also re-check tickets we already think are closed -- by
+  // default a closed ticket is never looked at again, which misses a human
+  // reopening it straight in ConnectWise (no event reaches us for that).
+  // Only worth the extra API calls for a small, explicitly scoped set, so
+  // it's opt-in and pairs with companyIds rather than applying portfolio-wide.
+  options: { includeClosed?: boolean; companyIds?: string[] } = {},
 ): Promise<SyncCounts> {
+  const params: unknown[] = [target];
+  const conditions = ["state='created'", "ticket_id IS NOT NULL", "cw_target=$1"];
+  if (!options.includeClosed) conditions.push("closed=false");
+  if (options.companyIds?.length) { params.push(options.companyIds); conditions.push(`packet->>'appCompanyId' = ANY($${params.length}::text[])`); }
   const rows = (await db.query(
-    `SELECT id, ticket_id FROM ${table} WHERE state='created' AND closed=false AND ticket_id IS NOT NULL AND cw_target=$1`,
-    [target],
+    `SELECT id, ticket_id FROM ${table} WHERE ${conditions.join(" AND ")}`,
+    params,
   )).rows as { id: string; ticket_id: number }[];
   if (!rows.length) return { checked: 0, updated: 0, errors: 0 };
   let updated = 0, errors = 0;
