@@ -85,7 +85,22 @@ export async function autoCreateHighSeverityTickets(): Promise<Counts> {
       const target = targetPriorityFor(row.worst_severity, priorities);
       if (target) {
         const ticketId = await waitForTicketId(row.id);
-        if (ticketId) await setGroupTicketPriority(row.id, target.id, ACTOR).catch(() => {});
+        if (ticketId) {
+          // A failure here used to vanish silently -- a real Critical
+          // ticket could sit at the board's default priority indefinitely
+          // with nothing recorded anywhere to say why. backfillTicketPriority
+          // will retry it on the next pass (no ticket.priority.changed audit
+          // means it never counts as already handled), but the reason for
+          // the first failure is worth keeping visible in the meantime.
+          await setGroupTicketPriority(row.id, target.id, ACTOR).catch(async (err) => {
+            const message = err instanceof Error ? err.message : String(err);
+            await db.query("UPDATE patch_group_ticket_requests SET last_error=$2,updated_at=now() WHERE id=$1",
+              [row.id, `Ticket created, but asserting ${row.worst_severity} priority failed: ${message}`]).catch(() => {});
+          });
+        } else {
+          await db.query("UPDATE patch_group_ticket_requests SET last_error=$2,updated_at=now() WHERE id=$1",
+            [row.id, `Ticket created, but its ticket_id didn't appear within 60s to assert ${row.worst_severity} priority. The next priority backfill pass will retry.`]).catch(() => {});
+        }
       }
     } catch {
       errors++; // one draft failing (routing went stale, connection changed) must not block the rest

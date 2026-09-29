@@ -110,6 +110,8 @@ test("one ticket's ConnectWise call failing does not block the rest", async () =
   });
   const result = await backfill.backfillTicketPriority();
   assert.deepEqual(result, { checked: 2, updated: 1, errors: 1 });
+  const update = db.calls.find((c) => c.sql.includes("SET last_error"));
+  assert.deepEqual(update.params, ["a", "Priority backfill failed to set Critical priority: ConnectWise rejected the request"]);
 });
 
 test("no candidate tickets means no ConnectWise-bound calls at all", async () => {

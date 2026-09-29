@@ -253,4 +253,27 @@ test("a ticket id that never confirms leaves priority unset without failing the 
   const result = await autoCreate.autoCreateHighSeverityTickets();
   assert.deepEqual(result, { checked: 1, created: 1, errors: 0 });
   assert.equal(priorityCalled, false);
+  const update = db.calls.find((c) => c.sql.includes("SET last_error"));
+  assert.match(update.params[1], /didn't appear within 60s to assert Critical priority/);
+});
+
+test("a priority-setting failure after ticket creation is recorded on the row instead of vanishing silently", async () => {
+  const db = fakeDb({
+    eligible: [{ id: "a", app_company_id: "CO-147284", worst_severity: "Critical" }],
+    routings: [{ app_company_id: "CO-147284", company_id: 55, board_id: 9, team_id: null }],
+  });
+  const autoCreate = await loadAutoCreate({
+    db,
+    reviewGroupTicket: async () => {},
+    readGroupTicket: readGroupTicketDualMode({ ticketId: 999, state: "created" }),
+    createGroupTicket: async () => {},
+    setGroupTicketPriority: async () => { throw new Error("ConnectWise rejected the request"); },
+    cwPrioritiesBySort: async () => [{ id: 1, name: "Urgent" }],
+  });
+  const result = await autoCreate.autoCreateHighSeverityTickets();
+  // The ticket itself was created successfully -- a priority failure must
+  // never turn that into an "error" the way a failed creation would.
+  assert.deepEqual(result, { checked: 1, created: 1, errors: 0 });
+  const update = db.calls.find((c) => c.sql.includes("SET last_error"));
+  assert.deepEqual(update.params, ["a", "Ticket created, but asserting Critical priority failed: ConnectWise rejected the request"]);
 });

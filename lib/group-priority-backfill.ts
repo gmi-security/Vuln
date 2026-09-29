@@ -41,8 +41,11 @@ export async function backfillTicketPriority(): Promise<{ checked: number; updat
     try {
       await setGroupTicketPriority(row.id, target.id, ACTOR);
       updated++;
-    } catch {
+    } catch (err) {
       errors++; // one ticket's connection mismatch or ConnectWise rejection must not block the rest
+      const message = err instanceof Error ? err.message : String(err);
+      await db.query("UPDATE patch_group_ticket_requests SET last_error=$2,updated_at=now() WHERE id=$1",
+        [row.id, `Priority backfill failed to set ${row.worst_severity} priority: ${message}`]).catch(() => {});
     }
   });
   return { checked: rows.length, updated, errors };
