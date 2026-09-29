@@ -39,6 +39,8 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
   const [adoptResult, setAdoptResult] = useState("");
   const [abandoning, setAbandoning] = useState(false);
   const [abandonResult, setAbandonResult] = useState("");
+  const [recutting, setRecutting] = useState(false);
+  const [recutResult, setRecutResult] = useState("");
 
   const reload = useCallback(async () => {
     setLoading(true); setError("");
@@ -142,6 +144,25 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
     finally { setAbandoning(false); }
   }
 
+  // Closes the confirmed 37 Combined children of #2655137 plus the parent
+  // itself for real in ConnectWise (with a note explaining why), then
+  // recuts every CVE they covered as a fresh, standalone ticket through the
+  // normal consolidated-patch-plan pipeline -- since Combine/Merge
+  // permissions in ConnectWise aren't changing and a merged ticket can't be
+  // reliably separated through the API, this is the reset instead. Same
+  // background-trigger pattern as the other slow actions above.
+  async function closeAndRecutNow() {
+    if (!window.confirm("Close all 38 tickets (the 37 Combined children and parent #2655137) in ConnectWise and recut their CVEs as new standalone tickets? This closes real, currently-tracked tickets -- continue?")) return;
+    setRecutting(true); setRecutResult(""); setError("");
+    try {
+      const result = await dashboardRequest<{ started: boolean }>("patch-group-tickets/close-and-recut", { method: "POST" });
+      setRecutResult(result.started
+        ? "Started -- closing 38 tickets and recollecting CrowdStrike findings can take several minutes. Click Refresh shortly to see results."
+        : "Already running from a previous trigger -- that pass covers this too. Click Refresh shortly to see results.");
+    } catch (e) { setError(e instanceof Error ? e.message : "Could not start the close-and-recut pass."); }
+    finally { setRecutting(false); }
+  }
+
   const buckets = { "cut-open": 0, "cut-closed": 0, attention: 0, draft: 0 };
   let devicesCovered = 0;
   const distinctCves = new Set<string>();
@@ -162,6 +183,7 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
         <button type="button" className={styles.button} disabled={findingUntracked} onClick={() => void findUntrackedNow()}>{findingUntracked ? "Checking…" : "Find untracked Atlas tickets"}</button>
         <button type="button" className={styles.button} disabled={adopting} onClick={() => void adoptUntrackedNow()}>{adopting ? "Adopting…" : "Adopt untracked tickets"}</button>
         <button type="button" className={styles.button} disabled={abandoning} onClick={() => void abandonUntrackedNow()}>{abandoning ? "Abandoning…" : "Abandon closed untracked + cut replacements"}</button>
+        <button type="button" className={styles.button} disabled={recutting} onClick={() => void closeAndRecutNow()}>{recutting ? "Closing…" : "Close merged parent/children + recut as new"}</button>
         <button type="button" className={styles.button} disabled={loading} onClick={() => void reload()}>{loading ? "Loading…" : "Refresh"}</button>
       </div>
     </div>
@@ -170,6 +192,7 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
     {validateResult && <p role="status" className={`${styles.resultNote} mt-1`}>{validateResult}</p>}
     {adoptResult && <p role="status" className={`${styles.resultNote} mt-1`}>{adoptResult} Adopted tickets will be reopened on the next "Validate closures now" run.</p>}
     {abandonResult && <p role="status" className={`${styles.resultNote} mt-1`}>{abandonResult} New drafts appear below under "Awaiting review"; Critical/High ones are cut automatically by "Run auto-create now".</p>}
+    {recutResult && <p role="status" className={`${styles.resultNote} mt-1`}>{recutResult} Closed tickets show "Closed in ConnectWise" above; new drafts appear below under "Awaiting review".</p>}
     {untracked && (untracked.length
       ? <div className="mt-2 rounded-lg border border-amber-800/60 bg-amber-950/10 p-3">
           <p className={styles.resultNote}>{untracked.length} Atlas ticket{untracked.length === 1 ? "" : "s"} in ConnectWise have no tracked row -- not created through this app, so no automation here can see or act on {untracked.length === 1 ? "it" : "them"} yet. Click "Adopt untracked tickets" to relink the ones whose original draft can still be matched. For any that are already closed with no fix behind them, "Abandon closed untracked + cut replacements" writes them off and queues their CVEs for a fresh ticket instead. Otherwise, handle these by hand:</p>
