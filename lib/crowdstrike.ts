@@ -104,12 +104,12 @@ function timedFetchOnce(url: string, init: RequestInit, timeoutMs: number): Prom
 // A large tenant's device/vuln hydration fans out many of these requests
 // (bounded by runWithConcurrency below), which makes hitting CrowdStrike's
 // rate limiter an expected, recoverable event rather than a rare one — retry
-// 429/502/503/504 with backoff (honoring Retry-After when CrowdStrike sends
+// 429/500/502/503/504 with backoff (honoring Retry-After when CrowdStrike sends
 // it) instead of failing the whole sync over a single throttled request.
 async function timedFetch(url: string, init: RequestInit, timeoutMs = 60_000): Promise<Response> {
   for (let attempt = 0; ; attempt++) {
     const res = await timedFetchOnce(url, init, timeoutMs);
-    if (res.ok || ![429, 502, 503, 504].includes(res.status) || attempt >= 4) return res;
+    if (res.ok || ![429, 500, 502, 503, 504].includes(res.status) || attempt >= 4) return res;
     const retryAfter = Number(res.headers.get("retry-after"));
     const delayMs = Number.isFinite(retryAfter) && retryAfter > 0
       ? Math.min(retryAfter * 1000, 30_000)

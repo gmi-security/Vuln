@@ -38,6 +38,8 @@ node --env-file=/opt/vuln/.env.local scripts/spotlight-run-diagnostic.mjs
 
 Run this from `/opt/vuln-inventory` after updating that checkout. It does not count or expose record payloads and makes no database changes. Do not promote or remove any stored generation based on table size alone.
 
+The diagnostic returned one Atlas run (`f1faff2c-9b2d-4f4b-ad59-d0021d9b5a73`), started at `2026-09-29T15:02:45.696Z` and failed at `15:11:18.761Z`. Its saved error was a CrowdStrike Spotlight query HTTP 500 with trace ID `f5ab25d6-f24a-4bc0-a007-f1a8fb68b5fe`. No run was active. The importer previously retried 429, 502, 503 and 504, but treated a 500 as immediately fatal. A bounded retry for 500 is being added; this does not establish whether the vendor's error was transient. A persistent 500 will still fail the run after the retry limit and should be escalated to CrowdStrike with the trace ID.
+
 This is an observed baseline, not a cutover reconciliation. Snapshot contents may have changed since the command ran; the exact Spotlight active count, backup restore, ID/relationship audit, worker ownership and final write-freeze timing remain open.
 
 ## Production facts to record before backfill

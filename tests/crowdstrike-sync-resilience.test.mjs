@@ -48,6 +48,25 @@ test("a throttled request is retried instead of failing the whole sync", async (
   );
 }, { timeout: 30_000 });
 
+test("Spotlight query retries a transient 500 and imports the returned finding", async () => {
+  let queryAttempts = 0;
+  await withFetch((url) => {
+    if (url.includes("/oauth2/token")) return json({ access_token: "tok" });
+    if (url.includes("/spotlight/queries/vulnerabilities/v1")) {
+      queryAttempts++;
+      if (queryAttempts === 1) return new Response("temporary error", { status: 500 });
+      return json({ resources: ["source-1"], meta: { pagination: { after: "", total: 1 } } });
+    }
+    if (url.includes("/spotlight/entities/vulnerabilities/v2"))
+      return json({ resources: [{ id: "source-1", cve: { id: "CVE-2026-1234" }, host_info: { hostname: "atlas-host" } }] });
+    throw new Error(`Unexpected request: ${url}`);
+  }, async () => {
+    const result = await spotlightListFindings(atlas);
+    assert.equal(queryAttempts, 2);
+    assert.deepEqual(result.findings.map(finding => finding.id), ["source-1"]);
+  });
+});
+
 test("hydration never exceeds the concurrency cap even with hundreds of batches", async () => {
   let inFlight = 0, maxInFlight = 0;
   await withFetch(
