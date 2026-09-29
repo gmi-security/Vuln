@@ -129,9 +129,20 @@ test("no ConnectWise connection configured means no db calls at all", async () =
   assert.equal(db.calls.length, 0);
 });
 
-test("no ConnectWise priorities available leaves candidates checked but none updated", async () => {
+test("no ConnectWise priorities available leaves candidates checked but none updated, with the real reason recorded", async () => {
   const db = fakeDb({ rows: [{ id: "a", worst_severity: "Critical" }] });
   const backfill = await loadBackfill({ db, cwPrioritiesBySort: async () => { throw new Error("ConnectWise unreachable"); } });
   const result = await backfill.backfillTicketPriority();
   assert.deepEqual(result, { checked: 1, updated: 0, errors: 0 });
+  const update = db.calls.find((c) => c.sql.includes("SET last_error"));
+  assert.deepEqual(update.params, ["a", "Priority backfill could not fetch ConnectWise priorities: ConnectWise unreachable"]);
+});
+
+test("ConnectWise returning zero priorities (no throw) still records a reason, distinct from a fetch error", async () => {
+  const db = fakeDb({ rows: [{ id: "a", worst_severity: "Critical" }] });
+  const backfill = await loadBackfill({ db, cwPrioritiesBySort: async () => [] });
+  const result = await backfill.backfillTicketPriority();
+  assert.deepEqual(result, { checked: 1, updated: 0, errors: 0 });
+  const update = db.calls.find((c) => c.sql.includes("SET last_error"));
+  assert.deepEqual(update.params, ["a", "Priority backfill: ConnectWise returned no priorities for this connection."]);
 });

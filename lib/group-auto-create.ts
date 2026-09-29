@@ -4,7 +4,7 @@ import { runWithConcurrency } from "./ticket-status-sync";
 import { elasticVulnEnabled } from "./elastic-vuln-server";
 import { DashboardError } from "./elastic-dashboard";
 import { ATLAS_REPORTING_COMPANY_ID } from "./reporting-direct-sources";
-import { cwPrioritiesBySort } from "./connectwise-client";
+import { cwPrioritiesBySort, type CWOption } from "./connectwise-client";
 import { targetPriorityFor } from "./group-ticket-priority";
 
 // Critical/High severity remediations skip the human review queue and go
@@ -62,8 +62,16 @@ export async function autoCreateHighSeverityTickets(): Promise<Counts> {
   // Most-urgent-first; fetched once and reused for every ticket this pass.
   // Missing/unreachable never blocks ticket creation -- it just means the
   // priority stays whatever the board's default is, same as before this
-  // existed, rather than failing the whole thing.
-  const priorities = await cwPrioritiesBySort(saved.value).catch(() => []);
+  // existed, rather than failing the whole thing. The failure itself is
+  // still worth keeping visible though (see prioritiesFetchError below) --
+  // this used to vanish into an indistinguishable empty array.
+  let priorities: CWOption[] = [];
+  let prioritiesFetchError: string | null = null;
+  try {
+    priorities = await cwPrioritiesBySort(saved.value);
+  } catch (err) {
+    prioritiesFetchError = err instanceof Error ? err.message : String(err);
+  }
   let created = 0, errors = 0;
   await runWithConcurrency(rows, 3, async (row) => {
     if (!row.app_company_id || !PILOT_COMPANY_IDS.has(row.app_company_id)) return; // outside the pilot scope
@@ -101,6 +109,9 @@ export async function autoCreateHighSeverityTickets(): Promise<Counts> {
           await db.query("UPDATE patch_group_ticket_requests SET last_error=$2,updated_at=now() WHERE id=$1",
             [row.id, `Ticket created, but its ticket_id didn't appear within 60s to assert ${row.worst_severity} priority. The next priority backfill pass will retry.`]).catch(() => {});
         }
+      } else if (prioritiesFetchError) {
+        await db.query("UPDATE patch_group_ticket_requests SET last_error=$2,updated_at=now() WHERE id=$1",
+          [row.id, `Ticket created, but couldn't fetch ConnectWise priorities to assert ${row.worst_severity}: ${prioritiesFetchError}. The next priority backfill pass will retry.`]).catch(() => {});
       }
     } catch {
       errors++; // one draft failing (routing went stale, connection changed) must not block the rest

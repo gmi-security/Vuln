@@ -234,6 +234,8 @@ test("no ConnectWise priorities available never blocks the ticket from counting 
   const result = await autoCreate.autoCreateHighSeverityTickets();
   assert.deepEqual(result, { checked: 1, created: 1, errors: 0 });
   assert.equal(priorityCalled, false);
+  const update = db.calls.find((c) => c.sql.includes("SET last_error"));
+  assert.deepEqual(update.params, ["a", "Ticket created, but couldn't fetch ConnectWise priorities to assert Critical: ConnectWise unreachable. The next priority backfill pass will retry."]);
 });
 
 test("a ticket id that never confirms leaves priority unset without failing the create count", async () => {
