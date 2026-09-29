@@ -510,7 +510,7 @@ test("closeAndRecutMergedAtlasTickets: a pass already running elsewhere backs of
   let cwCalled = false;
   const reconciliation = await loadReconciliation({ db, cwRequest: async () => { cwCalled = true; return {}; } });
   const result = await reconciliation.closeAndRecutMergedAtlasTickets();
-  assert.deepEqual(result, { checked: 0, closed: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0 });
+  assert.deepEqual(result, { checked: 0, closed: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0, firstError: null });
   assert.equal(cwCalled, false);
 });
 
@@ -518,5 +518,21 @@ test("closeAndRecutMergedAtlasTickets: no ConnectWise connection means nothing h
   const db = fakeDb({ trackedRows: {} });
   const reconciliation = await loadReconciliation({ db, savedConnection: async () => { throw new Error("not configured"); } });
   const result = await reconciliation.closeAndRecutMergedAtlasTickets();
-  assert.deepEqual(result, { checked: 0, closed: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0 });
+  assert.deepEqual(result, { checked: 0, closed: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0, firstError: null });
+});
+
+test("firstError surfaces the first failure's ticket number and message directly on the result", async () => {
+  const db = fakeDb({
+    trackedRows: {
+      [PARENT_ID]: { table: "single", id: "draft-parent", cves: ["CVE-2026-68839"], tenantId: "tenant-a", boardId: 9 },
+      [CHILD_ID]: { table: "group", id: "draft-child", cves: ["CVE-2024-1", "CVE-2024-2"], tenantId: "tenant-a", boardId: 9 },
+    },
+  });
+  const reconciliation = await loadReconciliation({
+    db,
+    cwDefaultClosedStatus: async () => { throw new Error("This board has no closed status configured."); },
+  });
+  const result = await reconciliation.closeAndRecutMergedAtlasTickets();
+  assert.equal(result.errors, 2);
+  assert.match(result.firstError, /^#\d+: This board has no closed status configured\.$/);
 });

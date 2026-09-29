@@ -311,7 +311,7 @@ export function triggerAbandonAndReplaceNow(): { started: boolean } {
   return { started: true };
 }
 
-export type RecutResult = { checked: number; closed: number; cvesReplaced: number; cvesNeedsReview: number; cvesAlreadyCovered: number; unresolved: number; errors: number };
+export type RecutResult = { checked: number; closed: number; cvesReplaced: number; cvesNeedsReview: number; cvesAlreadyCovered: number; unresolved: number; errors: number; firstError: string | null };
 type TrackedRow = { id: string; cves: string[]; tenantId: string; boardId: number | null };
 
 async function findTrackedRow(
@@ -341,7 +341,7 @@ export async function closeAndRecutMergedAtlasTickets(): Promise<RecutResult> {
   const db = await patchTicketDatabase();
   const lockClient = await db.connect();
   const acquired = (await lockClient.query(`SELECT pg_try_advisory_lock(${RECUT_LOCK_KEY}) AS locked`)).rows[0].locked as boolean;
-  if (!acquired) { lockClient.release(); return { checked: 0, closed: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0 }; }
+  if (!acquired) { lockClient.release(); return { checked: 0, closed: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0, firstError: null }; }
   try {
     return await runCloseAndRecut(db);
   } finally {
@@ -362,8 +362,9 @@ export async function closeAndRecutMergedAtlasTickets(): Promise<RecutResult> {
 // covered by the normal closure-validation loop.
 async function runCloseAndRecut(db: Awaited<ReturnType<typeof patchTicketDatabase>>): Promise<RecutResult> {
   const saved = await savedConnection().catch(() => null);
-  if (!saved) return { checked: 0, closed: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0 };
+  if (!saved) return { checked: 0, closed: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0, firstError: null };
   let checked = 0, closed = 0, unresolved = 0, errors = 0;
+  let firstError: string | null = null;
   const cvesByTenant = new Map<string, Set<string>>();
   for (const ticketId of KNOWN_MERGED_ATLAS_TICKET_IDS) {
     checked++;
@@ -388,17 +389,20 @@ async function runCloseAndRecut(db: Awaited<ReturnType<typeof patchTicketDatabas
       errors++; // one ticket's lookup or ConnectWise call failing must not block the rest
       // 38/38 failing with nothing recorded meant no way to tell why -- see
       // the same fix already shipped for closure-validation. Best-effort:
-      // never let a failure writing this mask the original error.
+      // never let a failure writing this mask the original error. Also kept
+      // on the result itself (firstError) so it shows up straight in the
+      // job-status check, without having to find the right row in the table.
+      const message = err instanceof Error ? err.message : String(err);
+      firstError ??= `#${ticketId}: ${message}`;
       if (found) {
-        const message = err instanceof Error ? err.message : String(err);
         await db.query(`UPDATE ${found.table} SET last_error=$2,updated_at=now() WHERE id=$1`, [found.row.id, message]).catch(() => {});
       }
     }
   }
-  if (!cvesByTenant.size) return { checked, closed, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved, errors };
+  if (!cvesByTenant.size) return { checked, closed, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved, errors, firstError };
   const replaced = await replaceCvesWithFreshDrafts(cvesByTenant);
-  if (!replaced) return { checked, closed, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved, errors }; // closures still stand -- replacement waits for a CrowdStrike connection
-  return { checked, closed, ...replaced, errors: errors + replaced.errors, unresolved };
+  if (!replaced) return { checked, closed, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved, errors, firstError }; // closures still stand -- replacement waits for a CrowdStrike connection
+  return { checked, closed, ...replaced, errors: errors + replaced.errors, unresolved, firstError };
 }
 
 const recutRuntime = globalThis as typeof globalThis & { __groupTicketRecut?: { working?: Promise<void> } };
