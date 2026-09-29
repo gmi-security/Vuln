@@ -44,6 +44,8 @@ The replacement Atlas run (`2bb494ad-10ba-4a3f-a4c5-0f1b39dcb566`) advanced to 2
 
 A later Atlas run reached 32,000 fetched and stored records, then failed with `This operation was aborted` after about four minutes. The CrowdStrike client imposes a 60-second timeout on each fetch, but its retry loop previously handled only HTTP responses. It now retries an aborted GET request up to the existing bounded retry limit without advancing the pagination cursor or restarting the import. This treats an individual stalled request; it does not make the whole import resumable after a process restart or persistent upstream failure. That remains an architectural risk for a multi-million-record import.
 
+The architectural recovery work is specified in `docs/superpowers/specs/2026-09-29-resumable-atlas-spotlight-design.md` and implemented in staged ID discovery plus durable hydration checkpoints. The first production run on that code will start a version-2 generation because the failed runs above have no discovery checkpoint. Subsequent interruptions can resume the saved version-2 run. Its database schema and stop/resume behavior must be rehearsed against an isolated restore before live promotion; the read-only inventory is not that rehearsal.
+
 This is an observed baseline, not a cutover reconciliation. Snapshot contents may have changed since the command ran; the exact Spotlight active count, backup restore, ID/relationship audit, worker ownership and final write-freeze timing remain open.
 
 ## Production facts to record before backfill

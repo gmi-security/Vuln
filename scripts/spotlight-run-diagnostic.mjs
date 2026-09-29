@@ -15,12 +15,23 @@ try {
   try {
     await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
     try {
-      const runs = (await client.query(`
+      const checkpointSchema = (await client.query(`SELECT EXISTS (
+        SELECT 1 FROM information_schema.columns WHERE table_schema = 'public'
+          AND table_name = 'spotlight_import_runs' AND column_name = 'checkpoint_version'
+      ) AS present`)).rows[0]?.present === true;
+      const runs = (await client.query(checkpointSchema ? `
+        SELECT id::text AS id, tenant_key, status, phase, checkpoint_version,
+          discovered_count::text AS discovered_count,
+          expected_count::text AS expected_count,
+          hydrated_count::text AS hydrated_count,
+          query_cursor <> '' AS has_query_cursor,
+          hydration_cursor <> '' AS has_hydration_cursor,
+          started_at, finished_at, LEFT(error, 500) AS error
+        FROM spotlight_import_runs ORDER BY started_at DESC LIMIT 10
+      ` : `
         SELECT id::text AS id, tenant_key, status, started_at, finished_at,
           LEFT(error, 500) AS error
-        FROM spotlight_import_runs
-        ORDER BY started_at DESC
-        LIMIT 10
+        FROM spotlight_import_runs ORDER BY started_at DESC LIMIT 10
       `)).rows;
       const active = (await client.query(`
         SELECT tenant_key, run_id::text AS run_id, promoted_at

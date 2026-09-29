@@ -143,8 +143,8 @@ export function createSpotlightRecordStore(db: Database) {
       release: async () => {
         if (released) return;
         released = true;
-        client.off?.("error", onError);
         if (!lost) await client.query("SELECT pg_advisory_unlock(1701, hashtext($1))", [tenantKey]).catch(() => {});
+        client.off?.("error", onError);
         client.release();
       },
     };
@@ -160,6 +160,9 @@ export function createSpotlightRecordStore(db: Database) {
         hydration_cursor, discovered_count, expected_count, hydrated_count
         FROM spotlight_import_runs WHERE tenant_key = $1 AND checkpoint_version = 2
           AND status IN ('running', 'failed') AND phase IN ('discovering', 'hydrating')
+          AND started_at > COALESCE((SELECT active.started_at FROM spotlight_import_current current_run
+            JOIN spotlight_import_runs active ON active.id = current_run.run_id
+            WHERE current_run.tenant_key = $1), '-infinity'::timestamptz)
         ORDER BY started_at DESC LIMIT 1 FOR UPDATE`, [tenantKey]);
       let row;
       if (existing.rows.length) {
@@ -234,6 +237,12 @@ export function createSpotlightRecordStore(db: Database) {
         SELECT $1::uuid, $2, source.source_id
         FROM jsonb_array_elements_text($3::jsonb) AS source(source_id)
         ON CONFLICT (run_id, tenant_key, source_id) DO NOTHING`, [runId, tenantKey, JSON.stringify(ids)]);
+      if (!nextCursor && reportedTotal != null) {
+        const distinct = await client.query(`SELECT COUNT(*) AS count FROM spotlight_import_ids
+          WHERE run_id = $1::uuid AND tenant_key = $2`, [runId, tenantKey]);
+        if (Number(distinct.rows[0]?.count) < reportedTotal)
+          throw new Error(`Spotlight pagination incomplete: ${distinct.rows[0]?.count} distinct IDs of ${reportedTotal}.`);
+      }
       const updated = await client.query(`UPDATE spotlight_import_runs SET
         query_cursor = $3, discovered_count = $4,
         phase = CASE WHEN $3 = '' THEN 'hydrating' ELSE 'discovering' END,
@@ -285,7 +294,7 @@ export function createSpotlightRecordStore(db: Database) {
       await client.query("BEGIN");
       const locked = await client.query(`SELECT phase, hydration_cursor,
         hydration_cursor < $3 AS advances FROM spotlight_import_runs
-        WHERE id = $1::uuid AND tenant_key = $2 AND status = 'running' FOR UPDATE`, [runId, tenantKey]);
+        WHERE id = $1::uuid AND tenant_key = $2 AND status = 'running' FOR UPDATE`, [runId, tenantKey, ids[0]]);
       if (locked.rows[0]?.phase !== "hydrating" || locked.rows[0]?.advances === false)
         throw new Error("Spotlight hydration checkpoint changed during the import.");
       const inserted = await client.query(`INSERT INTO spotlight_import_records
@@ -477,9 +486,11 @@ export function createSpotlightRecordStore(db: Database) {
     await ensureSchema();
     const active = await db.query("SELECT run_id FROM spotlight_import_current WHERE tenant_key = $1", [tenantKey]);
     const activeId = active.rows[0]?.run_id ?? null;
+    if (!activeId) return;
     const old = await db.query(`SELECT id FROM spotlight_import_runs
       WHERE tenant_key = $1 AND status <> 'running'
-        AND ($2::uuid IS NULL OR id <> $2::uuid)`, [tenantKey, activeId]);
+        AND id <> $2::uuid
+        AND started_at < (SELECT started_at FROM spotlight_import_runs WHERE id = $2::uuid)`, [tenantKey, activeId]);
     for (const { id } of old.rows) {
       while (true) {
         const deleted = await db.query(`WITH doomed AS (
