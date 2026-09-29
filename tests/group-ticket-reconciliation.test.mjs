@@ -32,15 +32,16 @@ function loader(overrides = {}) {
   return async (path) => { const mod = await load(path); await mod.evaluate(); return mod.namespace; };
 }
 
-function fakeDb({ routing, trackedTicketIds = [] }) {
+function fakeDb({ routing, trackedTicketIds = [], preparedDraftIds = [] }) {
   const calls = [];
   return {
     calls,
     query: async (sql, params) => {
       calls.push({ sql, params });
       if (sql.includes("FROM patch_customer_routing")) return { rows: routing ? [routing] : [] };
-      if (sql.includes("FROM patch_group_ticket_requests")) return { rows: trackedTicketIds.map((id) => ({ ticket_id: id })) };
-      return { rows: [] };
+      if (sql.includes("ticket_id IS NOT NULL AND cw_target")) return { rows: trackedTicketIds.map((id) => ({ ticket_id: id })) };
+      if (sql.includes("state='prepared'") && sql.trim().startsWith("SELECT id")) return { rows: preparedDraftIds.includes(params[0]) ? [{ id: params[0] }] : [] };
+      return { rows: [], rowCount: 1 }; // UPDATE / INSERT
     },
   };
 }
@@ -101,4 +102,74 @@ test("no known Atlas routing yet means an empty result and no ConnectWise call a
   const result = await reconciliation.findUntrackedAtlasTickets();
   assert.deepEqual(result, []);
   assert.equal(cwCalled, false);
+});
+
+const UUID = "9cc45b19-bd25-47bf-8182-580b922ee041";
+
+test("an untracked ticket whose attached CSV names a still-prepared draft is adopted", async () => {
+  const db = fakeDb({ routing, trackedTicketIds: [], preparedDraftIds: [UUID] });
+  const reconciliation = await loadReconciliation({
+    db,
+    cwRequest: async (connection, path) => {
+      if (path.startsWith("/service/tickets?")) return [{ id: 2656161, summary: "Patch CVE-2024-29059 | 1 affected devices", status: { name: "Closed Merged" }, closedFlag: true, board: { id: 9 }, company: { id: 55 } }];
+      if (path.startsWith("/system/documents?")) return [{ title: `CVE-2024-29059 patch request ${UUID}` }];
+      throw new Error(`unexpected path ${path}`);
+    },
+  });
+  const result = await reconciliation.adoptManualAtlasTickets();
+  assert.deepEqual(result, { checked: 1, adopted: 1, noMatch: 0, errors: 0 });
+  const update = db.calls.find((c) => c.sql.includes("SET state='created'"));
+  assert.equal(update.params[0], UUID);
+  assert.equal(update.params[1], 2656161);
+  assert.equal(update.params[7], 55); // companyId
+  assert.deepEqual(JSON.parse(update.params[8]), { companyId: 55, boardId: 9 });
+  const audit = db.calls.find((c) => c.sql.includes("ticket.adopted"));
+  assert.ok(audit, "expected a ticket.adopted audit entry");
+});
+
+test("an untracked ticket with no attachment UUID has no match, nothing written", async () => {
+  const db = fakeDb({ routing, trackedTicketIds: [], preparedDraftIds: [UUID] });
+  const reconciliation = await loadReconciliation({
+    db,
+    cwRequest: async (connection, path) => {
+      if (path.startsWith("/service/tickets?")) return [{ id: 2656161, summary: "T", status: { name: "New" }, closedFlag: false, board: { id: 9 }, company: { id: 55 } }];
+      if (path.startsWith("/system/documents?")) return [];
+      throw new Error(`unexpected path ${path}`);
+    },
+  });
+  const result = await reconciliation.adoptManualAtlasTickets();
+  assert.deepEqual(result, { checked: 1, adopted: 0, noMatch: 1, errors: 0 });
+  assert.equal(db.calls.some((c) => c.sql.includes("SET state='created'")), false);
+});
+
+test("a matched UUID whose draft is no longer state='prepared' (already superseded or already created) has no match", async () => {
+  const db = fakeDb({ routing, trackedTicketIds: [], preparedDraftIds: [] }); // nothing currently in state='prepared'
+  const reconciliation = await loadReconciliation({
+    db,
+    cwRequest: async (connection, path) => {
+      if (path.startsWith("/service/tickets?")) return [{ id: 2656161, summary: "T", status: { name: "New" }, closedFlag: false, board: { id: 9 }, company: { id: 55 } }];
+      if (path.startsWith("/system/documents?")) return [{ title: `CVE-2024-29059 patch request ${UUID}` }];
+      throw new Error(`unexpected path ${path}`);
+    },
+  });
+  const result = await reconciliation.adoptManualAtlasTickets();
+  assert.deepEqual(result, { checked: 1, adopted: 0, noMatch: 1, errors: 0 });
+});
+
+test("one ticket's ConnectWise lookup failing does not block the rest", async () => {
+  const db = fakeDb({ routing, trackedTicketIds: [], preparedDraftIds: [UUID] });
+  const reconciliation = await loadReconciliation({
+    db,
+    cwRequest: async (connection, path) => {
+      if (path.startsWith("/service/tickets?")) return [
+        { id: 1, summary: "T", status: { name: "New" }, closedFlag: false, board: { id: 9 }, company: { id: 55 } },
+        { id: 2656161, summary: "T", status: { name: "New" }, closedFlag: false, board: { id: 9 }, company: { id: 55 } },
+      ];
+      if (path.includes("recordId=1")) throw new Error("ConnectWise unreachable");
+      if (path.startsWith("/system/documents?")) return [{ title: `CVE-2024-29059 patch request ${UUID}` }];
+      throw new Error(`unexpected path ${path}`);
+    },
+  });
+  const result = await reconciliation.adoptManualAtlasTickets();
+  assert.deepEqual(result, { checked: 2, adopted: 1, noMatch: 0, errors: 1 });
 });

@@ -35,6 +35,8 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
   const [validateResult, setValidateResult] = useState("");
   const [findingUntracked, setFindingUntracked] = useState(false);
   const [untracked, setUntracked] = useState<{ id: number; summary: string; status: string; closed: boolean; url: string }[] | null>(null);
+  const [adopting, setAdopting] = useState(false);
+  const [adoptResult, setAdoptResult] = useState("");
 
   const reload = useCallback(async () => {
     setLoading(true); setError("");
@@ -95,6 +97,21 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
     finally { setFindingUntracked(false); }
   }
 
+  // A manually-pasted ticket's attached CSV is named after the exact draft
+  // row it came from (a UUID) -- an unambiguous link, not a guess. This
+  // relinks each one so it becomes a normal tracked ticket, visible to
+  // auto-create/priority/closure-validation from then on.
+  async function adoptUntrackedNow() {
+    setAdopting(true); setAdoptResult(""); setError("");
+    try {
+      const result = await dashboardRequest<{ checked: number; adopted: number; noMatch: number; errors: number }>("patch-group-tickets/adopt-untracked", { method: "POST" });
+      setAdoptResult(`Checked ${result.checked} untracked ticket${result.checked === 1 ? "" : "s"} · adopted ${result.adopted} · ${result.noMatch} had no matching draft${result.errors ? ` · ${result.errors} failed` : ""}.`);
+      setUntracked(null);
+      await reload();
+    } catch (e) { setError(e instanceof Error ? e.message : "Could not adopt untracked tickets."); }
+    finally { setAdopting(false); }
+  }
+
   const buckets = { "cut-open": 0, "cut-closed": 0, attention: 0, draft: 0 };
   let devicesCovered = 0;
   const distinctCves = new Set<string>();
@@ -113,15 +130,17 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
         <button type="button" className={styles.button} disabled={autoCreating} onClick={() => void runAutoCreateNow()}>{autoCreating ? "Running…" : "Run auto-create now"}</button>
         <button type="button" className={styles.button} disabled={validating} onClick={() => void runValidateClosuresNow()}>{validating ? "Validating…" : "Validate closures now"}</button>
         <button type="button" className={styles.button} disabled={findingUntracked} onClick={() => void findUntrackedNow()}>{findingUntracked ? "Checking…" : "Find untracked Atlas tickets"}</button>
+        <button type="button" className={styles.button} disabled={adopting} onClick={() => void adoptUntrackedNow()}>{adopting ? "Adopting…" : "Adopt untracked tickets"}</button>
         <button type="button" className={styles.button} disabled={loading} onClick={() => void reload()}>{loading ? "Loading…" : "Refresh"}</button>
       </div>
     </div>
     <p className={styles.resultNote}>Customer-linked consolidation plans prepared for review and their ConnectWise ticket status.</p>
     {autoCreateResult && <p role="status" className={`${styles.resultNote} mt-1`}>{autoCreateResult}</p>}
     {validateResult && <p role="status" className={`${styles.resultNote} mt-1`}>{validateResult}</p>}
+    {adoptResult && <p role="status" className={`${styles.resultNote} mt-1`}>{adoptResult} Adopted tickets will be reopened on the next "Validate closures now" run.</p>}
     {untracked && (untracked.length
       ? <div className="mt-2 rounded-lg border border-amber-800/60 bg-amber-950/10 p-3">
-          <p className={styles.resultNote}>{untracked.length} Atlas ticket{untracked.length === 1 ? "" : "s"} in ConnectWise have no tracked row -- not created through this app, so no automation here can see or act on {untracked.length === 1 ? "it" : "them"}. Handle these by hand:</p>
+          <p className={styles.resultNote}>{untracked.length} Atlas ticket{untracked.length === 1 ? "" : "s"} in ConnectWise have no tracked row -- not created through this app, so no automation here can see or act on {untracked.length === 1 ? "it" : "them"} yet. Click "Adopt untracked tickets" to relink the ones whose original draft can still be matched, or handle these by hand:</p>
           <ul className="mt-2 space-y-1 text-sm">{untracked.map(t => <li key={t.id}>
             <a href={t.url} target="_blank" rel="noopener noreferrer" className="text-sky-300 underline">#{t.id}</a>
             {" — "}{t.status}{t.closed ? " (closed)" : ""}{t.summary ? ` — ${t.summary}` : ""}
