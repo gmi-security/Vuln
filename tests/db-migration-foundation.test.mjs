@@ -93,6 +93,8 @@ test("snapshot inventory counts buckets without fetching JSONB payloads", async 
     query: async (sql, params) => {
       const statement = String(sql);
       calls.push({ statement, params });
+      if (statement.includes("current_database()")) return { rows: [{ database_name: "gmi_vuln", role_name: "gmi_vuln", schema_name: "public", server_version: "18.0" }] };
+      if (statement.includes("FROM pg_class c")) return { rows: [{ schema_name: "public", table_name: "vuln_store", owner_name: "gmi_vuln", total_bytes: "1024" }] };
       if (statement.includes("to_regclass")) return { rows: [{ snapshot_table: "vuln_store", legacy_table: "vuln_snapshot", spotlight_table: null }] };
       if (statement.includes("SELECT key FROM vuln_store")) return { rows: [{ key: "findings:00" }, { key: "companies:00" }, { key: "meta" }] };
       if (statement.includes("data->'compensatingControls'")) return { rows: [{ controls: 4, aliases: 7 }] };
@@ -110,6 +112,9 @@ test("snapshot inventory counts buckets without fetching JSONB payloads", async 
   assert.equal(result.source, "sharded");
   assert.equal(result.updatedAt, "2026-09-29T00:00:00.000Z");
   assert.equal(result.spotlightTablePresent, false);
+  assert.equal(result.database.name, "gmi_vuln");
+  assert.equal(result.tables[0].name, "vuln_store");
+  assert.equal(result.tables[0].bytes, 1024);
   assert.ok(calls.every(c => !/SELECT\s+data\s+FROM\s+vuln_store/i.test(c.statement)));
 });
 
@@ -144,4 +149,11 @@ test("snapshot inventory reads the legacy row when the sharded table does not ex
   const result = await collectSnapshotInventory(client);
   assert.equal(result.source, "legacy");
   assert.equal(result.collections.findings, 2);
+});
+
+test("inventory connection target excludes username, password and query parameters", async () => {
+  const { safeConnectionTarget } = await import("../lib/db/connection-target.mjs");
+  const target = safeConnectionTarget("postgresql://secret-user:secret-pass@db.example.com:25060/gmi_vuln?sslmode=require&token=secret");
+  assert.deepEqual(target, { host: "db.example.com", port: "25060", database: "gmi_vuln" });
+  assert.ok(!JSON.stringify(target).includes("secret"));
 });

@@ -1,4 +1,5 @@
 import pg from "pg";
+import { safeConnectionTarget } from "../lib/db/connection-target.mjs";
 import { collectSnapshotInventory } from "../lib/db/snapshot-inventory.mjs";
 
 if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required.");
@@ -12,7 +13,7 @@ try {
   const client = await pool.connect();
   try {
     const inventory = await collectSnapshotInventory(client);
-    console.log(JSON.stringify(inventory, null, 2));
+    console.log(JSON.stringify({ connectionTarget: safeConnectionTarget(process.env.DATABASE_URL), ...inventory }, null, 2));
   } finally {
     client.release();
   }

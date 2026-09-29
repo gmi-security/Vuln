@@ -4,7 +4,7 @@ This is the evidence checklist for moving Vuln's core state from `vuln_store` sn
 
 ## Read-only snapshot inventory
 
-On the Droplet, in `/opt/vuln`, run the command below with the existing server configuration. It uses a read-only repeatable-read transaction, reads bucket lengths without transferring JSONB payloads, and prints no credentials:
+On the Droplet, in `/opt/vuln`, run the command below with the existing server configuration after this branch's files are available there. It uses a read-only repeatable-read transaction, reads bucket lengths without transferring JSONB payloads, and prints no credentials. The output also identifies the database, role, schema, PostgreSQL version, and relevant table owners and sizes:
 
 ```sh
 node --env-file=.env.local scripts/inventory-db.mjs
