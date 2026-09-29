@@ -3,7 +3,7 @@ import { dashboardConnectionRevision, verifyAgainstCrowdStrike } from "./elastic
 import { setGroupTicketPriority } from "./patch-group-ticket-store";
 import { cwDefaultOpenStatus, cwAddTicketNote, cwRequest, cwPrioritiesBySort, type CWOption } from "./connectwise-client";
 import { targetPriorityFor } from "./group-ticket-priority";
-import { runWithConcurrency } from "./ticket-status-sync";
+import { runWithConcurrency, syncTable } from "./ticket-status-sync";
 import { elasticVulnEnabled } from "./elastic-vuln-server";
 import { ATLAS_REPORTING_COMPANY_ID } from "./reporting-direct-sources";
 import type { PatchGroup } from "./patch-request";
@@ -121,6 +121,24 @@ export async function validateClosedGroupTickets(): Promise<Counts> {
   return { checked: rows.length, reopened, confirmedFixed, needsManualUnmerge, errors };
 }
 
+// A ticket closed in ConnectWise doesn't reach validateClosedGroupTickets
+// until our own tracker's closed flag catches up with it -- previously that
+// only happened on ticket-status-sync.ts's own 15-minute pass, so a ticket
+// closed without a verified fix could sit looking closed to the client for
+// up to two full sync cycles before this reopened it. This refreshes just
+// the pilot's own tickets immediately before validating, so "closed"
+// effectively means "closed and no rescan has found the CVE since" rather
+// than "closed until the next slow sync notices" -- a closure without a
+// verified fix behind it gets caught and reversed on this same pass.
+export async function syncAndValidateClosedGroupTickets(): Promise<Counts & { synced: number }> {
+  const saved = await savedConnection().catch(() => null);
+  if (!saved) return { checked: 0, reopened: 0, confirmedFixed: 0, needsManualUnmerge: 0, errors: 0, synced: 0 };
+  const db = await patchTicketDatabase();
+  const sync = await syncTable(db, "patch_group_ticket_requests", saved.target, saved.value);
+  const validation = await validateClosedGroupTickets();
+  return { ...validation, synced: sync.updated };
+}
+
 const runtime = globalThis as typeof globalThis & { __groupClosureValidation?: { timer?: ReturnType<typeof setInterval>; working?: Promise<void> } };
 const state = runtime.__groupClosureValidation ??= {};
 
@@ -128,12 +146,15 @@ export function startClosureValidationScheduler(): void {
   if (state.timer || !elasticVulnEnabled() || process.env.VULN_DISABLE_SCHEDULER === "true") return;
   const trigger = () => {
     if (state.working) return;
-    state.working = validateClosedGroupTickets().then(
+    state.working = syncAndValidateClosedGroupTickets().then(
       () => {},
       (err) => console.error("[group-closure-validation] Could not complete:", err instanceof Error ? err.message : err),
     ).finally(() => { state.working = undefined; });
   };
-  state.timer = setInterval(trigger, 15 * 60_000);
+  // Tighter than the general 15-minute sync schedulers on purpose: this is
+  // the loop that stands between a premature closure and a client seeing it
+  // as done, so the gap needs to be minutes, not up to half an hour.
+  state.timer = setInterval(trigger, 5 * 60_000);
   state.timer.unref();
   trigger();
 }

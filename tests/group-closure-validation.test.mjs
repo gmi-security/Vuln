@@ -59,7 +59,7 @@ function fakeDb({ closedRows, ticketRows = {} }) {
   };
 }
 
-async function loadValidation({ db, savedConnection, dashboardConnectionRevision, verifyAgainstCrowdStrike, cwDefaultOpenStatus, cwAddTicketNote, cwRequest, cwPrioritiesBySort, setGroupTicketPriority }) {
+async function loadValidation({ db, savedConnection, dashboardConnectionRevision, verifyAgainstCrowdStrike, cwDefaultOpenStatus, cwAddTicketNote, cwRequest, cwPrioritiesBySort, setGroupTicketPriority, syncTable }) {
   return loader({
     "./patch-ticket-store": { patchTicketDatabase: async () => db, savedConnection: savedConnection ?? (async () => ({ revision: 7, value: {}, target: "cw-1" })) },
     "./elastic-dashboard-store": {
@@ -75,7 +75,7 @@ async function loadValidation({ db, savedConnection, dashboardConnectionRevision
       cwRequest: cwRequest ?? (async () => { throw new Error("not expected to be called"); }),
       cwPrioritiesBySort: cwPrioritiesBySort ?? (async () => []),
     },
-    "./ticket-status-sync": { runWithConcurrency },
+    "./ticket-status-sync": { runWithConcurrency, syncTable: syncTable ?? (async () => ({ checked: 0, updated: 0, errors: 0 })) },
     "./elastic-vuln-server": { elasticVulnEnabled: () => false },
   })("lib/group-closure-validation.ts");
 }
@@ -262,4 +262,27 @@ test("no CrowdStrike connection configured leaves candidates checked but nothing
   const result = await validate.validateClosedGroupTickets();
   assert.deepEqual(result, { checked: 1, reopened: 0, confirmedFixed: 0, needsManualUnmerge: 0, errors: 0 });
   assert.equal(verifyCalled, false);
+});
+
+test("syncAndValidateClosedGroupTickets refreshes ConnectWise status before validating, so a ticket closed since the last slow sync is still caught this pass", async () => {
+  const db = fakeDb({ closedRows: [baseRow], ticketRows: { a: { ticket_id: 555, cw_target: "cw-1" } } });
+  const calls = [];
+  const validate = await loadValidation({
+    db,
+    syncTable: async () => { calls.push("sync"); return { checked: 3, updated: 1, errors: 0 }; },
+    verifyAgainstCrowdStrike: async () => { calls.push("validate"); return { checkedAt: "2026-09-28T00:00:00.000Z", stillOpenHosts: ["host-1"] }; },
+    cwDefaultOpenStatus: async () => ({ id: 42, name: "New" }),
+    cwAddTicketNote: async () => {},
+    cwRequest: async () => ({}),
+  });
+  const result = await validate.syncAndValidateClosedGroupTickets();
+  assert.deepEqual(result, { checked: 1, reopened: 1, confirmedFixed: 0, needsManualUnmerge: 0, errors: 0, synced: 1 });
+  assert.deepEqual(calls, ["sync", "validate"]);
+});
+
+test("syncAndValidateClosedGroupTickets with no ConnectWise connection does nothing", async () => {
+  const db = fakeDb({ closedRows: [] });
+  const validate = await loadValidation({ db, savedConnection: async () => { throw new Error("not configured"); } });
+  const result = await validate.syncAndValidateClosedGroupTickets();
+  assert.deepEqual(result, { checked: 0, reopened: 0, confirmedFixed: 0, needsManualUnmerge: 0, errors: 0, synced: 0 });
 });
