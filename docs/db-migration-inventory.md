@@ -30,6 +30,14 @@ The active snapshot source is sharded `vuln_store`, last updated at `2026-09-29T
 
 `vuln_store` occupies 158,826,496 bytes including indexes/TOAST. The frozen legacy `vuln_snapshot` occupies 21,741,568 bytes. `spotlight_import_records` exists and occupies 832,913,408 bytes, but table size does not establish an exact active record count or a completed Atlas generation. The existing dashboard job/query, ticket request, reporting queue, trend and Spotlight tables are present in this same database. The inventory alone cannot prove whether the running dashboard is using the `DATABASE_URL` fallback or a dedicated URL pointing to the same database.
 
+The operator later reported `spotlight.active: []` and `spotlight.running: []`. Thus no Spotlight generation is currently promoted and no database run is marked running, despite the records table occupying space. The next read-only diagnostic is the recent run history, including stored failure messages:
+
+```sh
+node --env-file=/opt/vuln/.env.local scripts/spotlight-run-diagnostic.mjs
+```
+
+Run this from `/opt/vuln-inventory` after updating that checkout. It does not count or expose record payloads and makes no database changes. Do not promote or remove any stored generation based on table size alone.
+
 This is an observed baseline, not a cutover reconciliation. Snapshot contents may have changed since the command ran; the exact Spotlight active count, backup restore, ID/relationship audit, worker ownership and final write-freeze timing remain open.
 
 ## Production facts to record before backfill
