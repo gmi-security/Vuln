@@ -67,6 +67,59 @@ test("Spotlight query retries a transient 500 and imports the returned finding",
   });
 });
 
+test("Spotlight renews an expired token on a later query page without losing earlier findings", async () => {
+  let tokenRequests = 0;
+  let expiredPageAttempts = 0;
+  await withFetch((url, init) => {
+    if (url.includes("/oauth2/token")) return json({ access_token: `token-${++tokenRequests}` });
+    const request = new URL(url);
+    const authorization = init.headers.Authorization;
+    if (request.pathname.includes("/spotlight/queries/vulnerabilities/v1")) {
+      if (!request.searchParams.has("after")) return json({ resources: ["source-1"], meta: { pagination: { after: "next", total: 2 } } });
+      expiredPageAttempts++;
+      if (authorization === "Bearer token-1") return new Response("expired", { status: 401 });
+      assert.equal(authorization, "Bearer token-2");
+      return json({ resources: ["source-2"], meta: { pagination: { after: "", total: 2 } } });
+    }
+    if (request.pathname.includes("/spotlight/entities/vulnerabilities/v2")) {
+      assert.equal(authorization, "Bearer token-2");
+      return json({ resources: request.searchParams.getAll("ids").map(id => ({
+        id, cve: { id: "CVE-2026-1234" }, host_info: { hostname: "atlas-host" },
+      })) });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  }, async () => {
+    const result = await spotlightListFindings(atlas);
+    assert.deepEqual(result.findings.map(finding => finding.id), ["source-1", "source-2"]);
+    assert.equal(tokenRequests, 2);
+    assert.equal(expiredPageAttempts, 2);
+  });
+});
+
+test("concurrent Spotlight hydration shares one token renewal", async () => {
+  let tokenRequests = 0;
+  await withFetch((url, init) => {
+    if (url.includes("/oauth2/token")) return json({ access_token: `token-${++tokenRequests}` });
+    const request = new URL(url);
+    if (request.pathname.includes("/spotlight/queries/vulnerabilities/v1")) {
+      const page = Number(request.searchParams.get("after") || 0);
+      return json({ resources: [`source-${page}`], meta: { pagination: { after: page < 7 ? String(page + 1) : "", total: 8 } } });
+    }
+    if (request.pathname.includes("/spotlight/entities/vulnerabilities/v2")) {
+      if (init.headers.Authorization === "Bearer token-1") return new Response("expired", { status: 401 });
+      assert.equal(init.headers.Authorization, "Bearer token-2");
+      return json({ resources: request.searchParams.getAll("ids").map(id => ({
+        id, cve: { id: "CVE-2026-1234" }, host_info: { hostname: id },
+      })) });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  }, async () => {
+    const result = await spotlightListFindings(atlas);
+    assert.equal(result.findings.length, 8);
+    assert.equal(tokenRequests, 2);
+  });
+});
+
 test("hydration never exceeds the concurrency cap even with hundreds of batches", async () => {
   let inFlight = 0, maxInFlight = 0;
   await withFetch(

@@ -254,8 +254,24 @@ export type SpotlightListResult = { findings: SpotlightFinding[]; truncated: boo
 // CrowdStrike Spotlight API: query open vuln ids and yield bounded hydrated
 // batches. Requires scope: spotlight-vulnerabilities:read.
 export async function* spotlightFindingBatches(config: FalconTenant): AsyncGenerator<SpotlightFinding[]> {
-  const token = await falconToken(config);
-  const authHeader = { Authorization: `Bearer ${token}`, Accept: "application/json" };
+  let token = await falconToken(config);
+  let renewal: Promise<string> | undefined;
+  async function spotlightFetch(url: string): Promise<Response> {
+    const usedToken = token;
+    const request = (bearer: string) => timedFetch(url, {
+      headers: { Authorization: `Bearer ${bearer}`, Accept: "application/json" }, cache: "no-store",
+    });
+    const response = await request(usedToken);
+    if (response.status !== 401) return response;
+    await response.body?.cancel().catch(() => {});
+    if (token === usedToken) {
+      renewal ??= falconToken(config)
+        .then(nextToken => { token = nextToken; return nextToken; })
+        .finally(() => { renewal = undefined; });
+      await renewal;
+    }
+    return request(token);
+  }
 
   const parseResource = (v: any): SpotlightFinding => {
     const id = String(v?.id ?? "").trim();
@@ -294,7 +310,7 @@ export async function* spotlightFindingBatches(config: FalconTenant): AsyncGener
     const results = await runWithConcurrency(batches, 8, async (batch) => {
       const url = new URL(`${config.baseUrl}/spotlight/entities/vulnerabilities/v2`);
       for (const id of batch) url.searchParams.append("ids", id);
-      const r = await timedFetch(url.toString(), { headers: authHeader, cache: "no-store" });
+      const r = await spotlightFetch(url.toString());
       if (!r.ok) throw new Error(`Spotlight entities ${r.status}: ${await r.text().catch(() => r.statusText)}`);
       const j: any = await r.json();
       if (!Array.isArray(j?.resources) || j.resources.length !== batch.length)
@@ -317,7 +333,7 @@ export async function* spotlightFindingBatches(config: FalconTenant): AsyncGener
     url.searchParams.set("filter", "status:'open',status:'reopen'");
     url.searchParams.set("limit", "400");
     if (after) url.searchParams.set("after", after);
-    const r = await timedFetch(url.toString(), { headers: authHeader, cache: "no-store" });
+    const r = await spotlightFetch(url.toString());
     if (!r.ok) throw new Error(`Spotlight query ${r.status}: ${await r.text().catch(() => r.statusText)}`);
     const j: any = await r.json();
     if (!Array.isArray(j?.resources) || j.resources.some((id: unknown) => typeof id !== "string" || !id))

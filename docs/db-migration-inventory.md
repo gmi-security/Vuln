@@ -40,6 +40,8 @@ Run this from `/opt/vuln-inventory` after updating that checkout. It does not co
 
 The diagnostic returned one Atlas run (`f1faff2c-9b2d-4f4b-ad59-d0021d9b5a73`), started at `2026-09-29T15:02:45.696Z` and failed at `15:11:18.761Z`. Its saved error was a CrowdStrike Spotlight query HTTP 500 with trace ID `f5ab25d6-f24a-4bc0-a007-f1a8fb68b5fe`. No run was active. The importer previously retried 429, 502, 503 and 504, but treated a 500 as immediately fatal. A bounded retry for 500 is being added; this does not establish whether the vendor's error was transient. A persistent 500 will still fail the run after the retry limit and should be escalated to CrowdStrike with the trace ID.
 
+The replacement Atlas run (`2bb494ad-10ba-4a3f-a4c5-0f1b39dcb566`) advanced to 284,800 fetched and stored records, then failed at `2026-09-29T19:07:15.813Z` with Spotlight query HTTP 401, `access denied, invalid bearer token` (trace ID `7c164bc2-d137-4712-882c-2f1b952accde`). The importer acquired its token only once at run start. Its long pagination therefore outlived the token. Spotlight query and hydration requests now renew the token once on 401 and retry the same request; concurrent hydration shares the renewal. A second 401 remains an error. No generation has yet been promoted in the supplied production evidence.
+
 This is an observed baseline, not a cutover reconciliation. Snapshot contents may have changed since the command ran; the exact Spotlight active count, backup restore, ID/relationship audit, worker ownership and final write-freeze timing remain open.
 
 ## Production facts to record before backfill
