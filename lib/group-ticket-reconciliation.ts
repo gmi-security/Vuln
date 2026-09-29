@@ -367,8 +367,9 @@ async function runCloseAndRecut(db: Awaited<ReturnType<typeof patchTicketDatabas
   const cvesByTenant = new Map<string, Set<string>>();
   for (const ticketId of KNOWN_MERGED_ATLAS_TICKET_IDS) {
     checked++;
+    let found: Awaited<ReturnType<typeof findTrackedRow>> = null;
     try {
-      const found = await findTrackedRow(db, ticketId, saved.target);
+      found = await findTrackedRow(db, ticketId, saved.target);
       if (!found) { unresolved++; continue; } // already superseded by a previous pass, or not actually tracked yet -- leave it alone
       const { table, row } = found;
       if (!row.boardId) { unresolved++; continue; } // no board on record to look up a closed status for -- do not guess
@@ -383,8 +384,15 @@ async function runCloseAndRecut(db: Awaited<ReturnType<typeof patchTicketDatabas
       const cves = cvesByTenant.get(row.tenantId) ?? new Set<string>();
       for (const cve of row.cves) cves.add(cve);
       cvesByTenant.set(row.tenantId, cves);
-    } catch {
+    } catch (err) {
       errors++; // one ticket's lookup or ConnectWise call failing must not block the rest
+      // 38/38 failing with nothing recorded meant no way to tell why -- see
+      // the same fix already shipped for closure-validation. Best-effort:
+      // never let a failure writing this mask the original error.
+      if (found) {
+        const message = err instanceof Error ? err.message : String(err);
+        await db.query(`UPDATE ${found.table} SET last_error=$2,updated_at=now() WHERE id=$1`, [found.row.id, message]).catch(() => {});
+      }
     }
   }
   if (!cvesByTenant.size) return { checked, closed, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved, errors };

@@ -501,6 +501,8 @@ test("one ticket's ConnectWise close failing does not block the rest", async () 
   const result = await reconciliation.closeAndRecutMergedAtlasTickets();
   assert.equal(result.closed, 1);
   assert.equal(result.errors, 1);
+  const update = db.calls.find((c) => c.sql.includes("SET last_error") && c.sql.includes("patch_ticket_requests"));
+  assert.deepEqual(update.params, ["draft-parent", "ConnectWise rejected the request"]);
 });
 
 test("closeAndRecutMergedAtlasTickets: a pass already running elsewhere backs off instead of duplicating work", async () => {
