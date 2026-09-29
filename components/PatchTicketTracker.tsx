@@ -33,6 +33,8 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
   const [autoCreateResult, setAutoCreateResult] = useState("");
   const [validating, setValidating] = useState(false);
   const [validateResult, setValidateResult] = useState("");
+  const [findingUntracked, setFindingUntracked] = useState(false);
+  const [untracked, setUntracked] = useState<{ id: number; summary: string; status: string; closed: boolean; url: string }[] | null>(null);
 
   const reload = useCallback(async () => {
     setLoading(true); setError("");
@@ -79,6 +81,20 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
     finally { setValidating(false); }
   }
 
+  // A ticket created by pasting draft text directly into ConnectWise, rather
+  // than through this app's own "Create ticket" action, has no tracked row
+  // and is invisible to every automated check above -- this diffs the live
+  // ConnectWise board against what's tracked so those can be found and
+  // handled by hand instead of discovered one at a time.
+  async function findUntrackedNow() {
+    setFindingUntracked(true); setError("");
+    try {
+      const result = await dashboardRequest<{ tickets: { id: number; summary: string; status: string; closed: boolean; url: string }[] }>("patch-group-tickets/untracked");
+      setUntracked(result.tickets);
+    } catch (e) { setError(e instanceof Error ? e.message : "Could not check for untracked tickets."); }
+    finally { setFindingUntracked(false); }
+  }
+
   const buckets = { "cut-open": 0, "cut-closed": 0, attention: 0, draft: 0 };
   let devicesCovered = 0;
   const distinctCves = new Set<string>();
@@ -96,12 +112,22 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
       <div className="flex flex-wrap gap-2">
         <button type="button" className={styles.button} disabled={autoCreating} onClick={() => void runAutoCreateNow()}>{autoCreating ? "Running…" : "Run auto-create now"}</button>
         <button type="button" className={styles.button} disabled={validating} onClick={() => void runValidateClosuresNow()}>{validating ? "Validating…" : "Validate closures now"}</button>
+        <button type="button" className={styles.button} disabled={findingUntracked} onClick={() => void findUntrackedNow()}>{findingUntracked ? "Checking…" : "Find untracked Atlas tickets"}</button>
         <button type="button" className={styles.button} disabled={loading} onClick={() => void reload()}>{loading ? "Loading…" : "Refresh"}</button>
       </div>
     </div>
     <p className={styles.resultNote}>Customer-linked consolidation plans prepared for review and their ConnectWise ticket status.</p>
     {autoCreateResult && <p role="status" className={`${styles.resultNote} mt-1`}>{autoCreateResult}</p>}
     {validateResult && <p role="status" className={`${styles.resultNote} mt-1`}>{validateResult}</p>}
+    {untracked && (untracked.length
+      ? <div className="mt-2 rounded-lg border border-amber-800/60 bg-amber-950/10 p-3">
+          <p className={styles.resultNote}>{untracked.length} Atlas ticket{untracked.length === 1 ? "" : "s"} in ConnectWise have no tracked row -- not created through this app, so no automation here can see or act on {untracked.length === 1 ? "it" : "them"}. Handle these by hand:</p>
+          <ul className="mt-2 space-y-1 text-sm">{untracked.map(t => <li key={t.id}>
+            <a href={t.url} target="_blank" rel="noopener noreferrer" className="text-sky-300 underline">#{t.id}</a>
+            {" — "}{t.status}{t.closed ? " (closed)" : ""}{t.summary ? ` — ${t.summary}` : ""}
+          </li>)}</ul>
+        </div>
+      : <p role="status" className={`${styles.resultNote} mt-1`}>Every Atlas ticket in ConnectWise is tracked by this app.</p>)}
     <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-5">
       <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3"><div className="text-2xl font-semibold text-white">{total}</div><div className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Prepared</div></div>
       <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3"><div className="text-2xl font-semibold text-white">{cut}</div><div className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Tickets cut</div></div>
