@@ -37,6 +37,8 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
   const [untracked, setUntracked] = useState<{ id: number; summary: string; status: string; closed: boolean; url: string }[] | null>(null);
   const [adopting, setAdopting] = useState(false);
   const [adoptResult, setAdoptResult] = useState("");
+  const [abandoning, setAbandoning] = useState(false);
+  const [abandonResult, setAbandonResult] = useState("");
 
   const reload = useCallback(async () => {
     setLoading(true); setError("");
@@ -112,6 +114,22 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
     finally { setAdopting(false); }
   }
 
+  // For an untracked ticket that's already closed with no fix verified (a
+  // Combined/merged ticket closed before patching, for example), adoption
+  // has nothing to reopen it into -- this writes it off instead and queues
+  // its CVEs for a fresh ticket, skipping any CVE a different tracked
+  // ticket already covers.
+  async function abandonUntrackedNow() {
+    setAbandoning(true); setAbandonResult(""); setError("");
+    try {
+      const result = await dashboardRequest<{ checked: number; abandoned: number; cvesReplaced: number; cvesNeedsReview: number; cvesAlreadyCovered: number; unresolved: number; errors: number }>("patch-group-tickets/abandon-untracked", { method: "POST" });
+      setAbandonResult(`Checked ${result.checked} closed untracked ticket${result.checked === 1 ? "" : "s"} · abandoned ${result.abandoned} · ${result.cvesReplaced} CVE${result.cvesReplaced === 1 ? "" : "s"} queued for a fresh ticket · ${result.cvesAlreadyCovered} already covered by another tracked ticket · ${result.cvesNeedsReview} need manual review (single CVE, no group to join)${result.unresolved ? ` · ${result.unresolved} had no matching draft` : ""}${result.errors ? ` · ${result.errors} failed` : ""}.`);
+      setUntracked(null);
+      await reload();
+    } catch (e) { setError(e instanceof Error ? e.message : "Could not abandon untracked tickets."); }
+    finally { setAbandoning(false); }
+  }
+
   const buckets = { "cut-open": 0, "cut-closed": 0, attention: 0, draft: 0 };
   let devicesCovered = 0;
   const distinctCves = new Set<string>();
@@ -131,6 +149,7 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
         <button type="button" className={styles.button} disabled={validating} onClick={() => void runValidateClosuresNow()}>{validating ? "Validating…" : "Validate closures now"}</button>
         <button type="button" className={styles.button} disabled={findingUntracked} onClick={() => void findUntrackedNow()}>{findingUntracked ? "Checking…" : "Find untracked Atlas tickets"}</button>
         <button type="button" className={styles.button} disabled={adopting} onClick={() => void adoptUntrackedNow()}>{adopting ? "Adopting…" : "Adopt untracked tickets"}</button>
+        <button type="button" className={styles.button} disabled={abandoning} onClick={() => void abandonUntrackedNow()}>{abandoning ? "Abandoning…" : "Abandon closed untracked + cut replacements"}</button>
         <button type="button" className={styles.button} disabled={loading} onClick={() => void reload()}>{loading ? "Loading…" : "Refresh"}</button>
       </div>
     </div>
@@ -138,9 +157,10 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
     {autoCreateResult && <p role="status" className={`${styles.resultNote} mt-1`}>{autoCreateResult}</p>}
     {validateResult && <p role="status" className={`${styles.resultNote} mt-1`}>{validateResult}</p>}
     {adoptResult && <p role="status" className={`${styles.resultNote} mt-1`}>{adoptResult} Adopted tickets will be reopened on the next "Validate closures now" run.</p>}
+    {abandonResult && <p role="status" className={`${styles.resultNote} mt-1`}>{abandonResult} New drafts appear below under "Awaiting review"; Critical/High ones are cut automatically by "Run auto-create now".</p>}
     {untracked && (untracked.length
       ? <div className="mt-2 rounded-lg border border-amber-800/60 bg-amber-950/10 p-3">
-          <p className={styles.resultNote}>{untracked.length} Atlas ticket{untracked.length === 1 ? "" : "s"} in ConnectWise have no tracked row -- not created through this app, so no automation here can see or act on {untracked.length === 1 ? "it" : "them"} yet. Click "Adopt untracked tickets" to relink the ones whose original draft can still be matched, or handle these by hand:</p>
+          <p className={styles.resultNote}>{untracked.length} Atlas ticket{untracked.length === 1 ? "" : "s"} in ConnectWise have no tracked row -- not created through this app, so no automation here can see or act on {untracked.length === 1 ? "it" : "them"} yet. Click "Adopt untracked tickets" to relink the ones whose original draft can still be matched. For any that are already closed with no fix behind them, "Abandon closed untracked + cut replacements" writes them off and queues their CVEs for a fresh ticket instead. Otherwise, handle these by hand:</p>
           <ul className="mt-2 space-y-1 text-sm">{untracked.map(t => <li key={t.id}>
             <a href={t.url} target="_blank" rel="noopener noreferrer" className="text-sky-300 underline">#{t.id}</a>
             {" — "}{t.status}{t.closed ? " (closed)" : ""}{t.summary ? ` — ${t.summary}` : ""}

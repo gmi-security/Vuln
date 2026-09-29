@@ -1,6 +1,11 @@
-import { patchTicketDatabase, savedConnection } from "./patch-ticket-store";
+import { randomUUID } from "node:crypto";
+import { patchTicketDatabase, savedConnection, activeTicketedPairs, persistPreparedPatch } from "./patch-ticket-store";
+import { persistPreparedGroups } from "./patch-group-ticket-store";
+import { dashboardConnectionRevision, prepareConsolidation, preparePatchRequest } from "./elastic-dashboard-store";
 import { cwRequest, cwId, ticketUrl, type CWRecord, type ConnectWiseConnection } from "./connectwise-client";
 import { ATLAS_REPORTING_COMPANY_ID } from "./reporting-direct-sources";
+import { DashboardError } from "./elastic-dashboard";
+import type { PatchGroup } from "./patch-request";
 
 export type UntrackedTicket = { id: number; summary: string; status: string; closed: boolean; url: string };
 const ACTOR = "ticket-reconciliation";
@@ -116,4 +121,88 @@ export async function adoptManualAtlasTickets(): Promise<AdoptResult> {
     }
   }
   return { checked, adopted, noMatch, errors };
+}
+
+export type AbandonResult = { checked: number; abandoned: number; cvesReplaced: number; cvesNeedsReview: number; cvesAlreadyCovered: number; unresolved: number; errors: number };
+// buildPatchRequest/buildPatchConsolidation raise exactly this shape of
+// DashboardError when a fresh CrowdStrike collection finds nothing left to
+// act on -- either no open findings at all (already patched since the
+// original ticket was cut) or every finding already sits under a different
+// active ticket. Both are a correct, unsurprising "nothing to replace"
+// outcome, not a failure, so they're counted separately from real errors
+// (auth/network/connection-revision failures) instead of hiding either one
+// inside a generic error count.
+function isNothingLeftToReplace(error: unknown): boolean {
+  return error instanceof DashboardError && /no open\/reopened findings|already has an active ticket in progress/i.test(error.message);
+}
+
+// For a ticket that's untracked *and* already closed (a ticket adoption
+// couldn't link to a still-pending draft, or a human never intends to work
+// it as-is -- e.g. one of the 37 Combined Tickets closed before patching
+// happened), there is no ticket to reopen or reconsolidate. This writes it
+// off instead: the originating draft (found the same way adoption finds
+// it, via the attachment's UUID) is marked abandoned with a permanent
+// record of why, and every CVE it covered is queued for a brand new
+// consolidation -- using the same live CrowdStrike collection and the same
+// already-ticketed exclusion (activeTicketedPairs) every other ticket in
+// this app goes through, so a CVE that's already covered by a different,
+// still-open tracked ticket (the parent it may have been merged into)
+// never gets a duplicate. Two or more CVEs land in a normal group draft,
+// which the existing auto-create pass turns into a real ticket on its own;
+// a single leftover CVE has no group auto-create path, so it's left as a
+// single-CVE draft for a human to finish. A ticket with no resolvable
+// origin is left completely untouched, same as adoptManualAtlasTickets.
+export async function abandonAndReplaceUntrackedAtlasTickets(): Promise<AbandonResult> {
+  const { saved, tracked, rows } = await liveAtlasTickets();
+  const db = await patchTicketDatabase();
+  let checked = 0, abandoned = 0, unresolved = 0, errors = 0;
+  const cvesByTenant = new Map<string, Set<string>>();
+  for (const row of rows) {
+    if (!cwId(row.id) || tracked.has(row.id) || row.closedFlag !== true) continue; // only closed, untracked tickets are "lost"
+    checked++;
+    try {
+      const uuid = await draftUuidForTicket(saved.value, row.id);
+      if (!uuid) { unresolved++; continue; }
+      const draft = (await db.query("SELECT packet, tenant_id FROM patch_group_ticket_requests WHERE id=$1", [uuid])).rows[0] as
+        { packet: PatchGroup; tenant_id: string } | undefined;
+      if (!draft?.packet?.cves?.length) { unresolved++; continue; }
+      const result = await db.query(`UPDATE patch_group_ticket_requests SET state='abandoned',ticket_id=$2,ticket_url=$3,ticket_status=$4,closed=true,
+        cw_target=$5,cw_revision=$6,last_error='Closed in ConnectWise before a fix was verified and treated as lost; its CVEs were queued for a fresh ticket where not already covered elsewhere.',updated_at=now()
+        WHERE id=$1 AND ticket_id IS NULL`,
+        [uuid, row.id, ticketUrl(saved.value, row.id), typeof row.status?.name === "string" ? row.status.name : "Unknown", saved.target, saved.revision]);
+      if (!result.rowCount) { unresolved++; continue; } // already adopted or abandoned by a concurrent pass -- leave it alone
+      await db.query("INSERT INTO patch_group_ticket_audit(request_id,actor,action) VALUES($1,$2,'ticket.abandoned')", [uuid, ACTOR]);
+      abandoned++;
+      const cves = cvesByTenant.get(draft.tenant_id) ?? new Set<string>();
+      for (const cve of draft.packet.cves) cves.add(cve);
+      cvesByTenant.set(draft.tenant_id, cves);
+    } catch {
+      errors++; // one ticket's lookup or update failing must not block the rest
+    }
+  }
+  if (!cvesByTenant.size) return { checked, abandoned, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved, errors };
+  const revision = await dashboardConnectionRevision("crowdstrike");
+  if (revision === null) return { checked, abandoned, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved, errors }; // no CrowdStrike connection to re-collect from -- abandonment still stands, replacement waits
+  const alreadyTicketed = await activeTicketedPairs();
+  let cvesReplaced = 0, cvesNeedsReview = 0, cvesAlreadyCovered = 0;
+  for (const [tenantId, cveSet] of cvesByTenant) {
+    const cves = [...cveSet];
+    try {
+      if (cves.length >= 2) {
+        const consolidation = await prepareConsolidation({ cves, tenantId, appCompanyId: ATLAS_REPORTING_COMPANY_ID }, revision, alreadyTicketed);
+        await persistPreparedGroups(consolidation, ACTOR, revision);
+        cvesReplaced += cves.length;
+      } else {
+        // No group to consolidate into and no single-CVE auto-create path --
+        // drafted for a human to review and cut by hand.
+        const patchRequest = await preparePatchRequest({ cve: cves[0], tenantId }, revision, alreadyTicketed);
+        await persistPreparedPatch(randomUUID(), patchRequest, ACTOR, revision);
+        cvesNeedsReview++;
+      }
+    } catch (err) {
+      if (isNothingLeftToReplace(err)) cvesAlreadyCovered += cves.length;
+      else errors++; // one tenant's re-collection failing must not block the rest
+    }
+  }
+  return { checked, abandoned, cvesReplaced, cvesNeedsReview, cvesAlreadyCovered, unresolved, errors };
 }
