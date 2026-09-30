@@ -51,6 +51,26 @@ async function mockHttp(replies, work) {
 const auth = { access_token: "fake-access-token" };
 
 const cveOptions = { ...options, view: "cve-devices", measure: "hosts", groupBy: "cve", top: 10 };
+
+test("CVE tiles accept larger limits without expanding other query scopes", () => {
+  for (const top of [250, 500]) {
+    assert.equal(contract.parseQueryInput({ ...input, crowdstrike: { ...cveOptions, top } }).crowdstrike.top, top);
+    assert.throws(() => contract.parseQueryInput({ ...input, crowdstrike: { ...options, top } }), /top limit/);
+  }
+  assert.throws(() => contract.parseQueryInput({ ...input, crowdstrike: { ...cveOptions, top: 501 } }), /top limit/);
+});
+
+test("a 500-CVE table retains severity and complete device ranking beyond row 100", () => {
+  const items = Array.from({ length: 510 }, (_, i) => raw(`finding-${i}`, {
+    aid: `host-${i}`, cve: { id: `CVE-2026-${1000 + i}`, severity: i < 5 ? "CRITICAL" : "HIGH" },
+  }));
+  items.push(raw("extra-device", { aid: "second-host", cve: { id: "CVE-2026-1509", severity: "HIGH" } }));
+  const result = adapter.summarizeVulnerabilities(items.map(adapter.normalizeVulnerability), { ...cveOptions, top: 500 });
+  assert.equal(result.rows.length, 500);
+  assert.equal(new Set(result.rows.map(row => row[0])).size, 500);
+  assert.ok(result.rows.slice(0, 5).every(row => row[1] === "CRITICAL"));
+  assert.deepEqual(result.rows[5].slice(0, 4), ["CVE-2026-1509", "HIGH", 2, 2]);
+});
 test("a transient GET failure retries the same page without restarting collection", async () => {
   const original = globalThis.fetch, calls = [];
   let nextPageAttempts = 0;

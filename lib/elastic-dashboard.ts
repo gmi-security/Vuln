@@ -20,6 +20,9 @@ export type CrowdStrikeOptions = {
 export const DEFAULT_CROWDSTRIKE: CrowdStrikeOptions = {
   dataset: "vulnerabilities", measure: "findings", groupBy: "none", top: 10, history: false,
 };
+export function crowdStrikeTopOptions(view?: CrowdStrikeOptions["view"]): number[] {
+  return view === "cve-devices" ? [10, 25, 50, 100, 250, 500] : [10, 25, 50, 100];
+}
 export type QueryInput = { query: string; source?: DashboardSource; crowdstrike?: CrowdStrikeOptions };
 export type QueryDefinition = QueryInput & {
   id: string;
@@ -64,7 +67,7 @@ export function parseQueryInput(value: unknown): QueryInput {
   if (options.view !== undefined && !["summary", "patch-worklist", "severity-counts", "cve-devices"].includes(options.view)) throw new DashboardError("Choose a supported vulnerability view.");
   if (!["findings", "cves", "hosts"].includes(options.measure) ||
       !["none", "host", "severity", "priority", "status", "cve"].includes(options.groupBy) ||
-      ![10, 25, 50, 100].includes(options.top) || typeof options.history !== "boolean") {
+      !crowdStrikeTopOptions(options.view).includes(options.top) || typeof options.history !== "boolean") {
     throw new DashboardError("Choose a valid measure, grouping, top limit, and history setting.");
   }
   if (options.history && options.groupBy !== "none") throw new DashboardError("Daily history requires no grouping. Use a separate tile for grouped results.");

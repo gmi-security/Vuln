@@ -18,7 +18,7 @@ import RiskDashboard from "@/components/RiskDashboard";
 import styles from "./QueryDashboard.module.css";
 import { OPEN_VULN_TREND } from "@/lib/elastic-query-templates";
 import { inputClass, PanelCard, selectClass } from "@/components/ui";
-import { DEFAULT_CROWDSTRIKE, canShowMetrics, isChartDisplay, numericColumn, suggestChart, type CrowdStrikeOptions, type DashboardSource, type DashboardQuery, type ElasticDashboard, type QueryDefinition, type QueryResult } from "@/lib/elastic-dashboard";
+import { DEFAULT_CROWDSTRIKE, crowdStrikeTopOptions, canShowMetrics, isChartDisplay, numericColumn, suggestChart, type CrowdStrikeOptions, type DashboardSource, type DashboardQuery, type ElasticDashboard, type QueryDefinition, type QueryResult } from "@/lib/elastic-dashboard";
 import type { SlaSettings } from "@/lib/types";
 
 type Draft = Omit<QueryDefinition, "id"> & { id?: string };
@@ -147,6 +147,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
   function updateCrowdStrike(options: Partial<CrowdStrikeOptions>) {
     if (!draft) return;
     const crowdstrike = { ...DEFAULT_CROWDSTRIKE, ...draft.crowdstrike, ...options };
+    if (!crowdStrikeTopOptions(crowdstrike.view).includes(crowdstrike.top)) crowdstrike.top = 100;
     if (crowdstrike.view === "patch-worklist" || crowdstrike.view === "severity-counts") {
       crowdstrike.history = false; crowdstrike.groupBy = "none"; crowdstrike.measure = "findings";
     }
@@ -324,7 +325,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
             </>}
             {(draft.crowdstrike?.view === "patch-worklist" || draft.crowdstrike?.groupBy !== "none") && <label className="text-sm text-zinc-300">{draft.crowdstrike?.view === "patch-worklist" ? "Top findings" : draft.crowdstrike?.view === "cve-devices" ? "Top CVEs" : "Top groups"}
               <select className={`${selectClass} mt-2 block`} value={draft.crowdstrike?.top} onChange={(event) => updateCrowdStrike({ top: Number(event.target.value) })}>
-                {[10, 25, 50, 100].map((value) => <option key={value} value={value}>{value}</option>)}
+                {crowdStrikeTopOptions(draft.crowdstrike?.view).map((value) => <option key={value} value={value}>{value}</option>)}
               </select>
             </label>}
           </div>

@@ -30,24 +30,34 @@ export default function QueryDashboardResults({ result, display, chart, prepareP
   result: QueryResult; display: QueryDefinition["display"]; chart?: QueryDefinition["chart"]; preparePatch?: boolean; companyId?: string;
 }) {
   const [selected, setSelected] = useState<{ cve: string; row?: QueryResult["rows"][number] } | null>(null);
-  const [consolidating, setConsolidating] = useState(false);
+  const [consolidating, setConsolidating] = useState<string[] | null>(null);
+  const [requestedPage, setRequestedPage] = useState(0);
+  const tableScroll = useRef<HTMLDivElement>(null);
   const dialog = useRef<HTMLDialogElement>(null);
   const consolidationDialog = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   const consolidationTitleId = useId();
   useEffect(() => { if (selected) dialog.current?.showModal(); }, [selected]);
   useEffect(() => { if (consolidating) consolidationDialog.current?.showModal(); }, [consolidating]);
-  // Dynamic to however many distinct CVEs the tile actually shows — bounded
-  // only by the tile's own top-N setting (max 100), which is also the
-  // consolidation endpoint's own ceiling, so this never has to truncate.
-  const consolidationCves = [...new Set(result.rows.flatMap((row) => row.filter((value): value is string => typeof value === "string" && /\bCVE-\d{4}-\d{4,19}\b/i.test(value)).map((value) => value.match(/CVE-\d{4}-\d{4,19}/i)![0].toUpperCase())))].slice(0, 100);
+  const pageSize = 50;
+  const pageCount = Math.max(1, Math.ceil(result.rows.length / pageSize));
+  const page = Math.min(requestedPage, pageCount - 1);
+  const pageRows = result.rows.slice(page * pageSize, (page + 1) * pageSize);
+  const cvesIn = (rows: QueryResult["rows"]) => [...new Set(rows.flatMap(row => row.flatMap(value =>
+    typeof value === "string" ? (value.match(/\bCVE-\d{4}-\d{4,19}\b/gi) ?? []).map(cve => cve.toUpperCase()) : [])))];
+  const allCves = cvesIn(result.rows);
+  const pageCves = cvesIn(pageRows);
+  function changePage(next: number) {
+    setRequestedPage(next);
+    tableScroll.current?.scrollTo({ top: 0 });
+  }
   const consolidationPanel = (
-    <dialog ref={consolidationDialog} className={styles.detail} aria-labelledby={consolidationTitleId} onClose={() => setConsolidating(false)} onClick={(event) => { if (event.target === event.currentTarget) consolidationDialog.current?.close(); }}>
+    <dialog ref={consolidationDialog} className={styles.detail} aria-labelledby={consolidationTitleId} onClose={() => setConsolidating(null)} onClick={(event) => { if (event.target === event.currentTarget) consolidationDialog.current?.close(); }}>
       <div className={styles.detailBody}>
         <div className={styles.detailTop}><span>Patch consolidation</span><button type="button" className={styles.button} onClick={() => consolidationDialog.current?.close()}><X size={15} />Close</button></div>
-        <h2 id={consolidationTitleId}>{consolidationCves.length} CVEs</h2>
-        <p className={styles.resultNote}>{consolidationCves.join(", ")}</p>
-        {consolidating && <PatchConsolidationPanel key={`${companyId}-${consolidationCves.join(",")}`} cves={consolidationCves} companyId={companyId} />}
+        <h2 id={consolidationTitleId}>{consolidating?.length ?? 0} CVEs</h2>
+        <p className={styles.resultNote}>{consolidating?.join(", ")}</p>
+        {consolidating && <PatchConsolidationPanel key={`${companyId}-${consolidating.join(",")}`} cves={consolidating} companyId={companyId} />}
       </div>
     </dialog>
   );
@@ -93,17 +103,18 @@ export default function QueryDashboardResults({ result, display, chart, prepareP
     return formatResultValue(value, name);
   }
   return <div>
-    {preparePatch && consolidationCves.length >= 2 && (
+    {preparePatch && allCves.length >= 2 && (
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[rgba(179,14,20,0.14)] bg-[#0a0a0a] px-4 py-3">
-        <p className="text-sm text-zinc-300">{consolidationCves.length} CVEs shown — see which patches cover the most of them.</p>
-        <button type="button" className={styles.button} onClick={() => setConsolidating(true)}>Build consolidated patch plan</button>
+        <p className="text-sm text-zinc-300">{allCves.length} CVEs loaded · {pageCves.length} on this page. Patch plans use this page only.</p>
+        <button type="button" className={styles.button} disabled={pageCves.length < 2 || pageCves.length > 100} onClick={() => setConsolidating([...pageCves])}>Build patch plan for this page</button>
+        {pageCves.length > 100 && <p className={styles.resultNote}>This page contains more than 100 distinct CVEs. Use a query with one CVE per row to build a patch plan.</p>}
       </div>
     )}
-    <div role="region" aria-label="Scrollable query results" tabIndex={0} className={styles.tableScroll}>
+    <div ref={tableScroll} role="region" aria-label="Scrollable query results" tabIndex={0} className={styles.tableScroll}>
       <table className={styles.table}>
         <caption className="sr-only">Dashboard query results</caption>
         <thead><tr>{result.columns.map((column) => <th key={column.name} scope="col" className={numericColumn(column.type) ? styles.number : undefined}>{columnLabel(column.name)}</th>)}</tr></thead>
-        <tbody>{result.rows.map((row, index) => <tr key={index}>
+        <tbody>{pageRows.map((row, index) => <tr key={page * pageSize + index}>
           {row.map((value, position) => <td key={position} className={numericColumn(result.columns[position].type) ? styles.number : undefined}>
             {typeof value === "string" && /\bCVE-\d{4}-\d{4,19}\b/i.test(value) ? <CveText text={value} onSelect={cve => setSelected({ cve, row })} /> :
               position === devicesIndex && typeof value === "number" ? <span className={styles.deviceValue}><span className={styles.miniTrack} aria-hidden="true"><span style={{ width: `${value / maxDevices * 100}%` }} /></span>{formatResultValue(value, result.columns[position].name)}</span> : cell(value, result.columns[position].name)}
@@ -111,8 +122,15 @@ export default function QueryDashboardResults({ result, display, chart, prepareP
         </tr>)}</tbody>
       </table>
     </div>
-    <p className={styles.resultNote}>{result.rows.length ? `${result.rows.length} rows · Scroll inside the table${hasCves ? " · Select a CVE for details" : ""}` : "The query returned no rows."}</p>
-    {result.truncated && <p className="mt-3 text-sm text-amber-300">Showing the first 100 rows. Narrow or aggregate the query to show the full result.</p>}
+    <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+      <p className={styles.resultNote} aria-live="polite">{result.rows.length ? `Rows ${page * pageSize + 1}–${Math.min((page + 1) * pageSize, result.rows.length)} of ${result.rows.length} loaded${hasCves ? " · Select a CVE for details" : ""}` : "The query returned no rows."}</p>
+      {pageCount > 1 && <nav aria-label="Table pages" className="flex items-center gap-2">
+        <button type="button" className={styles.button} disabled={page === 0} onClick={() => changePage(page - 1)}>Previous</button>
+        <span className={styles.resultNote}>Page {page + 1} of {pageCount}</span>
+        <button type="button" className={styles.button} disabled={page === pageCount - 1} onClick={() => changePage(page + 1)}>Next</button>
+      </nav>}
+    </div>
+    {result.truncated && <p className="mt-3 text-sm text-amber-300">Only the first {result.rows.length} result rows were loaded. These pages do not include the full query result; narrow or aggregate the query.</p>}
     {details}
     {consolidationPanel}
   </div>;
