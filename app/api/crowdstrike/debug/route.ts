@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getCsDevicesSyncStatus, getCsSpotlightSyncStatus } from "@/lib/store";
+import { getCsDevicesSyncStatus, getCsSpotlightSyncStatusDurable } from "@/lib/store";
 import { falconConfigs, falconProbeCounts } from "@/lib/crowdstrike";
 
 export const dynamic = "force-dynamic";
@@ -13,7 +13,7 @@ export async function GET() {
   }
 
   const devices = getCsDevicesSyncStatus();
-  const spotlight = getCsSpotlightSyncStatus();
+  const spotlight = await getCsSpotlightSyncStatusDurable();
 
   const probes = await Promise.all(
     configs.map(async (config) => {

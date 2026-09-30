@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { ensureHydrated, startCsSpotlightSync, getCsSpotlightSyncStatus } from "@/lib/store";
+import { ensureHydrated, startCsSpotlightSync, getCsSpotlightSyncStatus,
+  getCsSpotlightSyncStatusDurable } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
@@ -26,5 +27,5 @@ export async function POST(request: Request) {
 }
 
 export async function GET() {
-  return NextResponse.json({ status: getCsSpotlightSyncStatus() });
+  return NextResponse.json({ status: await getCsSpotlightSyncStatusDurable() });
 }

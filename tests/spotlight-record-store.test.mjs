@@ -53,6 +53,141 @@ test("record batch rejects a missing source ID before writing", async () => {
   assert.equal(queries, 0);
 });
 
+test("resumable run reuses a failed hydration checkpoint instead of inserting a replacement", async () => {
+  const calls = [];
+  const checkpoint = { id: "run-resume", tenant_key: "CO-147284", phase: "hydrating",
+    query_cursor: "last-page", hydration_cursor: "source-400", discovered_count: "800", expected_count: "800", hydrated_count: "400" };
+  const client = { query: async (sql, values) => {
+    calls.push({ sql: String(sql), values });
+    if (String(sql).includes("SELECT id, tenant_key, phase")) return { rows: [checkpoint], rowCount: 1 };
+    if (String(sql).includes("UPDATE spotlight_import_runs") && String(sql).includes("RETURNING")) return { rows: [checkpoint], rowCount: 1 };
+    return { rows: [], rowCount: 0 };
+  }, release: () => {} };
+  const db = { query: async () => ({ rows: [], rowCount: 0 }), connect: async () => client };
+  const run = await createSpotlightRecordStore(db).beginOrResumeSpotlightRun("CO-147284");
+  assert.equal(run.id, "run-resume");
+  assert.equal(run.phase, "hydrating");
+  assert.equal(run.hydratedCount, 400);
+  assert.ok(!calls.some(call => call.sql.includes("INSERT INTO spotlight_import_runs")));
+  assert.ok(calls.some(call => call.sql.includes("SELECT active.started_at") && call.sql.includes("started_at >")));
+  assert.ok(calls.some(call => call.sql.trim() === "COMMIT"));
+});
+
+test("a second Spotlight worker cannot claim the same tenant lock", async () => {
+  let released = false;
+  const client = { query: async sql => String(sql).includes("pg_try_advisory_lock")
+    ? { rows: [{ locked: false }], rowCount: 1 } : { rows: [], rowCount: 0 },
+  release: () => { released = true; } };
+  const db = { query: async () => ({ rows: [], rowCount: 0 }), connect: async () => client };
+  await assert.rejects(() => createSpotlightRecordStore(db).acquireSpotlightWorkerLock("CO-147284"), /already running/i);
+  assert.equal(released, true);
+});
+
+test("first resumable run creates version two after retiring a legacy running attempt", async () => {
+  const calls = [];
+  const created = { id: "new-run", tenant_key: "CO-147284", phase: "discovering",
+    query_cursor: "", hydration_cursor: "", discovered_count: "0", expected_count: null, hydrated_count: "0" };
+  const client = { query: async sql => {
+    calls.push(String(sql));
+    if (String(sql).includes("SELECT id, tenant_key, phase")) return { rows: [], rowCount: 0 };
+    if (String(sql).includes("INSERT INTO spotlight_import_runs")) return { rows: [created], rowCount: 1 };
+    return { rows: [], rowCount: 1 };
+  }, release: () => {} };
+  const db = { query: async () => ({ rows: [], rowCount: 0 }), connect: async () => client };
+  const run = await createSpotlightRecordStore(db).beginOrResumeSpotlightRun("CO-147284");
+  assert.equal(run.id, "new-run");
+  assert.equal(run.phase, "discovering");
+  assert.ok(calls.some(sql => sql.includes("checkpoint_version, phase")));
+  assert.ok(calls.some(sql => sql.includes("Interrupted before resumable checkpoint")));
+});
+
+test("ID page and continuation cursor commit in one transaction", async () => {
+  const calls = [];
+  const client = { query: async (sql, values) => {
+    calls.push({ sql: String(sql), values });
+    if (String(sql).includes("SELECT phase, query_cursor")) return { rows: [{ phase: "discovering", query_cursor: "old", discovered_count: "400" }], rowCount: 1 };
+    if (String(sql).includes("UPDATE spotlight_import_runs") && String(sql).includes("RETURNING")) return { rows: [{ discovered_count: "402", expected_count: null, phase: "discovering" }], rowCount: 1 };
+    return { rows: [], rowCount: 2 };
+  }, release: () => {} };
+  const db = { query: async () => ({ rows: [], rowCount: 0 }), connect: async () => client };
+  await createSpotlightRecordStore(db).saveSpotlightIdPage("run-1", "CO-147284", "old", ["source-1", "source-2"], "next", 800);
+  const statements = calls.map(call => call.sql.trim());
+  assert.equal(statements[0], "BEGIN");
+  assert.ok(statements.some(sql => sql.includes("INSERT INTO spotlight_import_ids")));
+  assert.ok(statements.some(sql => sql.includes("query_cursor = $")));
+  assert.equal(statements.at(-1), "COMMIT");
+});
+
+test("terminal discovery checks distinct staged IDs against CrowdStrike total", async () => {
+  const calls = [];
+  const client = { query: async (sql, values) => {
+    calls.push(String(sql));
+    if (String(sql).includes("SELECT phase, query_cursor"))
+      return { rows: [{ phase: "discovering", query_cursor: "prior", discovered_count: "2" }], rowCount: 1 };
+    if (String(sql).includes("COUNT(*) AS count FROM spotlight_import_ids"))
+      return { rows: [{ count: "2" }], rowCount: 1 };
+    return { rows: [], rowCount: 1 };
+  }, release: () => {} };
+  const db = { query: async () => ({ rows: [], rowCount: 0 }), connect: async () => client };
+  await assert.rejects(() => createSpotlightRecordStore(db).saveSpotlightIdPage(
+    "run-1", "CO-147284", "prior", ["duplicate"], "", 3), /distinct|incomplete/i);
+  assert.ok(calls.some(sql => sql.includes("COUNT(*) AS count FROM spotlight_import_ids")));
+  assert.ok(calls.includes("ROLLBACK"));
+  assert.ok(!calls.some(sql => sql.includes("UPDATE spotlight_import_runs SET")));
+});
+
+test("hydrated records and their last ID commit in one transaction", async () => {
+  const calls = [];
+  const client = { query: async (sql, values) => {
+    calls.push({ sql: String(sql), values });
+    if (String(sql).includes("SELECT phase, hydration_cursor")) return { rows: [{ phase: "hydrating", hydration_cursor: "" }], rowCount: 1 };
+    return { rows: [], rowCount: 1 };
+  }, release: () => {} };
+  const db = { query: async () => ({ rows: [], rowCount: 0 }), connect: async () => client };
+  await createSpotlightRecordStore(db).writeSpotlightHydrationBatch("run-1", "CO-147284", ["source-1"], [row("source-1")]);
+  const statements = calls.map(call => call.sql.trim());
+  assert.equal(statements[0], "BEGIN");
+  assert.ok(statements.some(sql => sql.includes("INSERT INTO spotlight_import_records")));
+  assert.ok(statements.some(sql => sql.includes("hydration_cursor = $")));
+  const checkpointGuard = calls.find(call => call.sql.includes("AS advances"));
+  assert.deepEqual(checkpointGuard.values, ["run-1", "CO-147284", "source-1"]);
+  assert.equal(statements.at(-1), "COMMIT");
+});
+
+test("resumable promotion rejects a missing ID even when record counts match", async () => {
+  const calls = [];
+  const client = { query: async sql => {
+    calls.push(String(sql));
+    if (String(sql).includes("SELECT phase, expected_count, hydrated_count"))
+      return { rows: [{ phase: "hydrating", expected_count: "2", hydrated_count: "2" }], rowCount: 1 };
+    if (String(sql).includes("AS records") && String(sql).includes("spotlight_import_records"))
+      return { rows: [{ ids: "2", records: "2", hosts: "1", missing: "1", extra: "1" }], rowCount: 1 };
+    return { rows: [], rowCount: 1 };
+  }, release: () => {} };
+  const db = { query: async () => ({ rows: [], rowCount: 0 }), connect: async () => client };
+  await assert.rejects(() => createSpotlightRecordStore(db).completeResumableSpotlightRun("run-1", "CO-147284"), /count mismatch/i);
+  assert.ok(calls.some(sql => sql.trim() === "ROLLBACK"));
+  assert.ok(!calls.some(sql => sql.includes("INSERT INTO spotlight_import_current")));
+});
+
+test("resumable promotion moves the active pointer only after exact staged ID reconciliation", async () => {
+  const calls = [];
+  const client = { query: async sql => {
+    calls.push(String(sql));
+    if (String(sql).includes("SELECT phase, expected_count, hydrated_count"))
+      return { rows: [{ phase: "hydrating", expected_count: "2", hydrated_count: "2" }], rowCount: 1 };
+    if (String(sql).includes("AS records") && String(sql).includes("spotlight_import_records"))
+      return { rows: [{ ids: "2", records: "2", hosts: "1", missing: "0", extra: "0" }], rowCount: 1 };
+    return { rows: [{ id: "run-1" }], rowCount: 1 };
+  }, release: () => {} };
+  const db = { query: async () => ({ rows: [], rowCount: 0 }), connect: async () => client };
+  const result = await createSpotlightRecordStore(db).completeResumableSpotlightRun("run-1", "CO-147284");
+  assert.deepEqual(result, { findingsImported: 2, hostsAffected: 1 });
+  const pointer = calls.findIndex(sql => sql.includes("INSERT INTO spotlight_import_current"));
+  assert.ok(pointer > calls.findIndex(sql => sql.includes("AS missing")));
+  assert.ok(pointer < calls.findIndex(sql => sql.trim() === "COMMIT"));
+});
+
 test("starting a replacement run marks an interrupted prior run failed before inserting", async () => {
   const calls = [];
   const store = createSpotlightRecordStore({ query: async sql => {
@@ -104,7 +239,7 @@ test("promotion rejects a source ID shortfall and leaves the active pointer unch
 });
 
 test("cleanup removes interrupted generations in chunks while retaining the active generation", async () => {
-  const removed = [];
+  const removed = [], removedIds = [];
   let deletes = 0;
   const db = { query: async (sql, values = []) => {
     const statement = String(sql);
@@ -116,12 +251,30 @@ test("cleanup removes interrupted generations in chunks while retaining the acti
       removed.push(values[0]);
       return { rows: [], rowCount: ++deletes === 1 ? 10_000 : 0 };
     }
+    if (statement.includes("DELETE FROM spotlight_import_ids")) removedIds.push(values[0]);
     return { rows: [], rowCount: 1 };
   } };
   const store = createSpotlightRecordStore(db);
   await store.pruneSpotlightRuns("CO-147284");
   assert.deepEqual(removed, ["run-interrupted", "run-interrupted"]);
+  assert.deepEqual(removedIds, ["run-interrupted"]);
   assert.ok(!removed.includes("run-active"));
+});
+
+test("cleanup cannot delete a newer failed run that may still be resumed", async () => {
+  let candidateQuery = "";
+  const db = { query: async sql => {
+    const statement = String(sql);
+    if (statement.includes("SELECT run_id FROM spotlight_import_current"))
+      return { rows: [{ run_id: "run-active" }], rowCount: 1 };
+    if (statement.includes("FROM spotlight_import_runs") && statement.includes("status <> 'running'")) {
+      candidateQuery = statement;
+      return { rows: [], rowCount: 0 };
+    }
+    return { rows: [], rowCount: 0 };
+  } };
+  await createSpotlightRecordStore(db).pruneSpotlightRuns("CO-147284");
+  assert.match(candidateQuery, /started_at\s*</i);
 });
 
 test("runtime Spotlight storage uses the established application database without the dashboard URL", async () => {

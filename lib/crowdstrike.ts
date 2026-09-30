@@ -104,12 +104,20 @@ function timedFetchOnce(url: string, init: RequestInit, timeoutMs: number): Prom
 // A large tenant's device/vuln hydration fans out many of these requests
 // (bounded by runWithConcurrency below), which makes hitting CrowdStrike's
 // rate limiter an expected, recoverable event rather than a rare one — retry
-// 429/502/503/504 with backoff (honoring Retry-After when CrowdStrike sends
+// 429/500/502/503/504 with backoff (honoring Retry-After when CrowdStrike sends
 // it) instead of failing the whole sync over a single throttled request.
 async function timedFetch(url: string, init: RequestInit, timeoutMs = 60_000): Promise<Response> {
   for (let attempt = 0; ; attempt++) {
-    const res = await timedFetchOnce(url, init, timeoutMs);
-    if (res.ok || ![429, 502, 503, 504].includes(res.status) || attempt >= 4) return res;
+    let res: Response;
+    try {
+      res = await timedFetchOnce(url, init, timeoutMs);
+    } catch (error) {
+      if ((init.method ?? "GET").toUpperCase() !== "GET" ||
+          !(error instanceof Error && error.name === "AbortError") || attempt >= 4) throw error;
+      await new Promise(resolve => setTimeout(resolve, Math.min(500 * 2 ** attempt, 8_000)));
+      continue;
+    }
+    if (res.ok || ![429, 500, 502, 503, 504].includes(res.status) || attempt >= 4) return res;
     const retryAfter = Number(res.headers.get("retry-after"));
     const delayMs = Number.isFinite(retryAfter) && retryAfter > 0
       ? Math.min(retryAfter * 1000, 30_000)
@@ -251,37 +259,110 @@ const EXPRT_SEV: Record<string, Severity> = {
 
 export type SpotlightListResult = { findings: SpotlightFinding[]; truncated: boolean };
 
+function parseSpotlightResource(config: FalconTenant, v: any): SpotlightFinding {
+  const id = String(v?.id ?? "").trim();
+  if (!id) throw new Error(`Spotlight source vulnerability ID is missing for ${config.label}.`);
+  const cve = String(v?.cve?.id ?? "").toUpperCase() || `CS-${v?.id ?? "vuln"}`;
+  const sev: Severity =
+    EXPRT_SEV[String(v?.cve?.exprt_rating ?? v?.severity ?? "").toUpperCase()] ?? "Medium";
+  const cvss = Number(v?.cve?.cvss_v3 ?? v?.cve?.cvss_v2 ?? 5.0);
+  return {
+    id, raw: v, cve,
+    hostname: String(v?.host_info?.hostname ?? ""),
+    localIp: String(v?.host_info?.local_ip ?? ""),
+    externalIp: String(v?.host_info?.external_ip ?? ""),
+    os: String(v?.host_info?.os_version ?? v?.host_info?.platform ?? ""),
+    severity: sev,
+    cvss: isNaN(cvss) ? 5.0 : cvss,
+    title: String(v?.cve?.description ?? v?.cve?.id ?? "CrowdStrike Spotlight finding"),
+    description: String(v?.cve?.description ?? "Reported by CrowdStrike Falcon Spotlight."),
+    remediation: String(v?.remediation?.entities?.[0]?.action ?? "Apply vendor patch."),
+    exploitAvailable: Boolean(v?.cve?.exploit_status ?? false),
+    status: String(v?.status ?? "open"),
+    exprRating: String(v?.cve?.exprt_rating ?? ""),
+  };
+}
+
+// Discovery and hydration are separate so a large import can persist the ID
+// set before fetching full records and resume either phase independently.
+export async function createSpotlightSession(config: FalconTenant) {
+  let token = await falconToken(config);
+  let renewal: Promise<string> | undefined;
+  async function request(url: string): Promise<Response> {
+    const usedToken = token;
+    const get = (bearer: string) => timedFetch(url, {
+      headers: { Authorization: `Bearer ${bearer}`, Accept: "application/json" }, cache: "no-store",
+    });
+    const response = await get(usedToken);
+    if (response.status !== 401) return response;
+    await response.body?.cancel().catch(() => {});
+    if (token === usedToken) {
+      renewal ??= falconToken(config)
+        .then(nextToken => { token = nextToken; return nextToken; })
+        .finally(() => { renewal = undefined; });
+      await renewal;
+    }
+    return get(token);
+  }
+  async function queryPage(after = ""): Promise<{ ids: string[]; next: string; total: number | null }> {
+    const url = new URL(`${config.baseUrl}/spotlight/queries/vulnerabilities/v1`);
+    url.searchParams.set("filter", "status:'open',status:'reopen'");
+    url.searchParams.set("limit", "400");
+    if (after) url.searchParams.set("after", after);
+    const response = await request(url.toString());
+    if (!response.ok) throw new Error(`Spotlight query ${response.status}: ${await response.text().catch(() => response.statusText)}`);
+    const json: any = await response.json();
+    if (!Array.isArray(json?.resources) || json.resources.some((id: unknown) => typeof id !== "string" || !id))
+      throw new Error(`Spotlight query returned invalid IDs for ${config.label}.`);
+    const next = json?.meta?.pagination?.after ?? "";
+    if (typeof next !== "string") throw new Error(`Spotlight query returned an invalid cursor for ${config.label}.`);
+    if (!json.resources.length && next) throw new Error(`Spotlight query returned an empty page with a cursor for ${config.label}.`);
+    const rawTotal = json?.meta?.pagination?.total;
+    return { ids: json.resources, next, total: Number.isSafeInteger(rawTotal) && rawTotal >= 0 ? rawTotal : null };
+  }
+  async function hydrateIds(ids: string[]): Promise<SpotlightFinding[]> {
+    if (!ids.length) return [];
+    const groups: string[][] = [];
+    for (let i = 0; i < ids.length; i += 400) groups.push(ids.slice(i, i + 400));
+    const results = await runWithConcurrency(groups, 8, async group => {
+      const url = new URL(`${config.baseUrl}/spotlight/entities/vulnerabilities/v2`);
+      for (const id of group) url.searchParams.append("ids", id);
+      const response = await request(url.toString());
+      if (!response.ok) throw new Error(`Spotlight entities ${response.status}: ${await response.text().catch(() => response.statusText)}`);
+      const json: any = await response.json();
+      if (!Array.isArray(json?.resources) || json.resources.length !== group.length)
+        throw new Error(`Spotlight entity hydration incomplete for ${config.label}: expected ${group.length} findings.`);
+      const returnedIds = new Set(json.resources.map((item: any) => String(item?.id ?? "").trim()));
+      if (returnedIds.has("") || returnedIds.size !== group.length || group.some(id => !returnedIds.has(id)))
+        throw new Error(`Spotlight entity hydration IDs mismatch for ${config.label}.`);
+      return json.resources.map((item: any) => parseSpotlightResource(config, item));
+    });
+    return results.flat();
+  }
+  return { queryPage, hydrateIds };
+}
+
 // CrowdStrike Spotlight API: query open vuln ids and yield bounded hydrated
 // batches. Requires scope: spotlight-vulnerabilities:read.
 export async function* spotlightFindingBatches(config: FalconTenant): AsyncGenerator<SpotlightFinding[]> {
-  const token = await falconToken(config);
-  const authHeader = { Authorization: `Bearer ${token}`, Accept: "application/json" };
-
-  const parseResource = (v: any): SpotlightFinding => {
-    const id = String(v?.id ?? "").trim();
-    if (!id) throw new Error(`Spotlight source vulnerability ID is missing for ${config.label}.`);
-    const cve = String(v?.cve?.id ?? "").toUpperCase() || `CS-${v?.id ?? "vuln"}`;
-    const sev: Severity =
-      EXPRT_SEV[String(v?.cve?.exprt_rating ?? v?.severity ?? "").toUpperCase()] ?? "Medium";
-    const cvss = Number(v?.cve?.cvss_v3 ?? v?.cve?.cvss_v2 ?? 5.0);
-    return {
-      id,
-      raw: v,
-      cve,
-      hostname: String(v?.host_info?.hostname ?? ""),
-      localIp: String(v?.host_info?.local_ip ?? ""),
-      externalIp: String(v?.host_info?.external_ip ?? ""),
-      os: String(v?.host_info?.os_version ?? v?.host_info?.platform ?? ""),
-      severity: sev,
-      cvss: isNaN(cvss) ? 5.0 : cvss,
-      title: String(v?.cve?.description ?? v?.cve?.id ?? "CrowdStrike Spotlight finding"),
-      description: String(v?.cve?.description ?? "Reported by CrowdStrike Falcon Spotlight."),
-      remediation: String(v?.remediation?.entities?.[0]?.action ?? "Apply vendor patch."),
-      exploitAvailable: Boolean(v?.cve?.exploit_status ?? false),
-      status: String(v?.status ?? "open"),
-      exprRating: String(v?.cve?.exprt_rating ?? ""),
-    };
-  };
+  let token = await falconToken(config);
+  let renewal: Promise<string> | undefined;
+  async function spotlightFetch(url: string): Promise<Response> {
+    const usedToken = token;
+    const request = (bearer: string) => timedFetch(url, {
+      headers: { Authorization: `Bearer ${bearer}`, Accept: "application/json" }, cache: "no-store",
+    });
+    const response = await request(usedToken);
+    if (response.status !== 401) return response;
+    await response.body?.cancel().catch(() => {});
+    if (token === usedToken) {
+      renewal ??= falconToken(config)
+        .then(nextToken => { token = nextToken; return nextToken; })
+        .finally(() => { renewal = undefined; });
+      await renewal;
+    }
+    return request(token);
+  }
 
   const seenCursors = new Set<string>();
   let after = "";
@@ -294,7 +375,7 @@ export async function* spotlightFindingBatches(config: FalconTenant): AsyncGener
     const results = await runWithConcurrency(batches, 8, async (batch) => {
       const url = new URL(`${config.baseUrl}/spotlight/entities/vulnerabilities/v2`);
       for (const id of batch) url.searchParams.append("ids", id);
-      const r = await timedFetch(url.toString(), { headers: authHeader, cache: "no-store" });
+      const r = await spotlightFetch(url.toString());
       if (!r.ok) throw new Error(`Spotlight entities ${r.status}: ${await r.text().catch(() => r.statusText)}`);
       const j: any = await r.json();
       if (!Array.isArray(j?.resources) || j.resources.length !== batch.length)
@@ -304,7 +385,7 @@ export async function* spotlightFindingBatches(config: FalconTenant): AsyncGener
       const returnedIds = new Set(j.resources.map((item: any) => String(item?.id ?? "").trim()));
       if (returnedIds.size !== batch.length || batch.some(id => !returnedIds.has(id)))
         throw new Error(`Spotlight entity hydration IDs mismatch for ${config.label}.`);
-      return j.resources.map(parseResource) as SpotlightFinding[];
+      return j.resources.map((item: any) => parseSpotlightResource(config, item)) as SpotlightFinding[];
     });
     batches = [];
     return results.flat();
@@ -317,7 +398,7 @@ export async function* spotlightFindingBatches(config: FalconTenant): AsyncGener
     url.searchParams.set("filter", "status:'open',status:'reopen'");
     url.searchParams.set("limit", "400");
     if (after) url.searchParams.set("after", after);
-    const r = await timedFetch(url.toString(), { headers: authHeader, cache: "no-store" });
+    const r = await spotlightFetch(url.toString());
     if (!r.ok) throw new Error(`Spotlight query ${r.status}: ${await r.text().catch(() => r.statusText)}`);
     const j: any = await r.json();
     if (!Array.isArray(j?.resources) || j.resources.some((id: unknown) => typeof id !== "string" || !id))
