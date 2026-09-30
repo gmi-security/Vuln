@@ -145,7 +145,18 @@ function getPool(): Pool | null {
     pool = new Pool({
       connectionString: process.env.DATABASE_URL,
       ssl: { rejectUnauthorized: false },
-      max: 3,
+      // The DigitalOcean managed Postgres cluster backing this allows 397
+      // concurrent backend connections; this single Node process was
+      // needlessly capped at 3, which meant concurrent Spotlight discovery
+      // partitions (each holding a client open for the duration of its own
+      // transaction) were competing with every other concurrent DB use in
+      // the app -- ticket reconciliation, the risk-refresh scheduler,
+      // ordinary page loads -- for a shared pool of only 3. 20 stays
+      // trivially far under the cluster ceiling (this database is also
+      // shared with other apps on the same cluster) while giving real
+      // headroom for several concurrent discovery partitions plus
+      // everything else the app does at the same time.
+      max: 20,
       // Fail fast if the DB is unreachable so hydration can fall back to
       // in-memory instead of hanging every request.
       connectionTimeoutMillis: 8000,
