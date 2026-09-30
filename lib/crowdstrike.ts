@@ -283,18 +283,19 @@ function parseSpotlightResource(config: FalconTenant, v: any): SpotlightFinding 
   };
 }
 
-// Discovery is cursor-paginated (each page's "after" token is only known once
-// the prior page's response arrives), so it's inherently a chain of
-// sequential round-trips -- the actual bottleneck is CrowdStrike's per-
-// request latency, not local CPU/network throughput. A bigger page pulls
-// more IDs per round-trip, directly cutting how many of those sequential
-// round-trips a full walk needs. Overridable without a redeploy (just an
-// app restart) in case the live instance's real max differs from this
-// default; an out-of-range value here falls back to the original 400
-// instead of sending something CrowdStrike is likely to reject outright.
+// CrowdStrike's own error confirms the real ceiling for this endpoint:
+// {"code":400,"message":"1000 is an invalid page size, must be between 1
+// and 400"} -- 400 is not an arbitrary choice, it's the server-enforced
+// max. Discovery is cursor-paginated (each page's "after" token is only
+// known once the prior page's response arrives), so it's inherently a
+// chain of sequential round-trips; a bigger page would cut how many
+// round-trips a full walk needs, but 400 is as large as CrowdStrike will
+// accept. Overridable without a redeploy (just an app restart) only to go
+// *lower* if a specific tenant needs it; an out-of-range value falls back
+// to 400.
 const SPOTLIGHT_DISCOVERY_PAGE_SIZE = (() => {
   const raw = Number(process.env.SPOTLIGHT_DISCOVERY_PAGE_SIZE);
-  return Number.isInteger(raw) && raw > 0 && raw <= 5000 ? raw : 1000;
+  return Number.isInteger(raw) && raw > 0 && raw <= 400 ? raw : 400;
 })();
 
 // Discovery and hydration are separate so a large import can persist the ID
