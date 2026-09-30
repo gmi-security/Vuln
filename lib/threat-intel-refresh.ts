@@ -20,6 +20,12 @@
 
 export type ActiveExploitationSignal = { active: boolean; source: string; detail: string };
 
+// An unreachable/slow internal instance (VPN-gated, firewalled) must fail
+// fast per CVE, not hang the whole refresh job -- same pattern every other
+// external fetch in this codebase uses (see lib/dashboard-browser-client.ts,
+// lib/n8n.ts, lib/alerts.ts).
+const THREAT_INTEL_TIMEOUT_MS = 15_000;
+
 function envPair(urlVar: string, keyVar: string): { url: string; key: string } | null {
   const url = process.env[urlVar]?.trim().replace(/\/$/, "");
   const key = process.env[keyVar]?.trim();
@@ -41,7 +47,7 @@ export async function fetchMispActiveExploitation(cves: string[]): Promise<Map<s
         method: "POST",
         headers: { Authorization: conn.key, Accept: "application/json", "Content-Type": "application/json" },
         body: JSON.stringify({ value: cve, type: "vulnerability" }),
-        cache: "no-store",
+        cache: "no-store", signal: AbortSignal.timeout(THREAT_INTEL_TIMEOUT_MS),
       });
       if (!res.ok) continue;
       const json = (await res.json()) as { response?: { Attribute?: { id?: string; sighting_count?: string | number; Sighting?: unknown[] }[] } };
@@ -77,7 +83,7 @@ export async function fetchOpenCtiActiveExploitation(cves: string[]): Promise<Ma
         method: "POST",
         headers: { Authorization: `Bearer ${conn.key}`, "Content-Type": "application/json" },
         body: JSON.stringify({ query, variables: { search: { mode: "and", filters: [{ key: "name", values: [cve] }], filterGroups: [] } } }),
-        cache: "no-store",
+        cache: "no-store", signal: AbortSignal.timeout(THREAT_INTEL_TIMEOUT_MS),
       });
       if (!res.ok) continue;
       const json = (await res.json()) as { data?: { vulnerabilities?: { edges?: { node?: { stixCoreRelationships?: { edges?: unknown[] } } }[] } } };
@@ -109,7 +115,7 @@ export async function fetchIntelOwlActiveExploitation(cves: string[]): Promise<M
         method: "POST",
         headers: { Authorization: `Token ${conn.key}`, "Content-Type": "application/json" },
         body: JSON.stringify({ observable_name: cve, observable_classification: "generic", tlp: "AMBER" }),
-        cache: "no-store",
+        cache: "no-store", signal: AbortSignal.timeout(THREAT_INTEL_TIMEOUT_MS),
       });
       if (!res.ok) continue;
       const json = (await res.json()) as { reports?: { report?: { evaluation?: string; exploited?: boolean } }[] };
