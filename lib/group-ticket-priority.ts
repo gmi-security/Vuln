@@ -8,3 +8,11 @@ export function targetPriorityFor<T extends { id: number }>(severity: "Critical"
   if (!priorities.length) return undefined;
   return severity === "Critical" ? priorities[0] : priorities[Math.min(1, priorities.length - 1)];
 }
+
+// Same most-urgent-first slot-picking, generalized to Swath (1 = most
+// urgent) for lib/swath-ticket-priority.ts. Swath 1->top slot, Swath
+// 2->next, etc., clamped the same way targetPriorityFor is.
+export function targetPriorityForSwath<T extends { id: number }>(swath: 1 | 2 | 3 | 4, priorities: T[]): T | undefined {
+  if (!priorities.length) return undefined;
+  return priorities[Math.min(swath - 1, priorities.length - 1)];
+}

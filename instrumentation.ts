@@ -51,4 +51,10 @@ export async function register(): Promise<void> {
   // verified fix. Runs on its own schedule regardless of backfill outcome.
   const { startClosureValidationScheduler } = await import("@/lib/group-closure-validation");
   startClosureValidationScheduler();
+  // Risk-Based Vulnerability Management: refreshes CISA KEV/EPSS for CVEs
+  // actually present in each tenant's current Spotlight generation, then
+  // recomputes finding_risk (risk score, Swath, verification status). See
+  // lib/risk-refresh-scheduler.ts.
+  const { startRiskRefreshScheduler } = await import("@/lib/risk-refresh-scheduler");
+  startRiskRefreshScheduler();
 }
