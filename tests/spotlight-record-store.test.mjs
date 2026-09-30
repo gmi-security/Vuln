@@ -378,6 +378,16 @@ test("savePartitionPage flips the whole run to hydrating once the last open part
   assert.equal(run.expectedCount, 602);
   const runUpdate = calls.find(c => c.sql.includes("UPDATE spotlight_import_runs") && c.sql.includes("RETURNING"));
   assert.deepEqual(runUpdate.values, ["run-1", "CO-147284", "602", true, 602]);
+  // Regression guard for a real production error: "column expected_count is
+  // of type bigint but expression is of type text". CASE WHEN $n THEN $m
+  // ELSE NULL END cannot infer $m's type from an untyped NULL branch, so it
+  // silently defaults to text -- Postgres only catches the mismatch at
+  // EXECUTE time against the real bigint column, which this string-matching
+  // mock can't reproduce. The explicit ::bigint/::boolean casts are the fix;
+  // this only guards that they don't get refactored away.
+  assert.match(runUpdate.sql, /discovered_count\s*=\s*\$3::bigint/);
+  assert.match(runUpdate.sql, /CASE WHEN \$4::boolean THEN 'hydrating'/);
+  assert.match(runUpdate.sql, /CASE WHEN \$4::boolean THEN \$5::bigint ELSE NULL END/);
 });
 
 test("savePartitionPage rejects a page whose partition checkpoint already moved on", async () => {

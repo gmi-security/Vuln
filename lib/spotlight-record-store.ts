@@ -483,8 +483,8 @@ export function createSpotlightRecordStore(db: Database) {
         expectedCount = Number(distinct.rows[0]?.count ?? 0);
       }
       const updatedRun = await client.query(`UPDATE spotlight_import_runs SET
-        discovered_count = $3, phase = CASE WHEN $4 THEN 'hydrating' ELSE 'discovering' END,
-        expected_count = CASE WHEN $4 THEN $5 ELSE NULL END
+        discovered_count = $3::bigint, phase = CASE WHEN $4::boolean THEN 'hydrating' ELSE 'discovering' END,
+        expected_count = CASE WHEN $4::boolean THEN $5::bigint ELSE NULL END
         WHERE id = $1::uuid AND tenant_key = $2
         RETURNING id, phase, hydration_cursor, discovered_count, expected_count, hydrated_count`,
         [runId, tenantKey, totals.rows[0].total, allDone, expectedCount]);
