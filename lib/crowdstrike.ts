@@ -283,6 +283,20 @@ function parseSpotlightResource(config: FalconTenant, v: any): SpotlightFinding 
   };
 }
 
+// Discovery is cursor-paginated (each page's "after" token is only known once
+// the prior page's response arrives), so it's inherently a chain of
+// sequential round-trips -- the actual bottleneck is CrowdStrike's per-
+// request latency, not local CPU/network throughput. A bigger page pulls
+// more IDs per round-trip, directly cutting how many of those sequential
+// round-trips a full walk needs. Overridable without a redeploy (just an
+// app restart) in case the live instance's real max differs from this
+// default; an out-of-range value here falls back to the original 400
+// instead of sending something CrowdStrike is likely to reject outright.
+const SPOTLIGHT_DISCOVERY_PAGE_SIZE = (() => {
+  const raw = Number(process.env.SPOTLIGHT_DISCOVERY_PAGE_SIZE);
+  return Number.isInteger(raw) && raw > 0 && raw <= 5000 ? raw : 1000;
+})();
+
 // Discovery and hydration are separate so a large import can persist the ID
 // set before fetching full records and resume either phase independently.
 export async function createSpotlightSession(config: FalconTenant) {
@@ -307,7 +321,7 @@ export async function createSpotlightSession(config: FalconTenant) {
   async function queryPage(after = "", filter = "status:'open',status:'reopen'"): Promise<{ ids: string[]; next: string; total: number | null }> {
     const url = new URL(`${config.baseUrl}/spotlight/queries/vulnerabilities/v1`);
     url.searchParams.set("filter", filter);
-    url.searchParams.set("limit", "400");
+    url.searchParams.set("limit", String(SPOTLIGHT_DISCOVERY_PAGE_SIZE));
     if (after) url.searchParams.set("after", after);
     const response = await request(url.toString());
     if (!response.ok) throw new Error(`Spotlight query ${response.status}: ${await response.text().catch(() => response.statusText)}`);
