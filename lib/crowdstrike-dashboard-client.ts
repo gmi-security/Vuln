@@ -133,6 +133,20 @@ export async function executeCrowdStrike(connection: CrowdStrikeConnection, valu
   if (!options) throw new DashboardError("Choose a CrowdStrike dataset.");
   const dataset = CROWDSTRIKE_DATASETS[options.dataset];
   const deadline = Date.now() + budgetMs, auth = await session(connection, deadline);
+  if (options.history && options.measure === "findings" && options.groupBy === "none") {
+    // Daily history needs the matching population count, not millions of
+    // finding entities. The API total is independent of the one-row page.
+    const url = new URL(`${auth.base}/spotlight/queries/vulnerabilities/v1`);
+    url.searchParams.set("filter", input.query);
+    url.searchParams.set("limit", "1");
+    const body = await jsonRequest(url, { headers: auth.headers }, deadline, auth.secrets);
+    const total = body.meta?.pagination?.total;
+    if (!Array.isArray(body.resources) || !Number.isSafeInteger(total) || total < 0) {
+      throw new DashboardError("CrowdStrike did not return a valid finding total. No daily observation was saved.");
+    }
+    return { columns: [{ name: "findings", type: "long" }], rows: [[total]], truncated: false,
+      note: "Matching CrowdStrike finding total at collection time. Counts vulnerability instances, not unique CVEs or devices." };
+  }
   if (options.view === "severity-counts") {
     // Read the API's matching population total, not the length of the first page.
     // No entity collection or local 250,000-record cap is needed for these counts.

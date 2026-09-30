@@ -52,6 +52,32 @@ const auth = { access_token: "fake-access-token" };
 
 const cveOptions = { ...options, view: "cve-devices", measure: "hosts", groupBy: "cve", top: 10 };
 
+test("daily finding history uses one bounded count request for populations above two million", async () => {
+  const dailyModule = await load("lib/dashboard-daily-trend.ts"); await dailyModule.evaluate();
+  const daily = contract.parseDefinition(dailyModule.namespace.DAILY_OPEN_VULNERABILITIES, "crowdstrike-daily-open-vulnerabilities");
+  assert.equal(daily.display, "line");
+  assert.equal(daily.refreshMinutes, 1440);
+  for (const total of [2_113_249, 0]) {
+    await mockHttp([auth, { resources: total ? ["one-finding-id"] : [], meta: { pagination: { total } } }], async calls => {
+      const result = await client.executeCrowdStrike(connection, daily);
+      assert.deepEqual(result.rows, [[total]]);
+      assert.equal(result.truncated, false);
+      assert.equal(calls.length, 2, "Only authentication and a count request; no entity pagination");
+      assert.equal(calls[1].url.pathname, "/spotlight/queries/vulnerabilities/v1");
+      assert.equal(calls[1].url.searchParams.get("limit"), "1");
+      assert.equal(calls[1].url.searchParams.get("filter"), "status:['open','reopen']");
+    });
+  }
+});
+
+test("daily finding history rejects missing, negative, fractional and unsafe totals instead of saving zero", async () => {
+  for (const total of [undefined, null, -1, 1.5, "42", Number.MAX_SAFE_INTEGER + 1]) {
+    await mockHttp([auth, { resources: [], meta: { pagination: { total } } }], async () => {
+      await assert.rejects(client.executeCrowdStrike(connection, { ...input, crowdstrike: { ...options, history: true } }), /No daily observation was saved/);
+    });
+  }
+});
+
 test("CVE tiles accept larger limits without expanding other query scopes", () => {
   for (const top of [250, 500]) {
     assert.equal(contract.parseQueryInput({ ...input, crowdstrike: { ...cveOptions, top } }).crowdstrike.top, top);

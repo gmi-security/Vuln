@@ -30,6 +30,7 @@ async function load(path) {
       const values = overrides.get(specifier);
       return new SyntheticModule(Object.keys(values), function () { for (const [key, value] of Object.entries(values)) this.setExport(key, value); });
     }
+    if (specifier.startsWith("@/lib/")) return load(`${specifier.slice(2)}.ts`);
     if (specifier.startsWith(".")) return load(resolve(dirname(path), `${specifier}.ts`));
     const values = await import(specifier);
     return new SyntheticModule(Object.keys(values), function () { for (const key of Object.keys(values)) this.setExport(key, values[key]); });
@@ -216,7 +217,17 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
   let falconFail = false, falconHold = null;
   const falconResult = { columns: [{ name: "findings", type: "long" }], rows: [[7]], truncated: false };
   let patchHold = null;
-  const patchPacket = { cve: "CVE-2026-12345", hostCount: 104, findingCount: 108, body: "All hosts and remediations", csv: "test csv" };
+  const patchPacket = { cve: "CVE-2026-12345", hostCount: 104, findingCount: 108, body: "All hosts and remediations", csv: "test csv",
+    tenantIds: ["test-tenant"], hostScope: ["test-tenant:host-1"], collectedAt: new Date().toISOString(), worstSeverity: "Critical" };
+  // This suite exercises dashboard jobs, not ticket persistence or live CW operations.
+  overrides.set("./patch-ticket-store", {
+    activeTicketedPairs: async () => new Set(), persistPreparedPatch: async id => id,
+    verifyPatchTicketFix: async () => { throw new Error("Unexpected ticket verification"); },
+  });
+  overrides.set("./patch-group-ticket-store", {
+    persistPreparedGroups: async () => { throw new Error("Unexpected consolidation"); },
+    verifyGroupTicketFix: async () => { throw new Error("Unexpected group verification"); },
+  });
   overrides.set("./crowdstrike-dashboard-client", { ...falconModule.namespace, executePatchRequest: async () => {
     if (patchHold) { const wait = patchHold; patchHold = null; return wait; }
     return patchPacket;
@@ -239,6 +250,7 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
     assert.equal(first.storageReady, true);
     assert.equal(first.connected, false);
     assert.equal(first.queries.length, 1);
+    assert.ok(!first.queries.some(q => q.id === "crowdstrike-daily-open-vulnerabilities"), "Do not install the daily tile before CrowdStrike is connected");
     await store.saveConnection({ endpoint: "https://elastic.example.com", apiKey: "private-test-key" }, "admin-connect");
     await waitFor(async () => (await store.readDashboard(true)).queries[0].result !== null);
     const raw = (await db.query("SELECT secret FROM elastic_dashboard_connection")).rows[0].secret;
@@ -307,7 +319,7 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
     await waitFor(async () => (await jobs.readDashboardJob(conflictJob.jobId, "member-conflict")).status === "failed");
     assert.equal((await store.readDashboard(true)).queries.find((q) => q.id === "queued-save").title, "Newer edit");
     await waitFor(() => !globalThis.__elasticJobs.working);
-    await db.query("INSERT INTO elastic_dashboard_jobs (id, actor, kind, input, connection_revision, status, started_at) VALUES ('00000000-0000-0000-0000-000000000001', 'interrupted', 'preview', '{}', 1, 'running', now() - interval '8 minutes')");
+    await db.query("INSERT INTO elastic_dashboard_jobs (id, actor, kind, input, connection_revision, status, started_at) VALUES ('00000000-0000-0000-0000-000000000001', 'interrupted', 'preview', '{}', 1, 'running', now() - interval '13 minutes')");
     jobs.triggerDashboardJobs();
     await waitFor(async () => (await db.query("SELECT status FROM elastic_dashboard_jobs WHERE actor = 'interrupted'")).rows[0].status === "failed");
     await waitFor(() => !globalThis.__elasticJobs.working);
@@ -523,6 +535,27 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
     await waitFor(async () => (await db.query("SELECT status FROM elastic_dashboard_jobs WHERE id = $1", [stalePatch.jobId])).rows[0].status === "failed");
     await assert.rejects(() => jobs.readDashboardJob(stalePatch.jobId, "stale-patch-member"), /connection changed/);
     assert.equal((await db.query("SELECT result FROM elastic_dashboard_jobs WHERE id = $1", [stalePatch.jobId])).rows[0].result, null);
+    // Startup installs exactly one daily snapshot tile and preserves user edits/deletion.
+    await waitFor(() => !globalThis.__elasticDashboard.ticking);
+    const dailyModule = await load("lib/dashboard-daily-trend.ts"); await dailyModule.evaluate();
+    const { installDailyOpenVulnerabilityTile, DAILY_OPEN_VULNERABILITIES: daily } = dailyModule.namespace;
+    await installDailyOpenVulnerabilityTile(db);
+    await installDailyOpenVulnerabilityTile(db);
+    let dailyRow = (await db.query("SELECT * FROM elastic_dashboard_queries WHERE id = $1", [daily.id])).rows[0];
+    assert.equal(dailyRow.definition.query, "status:['open','reopen']");
+    assert.equal(dailyRow.definition.refreshMinutes, 1440);
+    assert.equal(dailyRow.result, null, "Installation must not invent a historical count");
+    assert.equal((await db.query("SELECT count(*)::int AS count FROM elastic_dashboard_audit WHERE query_id = $1 AND action = 'query.daily-open-trend.installed'", [daily.id])).rows[0].count, 1);
+    await store.saveQuery(daily, "daily-first-observation");
+    await store.saveQuery(daily, "daily-same-day-observation");
+    assert.equal((await db.query("SELECT count(*)::int AS count FROM dashboard_daily_history WHERE query_id = $1", [daily.id])).rows[0].count, 1);
+    await db.query("UPDATE elastic_dashboard_queries SET definition = jsonb_set(definition, '{title}', '\"My daily trend\"') WHERE id = $1", [daily.id]);
+    await installDailyOpenVulnerabilityTile(db);
+    dailyRow = (await db.query("SELECT * FROM elastic_dashboard_queries WHERE id = $1", [daily.id])).rows[0];
+    assert.equal(dailyRow.definition.title, "My daily trend");
+    await store.deleteDashboardTile(daily.id, "daily-delete");
+    await installDailyOpenVulnerabilityTile(db);
+    assert.ok((await db.query("SELECT deleted_at FROM elastic_dashboard_queries WHERE id = $1", [daily.id])).rows[0].deleted_at);
     // Leave the isolated DB unconnected for the subsequent HTTP authorization checks.
     await db.query("DELETE FROM elastic_dashboard_connection");
     await db.query("DELETE FROM dashboard_source_connections; DELETE FROM dashboard_daily_history; DELETE FROM elastic_dashboard_queries WHERE definition->>'source' = 'crowdstrike'");
