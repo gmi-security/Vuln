@@ -28,7 +28,7 @@ export type RiskRefreshResult = { tenantsProcessed: number; findingsScored: numb
 
 export async function refreshAllTenantsRisk(): Promise<RiskRefreshResult> {
   const db = await riskScoringDatabase();
-  const tenants = (await db.query("SELECT DISTINCT tenant_key, company_id FROM spotlight_import_records r JOIN spotlight_import_current c ON c.tenant_key=r.tenant_key AND c.run_id=r.run_id"))
+  const tenants = (await db.query("SELECT DISTINCT r.tenant_key, r.company_id FROM spotlight_import_records r JOIN spotlight_import_current c ON c.tenant_key=r.tenant_key AND c.run_id=r.run_id"))
     .rows as { tenant_key: string; company_id: string }[];
   let findingsScored = 0, errors = 0;
   for (const { tenant_key, company_id } of tenants) {
