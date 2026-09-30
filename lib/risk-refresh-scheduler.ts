@@ -59,12 +59,20 @@ function runOnce(): Promise<void> {
     const db = await riskScoringDatabase();
     const lock = await db.query("SELECT pg_try_advisory_lock($1) AS locked", [RISK_REFRESH_LOCK_KEY]);
     if (!lock.rows[0].locked) return;
-    await recordJobRun(RISK_REFRESH_JOB, "running");
     try {
+      // Job-run bookkeeping is diagnostic, not load-bearing -- a failure
+      // writing to background_job_runs (e.g. a permissions gap on that one
+      // table) must never abort the actual refresh, and must never happen
+      // before the lock is held by the try/finally that releases it. This
+      // was a real bug: recordJobRun("running") used to run BEFORE this
+      // try block, so when it threw, pg_advisory_unlock never ran and the
+      // lock stayed held forever -- every future scheduled pass silently
+      // no-op'd until the process restarted.
+      await recordJobRun(RISK_REFRESH_JOB, "running").catch((err) => console.error("[risk-refresh] could not record job start:", err instanceof Error ? err.message : err));
       const result = await refreshAllTenantsRisk();
-      await recordJobRun(RISK_REFRESH_JOB, "succeeded", result);
+      await recordJobRun(RISK_REFRESH_JOB, "succeeded", result).catch((err) => console.error("[risk-refresh] could not record job success:", err instanceof Error ? err.message : err));
     } catch (err) {
-      await recordJobRun(RISK_REFRESH_JOB, "failed", undefined, err instanceof Error ? err.message : String(err));
+      await recordJobRun(RISK_REFRESH_JOB, "failed", undefined, err instanceof Error ? err.message : String(err)).catch(() => {});
       throw err;
     } finally {
       await db.query("SELECT pg_advisory_unlock($1)", [RISK_REFRESH_LOCK_KEY]).catch(() => {});
