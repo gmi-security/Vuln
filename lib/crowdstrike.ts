@@ -108,23 +108,7 @@ function timedFetchOnce(url: string, init: RequestInit, timeoutMs: number): Prom
 // it) instead of failing the whole sync over a single throttled request.
 async function timedFetch(url: string, init: RequestInit, timeoutMs = 60_000): Promise<Response> {
   for (let attempt = 0; ; attempt++) {
-    let res: Response;
-    try {
-      res = await timedFetchOnce(url, init, timeoutMs);
-    } catch (error) {
-      // The request itself failing -- our own per-request timeout firing
-      // ("AbortError: This operation was aborted"), or a network reset --
-      // must be retried the same as a 502/503/504, not thrown straight
-      // through. A multi-hundred-page Spotlight import (hundreds of
-      // sequential/concurrent requests) will hit an occasional slow
-      // response; without this, that one timeout failed the entire import
-      // with no partial progress kept (this is the exact failure a real
-      // production run hit: a single aborted request killed a 294,400-
-      // record, 28-minute Spotlight import, and nothing re-triggered it).
-      if (attempt >= 4) throw error;
-      await new Promise((resolve) => setTimeout(resolve, Math.min(500 * 2 ** attempt, 8_000)));
-      continue;
-    }
+    const res = await timedFetchOnce(url, init, timeoutMs);
     if (res.ok || ![429, 502, 503, 504].includes(res.status) || attempt >= 4) return res;
     const retryAfter = Number(res.headers.get("retry-after"));
     const delayMs = Number.isFinite(retryAfter) && retryAfter > 0
