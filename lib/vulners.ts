@@ -65,13 +65,14 @@ export function vulnersBridgeConfig(): VulnersBridgeConfig | null {
   return { baseUrl, apiKey };
 }
 
-function bridgeHealthError(err: unknown): { authError: boolean; message: string } {
+function bridgeHealthError(err: unknown): { authError: boolean; checkError: boolean; message: string } {
   const status = err && typeof err === "object" && "httpStatus" in err ? err.httpStatus : null;
-  if (status === 401 || status === 403) return { authError: true, message: "Bridge credentials rejected." };
+  if (status === 401 || status === 403) return { authError: true, checkError: false, message: "Bridge credentials rejected." };
+  if (typeof status === "number" && status >= 400 && status < 500) return { authError: false, checkError: true, message: "Bridge health check rejected." };
   if (err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError")) {
-    return { authError: false, message: "Bridge request timed out." };
+    return { authError: false, checkError: false, message: "Bridge request timed out." };
   }
-  return { authError: false, message: "Bridge unavailable." };
+  return { authError: false, checkError: false, message: "Bridge unavailable." };
 }
 async function bridgeFetch(
   cfg: VulnersBridgeConfig,
@@ -170,6 +171,7 @@ export async function vulnersStatus(): Promise<{
   status: string;
   message: string;
   authError: boolean;
+  checkError: boolean;
 }> {
   const bridge = vulnersBridgeConfig();
   if (bridge) {
@@ -183,6 +185,7 @@ export async function vulnersStatus(): Promise<{
         status: "Connected",
         message: "Vulners bridge reachable (nmap active scanner).",
         authError: false,
+        checkError: false,
       };
     } catch (err) {
       return {
@@ -203,6 +206,7 @@ export async function vulnersStatus(): Promise<{
       message:
         "Set VULNERS_API_KEY for cloud CVE enrichment, or VULNERS_BRIDGE_URL + VULNERS_BRIDGE_API_KEY for the nmap active scanner.",
       authError: false,
+      checkError: false,
     };
   }
   try {
@@ -220,6 +224,7 @@ export async function vulnersStatus(): Promise<{
       status: ok ? "Connected" : `HTTP ${res.status}`,
       message: ok ? "Vulners cloud API reachable." : `Vulners cloud API returned HTTP ${res.status}.`,
       authError: res.status === 401 || res.status === 403,
+      checkError: res.status >= 400 && res.status < 500 && res.status !== 401 && res.status !== 403,
     };
   } catch (err) {
     return {
@@ -228,6 +233,7 @@ export async function vulnersStatus(): Promise<{
       status: "Unreachable",
       message: "Vulners cloud API unavailable.",
       authError: false,
+      checkError: false,
     };
   }
 }
