@@ -65,17 +65,15 @@ export function vulnersBridgeConfig(): VulnersBridgeConfig | null {
   return { baseUrl, apiKey };
 }
 
-function describeBridgeFetchError(err: unknown): string {
-  if (err instanceof Error) {
-    const cause = (err as { cause?: unknown }).cause;
-    if (err.name === "AbortError" || err.name === "TimeoutError") return "Request timed out.";
-    if (cause instanceof Error) return cause.message;
-    if (typeof cause === "string") return cause;
-    return err.message;
+function bridgeHealthError(err: unknown): { authError: boolean; checkError: boolean; message: string } {
+  const status = err && typeof err === "object" && "httpStatus" in err ? err.httpStatus : null;
+  if (status === 401 || status === 403) return { authError: true, checkError: false, message: "Bridge credentials rejected." };
+  if (typeof status === "number" && status >= 400 && status < 500) return { authError: false, checkError: true, message: "Bridge health check rejected." };
+  if (err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError")) {
+    return { authError: false, checkError: false, message: "Bridge request timed out." };
   }
-  return "Connection failed.";
+  return { authError: false, checkError: false, message: "Bridge unavailable." };
 }
-
 async function bridgeFetch(
   cfg: VulnersBridgeConfig,
   path: string,
@@ -93,7 +91,7 @@ async function bridgeFetch(
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => res.statusText);
-    throw new Error(`Bridge ${path} HTTP ${res.status}: ${detail}`);
+    throw Object.assign(new Error(`Bridge ${path} HTTP ${res.status}: ${detail}`), { httpStatus: res.status });
   }
   return res.json();
 }
@@ -172,6 +170,8 @@ export async function vulnersStatus(): Promise<{
   reachable: boolean;
   status: string;
   message: string;
+  authError: boolean;
+  checkError: boolean;
 }> {
   const bridge = vulnersBridgeConfig();
   if (bridge) {
@@ -184,13 +184,15 @@ export async function vulnersStatus(): Promise<{
         reachable: true,
         status: "Connected",
         message: "Vulners bridge reachable (nmap active scanner).",
+        authError: false,
+        checkError: false,
       };
     } catch (err) {
       return {
         configured: true,
         reachable: false,
         status: "Unreachable",
-        message: describeBridgeFetchError(err),
+        ...bridgeHealthError(err),
       };
     }
   }
@@ -203,6 +205,8 @@ export async function vulnersStatus(): Promise<{
       status: "Not Configured",
       message:
         "Set VULNERS_API_KEY for cloud CVE enrichment, or VULNERS_BRIDGE_URL + VULNERS_BRIDGE_API_KEY for the nmap active scanner.",
+      authError: false,
+      checkError: false,
     };
   }
   try {
@@ -218,14 +222,18 @@ export async function vulnersStatus(): Promise<{
       configured: true,
       reachable: ok,
       status: ok ? "Connected" : `HTTP ${res.status}`,
-      message: ok ? "Vulners cloud API reachable." : await res.text().catch(() => res.statusText),
+      message: ok ? "Vulners cloud API reachable." : `Vulners cloud API returned HTTP ${res.status}.`,
+      authError: res.status === 401 || res.status === 403,
+      checkError: res.status >= 400 && res.status < 500 && res.status !== 401 && res.status !== 403,
     };
   } catch (err) {
     return {
       configured: true,
       reachable: false,
       status: "Unreachable",
-      message: err instanceof Error ? err.message : "Connection failed.",
+      message: "Vulners cloud API unavailable.",
+      authError: false,
+      checkError: false,
     };
   }
 }
