@@ -51,18 +51,25 @@ export async function GET(request: Request) {
             body: {
               configured: true,
               reachable: true,
-              message: `Resend API key valid — sending as ${process.env.REPORT_FROM_EMAIL!.trim()}.`,
+              authError: false,
+              checkError: false,
+              message: "Resend API reachable.",
             },
           };
         }
+        const authError = res.status === 401 || res.status === 403;
+        const checkError = res.status >= 400 && res.status < 500 && !authError;
         return {
           body: {
             configured: true,
             reachable: false,
-            message:
-              res.status === 401
-                ? "Resend rejected the API key (HTTP 401) — check RESEND_API_KEY."
-                : `Resend API returned HTTP ${res.status}.`,
+            authError,
+            checkError,
+            message: authError
+              ? "Resend credentials rejected."
+              : checkError
+                ? "Resend health check rejected."
+                : "Resend API unavailable.",
           },
         };
       } catch {
