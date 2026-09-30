@@ -282,10 +282,10 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
         </label>}
         {!draft.id && draft.source !== "crowdstrike" && <div className="space-y-2">
           <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => {
-            setDraft({ title: "Open vulnerabilities — daily trend", query: OPEN_VULN_TREND, display: "line", chart: { category: "day", value: "open_vulns" }, refreshMinutes: 1440, enabled: true });
+            setDraft({ title: "Open vulnerabilities — weekly trend", query: OPEN_VULN_TREND, display: "line", chart: { category: "day", value: "open_vulns" }, refreshMinutes: 1440, enabled: true });
             setPreview(null); setError(""); setMessage("");
-          }}>Use daily open trend</button>
-          <p className="text-xs text-zinc-500">Starts September 23. The query uses the last confirmed pull; advance report_end to the next UTC day after a successful import. Requires a complete starting state and status changes.</p>
+          }}>Use weekly open trend</button>
+          <p className="text-xs text-zinc-500">Last 5 weeks, always relative to today. Requires a complete starting state and status changes.</p>
         </div>}
         {draft.source === "crowdstrike" && <div className="space-y-4">
           {!draft.id && <button type="button" className={ghostButtonClass} onClick={() => {
