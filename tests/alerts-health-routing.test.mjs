@@ -4,7 +4,7 @@ import { test } from "node:test";
 
 test("alert health endpoint bypasses session proxy", async () => {
   const proxy = await readFile(new URL("../proxy.ts", import.meta.url), "utf8");
-  assert.match(proxy, /pathname === "\\/api\\/alerts\\/health"/);
+  assert.ok(proxy.includes('pathname === "/api/alerts/health"'));
 });
 
 test("email alert health exposes safe structured classification", async () => {
