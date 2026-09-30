@@ -30,6 +30,8 @@ export default function PatchReviewQueue({ companyId, sla }: { companyId: string
   const [detailPage, setDetailPage] = useState(1);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [stateFilter, setStateFilter] = useState<"all" | "pending" | "approved" | "dismissed">("all");
+  const [search, setSearch] = useState("");
   const load = useCallback(async (nextPage = 1) => {
     setBusy("load"); setError("");
     try {
@@ -73,18 +75,39 @@ export default function PatchReviewQueue({ companyId, sla }: { companyId: string
 
   const detailRows = useMemo(() => selected ? patchReviewRows(selected.group) : [], [selected]);
   const overdueLoaded = sla ? rows.filter(row => row.reviewState === "pending" && ageDays(row.preparedAt) >= slaDaysFor(row.worstSeverity, sla)).length : 0;
+
+  // Client-side over what's already loaded, same reasoning as the ticket
+  // tracker's filter -- a round trip per keystroke would just add latency.
+  const needle = search.trim().toLowerCase();
+  const filteredRows = useMemo(() => rows.filter(row => {
+    if (stateFilter !== "all" && row.reviewState !== stateFilter) return false;
+    if (!needle) return true;
+    const haystack = [row.remediationTitle, ...row.cves, row.companyName, row.tenantId].filter(Boolean).join(" ").toLowerCase();
+    return haystack.includes(needle);
+  }), [rows, stateFilter, needle]);
   return <section aria-label="Consolidation review queue" className="rounded-2xl border border-zinc-800 bg-[#080808] p-5 sm:p-7">
     <div className="flex flex-wrap items-start justify-between gap-3"><div>
       <p className="text-xs uppercase tracking-[0.25em] text-red-500">Consolidation</p>
       <h2 className="mt-2 text-xl font-semibold text-white">Review queue</h2>
       <p className="mt-2 max-w-2xl text-sm text-zinc-400">Awaiting review is ranked by devices affected — the biggest-impact remediation for this customer sits at the top. Approving the next one prepares its ticket; sending still requires the ConnectWise form.</p>
     </div><button type="button" className={styles.button} disabled={Boolean(busy)} onClick={() => void load()}>Refresh</button></div>
-    <p className="mt-4 text-sm text-zinc-400">{counts.pending} awaiting review · {counts.approved} approved · {rows.length} of {counts.total} loaded{overdueLoaded > 0 && <span className="ml-2 font-medium text-[#ff8f96]">· {overdueLoaded} past its severity's SLA</span>}</p>
+    <div className="mt-4 flex flex-wrap items-center gap-2 text-sm">
+      {([["all", `All (${counts.total})`], ["pending", `Awaiting review (${counts.pending})`], ["approved", `Approved (${counts.approved})`], ["dismissed", "Dismissed"]] as const).map(([key, label]) =>
+        <button key={key} type="button" aria-pressed={stateFilter === key} onClick={() => setStateFilter(key)}
+          className={`rounded-full border px-3 py-1 transition-colors ${stateFilter === key ? "border-[#ff8f96] bg-[rgba(179,14,20,0.16)] text-[#ff8f96]" : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-600"}`}>{label}</button>)}
+      {overdueLoaded > 0 && <span className="font-medium text-[#ff8f96]">· {overdueLoaded} past its severity's SLA</span>}
+    </div>
+    <div className="mt-3 flex flex-wrap items-center gap-2">
+      <input type="search" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by CVE, remediation, or customer…"
+        className="min-w-[16rem] flex-1 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-zinc-600 focus:outline-none" />
+      <span className="text-xs text-zinc-500">{filteredRows.length === rows.length ? `${rows.length} loaded` : `${filteredRows.length} of ${rows.length} loaded`}</span>
+    </div>
     {error && <p role="alert" className={styles.patchError}>{error}</p>}
     {!rows.length && !busy && <p className="mt-5 text-sm text-zinc-400">No saved consolidation candidates yet.</p>}
+    {rows.length > 0 && !filteredRows.length && <p className="mt-5 text-sm text-zinc-400">No rows match this filter/search.</p>}
     <div className={`${styles.tableScroll} mt-4`}><table className={styles.table}>
       <thead><tr><th>Customer / source</th><th>Remediation</th><th>CVEs</th><th>Assets</th><th>Findings</th><th>State</th><th>Age</th><th>Prepared</th><th>Details</th></tr></thead>
-      <tbody>{rows.map(row => {
+      <tbody>{filteredRows.map(row => {
         const isNext = row.id === rows.find(r => r.reviewState === "pending")?.id;
         const shownCves = row.cves.slice(0, 4);
         const moreCves = row.cves.length - shownCves.length;
