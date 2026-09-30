@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { dashboardRequest } from "@/lib/dashboard-browser-client";
 import { ageDays, patchGroupTicketState, type PatchGroupTicketSummary } from "@/lib/patch-group-ticket-types";
 import { slaDaysFor } from "@/lib/vuln-sla";
@@ -8,10 +8,21 @@ import styles from "./QueryDashboard.module.css";
 
 type Row = { id: string; scope: string; cves: string[]; row: PatchGroupTicketSummary };
 
-function stateBucket(state: string, ticketId: number | null, closed: boolean): "cut-open" | "cut-closed" | "attention" | "draft" {
+type Bucket = "cut-open" | "cut-closed" | "attention" | "draft";
+function stateBucket(state: string, ticketId: number | null, closed: boolean): Bucket {
   if (ticketId) return closed ? "cut-closed" : "cut-open";
   if (state === "failed" || state === "uncertain") return "attention";
   return "draft";
+}
+const BUCKET_BADGE: Record<Bucket, { label: string; className: string }> = {
+  "cut-open": { label: "Open", className: "border-emerald-800/60 bg-emerald-950/30 text-emerald-300" },
+  "cut-closed": { label: "Closed", className: "border-zinc-700 bg-zinc-900 text-zinc-300" },
+  attention: { label: "Needs attention", className: "border-[rgba(179,14,20,0.4)] bg-[rgba(179,14,20,0.12)] text-[#ff8f96]" },
+  draft: { label: "Draft", className: "border-amber-800/60 bg-amber-950/20 text-amber-300" },
+};
+function StatusBadge({ bucket }: { bucket: Bucket }) {
+  const { label, className } = BUCKET_BADGE[bucket];
+  return <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide ${className}`}>{label}</span>;
 }
 // slaDays is the org's real per-severity SLA (Settings > SLA) for this
 // ticket's worst CVE severity -- null only until it's loaded.
@@ -43,6 +54,8 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
   const [recutResult, setRecutResult] = useState("");
   const [checkingJob, setCheckingJob] = useState("");
   const [jobStatus, setJobStatus] = useState("");
+  const [bucketFilter, setBucketFilter] = useState<Bucket | "all">("all");
+  const [search, setSearch] = useState("");
 
   const reload = useCallback(async () => {
     setLoading(true); setError("");
@@ -197,6 +210,18 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
   const cut = buckets["cut-open"] + buckets["cut-closed"];
   const overdueOpen = sla ? rows.filter(r => r.row.ticketId && !r.row.closed && ageDays(r.row.preparedAt) >= slaDaysFor(r.row.worstSeverity, sla)).length : 0;
 
+  // Client-side, over what's already loaded -- a search/filter round trip
+  // to the server for a table this size would just add latency for no
+  // benefit. The stat tiles above double as filter toggles so the numbers
+  // and the table stay in sync at a glance, not two disconnected views.
+  const needle = search.trim().toLowerCase();
+  const filteredRows = useMemo(() => rows.filter(r => {
+    if (bucketFilter !== "all" && stateBucket(r.row.state, r.row.ticketId, r.row.closed) !== bucketFilter) return false;
+    if (!needle) return true;
+    const haystack = [r.scope, ...r.cves, r.row.ticketId?.toString(), r.row.company, r.row.companyName].filter(Boolean).join(" ").toLowerCase();
+    return haystack.includes(needle);
+  }), [rows, bucketFilter, needle]);
+
   return <section className="rounded-2xl border border-[rgba(179,14,20,0.14)] bg-[#050505] p-5" aria-label="Patch ticket tracker">
     <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
       <h2 className="text-lg text-zinc-100">Patch ticket tracker</h2>
@@ -227,20 +252,34 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
         </div>
       : <p role="status" className={`${styles.resultNote} mt-1`}>Every Atlas ticket in ConnectWise is tracked by this app.</p>)}
     <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-5">
-      <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3"><div className="text-2xl font-semibold text-white">{total}</div><div className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Prepared</div></div>
+      <button type="button" aria-pressed={bucketFilter === "all"} onClick={() => setBucketFilter("all")}
+        className={`rounded-xl border p-3 text-left transition-colors ${bucketFilter === "all" ? "border-zinc-500 bg-zinc-900" : "border-zinc-800 bg-zinc-950 hover:border-zinc-700"}`}>
+        <div className="text-2xl font-semibold text-white">{total}</div><div className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Prepared</div></button>
       <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3"><div className="text-2xl font-semibold text-white">{cut}</div><div className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Tickets cut</div></div>
-      <div className="rounded-xl border border-emerald-900/60 bg-emerald-950/10 p-3"><div className="text-2xl font-semibold text-emerald-300">{buckets["cut-open"]}</div><div className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Open in ConnectWise</div></div>
-      <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3"><div className="text-2xl font-semibold text-zinc-300">{buckets["cut-closed"]}</div><div className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Closed</div></div>
-      <div className="rounded-xl border border-[rgba(179,14,20,0.4)] bg-[rgba(179,14,20,0.08)] p-3"><div className="text-2xl font-semibold text-[#ff8f96]">{buckets.attention}</div><div className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Needs attention</div></div>
+      <button type="button" aria-pressed={bucketFilter === "cut-open"} onClick={() => setBucketFilter(f => f === "cut-open" ? "all" : "cut-open")}
+        className={`rounded-xl border p-3 text-left transition-colors ${bucketFilter === "cut-open" ? "border-emerald-500 bg-emerald-950/30" : "border-emerald-900/60 bg-emerald-950/10 hover:border-emerald-700"}`}>
+        <div className="text-2xl font-semibold text-emerald-300">{buckets["cut-open"]}</div><div className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Open in ConnectWise</div></button>
+      <button type="button" aria-pressed={bucketFilter === "cut-closed"} onClick={() => setBucketFilter(f => f === "cut-closed" ? "all" : "cut-closed")}
+        className={`rounded-xl border p-3 text-left transition-colors ${bucketFilter === "cut-closed" ? "border-zinc-500 bg-zinc-900" : "border-zinc-800 bg-zinc-950 hover:border-zinc-700"}`}>
+        <div className="text-2xl font-semibold text-zinc-300">{buckets["cut-closed"]}</div><div className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Closed</div></button>
+      <button type="button" aria-pressed={bucketFilter === "attention"} onClick={() => setBucketFilter(f => f === "attention" ? "all" : "attention")}
+        className={`rounded-xl border p-3 text-left transition-colors ${bucketFilter === "attention" ? "border-[#ff8f96] bg-[rgba(179,14,20,0.16)]" : "border-[rgba(179,14,20,0.4)] bg-[rgba(179,14,20,0.08)] hover:border-[#ff8f96]/70"}`}>
+        <div className="text-2xl font-semibold text-[#ff8f96]">{buckets.attention}</div><div className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Needs attention</div></button>
     </div>
     <p className={`${styles.resultNote} mt-3`}>{devicesCovered.toLocaleString()} device-tickets covered by created tickets (a device can appear on more than one ticket) · {distinctCves.size.toLocaleString()} distinct CVEs referenced across tracked plans.{overdueOpen > 0 && <span className="ml-2 font-medium text-[#ff8f96]">· {overdueOpen} open ticket{overdueOpen === 1 ? "" : "s"} past its severity's SLA</span>}</p>
     {error && <p role="alert" className={styles.patchError}>{error}</p>}
-    <div className={`${styles.tableScroll} mt-4`}><table className={styles.table}>
-      <thead><tr><th>Type</th><th>Scope</th><th>Ticket / state</th><th>Company</th><th>Devices</th><th>Age</th><th>Prepared</th></tr></thead>
-      <tbody>{rows.map(r => <tr key={r.id}>
-        <td>Customer remediation</td>
+    <div className="mt-4 flex flex-wrap items-center gap-2">
+      <input type="search" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by CVE, ticket #, or company…"
+        className="min-w-[16rem] flex-1 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-zinc-600 focus:outline-none" />
+      {(bucketFilter !== "all" || search) && <button type="button" className={styles.button} onClick={() => { setBucketFilter("all"); setSearch(""); }}>Clear filters</button>}
+      <span className="text-xs text-zinc-500">{filteredRows.length === rows.length ? `${rows.length} row${rows.length === 1 ? "" : "s"}` : `${filteredRows.length} of ${rows.length} rows`}</span>
+    </div>
+    <div className={`${styles.tableScroll} mt-3`}><table className={styles.table}>
+      <thead><tr><th>Scope</th><th>Status</th><th>Company</th><th>Devices</th><th>Age</th><th>Prepared</th></tr></thead>
+      <tbody>{filteredRows.map(r => <tr key={r.id}>
         <td title={`${r.row.remediationTitle || "Remediation"}\nResolves: ${r.cves.join(", ")}`}>{r.scope}</td>
-        <td>{r.row.ticketUrl && <a href={r.row.ticketUrl} target="_blank" rel="noopener noreferrer" className="text-sky-300 underline">#{r.row.ticketId}</a>}<div>{patchGroupTicketState(r.row)}</div>
+        <td><StatusBadge bucket={stateBucket(r.row.state, r.row.ticketId, r.row.closed)} />
+          <div className="mt-1">{r.row.ticketUrl && <a href={r.row.ticketUrl} target="_blank" rel="noopener noreferrer" className="text-sky-300 underline">#{r.row.ticketId}</a>}<span className="text-zinc-400"> {patchGroupTicketState(r.row)}</span></div>
           {r.row.createdBy === "auto-create" && <div className="mt-0.5 text-[11px] font-medium text-emerald-400">Auto-created (Critical/High)</div>}
           {r.row.slaEscalations > 0 && <div className="mt-0.5 text-[11px] font-medium text-[#ff8f96]">Auto-escalated ×{r.row.slaEscalations} (SLA breach)</div>}
           {r.row.error && <div className="mt-0.5 text-[11px] font-medium text-[#ff8f96]" title={r.row.error}>{r.row.error.length > 90 ? `${r.row.error.slice(0, 90)}…` : r.row.error}</div>}
@@ -252,6 +291,7 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
       </tr>)}</tbody>
     </table></div>
     {!rows.length && !loading && <p className={styles.resultNote}>No patch requests or consolidated plans prepared yet.</p>}
+    {rows.length > 0 && !filteredRows.length && <p className={styles.resultNote}>No rows match this filter/search.</p>}
     {more && <p className={styles.resultNote}>The tracker reached its page limit; counts cover the loaded customer plans.</p>}
   </section>;
 }
