@@ -48,7 +48,7 @@ function fakeDb({ existingFindingRow = undefined } = {}) {
 
 async function loadStore(db) {
   return loader({
-    "./elastic-dashboard-store": { dashboardDatabase: async () => db },
+    "./persist": { applicationDatabase: () => db },
   })("lib/risk-scoring-store.ts");
 }
 
@@ -122,4 +122,30 @@ test("setVerificationStatus records the transition and sets verified_at only for
   await store.setVerificationStatus(db, "f1", "verified_remediated", "system");
   const verified = db.calls.find((c) => c.sql.includes("UPDATE finding_risk SET verification_status"));
   assert.match(verified.sql, /verified_at=now\(\)/);
+});
+
+// riskScoringDatabase() itself -- unlike every test above, which passes a
+// fake db directly to each function, these actually exercise the connection
+// resolution. This is deliberately applicationDatabase(), NOT
+// dashboardDatabase(): a live production run found 0 tenants because
+// finding_risk had been created via dashboardDatabase() (which can point at
+// a separate ELASTIC_VULN_DATABASE_URL pool), while spotlight_import_records
+// is only ever written through applicationDatabase() -- so the join between
+// them silently matched nothing. These tests are the regression guard for
+// that specific mistake being reintroduced.
+test("riskScoringDatabase uses applicationDatabase(), not dashboardDatabase() -- the fix for the 0-tenants production bug", async () => {
+  const db = fakeDb();
+  let dashboardDatabaseCalled = false;
+  const store = await loader({
+    "./persist": { applicationDatabase: () => db },
+    "./elastic-dashboard-store": { dashboardDatabase: async () => { dashboardDatabaseCalled = true; return db; } },
+  })("lib/risk-scoring-store.ts");
+  const resolved = await store.riskScoringDatabase();
+  assert.equal(resolved, db);
+  assert.equal(dashboardDatabaseCalled, false, "riskScoringDatabase must not fall back to dashboardDatabase()");
+});
+
+test("riskScoringDatabase throws a clear error instead of silently returning undefined when no database is configured", async () => {
+  const store = await loader({ "./persist": { applicationDatabase: () => null } })("lib/risk-scoring-store.ts");
+  await assert.rejects(() => store.riskScoringDatabase(), /not configured/i);
 });

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { dashboardDatabase } from "./elastic-dashboard-store";
+import { applicationDatabase } from "./persist";
+import { DashboardError } from "./elastic-dashboard";
 import { DEFAULT_RISK_WEIGHTS, DEFAULT_SWATH_THRESHOLDS, type RiskWeights, type SwathThresholds } from "./risk-scoring";
 
 // finding_risk is keyed by (tenant_key, cve, host_key) -- a STABLE identity
@@ -7,9 +8,24 @@ import { DEFAULT_RISK_WEIGHTS, DEFAULT_SWATH_THRESHOLDS, type RiskWeights, type 
 // (lib/spotlight-record-store.ts) is replaced wholesale on every completed
 // import run, so risk scores, Swath overrides, and verification status can't
 // live there or they'd be lost the next time an import completes.
+//
+// Deliberately applicationDatabase(), NOT dashboardDatabase(): this module
+// runs raw SQL joins directly against spotlight_import_records/
+// spotlight_import_current, which lib/spotlight-record-store.ts writes
+// exclusively through applicationDatabase(). dashboardDatabase() can point
+// at a separate ELASTIC_VULN_DATABASE_URL pool when one is configured --
+// using it here would mean this module's tables and the Spotlight tables
+// could live in two different physical databases, so every join would
+// silently return zero rows (this is the exact bug a live production run
+// hit: refreshAllTenantsRisk found 0 tenants despite Atlas clearly having
+// Spotlight data, because finding_risk et al had been created in the wrong
+// database). See docs/superpowers/specs/2026-09-29-postgres-source-of-truth
+// -design.md for the broader, still-unresolved two-database split this
+// session already knew about.
 let ready: Promise<void> | undefined;
 export async function riskScoringDatabase() {
-  const db = await dashboardDatabase();
+  const db = applicationDatabase();
+  if (!db) throw new DashboardError("Database storage is not configured.", 503);
   ready ??= db.query(`
     CREATE TABLE IF NOT EXISTS finding_risk (
       id UUID PRIMARY KEY, tenant_key TEXT NOT NULL, company_id TEXT NOT NULL,
