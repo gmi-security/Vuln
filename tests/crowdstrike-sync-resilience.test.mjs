@@ -172,7 +172,7 @@ test("Spotlight session returns bounded ID pages and hydrates their exact source
     if (url.includes("/oauth2/token")) return json({ access_token: "tok" });
     const request = new URL(url);
     if (request.pathname.includes("/spotlight/queries/vulnerabilities/v1")) {
-      assert.equal(request.searchParams.get("limit"), "1000");
+      assert.equal(request.searchParams.get("limit"), "400");
       assert.equal(request.searchParams.get("filter"), "status:'open',status:'reopen'");
       return json({ resources: ["source-1"], meta: { pagination: { after: "next", total: 2 } } });
     }
