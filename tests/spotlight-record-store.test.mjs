@@ -277,6 +277,171 @@ test("cleanup cannot delete a newer failed run that may still be resumed", async
   assert.match(candidateQuery, /started_at\s*</i);
 });
 
+// Partitioned discovery (checkpoint_version 3): several independent cursor
+// walks (one per partition_key, e.g. status:'open' / status:'reopen') run
+// concurrently instead of one sequential walk -- built after a real 2.1M-
+// finding tenant showed sequential discovery alone would take hours.
+
+test("a brand new partitioned run creates version three and one partition row per key", async () => {
+  const calls = [];
+  const created = { id: "new-run", phase: "discovering", hydration_cursor: "",
+    discovered_count: "0", expected_count: null, hydrated_count: "0" };
+  const client = { query: async (sql, values) => {
+    calls.push({ sql: String(sql), values });
+    if (String(sql).includes("SELECT id, phase, hydration_cursor")) return { rows: [], rowCount: 0 };
+    if (String(sql).includes("INSERT INTO spotlight_import_runs")) return { rows: [created], rowCount: 1 };
+    if (String(sql).includes("SELECT partition_key, query_cursor, discovered_count, done"))
+      return { rows: [{ partition_key: "open", query_cursor: "", discovered_count: "0", done: false },
+        { partition_key: "reopen", query_cursor: "", discovered_count: "0", done: false }], rowCount: 2 };
+    return { rows: [], rowCount: 1 };
+  }, release: () => {} };
+  const db = { query: async () => ({ rows: [], rowCount: 0 }), connect: async () => client };
+  const run = await createSpotlightRecordStore(db).beginOrResumePartitionedSpotlightRun("CO-147284", ["open", "reopen"]);
+  assert.equal(run.id, "new-run");
+  assert.equal(run.phase, "discovering");
+  assert.deepEqual(run.partitions.map(p => p.key), ["open", "reopen"]);
+  assert.ok(run.partitions.every(p => !p.done && p.queryCursor === ""));
+  const insertRun = calls.find(c => c.sql.includes("INSERT INTO spotlight_import_runs"));
+  assert.ok(insertRun.sql.includes("checkpoint_version") && insertRun.values[0] !== undefined);
+  assert.ok(calls.some(c => c.sql.includes("INSERT INTO spotlight_import_partitions")));
+});
+
+test("a partitioned run resumes existing per-partition cursors instead of restarting them", async () => {
+  const existingRun = { id: "run-resume", phase: "discovering", hydration_cursor: "",
+    discovered_count: "600", expected_count: null, hydrated_count: "0" };
+  const calls = [];
+  const client = { query: async (sql) => {
+    calls.push(String(sql));
+    if (String(sql).includes("SELECT id, phase, hydration_cursor")) return { rows: [{ id: "run-resume" }], rowCount: 1 };
+    if (String(sql).includes("UPDATE spotlight_import_runs") && String(sql).includes("RETURNING"))
+      return { rows: [existingRun], rowCount: 1 };
+    if (String(sql).includes("SELECT partition_key, query_cursor, discovered_count, done"))
+      return { rows: [{ partition_key: "open", query_cursor: "page-400", discovered_count: "400", done: false },
+        { partition_key: "reopen", query_cursor: "", discovered_count: "200", done: true }], rowCount: 2 };
+    return { rows: [], rowCount: 1 };
+  }, release: () => {} };
+  const db = { query: async () => ({ rows: [], rowCount: 0 }), connect: async () => client };
+  const run = await createSpotlightRecordStore(db).beginOrResumePartitionedSpotlightRun("CO-147284", ["open", "reopen"]);
+  assert.equal(run.id, "run-resume");
+  assert.ok(!calls.some(sql => sql.includes("INSERT INTO spotlight_import_partitions")), "must not re-seed partitions on resume");
+  const open = run.partitions.find(p => p.key === "open");
+  assert.equal(open.queryCursor, "page-400");
+  assert.equal(open.done, false);
+  const reopen = run.partitions.find(p => p.key === "reopen");
+  assert.equal(reopen.done, true);
+});
+
+test("savePartitionPage keeps the run discovering while another partition is still open", async () => {
+  const calls = [];
+  const client = { query: async (sql, values) => {
+    calls.push({ sql: String(sql), values });
+    if (String(sql).includes("SELECT query_cursor, discovered_count, done"))
+      return { rows: [{ query_cursor: "old", discovered_count: "400", done: false }], rowCount: 1 };
+    if (String(sql).includes("SELECT COUNT(*) AS count FROM spotlight_import_partitions") && String(sql).includes("done = false"))
+      return { rows: [{ count: "1" }], rowCount: 1 }; // the other partition is still open
+    if (String(sql).includes("SUM(discovered_count)")) return { rows: [{ total: "402" }], rowCount: 1 };
+    if (String(sql).includes("UPDATE spotlight_import_runs") && String(sql).includes("RETURNING"))
+      return { rows: [{ id: "run-1", phase: "discovering", hydration_cursor: "", discovered_count: "402", expected_count: null, hydrated_count: "0" }], rowCount: 1 };
+    if (String(sql).includes("SELECT partition_key, query_cursor, discovered_count, done"))
+      return { rows: [{ partition_key: "open", query_cursor: "", discovered_count: "402", done: true },
+        { partition_key: "reopen", query_cursor: "mid", discovered_count: "200", done: false }], rowCount: 2 };
+    return { rows: [], rowCount: 1 };
+  }, release: () => {} };
+  const db = { query: async () => ({ rows: [], rowCount: 0 }), connect: async () => client };
+  const run = await createSpotlightRecordStore(db).savePartitionPage("run-1", "CO-147284", "open", "old", ["source-1", "source-2"], "", 402);
+  assert.equal(run.phase, "discovering", "must not flip to hydrating while another partition remains open");
+  const runUpdate = calls.find(c => c.sql.includes("UPDATE spotlight_import_runs") && c.sql.includes("RETURNING"));
+  assert.deepEqual(runUpdate.values.slice(0, 4), ["run-1", "CO-147284", "402", false]);
+});
+
+test("savePartitionPage flips the whole run to hydrating once the last open partition finishes", async () => {
+  const calls = [];
+  const client = { query: async (sql, values) => {
+    calls.push({ sql: String(sql), values });
+    if (String(sql).includes("SELECT query_cursor, discovered_count, done"))
+      return { rows: [{ query_cursor: "mid", discovered_count: "200", done: false }], rowCount: 1 };
+    if (String(sql).includes("SELECT COUNT(*) AS count FROM spotlight_import_partitions") && String(sql).includes("done = false"))
+      return { rows: [{ count: "0" }], rowCount: 1 }; // this was the last open partition
+    if (String(sql).includes("COUNT(*)::text AS count FROM spotlight_import_ids"))
+      return { rows: [{ count: "602" }], rowCount: 1 };
+    if (String(sql).includes("SUM(discovered_count)")) return { rows: [{ total: "602" }], rowCount: 1 };
+    if (String(sql).includes("UPDATE spotlight_import_runs") && String(sql).includes("RETURNING"))
+      return { rows: [{ id: "run-1", phase: "hydrating", hydration_cursor: "", discovered_count: "602", expected_count: "602", hydrated_count: "0" }], rowCount: 1 };
+    if (String(sql).includes("SELECT partition_key, query_cursor, discovered_count, done"))
+      return { rows: [{ partition_key: "open", query_cursor: "", discovered_count: "402", done: true },
+        { partition_key: "reopen", query_cursor: "", discovered_count: "200", done: true }], rowCount: 2 };
+    return { rows: [], rowCount: 1 };
+  }, release: () => {} };
+  const db = { query: async () => ({ rows: [], rowCount: 0 }), connect: async () => client };
+  const run = await createSpotlightRecordStore(db).savePartitionPage("run-1", "CO-147284", "reopen", "mid", ["source-3"], "", 200);
+  assert.equal(run.phase, "hydrating");
+  assert.equal(run.expectedCount, 602);
+  const runUpdate = calls.find(c => c.sql.includes("UPDATE spotlight_import_runs") && c.sql.includes("RETURNING"));
+  assert.deepEqual(runUpdate.values, ["run-1", "CO-147284", "602", true, 602]);
+});
+
+test("savePartitionPage rejects a page whose partition checkpoint already moved on", async () => {
+  const calls = [];
+  const client = { query: async sql => {
+    calls.push(String(sql));
+    if (String(sql).includes("SELECT query_cursor, discovered_count, done"))
+      return { rows: [{ query_cursor: "newer-than-expected", discovered_count: "400", done: false }], rowCount: 1 };
+    return { rows: [], rowCount: 1 };
+  }, release: () => {} };
+  const db = { query: async () => ({ rows: [], rowCount: 0 }), connect: async () => client };
+  await assert.rejects(() => createSpotlightRecordStore(db).savePartitionPage(
+    "run-1", "CO-147284", "open", "stale-cursor", ["source-1"], "next", null), /checkpoint changed/i);
+  assert.ok(calls.some(sql => sql === "ROLLBACK"));
+  assert.ok(!calls.some(sql => sql.includes("INSERT INTO spotlight_import_ids")));
+});
+
+test("savePartitionPage rejects a page for an already-done partition", async () => {
+  const client = { query: async sql => {
+    if (String(sql).includes("SELECT query_cursor, discovered_count, done"))
+      return { rows: [{ query_cursor: "", discovered_count: "400", done: true }], rowCount: 1 };
+    return { rows: [], rowCount: 1 };
+  }, release: () => {} };
+  const db = { query: async () => ({ rows: [], rowCount: 0 }), connect: async () => client };
+  await assert.rejects(() => createSpotlightRecordStore(db).savePartitionPage(
+    "run-1", "CO-147284", "open", "", ["source-1"], "next", null), /checkpoint changed/i);
+});
+
+test("resetPartitionCursor clears only the named partition's cursor, leaving it undone and other partitions untouched", async () => {
+  const calls = [];
+  const db = { query: async (sql, values) => { calls.push({ sql: String(sql), values }); return { rows: [], rowCount: 1 }; } };
+  await createSpotlightRecordStore(db).resetPartitionCursor("run-1", "CO-147284", "open", "Saved Spotlight cursor rejected: Spotlight query 400: invalid after token");
+  const reset = calls.find(c => c.sql.includes("UPDATE spotlight_import_partitions"));
+  assert.ok(reset.sql.includes("query_cursor = ''"));
+  assert.ok(reset.sql.includes("partition_key = $3"));
+  assert.ok(reset.sql.includes("done = false"), "must only reset a partition still in progress, not a completed one");
+  assert.deepEqual(reset.values, ["run-1", "CO-147284", "open"]);
+});
+
+test("getPartitionedRunCheckpoint reads the current state without acquiring a client or mutating anything", async () => {
+  let connected = false;
+  const db = { connect: async () => { connected = true; throw new Error("must not open a transaction for a read"); },
+    query: async sql => {
+      if (String(sql).includes("SELECT id, phase, hydration_cursor"))
+        return { rows: [{ id: "run-1", phase: "hydrating", hydration_cursor: "source-99",
+          discovered_count: "602", expected_count: "602", hydrated_count: "300" }], rowCount: 1 };
+      if (String(sql).includes("SELECT partition_key, query_cursor, discovered_count, done"))
+        return { rows: [{ partition_key: "open", query_cursor: "", discovered_count: "402", done: true },
+          { partition_key: "reopen", query_cursor: "", discovered_count: "200", done: true }], rowCount: 2 };
+      return { rows: [], rowCount: 0 };
+    } };
+  const run = await createSpotlightRecordStore(db).getPartitionedRunCheckpoint("run-1", "CO-147284");
+  assert.equal(connected, false);
+  assert.equal(run.phase, "hydrating");
+  assert.equal(run.hydratedCount, 300);
+  assert.equal(run.partitions.length, 2);
+});
+
+test("getPartitionedRunCheckpoint throws for an unknown run instead of returning an empty checkpoint", async () => {
+  const db = { query: async sql => String(sql).includes("SELECT id, phase, hydration_cursor")
+    ? { rows: [], rowCount: 0 } : { rows: [], rowCount: 0 } };
+  await assert.rejects(() => createSpotlightRecordStore(db).getPartitionedRunCheckpoint("missing", "CO-147284"), /not found/i);
+});
+
 test("runtime Spotlight storage uses the established application database without the dashboard URL", async () => {
   const prior = process.env.ELASTIC_VULN_DATABASE_URL;
   delete process.env.ELASTIC_VULN_DATABASE_URL;
