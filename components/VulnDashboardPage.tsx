@@ -12,6 +12,7 @@ import {
 import VulnShell from "@/components/VulnShell";
 import TrendChart, { type TrendSnapshot } from "@/components/TrendChart";
 import CompositeScoreInfo from "@/components/CompositeScoreInfo";
+import RiskDashboard from "@/components/RiskDashboard";
 import { PanelCard, Pill, StatCard, primaryButtonClass } from "@/components/ui";
 import {
   compositeColor,
@@ -266,6 +267,8 @@ export default function VulnDashboardPage() {
           </p>
         </div>
       ) : null}
+
+      <RiskDashboard />
 
       <PanelCard
         eyebrow="Trend"
