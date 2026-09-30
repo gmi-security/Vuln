@@ -36,6 +36,7 @@ export async function riskScoringDatabase() {
       cve TEXT PRIMARY KEY, cvss_score REAL, cvss_severity TEXT,
       epss_probability REAL, epss_percentile REAL,
       cisa_kev BOOLEAN NOT NULL DEFAULT false, kev_date_added DATE, kev_ransomware BOOLEAN NOT NULL DEFAULT false,
+      active_exploitation BOOLEAN NOT NULL DEFAULT false, active_exploitation_source TEXT, active_exploitation_detail TEXT,
       published_date DATE, updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
     CREATE TABLE IF NOT EXISTS risk_history (
@@ -224,6 +225,7 @@ export async function setVerificationStatus(db: Awaited<ReturnType<typeof riskSc
 export type CveEnrichmentRow = {
   cve: string; cvssScore: number | null; cvssSeverity: string | null; epssProbability: number | null; epssPercentile: number | null;
   cisaKev: boolean; kevDateAdded: string | null; kevRansomware: boolean; publishedDate: string | null;
+  activeExploitation: boolean; activeExploitationSource: string | null; activeExploitationDetail: string | null;
 };
 
 export async function getCveEnrichment(db: Awaited<ReturnType<typeof riskScoringDatabase>>, cves: string[]): Promise<Map<string, CveEnrichmentRow>> {
@@ -235,6 +237,7 @@ export async function getCveEnrichment(db: Awaited<ReturnType<typeof riskScoring
     epssProbability: row.epss_probability, epssPercentile: row.epss_percentile,
     cisaKev: row.cisa_kev, kevDateAdded: row.kev_date_added, kevRansomware: row.kev_ransomware,
     publishedDate: row.published_date,
+    activeExploitation: row.active_exploitation, activeExploitationSource: row.active_exploitation_source, activeExploitationDetail: row.active_exploitation_detail,
   });
   return out;
 }
@@ -242,15 +245,20 @@ export async function getCveEnrichment(db: Awaited<ReturnType<typeof riskScoring
 export async function upsertCveEnrichment(db: Awaited<ReturnType<typeof riskScoringDatabase>>, rows: (Partial<CveEnrichmentRow> & { cve: string })[]): Promise<void> {
   for (const row of rows) {
     await db.query(`
-      INSERT INTO cve_enrichment (cve, cvss_score, cvss_severity, epss_probability, epss_percentile, cisa_kev, kev_date_added, kev_ransomware, published_date, updated_at)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now())
+      INSERT INTO cve_enrichment (cve, cvss_score, cvss_severity, epss_probability, epss_percentile, cisa_kev, kev_date_added, kev_ransomware, published_date,
+        active_exploitation, active_exploitation_source, active_exploitation_detail, updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now())
       ON CONFLICT (cve) DO UPDATE SET
         cvss_score=coalesce($2, cve_enrichment.cvss_score), cvss_severity=coalesce($3, cve_enrichment.cvss_severity),
         epss_probability=coalesce($4, cve_enrichment.epss_probability), epss_percentile=coalesce($5, cve_enrichment.epss_percentile),
         cisa_kev=$6 OR cve_enrichment.cisa_kev, kev_date_added=coalesce($7, cve_enrichment.kev_date_added),
-        kev_ransomware=$8 OR cve_enrichment.kev_ransomware, published_date=coalesce($9, cve_enrichment.published_date), updated_at=now()
+        kev_ransomware=$8 OR cve_enrichment.kev_ransomware, published_date=coalesce($9, cve_enrichment.published_date),
+        active_exploitation=$10 OR cve_enrichment.active_exploitation,
+        active_exploitation_source=coalesce($11, cve_enrichment.active_exploitation_source),
+        active_exploitation_detail=coalesce($12, cve_enrichment.active_exploitation_detail), updated_at=now()
     `, [row.cve, row.cvssScore ?? null, row.cvssSeverity ?? null, row.epssProbability ?? null, row.epssPercentile ?? null,
-      row.cisaKev ?? false, row.kevDateAdded ?? null, row.kevRansomware ?? false, row.publishedDate ?? null]);
+      row.cisaKev ?? false, row.kevDateAdded ?? null, row.kevRansomware ?? false, row.publishedDate ?? null,
+      row.activeExploitation ?? false, row.activeExploitationSource ?? null, row.activeExploitationDetail ?? null]);
   }
 }
 

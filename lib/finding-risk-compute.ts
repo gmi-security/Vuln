@@ -114,7 +114,9 @@ export async function computeFindingRiskForTenant(tenantKey: string, companyId: 
           cve, cvss: extractCvss(record) ?? enriched?.cvssScore ?? null,
           epssProbability: enriched?.epssProbability ?? null, epssPercentile: enriched?.epssPercentile ?? null,
           cisaKev: enriched?.cisaKev ?? false, knownExploit: extractKnownExploit(record),
-          activeExploitation: false, // no independent active-exploitation feed wired up yet -- see report
+          // Sourced from MISP/OpenCTI/IntelOwl via cve-enrichment-refresh.ts
+          // when configured; false (not a guess) when no signal exists yet.
+          activeExploitation: enriched?.activeExploitation ?? false,
           ransomwareAssociation: enriched?.kevRansomware ?? false,
           publishedAt: extractPublishedAt(record) ?? enriched?.publishedDate ?? null,
           patchAvailable: null, repeatedDetection: false, widespreadExposure: false,
