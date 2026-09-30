@@ -304,9 +304,9 @@ export async function createSpotlightSession(config: FalconTenant) {
     }
     return get(token);
   }
-  async function queryPage(after = ""): Promise<{ ids: string[]; next: string; total: number | null }> {
+  async function queryPage(after = "", filter = "status:'open',status:'reopen'"): Promise<{ ids: string[]; next: string; total: number | null }> {
     const url = new URL(`${config.baseUrl}/spotlight/queries/vulnerabilities/v1`);
-    url.searchParams.set("filter", "status:'open',status:'reopen'");
+    url.searchParams.set("filter", filter);
     url.searchParams.set("limit", "400");
     if (after) url.searchParams.set("after", after);
     const response = await request(url.toString());
@@ -341,6 +341,19 @@ export async function createSpotlightSession(config: FalconTenant) {
   }
   return { queryPage, hydrateIds };
 }
+
+// Splitting "status:'open',status:'reopen'" into its two constituent values
+// lets discovery walk both concurrently instead of one combined sequential
+// cursor -- each value already appears standalone in that same OR'd filter,
+// so this is a proven-valid split, not a guess at an unverified field (e.g.
+// severity) this sandbox has no way to test against a live CrowdStrike
+// instance. status is mutually exclusive and exhaustive over "open"/"reopen"
+// (that IS the existing combined filter), so no record can land in both
+// partitions or neither.
+export const SPOTLIGHT_DISCOVERY_PARTITIONS: { key: string; filter: string }[] = [
+  { key: "open", filter: "status:'open'" },
+  { key: "reopen", filter: "status:'reopen'" },
+];
 
 // CrowdStrike Spotlight API: query open vuln ids and yield bounded hydrated
 // batches. Requires scope: spotlight-vulnerabilities:read.

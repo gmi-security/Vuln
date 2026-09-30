@@ -33,12 +33,13 @@ import {
   type TidalProgress,
 } from "@/lib/tidal";
 import { intuneConfig, intuneListAssets } from "@/lib/intune";
-import { falconConfigs, falconListAssets, createSpotlightSession } from "@/lib/crowdstrike";
+import { falconConfigs, falconListAssets, createSpotlightSession, SPOTLIGHT_DISCOVERY_PARTITIONS } from "@/lib/crowdstrike";
 import { selectSpotlightTenant, type SpotlightTenantSelection } from "@/lib/spotlight-import";
-import { runResumableSpotlightImport } from "@/lib/spotlight-resumable-import";
-import { acquireSpotlightWorkerLock, beginOrResumeSpotlightRun, saveSpotlightIdPage, nextSpotlightHydrationIds,
-  writeSpotlightHydrationBatch, abandonSpotlightDiscovery, completeResumableSpotlightRun,
-  failSpotlightRun, pruneSpotlightRuns, getLatestSpotlightRunState } from "@/lib/spotlight-record-store";
+import { runPartitionedSpotlightImport } from "@/lib/spotlight-resumable-import";
+import { acquireSpotlightWorkerLock, nextSpotlightHydrationIds,
+  writeSpotlightHydrationBatch, completeResumableSpotlightRun,
+  failSpotlightRun, pruneSpotlightRuns, getLatestSpotlightRunState,
+  beginOrResumePartitionedSpotlightRun, getPartitionedRunCheckpoint, savePartitionPage, resetPartitionCursor } from "@/lib/spotlight-record-store";
 import { recordVulnersEnrichment } from "@/lib/reporting-source-activity";
 import { defenderConfig, defenderListFindings } from "@/lib/defender";
 import { burpConfig, burpListIssues, type BurpFinding } from "@/lib/burp";
@@ -5530,16 +5531,17 @@ export async function importFromCrowdstrikeSpotlight(
   let lastLogged = 0;
   console.info("[spotlight] starting record import for", selection.config.label);
   try {
-    const result = await runResumableSpotlightImport(selection, {
+    const result = await runPartitionedSpotlightImport(selection, SPOTLIGHT_DISCOVERY_PARTITIONS, {
       acquire: acquireSpotlightWorkerLock,
       createSession: createSpotlightSession,
-      begin: beginOrResumeSpotlightRun,
-      savePage: saveSpotlightIdPage,
+      begin: beginOrResumePartitionedSpotlightRun,
+      getRunState: getPartitionedRunCheckpoint,
+      savePartitionPage,
+      resetPartition: resetPartitionCursor,
       nextIds: nextSpotlightHydrationIds,
       write: writeSpotlightHydrationBatch,
       complete: completeResumableSpotlightRun,
       fail: failSpotlightRun,
-      abandon: abandonSpotlightDiscovery,
       prune: pruneSpotlightRuns,
     }, (progress) => {
       syncJobGlobal.__vulnCsSpotlightSync = {

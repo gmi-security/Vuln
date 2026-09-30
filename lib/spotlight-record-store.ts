@@ -38,6 +38,44 @@ export type SpotlightRunState = SpotlightCheckpoint & {
   error: string | null;
 };
 
+// checkpoint_version 3: discovery runs several independent cursor walks (one
+// per partition_key, e.g. status:'open' / status:'reopen') concurrently
+// instead of one sequential walk -- see lib/spotlight-resumable-import.ts's
+// runPartitionedSpotlightImport. Hydration is unchanged and untouched by
+// partitioning: it always walks the full run's deduped spotlight_import_ids
+// regardless of which partition discovered each id.
+export type SpotlightPartitionCheckpoint = {
+  key: string;
+  queryCursor: string;
+  discoveredCount: number;
+  done: boolean;
+};
+
+export type SpotlightPartitionedRunCheckpoint = {
+  id: string;
+  tenantKey: string;
+  phase: "discovering" | "hydrating";
+  partitions: SpotlightPartitionCheckpoint[];
+  hydrationCursor: string;
+  discoveredCount: number;
+  expectedCount: number | null;
+  hydratedCount: number;
+};
+
+function partitionedCheckpoint(runRow: any, partitionRows: any[], tenantKey: string): SpotlightPartitionedRunCheckpoint {
+  return {
+    id: String(runRow.id), tenantKey, phase: runRow.phase,
+    partitions: partitionRows.map(r => ({
+      key: String(r.partition_key), queryCursor: String(r.query_cursor ?? ""),
+      discoveredCount: Number(r.discovered_count ?? 0), done: Boolean(r.done),
+    })),
+    hydrationCursor: String(runRow.hydration_cursor ?? ""),
+    discoveredCount: Number(runRow.discovered_count ?? 0),
+    expectedCount: runRow.expected_count == null ? null : Number(runRow.expected_count),
+    hydratedCount: Number(runRow.hydrated_count ?? 0),
+  };
+}
+
 function checkpoint(row: any): SpotlightCheckpoint {
   return {
     id: String(row.id), tenantKey: String(row.tenant_key), phase: row.phase,
@@ -100,6 +138,15 @@ export function createSpotlightRecordStore(db: Database) {
           tenant_key TEXT NOT NULL,
           source_id TEXT NOT NULL,
           PRIMARY KEY (run_id, tenant_key, source_id)
+        );
+        CREATE TABLE IF NOT EXISTS spotlight_import_partitions (
+          run_id UUID NOT NULL REFERENCES spotlight_import_runs(id),
+          tenant_key TEXT NOT NULL,
+          partition_key TEXT NOT NULL,
+          query_cursor TEXT NOT NULL DEFAULT '',
+          discovered_count BIGINT NOT NULL DEFAULT 0,
+          done BOOLEAN NOT NULL DEFAULT false,
+          PRIMARY KEY (run_id, tenant_key, partition_key)
         );
       `).then(() => undefined).catch(error => {
         schemaReady = undefined;
@@ -199,7 +246,7 @@ export function createSpotlightRecordStore(db: Database) {
       result = await db.query(`SELECT id, tenant_key, phase, query_cursor,
       hydration_cursor, discovered_count, expected_count, hydrated_count,
       status, started_at, finished_at, error FROM spotlight_import_runs
-      WHERE checkpoint_version = 2 AND phase IN ('discovering', 'hydrating')
+      WHERE checkpoint_version IN (2, 3) AND phase IN ('discovering', 'hydrating')
       ORDER BY started_at DESC LIMIT 1`);
     } catch (error) {
       if (error && typeof error === "object" && "code" in error &&
@@ -332,6 +379,140 @@ export function createSpotlightRecordStore(db: Database) {
     await db.query(`UPDATE spotlight_import_runs SET status = 'failed', phase = 'abandoned',
       finished_at = now(), error = $3 WHERE id = $1::uuid AND tenant_key = $2
         AND phase = 'discovering' AND status = 'running'`, [runId, tenantKey, reason]);
+  }
+
+  async function beginOrResumePartitionedSpotlightRun(tenantKey: string, partitionKeys: string[]): Promise<SpotlightPartitionedRunCheckpoint> {
+    await ensureSchema();
+    const client = await db.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(1700, hashtext($1))", [tenantKey]);
+      const existing = await client.query(`SELECT id, phase, hydration_cursor,
+        discovered_count, expected_count, hydrated_count
+        FROM spotlight_import_runs WHERE tenant_key = $1 AND checkpoint_version = 3
+          AND status IN ('running', 'failed') AND phase IN ('discovering', 'hydrating')
+          AND started_at > COALESCE((SELECT active.started_at FROM spotlight_import_current current_run
+            JOIN spotlight_import_runs active ON active.id = current_run.run_id
+            WHERE current_run.tenant_key = $1), '-infinity'::timestamptz)
+        ORDER BY started_at DESC LIMIT 1 FOR UPDATE`, [tenantKey]);
+      let runRow;
+      if (existing.rows.length) {
+        const resumed = await client.query(`UPDATE spotlight_import_runs
+          SET status = 'running', finished_at = NULL, error = NULL
+          WHERE id = $1::uuid RETURNING id, phase, hydration_cursor,
+            discovered_count, expected_count, hydrated_count`, [existing.rows[0].id]);
+        runRow = resumed.rows[0];
+      } else {
+        await client.query(`UPDATE spotlight_import_runs SET status = 'failed',
+          finished_at = now(), error = 'Interrupted before resumable checkpoint'
+          WHERE tenant_key = $1 AND status = 'running'`, [tenantKey]);
+        const created = await client.query(`INSERT INTO spotlight_import_runs
+          (id, tenant_key, status, checkpoint_version, phase)
+          VALUES ($1::uuid, $2, 'running', 3, 'discovering')
+          RETURNING id, phase, hydration_cursor, discovered_count, expected_count, hydrated_count`,
+          [randomUUID(), tenantKey]);
+        runRow = created.rows[0];
+        await client.query(`INSERT INTO spotlight_import_partitions (run_id, tenant_key, partition_key)
+          SELECT $1::uuid, $2, p.key FROM jsonb_array_elements_text($3::jsonb) AS p(key)`,
+          [runRow.id, tenantKey, JSON.stringify(partitionKeys)]);
+      }
+      const partitionRows = await client.query(`SELECT partition_key, query_cursor, discovered_count, done
+        FROM spotlight_import_partitions WHERE run_id = $1::uuid AND tenant_key = $2 ORDER BY partition_key`,
+        [runRow.id, tenantKey]);
+      await client.query("COMMIT");
+      return partitionedCheckpoint(runRow, partitionRows.rows, tenantKey);
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  // Read-only snapshot used right after a Promise.all of concurrent partition
+  // discovery loops resolves -- the last-assigned in-memory checkpoint from
+  // those loops is a race (whichever partition's transaction happened to
+  // commit last in JS-assignment order isn't guaranteed to be the one that
+  // actually flipped the run to 'hydrating' in Postgres), so the orchestrator
+  // re-reads the true state here instead of trusting that race.
+  async function getPartitionedRunCheckpoint(runId: string, tenantKey: string): Promise<SpotlightPartitionedRunCheckpoint> {
+    await ensureSchema();
+    const run = await db.query(`SELECT id, phase, hydration_cursor,
+      discovered_count, expected_count, hydrated_count
+      FROM spotlight_import_runs WHERE id = $1::uuid AND tenant_key = $2`, [runId, tenantKey]);
+    if (!run.rows.length) throw new Error("Spotlight run not found.");
+    const partitionRows = await db.query(`SELECT partition_key, query_cursor, discovered_count, done
+      FROM spotlight_import_partitions WHERE run_id = $1::uuid AND tenant_key = $2 ORDER BY partition_key`,
+      [runId, tenantKey]);
+    return partitionedCheckpoint(run.rows[0], partitionRows.rows, tenantKey);
+  }
+
+  async function savePartitionPage(runId: string, tenantKey: string, partitionKey: string, priorCursor: string,
+    ids: string[], nextCursor: string, reportedTotal: number | null): Promise<SpotlightPartitionedRunCheckpoint> {
+    if (ids.some(id => !id?.trim())) throw new Error("Spotlight discovery returned an invalid source ID.");
+    if (!ids.length && nextCursor) throw new Error("Spotlight discovery returned an empty page with a cursor.");
+    if (nextCursor && nextCursor === priorCursor) throw new Error("Spotlight discovery cursor repeated.");
+    await ensureSchema();
+    const client = await db.connect();
+    try {
+      await client.query("BEGIN");
+      const locked = await client.query(`SELECT query_cursor, discovered_count, done
+        FROM spotlight_import_partitions WHERE run_id = $1::uuid AND tenant_key = $2 AND partition_key = $3
+        FOR UPDATE`, [runId, tenantKey, partitionKey]);
+      if (!locked.rows.length || locked.rows[0].done || locked.rows[0].query_cursor !== priorCursor)
+        throw new Error("Spotlight discovery checkpoint changed during the import.");
+      const seenCount = Number(locked.rows[0].discovered_count) + ids.length;
+      if (!nextCursor && reportedTotal != null && seenCount < reportedTotal)
+        throw new Error(`Spotlight pagination incomplete for partition "${partitionKey}": received ${seenCount} of ${reportedTotal} IDs.`);
+      if (ids.length) await client.query(`INSERT INTO spotlight_import_ids (run_id, tenant_key, source_id)
+        SELECT $1::uuid, $2, source.source_id
+        FROM jsonb_array_elements_text($3::jsonb) AS source(source_id)
+        ON CONFLICT (run_id, tenant_key, source_id) DO NOTHING`, [runId, tenantKey, JSON.stringify(ids)]);
+      await client.query(`UPDATE spotlight_import_partitions SET query_cursor = $4, discovered_count = $5, done = $6
+        WHERE run_id = $1::uuid AND tenant_key = $2 AND partition_key = $3`,
+        [runId, tenantKey, partitionKey, nextCursor, seenCount, nextCursor === ""]);
+      const remaining = await client.query(`SELECT COUNT(*) AS count FROM spotlight_import_partitions
+        WHERE run_id = $1::uuid AND tenant_key = $2 AND done = false`, [runId, tenantKey]);
+      const allDone = Number(remaining.rows[0]?.count ?? 0) === 0;
+      const totals = await client.query(`SELECT COALESCE(SUM(discovered_count), 0)::text AS total
+        FROM spotlight_import_partitions WHERE run_id = $1::uuid AND tenant_key = $2`, [runId, tenantKey]);
+      let expectedCount: number | null = null;
+      if (allDone) {
+        const distinct = await client.query(`SELECT COUNT(*)::text AS count FROM spotlight_import_ids
+          WHERE run_id = $1::uuid AND tenant_key = $2`, [runId, tenantKey]);
+        expectedCount = Number(distinct.rows[0]?.count ?? 0);
+      }
+      const updatedRun = await client.query(`UPDATE spotlight_import_runs SET
+        discovered_count = $3, phase = CASE WHEN $4 THEN 'hydrating' ELSE 'discovering' END,
+        expected_count = CASE WHEN $4 THEN $5 ELSE NULL END
+        WHERE id = $1::uuid AND tenant_key = $2
+        RETURNING id, phase, hydration_cursor, discovered_count, expected_count, hydrated_count`,
+        [runId, tenantKey, totals.rows[0].total, allDone, expectedCount]);
+      const partitionRows = await client.query(`SELECT partition_key, query_cursor, discovered_count, done
+        FROM spotlight_import_partitions WHERE run_id = $1::uuid AND tenant_key = $2 ORDER BY partition_key`,
+        [runId, tenantKey]);
+      await client.query("COMMIT");
+      return partitionedCheckpoint(updatedRun.rows[0], partitionRows.rows, tenantKey);
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  // Self-heal for a single partition's saved cursor being rejected by
+  // CrowdStrike (expired "after" token) -- resets just that partition back to
+  // page 1 without touching the other partitions or the run. Safe to re-walk:
+  // spotlight_import_ids upserts by source_id (ON CONFLICT DO NOTHING), so
+  // rediscovering IDs already seen on this partition's first attempt is a
+  // no-op, not a duplicate.
+  async function resetPartitionCursor(runId: string, tenantKey: string, partitionKey: string, reason: string): Promise<void> {
+    await ensureSchema();
+    await db.query(`UPDATE spotlight_import_partitions SET query_cursor = ''
+      WHERE run_id = $1::uuid AND tenant_key = $2 AND partition_key = $3 AND done = false`,
+      [runId, tenantKey, partitionKey]);
+    console.error(`[spotlight] partition "${partitionKey}" cursor reset: ${reason}`);
   }
 
   async function completeResumableSpotlightRun(runId: string, tenantKey: string): Promise<{
@@ -523,6 +704,7 @@ export function createSpotlightRecordStore(db: Database) {
   return { beginSpotlightRun, acquireSpotlightWorkerLock, beginOrResumeSpotlightRun,
     getLatestSpotlightRunState, saveSpotlightIdPage,
     nextSpotlightHydrationIds, writeSpotlightHydrationBatch, abandonSpotlightDiscovery,
+    beginOrResumePartitionedSpotlightRun, getPartitionedRunCheckpoint, savePartitionPage, resetPartitionCursor,
     completeResumableSpotlightRun, writeSpotlightBatch, completeSpotlightRun,
     failSpotlightRun, countCompletedSpotlightRecords, listCompletedSpotlightRecords,
     pruneSpotlightRuns };
@@ -554,6 +736,15 @@ export const writeSpotlightHydrationBatch = (runId: string, tenantKey: string, i
   configuredStore().writeSpotlightHydrationBatch(runId, tenantKey, ids, rows);
 export const abandonSpotlightDiscovery = (runId: string, tenantKey: string, reason: string) =>
   configuredStore().abandonSpotlightDiscovery(runId, tenantKey, reason);
+export const beginOrResumePartitionedSpotlightRun = (tenantKey: string, partitionKeys: string[]) =>
+  configuredStore().beginOrResumePartitionedSpotlightRun(tenantKey, partitionKeys);
+export const getPartitionedRunCheckpoint = (runId: string, tenantKey: string) =>
+  configuredStore().getPartitionedRunCheckpoint(runId, tenantKey);
+export const savePartitionPage = (runId: string, tenantKey: string, partitionKey: string, priorCursor: string,
+  ids: string[], nextCursor: string, reportedTotal: number | null) =>
+  configuredStore().savePartitionPage(runId, tenantKey, partitionKey, priorCursor, ids, nextCursor, reportedTotal);
+export const resetPartitionCursor = (runId: string, tenantKey: string, partitionKey: string, reason: string) =>
+  configuredStore().resetPartitionCursor(runId, tenantKey, partitionKey, reason);
 export const completeResumableSpotlightRun = (runId: string, tenantKey: string) =>
   configuredStore().completeResumableSpotlightRun(runId, tenantKey);
 export const writeSpotlightBatch = (runId: string, tenantKey: string, rows: SpotlightRecord[]) =>
