@@ -48,6 +48,45 @@ test("a throttled request is retried instead of failing the whole sync", async (
   );
 }, { timeout: 30_000 });
 
+test("a request that throws (our own per-request timeout firing, e.g. AbortError) is retried instead of failing the whole sync", async () => {
+  // This is the exact failure a real production Spotlight import hit: a
+  // single request timed out ("AbortError: This operation was aborted")
+  // partway through a 294,400-record, 28-minute run, and -- before this fix
+  // -- timedFetch only retried bad HTTP status codes (429/502/503/504), not
+  // a thrown error, so that one slow response failed the whole import with
+  // no partial progress kept.
+  await withFetch(
+    (url, _init, callNumber) => {
+      if (url.includes("/oauth2/token")) {
+        if (callNumber === 1) throw new DOMException("This operation was aborted", "AbortError");
+        return new Response(JSON.stringify({ access_token: "tok" }), { status: 200 });
+      }
+      if (url.includes("/devices/queries/devices/v1")) return new Response(JSON.stringify({ resources: ["d1"], meta: { pagination: { total: 1 } } }), { status: 200 });
+      return new Response(JSON.stringify({ resources: [{ device_id: "d1" }] }), { status: 200 });
+    },
+    async (calls) => {
+      const result = await falconListAssets({ clientId: "a", clientSecret: "b", baseUrl: "https://x" });
+      assert.ok(!("error" in result), "the sync must succeed once the retried request goes through");
+      const tokenCalls = calls.filter((c) => c.url.includes("/oauth2/token"));
+      assert.equal(tokenCalls.length, 2, "one aborted attempt plus one successful retry");
+    },
+  );
+}, { timeout: 30_000 });
+
+test("a request that keeps throwing still gives up after a bounded number of retries, same cap as a persistent 429", async () => {
+  await withFetch(
+    (url) => {
+      if (url.includes("/oauth2/token")) throw new DOMException("This operation was aborted", "AbortError");
+      return new Response(JSON.stringify({ resources: [] }), { status: 200 });
+    },
+    async (calls) => {
+      await assert.rejects(() => falconListAssets({ clientId: "a", clientSecret: "b", baseUrl: "https://x" }), /aborted/i);
+      const tokenCalls = calls.filter((c) => c.url.includes("/oauth2/token"));
+      assert.equal(tokenCalls.length, 5, "one initial attempt plus 4 retries before giving up, same as the status-code retry path");
+    },
+  );
+}, { timeout: 30_000 });
+
 test("hydration never exceeds the concurrency cap even with hundreds of batches", async () => {
   let inFlight = 0, maxInFlight = 0;
   await withFetch(
