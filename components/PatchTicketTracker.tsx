@@ -69,10 +69,13 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
   async function runAutoCreateNow() {
     setAutoCreating(true); setAutoCreateResult(""); setError("");
     try {
-      const result = await dashboardRequest<{ checked: number; created: number; errors: number; priorityBackfill: { checked: number; updated: number; errors: number } }>("patch-group-tickets/auto-create", { method: "POST" });
+      const result = await dashboardRequest<{ checked: number; created: number; errors: number; paused?: boolean; priorityBackfill: { checked: number; updated: number; errors: number } }>("patch-group-tickets/auto-create", { method: "POST" });
       const p = result.priorityBackfill;
       const priorityNote = p.checked ? ` Priority backfill: updated ${p.updated} of ${p.checked} existing ticket${p.checked === 1 ? "" : "s"}${p.errors ? ` · ${p.errors} failed` : ""}.` : "";
-      setAutoCreateResult(`Checked ${result.checked} eligible draft${result.checked === 1 ? "" : "s"} · created ${result.created}${result.errors ? ` · ${result.errors} failed` : ""}.${priorityNote}`);
+      const creationNote = result.paused
+        ? "Auto-create is paused for Atlas -- no new tickets until this is turned back on."
+        : `Checked ${result.checked} eligible draft${result.checked === 1 ? "" : "s"} · created ${result.created}${result.errors ? ` · ${result.errors} failed` : ""}.`;
+      setAutoCreateResult(`${creationNote}${priorityNote}`);
       await reload();
     } catch (e) { setError(e instanceof Error ? e.message : "Could not run auto-create."); }
     finally { setAutoCreating(false); }

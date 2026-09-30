@@ -4,7 +4,7 @@ import { runWithConcurrency } from "./ticket-status-sync";
 import { elasticVulnEnabled } from "./elastic-vuln-server";
 import { DashboardError } from "./elastic-dashboard";
 import { ATLAS_REPORTING_COMPANY_ID } from "./reporting-direct-sources";
-import { cwPrioritiesBySort } from "./connectwise-client";
+import { cwPrioritiesBySort, type CWOption } from "./connectwise-client";
 import { targetPriorityFor } from "./group-ticket-priority";
 
 // Critical/High severity remediations skip the human review queue and go
@@ -19,6 +19,15 @@ const ACTOR = "auto-create";
 // Pilot scope: only this customer, by explicit request, while auto-create is
 // validated. Expand PILOT_COMPANY_IDS once it's proven out.
 const PILOT_COMPANY_IDS = new Set([ATLAS_REPORTING_COMPANY_ID]);
+// Paused 2026-09-29 while Atlas asked to hold new tickets until Automate
+// caught up; unpaused the same day 4:22pm on Jim/Mark's direction -- client
+// visibility into open vulns creates an obligation to ticket them, patching
+// readiness doesn't change that. Gates both entry points (the 15-minute
+// scheduler and "Run auto-create now"), not the autoCreateHighSeverityTickets
+// logic itself, so flipping this is the only thing that changes. Priority
+// backfill and closure-validation were never gated by this -- neither of
+// those creates a new ticket.
+export const ATLAS_AUTO_CREATE_PAUSED = false;
 
 type Counts = { checked: number; created: number; errors: number };
 
@@ -62,8 +71,16 @@ export async function autoCreateHighSeverityTickets(): Promise<Counts> {
   // Most-urgent-first; fetched once and reused for every ticket this pass.
   // Missing/unreachable never blocks ticket creation -- it just means the
   // priority stays whatever the board's default is, same as before this
-  // existed, rather than failing the whole thing.
-  const priorities = await cwPrioritiesBySort(saved.value).catch(() => []);
+  // existed, rather than failing the whole thing. The failure itself is
+  // still worth keeping visible though (see prioritiesFetchError below) --
+  // this used to vanish into an indistinguishable empty array.
+  let priorities: CWOption[] = [];
+  let prioritiesFetchError: string | null = null;
+  try {
+    priorities = await cwPrioritiesBySort(saved.value);
+  } catch (err) {
+    prioritiesFetchError = err instanceof Error ? err.message : String(err);
+  }
   let created = 0, errors = 0;
   await runWithConcurrency(rows, 3, async (row) => {
     if (!row.app_company_id || !PILOT_COMPANY_IDS.has(row.app_company_id)) return; // outside the pilot scope
@@ -85,7 +102,25 @@ export async function autoCreateHighSeverityTickets(): Promise<Counts> {
       const target = targetPriorityFor(row.worst_severity, priorities);
       if (target) {
         const ticketId = await waitForTicketId(row.id);
-        if (ticketId) await setGroupTicketPriority(row.id, target.id, ACTOR).catch(() => {});
+        if (ticketId) {
+          // A failure here used to vanish silently -- a real Critical
+          // ticket could sit at the board's default priority indefinitely
+          // with nothing recorded anywhere to say why. backfillTicketPriority
+          // will retry it on the next pass (no ticket.priority.changed audit
+          // means it never counts as already handled), but the reason for
+          // the first failure is worth keeping visible in the meantime.
+          await setGroupTicketPriority(row.id, target.id, ACTOR).catch(async (err) => {
+            const message = err instanceof Error ? err.message : String(err);
+            await db.query("UPDATE patch_group_ticket_requests SET last_error=$2,updated_at=now() WHERE id=$1",
+              [row.id, `Ticket created, but asserting ${row.worst_severity} priority failed: ${message}`]).catch(() => {});
+          });
+        } else {
+          await db.query("UPDATE patch_group_ticket_requests SET last_error=$2,updated_at=now() WHERE id=$1",
+            [row.id, `Ticket created, but its ticket_id didn't appear within 60s to assert ${row.worst_severity} priority. The next priority backfill pass will retry.`]).catch(() => {});
+        }
+      } else if (prioritiesFetchError) {
+        await db.query("UPDATE patch_group_ticket_requests SET last_error=$2,updated_at=now() WHERE id=$1",
+          [row.id, `Ticket created, but couldn't fetch ConnectWise priorities to assert ${row.worst_severity}: ${prioritiesFetchError}. The next priority backfill pass will retry.`]).catch(() => {});
       }
     } catch {
       errors++; // one draft failing (routing went stale, connection changed) must not block the rest
@@ -100,7 +135,7 @@ const state = runtime.__groupAutoCreate ??= {};
 export function startGroupAutoCreateScheduler(): void {
   if (state.timer || !elasticVulnEnabled() || process.env.VULN_DISABLE_SCHEDULER === "true") return;
   const trigger = () => {
-    if (state.working) return;
+    if (state.working || ATLAS_AUTO_CREATE_PAUSED) return;
     state.working = autoCreateHighSeverityTickets().then(
       () => {},
       (err) => console.error("[group-auto-create] Could not complete:", err instanceof Error ? err.message : err),

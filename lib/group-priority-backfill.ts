@@ -1,7 +1,7 @@
 import { patchTicketDatabase, savedConnection } from "./patch-ticket-store";
 import { setGroupTicketPriority } from "./patch-group-ticket-store";
 import { runWithConcurrency } from "./ticket-status-sync";
-import { cwPrioritiesBySort } from "./connectwise-client";
+import { cwPrioritiesBySort, type CWOption } from "./connectwise-client";
 import { ATLAS_REPORTING_COMPANY_ID } from "./reporting-direct-sources";
 import { targetPriorityFor } from "./group-ticket-priority";
 
@@ -32,8 +32,27 @@ export async function backfillTicketPriority(): Promise<{ checked: number; updat
       )
   `, [PILOT_COMPANY_IDS])).rows as { id: string; worst_severity: "Critical" | "High" }[];
   if (!rows.length) return { checked: 0, updated: 0, errors: 0 };
-  const priorities = await cwPrioritiesBySort(saved.value).catch(() => []);
-  if (!priorities.length) return { checked: rows.length, updated: 0, errors: 0 };
+  // A thrown error here used to become an indistinguishable empty array --
+  // every eligible ticket silently left at the board default with nothing
+  // anywhere to say the whole pass never even reached ConnectWise. Now the
+  // real reason (or "zero priorities configured", if it didn't throw at
+  // all) lands on every row this pass would have touched.
+  let priorities: CWOption[] = [];
+  let priorityFetchError: string | null = null;
+  try {
+    priorities = await cwPrioritiesBySort(saved.value);
+  } catch (err) {
+    priorityFetchError = err instanceof Error ? err.message : String(err);
+  }
+  if (!priorities.length) {
+    const message = priorityFetchError
+      ? `Priority backfill could not fetch ConnectWise priorities: ${priorityFetchError}`
+      : "Priority backfill: ConnectWise returned no priorities for this connection.";
+    await Promise.all(rows.map((row) => db.query(
+      "UPDATE patch_group_ticket_requests SET last_error=$2,updated_at=now() WHERE id=$1", [row.id, message],
+    ).catch(() => {})));
+    return { checked: rows.length, updated: 0, errors: 0 };
+  }
   let updated = 0, errors = 0;
   await runWithConcurrency(rows, 3, async (row) => {
     const target = targetPriorityFor(row.worst_severity, priorities);
@@ -41,8 +60,11 @@ export async function backfillTicketPriority(): Promise<{ checked: number; updat
     try {
       await setGroupTicketPriority(row.id, target.id, ACTOR);
       updated++;
-    } catch {
+    } catch (err) {
       errors++; // one ticket's connection mismatch or ConnectWise rejection must not block the rest
+      const message = err instanceof Error ? err.message : String(err);
+      await db.query("UPDATE patch_group_ticket_requests SET last_error=$2,updated_at=now() WHERE id=$1",
+        [row.id, `Priority backfill failed to set ${row.worst_severity} priority: ${message}`]).catch(() => {});
     }
   });
   return { checked: rows.length, updated, errors };

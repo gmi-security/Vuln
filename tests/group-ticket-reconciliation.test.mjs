@@ -39,13 +39,13 @@ function fakeDb({ routing, trackedTicketIds = [], singleTrackedTicketIds = [], p
     if (sql.includes("pg_try_advisory_lock")) return { rows: [{ locked: lockAcquired }] };
     if (sql.includes("pg_advisory_unlock")) return { rows: [{}] };
     if (sql.includes("FROM patch_customer_routing")) return { rows: routing ? [routing] : [] };
-    if (sql.includes("SELECT id, packet, tenant_id, routing FROM patch_group_ticket_requests")) {
+    if (sql.includes("SELECT id, packet, tenant_id, routing, state FROM patch_group_ticket_requests")) {
       const row = trackedRows[params[0]];
-      return { rows: row?.table === "group" ? [{ id: row.id, packet: { cves: row.cves }, tenant_id: row.tenantId, routing: { boardId: row.boardId } }] : [] };
+      return { rows: row?.table === "group" ? [{ id: row.id, packet: { cves: row.cves }, tenant_id: row.tenantId, routing: { boardId: row.boardId }, state: row.state ?? "created" }] : [] };
     }
-    if (sql.includes("SELECT id, packet, tenant_ids, routing FROM patch_ticket_requests")) {
+    if (sql.includes("SELECT id, packet, tenant_ids, routing, state FROM patch_ticket_requests")) {
       const row = trackedRows[params[0]];
-      return { rows: row?.table === "single" ? [{ id: row.id, packet: { cve: row.cves[0] }, tenant_ids: [row.tenantId], routing: { boardId: row.boardId } }] : [] };
+      return { rows: row?.table === "single" ? [{ id: row.id, packet: { cve: row.cves[0] }, tenant_ids: [row.tenantId], routing: { boardId: row.boardId }, state: row.state ?? "created" }] : [] };
     }
     if (sql.includes("FROM patch_group_ticket_requests") && sql.includes("ticket_id IS NOT NULL AND cw_target")) return { rows: trackedTicketIds.map((id) => ({ ticket_id: id })) };
     if (sql.includes("FROM patch_ticket_requests") && sql.includes("ticket_id IS NOT NULL AND cw_target")) return { rows: singleTrackedTicketIds.map((id) => ({ ticket_id: id })) };
@@ -243,7 +243,7 @@ test("a closed untracked ticket whose draft resolves is abandoned and its CVEs a
     persistPreparedGroups: async () => ["new-id"],
   });
   const result = await reconciliation.abandonAndReplaceUntrackedAtlasTickets();
-  assert.deepEqual(result, { checked: 1, abandoned: 1, cvesReplaced: 2, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0 });
+  assert.deepEqual(result, { checked: 1, abandoned: 1, cvesReplaced: 2, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0, firstError: null });
   assert.deepEqual(consolidationInput, { cves: ["CVE-2024-1", "CVE-2024-2"], tenantId: "tenant-abc", appCompanyId: "CO-147284" });
   const update = db.calls.find((c) => c.sql.includes("SET state='abandoned'"));
   assert.equal(update.params[0], UUID);
@@ -262,7 +262,7 @@ test("an untracked ticket that's still open in ConnectWise is left alone -- only
     },
   });
   const result = await reconciliation.abandonAndReplaceUntrackedAtlasTickets();
-  assert.deepEqual(result, { checked: 0, abandoned: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0 });
+  assert.deepEqual(result, { checked: 0, abandoned: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0, firstError: null });
   assert.equal(db.calls.some((c) => c.sql.includes("SET state='abandoned'")), false);
 });
 
@@ -281,7 +281,7 @@ test("a single leftover CVE (no group to join) is drafted through the single-CVE
     persistPreparedPatch: async () => "new-id",
   });
   const result = await reconciliation.abandonAndReplaceUntrackedAtlasTickets();
-  assert.deepEqual(result, { checked: 1, abandoned: 1, cvesReplaced: 0, cvesNeedsReview: 1, cvesAlreadyCovered: 0, unresolved: 0, errors: 0 });
+  assert.deepEqual(result, { checked: 1, abandoned: 1, cvesReplaced: 0, cvesNeedsReview: 1, cvesAlreadyCovered: 0, unresolved: 0, errors: 0, firstError: null });
   assert.deepEqual(patchInput, { cve: "CVE-2024-1", tenantId: "tenant-abc" });
 });
 
@@ -297,7 +297,7 @@ test("CrowdStrike reporting nothing left to replace (already patched or already 
     prepareConsolidation: async () => { throw new FakeDashboardError("Every open/reopened finding for this CVE already has an active ticket in progress. No patch request was prepared."); },
   });
   const result = await reconciliation.abandonAndReplaceUntrackedAtlasTickets();
-  assert.deepEqual(result, { checked: 1, abandoned: 1, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 2, unresolved: 0, errors: 0 });
+  assert.deepEqual(result, { checked: 1, abandoned: 1, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 2, unresolved: 0, errors: 0, firstError: null });
 });
 
 test("a genuine failure re-collecting from CrowdStrike is a normal error, not counted as already covered", async () => {
@@ -312,7 +312,7 @@ test("a genuine failure re-collecting from CrowdStrike is a normal error, not co
     prepareConsolidation: async () => { throw new Error("ConnectWise unreachable"); },
   });
   const result = await reconciliation.abandonAndReplaceUntrackedAtlasTickets();
-  assert.deepEqual(result, { checked: 1, abandoned: 1, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 1 });
+  assert.deepEqual(result, { checked: 1, abandoned: 1, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 1, firstError: "tenant tenant-abc: ConnectWise unreachable" });
 });
 
 test("no CrowdStrike connection configured still abandons the ticket, but leaves replacement for later", async () => {
@@ -327,7 +327,7 @@ test("no CrowdStrike connection configured still abandons the ticket, but leaves
     dashboardConnectionRevision: async () => null,
   });
   const result = await reconciliation.abandonAndReplaceUntrackedAtlasTickets();
-  assert.deepEqual(result, { checked: 1, abandoned: 1, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0 });
+  assert.deepEqual(result, { checked: 1, abandoned: 1, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0, firstError: null });
 });
 
 test("a ticket already abandoned or adopted by a concurrent pass (the update matches nothing) is left as unresolved, not double-counted", async () => {
@@ -341,7 +341,7 @@ test("a ticket already abandoned or adopted by a concurrent pass (the update mat
     },
   });
   const result = await reconciliation.abandonAndReplaceUntrackedAtlasTickets();
-  assert.deepEqual(result, { checked: 1, abandoned: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 1, errors: 0 });
+  assert.deepEqual(result, { checked: 1, abandoned: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 1, errors: 0, firstError: null });
 });
 
 test("an untracked closed ticket with no resolvable draft origin is left completely untouched", async () => {
@@ -355,7 +355,7 @@ test("an untracked closed ticket with no resolvable draft origin is left complet
     },
   });
   const result = await reconciliation.abandonAndReplaceUntrackedAtlasTickets();
-  assert.deepEqual(result, { checked: 1, abandoned: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 1, errors: 0 });
+  assert.deepEqual(result, { checked: 1, abandoned: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 1, errors: 0, firstError: null });
   assert.equal(db.calls.some((c) => c.sql.includes("SET state='abandoned'")), false);
 });
 
@@ -370,7 +370,7 @@ test("a closed untracked ticket that matches every other filter but isn't in the
     },
   });
   const result = await reconciliation.abandonAndReplaceUntrackedAtlasTickets();
-  assert.deepEqual(result, { checked: 0, abandoned: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0 });
+  assert.deepEqual(result, { checked: 0, abandoned: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0, firstError: null });
   assert.equal(db.calls.some((c) => c.sql.includes("SELECT packet, tenant_id") || c.sql.includes("SET state='abandoned'")), false); // never even looked up its attachments or draft
 });
 
@@ -405,7 +405,7 @@ test("a pass already running elsewhere (advisory lock held by another instance) 
   let cwCalled = false;
   const reconciliation = await loadReconciliation({ db, cwRequest: async () => { cwCalled = true; return []; } });
   const result = await reconciliation.abandonAndReplaceUntrackedAtlasTickets();
-  assert.deepEqual(result, { checked: 0, abandoned: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0 });
+  assert.deepEqual(result, { checked: 0, abandoned: 0, cvesReplaced: 0, cvesNeedsReview: 0, cvesAlreadyCovered: 0, unresolved: 0, errors: 0, firstError: null });
   assert.equal(cwCalled, false);
 });
 
@@ -439,6 +439,25 @@ test("a group-tracked child is closed in ConnectWise, superseded, and its CVEs q
   assert.deepEqual(update.params, ["draft-child", "Closed"]);
   const audit = db.calls.find((c) => c.sql.includes("ticket.superseded"));
   assert.ok(audit && audit.sql.includes("patch_group_ticket_audit"), "expected the audit row in the group table's audit log");
+  assert.deepEqual(consolidationInput, { cves: ["CVE-2024-1", "CVE-2024-2"], tenantId: "tenant-a", appCompanyId: "CO-147284" });
+});
+
+test("a ticket an earlier pass already closed (state='superseded') is not touched in ConnectWise again, but its CVEs are still collected for replacement -- the exact gap live behind the 38/38 failures", async () => {
+  const db = fakeDb({
+    trackedRows: { [CHILD_ID]: { table: "group", id: "draft-child", cves: ["CVE-2024-1", "CVE-2024-2"], tenantId: "tenant-a", boardId: 9, state: "superseded" } },
+  });
+  let cwCalled = false; let consolidationInput = null;
+  const reconciliation = await loadReconciliation({
+    db,
+    cwRequest: async () => { cwCalled = true; return {}; },
+    prepareConsolidation: async (input) => { consolidationInput = input; return { groups: [] }; },
+    persistPreparedGroups: async () => ["new-id"],
+  });
+  const result = await reconciliation.closeAndRecutMergedAtlasTickets();
+  assert.equal(result.closed, 0); // nothing closed this pass -- it already was
+  assert.equal(result.cvesReplaced, 2); // but its CVEs still got queued
+  assert.equal(cwCalled, false, "no status PATCH or note -- it's already closed");
+  assert.equal(db.calls.some((c) => c.sql.includes("SET state='superseded'")), false);
   assert.deepEqual(consolidationInput, { cves: ["CVE-2024-1", "CVE-2024-2"], tenantId: "tenant-a", appCompanyId: "CO-147284" });
 });
 
@@ -535,4 +554,47 @@ test("firstError surfaces the first failure's ticket number and message directly
   const result = await reconciliation.closeAndRecutMergedAtlasTickets();
   assert.equal(result.errors, 2);
   assert.match(result.firstError, /^#\d+: This board has no closed status configured\.$/);
+});
+
+test("a CVE-replacement failure (the live bug: 0 ticket-loop errors but the tenant re-collection itself failing) surfaces in firstError too, not just a bare count", async () => {
+  const db = fakeDb({
+    trackedRows: { [CHILD_ID]: { table: "group", id: "draft-child", cves: ["CVE-2024-1", "CVE-2024-2"], tenantId: "tenant-a", boardId: 9, state: "superseded" } },
+  });
+  const reconciliation = await loadReconciliation({
+    db,
+    prepareConsolidation: async () => { throw new Error("ConnectWise session expired"); },
+  });
+  const result = await reconciliation.closeAndRecutMergedAtlasTickets();
+  assert.equal(result.errors, 1);
+  assert.equal(result.firstError, "tenant tenant-a: ConnectWise session expired");
+});
+
+test("a tenant's combined CVEs exceeding parseConsolidationInput's 100-CVE cap are batched, not sent in one failing call -- the live bug (116 distinct CVEs, one tenant)", async () => {
+  // Every one of the 38 tracked tickets (the confirmed 37 plus the parent)
+  // contributes 3 unique CVEs to the same tenant: 114 total, comfortably
+  // over the 100-CVE cap.
+  const ids = [
+    2655138, 2655148, 2655170, 2655171, 2655172, 2655173, 2655174, 2655175,
+    2655990, 2655991, 2655996, 2656104, 2656130,
+    2656151, 2656152, 2656153, 2656154, 2656155, 2656156, 2656157, 2656158, 2656159,
+    2656160, 2656161, 2656162, 2656163, 2656164, 2656165, 2656166, 2656167, 2656168, 2656169,
+    2656170, 2656171, 2656172, 2656173, 2656174, PARENT_ID,
+  ];
+  assert.equal(new Set(ids).size, 38);
+  const trackedRows = {};
+  ids.forEach((id, index) => {
+    trackedRows[id] = { table: "group", id: `draft-${id}`, cves: [`CVE-${index}-1`, `CVE-${index}-2`, `CVE-${index}-3`], tenantId: "tenant-a", boardId: 9, state: "superseded" };
+  });
+  const db = fakeDb({ trackedRows });
+  const batchSizes = [];
+  const reconciliation = await loadReconciliation({
+    db,
+    prepareConsolidation: async (input) => { batchSizes.push(input.cves.length); return { groups: [] }; },
+    persistPreparedGroups: async () => ["new-id"],
+  });
+  const result = await reconciliation.closeAndRecutMergedAtlasTickets();
+  assert.equal(result.errors, 0);
+  assert.ok(batchSizes.every((n) => n <= 100), `every batch must be <= 100 CVEs, got ${batchSizes}`);
+  assert.equal(batchSizes.reduce((a, b) => a + b, 0), 114);
+  assert.equal(result.cvesReplaced, 114);
 });
