@@ -19,6 +19,16 @@ function ageBadge(days: number, pending: boolean, slaDays: number | null) {
   const cls = days >= slaDays ? "font-semibold text-[#ff8f96]" : days >= slaDays * 0.7 ? "text-amber-400" : "text-zinc-400";
   return <span className={cls}>{days}d{days >= slaDays ? ` · overdue (SLA ${slaDays}d)` : ""}</span>;
 }
+const REVIEW_STATE_STRIPE: Record<string, string> = { pending: "border-l-amber-500", approved: "border-l-emerald-500", dismissed: "border-l-zinc-600" };
+// Impact-first, same principle as the ticket tracker's board: devices
+// affected is this app's stand-in for a risk score, so it leads every row
+// as a big number instead of sitting as just another table column.
+function ImpactChip({ hostCount, pending }: { hostCount: number; pending: boolean }) {
+  return <div className={`flex w-16 shrink-0 flex-col items-center justify-center rounded-md border border-zinc-800 bg-black/40 py-1.5 ${pending ? "text-[#ff8f96]" : "text-zinc-100"}`}>
+    <span className="text-xl font-bold leading-none">{hostCount.toLocaleString()}</span>
+    <span className="mt-0.5 text-[9px] uppercase tracking-wide text-zinc-500">device{hostCount === 1 ? "" : "s"}</span>
+  </div>;
+}
 type Page = { requests: PatchGroupTicketSummary[]; more: boolean; total: number; pending: number; approved: number };
 
 export default function PatchReviewQueue({ companyId, sla }: { companyId: string; sla: SlaSettings | null }) {
@@ -105,21 +115,25 @@ export default function PatchReviewQueue({ companyId, sla }: { companyId: string
     {error && <p role="alert" className={styles.patchError}>{error}</p>}
     {!rows.length && !busy && <p className="mt-5 text-sm text-zinc-400">No saved consolidation candidates yet.</p>}
     {rows.length > 0 && !filteredRows.length && <p className="mt-5 text-sm text-zinc-400">No rows match this filter/search.</p>}
-    <div className={`${styles.tableScroll} mt-4`}><table className={styles.table}>
-      <thead><tr><th>Customer / source</th><th>Remediation</th><th>CVEs</th><th>Assets</th><th>Findings</th><th>State</th><th>Age</th><th>Prepared</th><th>Details</th></tr></thead>
-      <tbody>{filteredRows.map(row => {
-        const isNext = row.id === rows.find(r => r.reviewState === "pending")?.id;
-        const shownCves = row.cves.slice(0, 4);
-        const moreCves = row.cves.length - shownCves.length;
-        return <tr key={row.id}>
-        <td>{row.companyName ?? (row.source === "stored-findings" ? "Unassigned" : `CrowdStrike tenant ${row.tenantId}`)}</td>
-        <td>{isNext && <span className="mr-2 rounded-full border border-[rgba(179,14,20,0.4)] bg-[rgba(179,14,20,0.12)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#ff8f96]">Next</span>}{row.remediationTitle || "Recommended remediation"}</td>
-        <td title={row.cves.join(", ")}>{shownCves.join(", ")}{moreCves > 0 && ` +${moreCves} more`}</td><td>{row.hostCount.toLocaleString()}</td><td>{row.findingCount.toLocaleString()}</td>
-        <td>{patchGroupTicketState(row)}</td><td>{ageBadge(ageDays(row.preparedAt), row.reviewState === "pending", sla ? slaDaysFor(row.worstSeverity, sla) : null)}</td><td>{new Date(row.preparedAt).toLocaleString()}</td>
-        <td><button type="button" className={styles.button} disabled={Boolean(busy)} onClick={() => void open(row.id)}>{busy === row.id ? "Opening…" : "Review"}</button></td>
-      </tr>;
-      })}</tbody>
-    </table></div>
+    <div className="mt-4 space-y-2">{filteredRows.map(row => {
+      const isNext = row.id === rows.find(r => r.reviewState === "pending")?.id;
+      const shownCves = row.cves.slice(0, 4);
+      const moreCves = row.cves.length - shownCves.length;
+      const pending = row.reviewState === "pending";
+      return <div key={row.id} className={`flex gap-3 rounded-lg border border-zinc-800 border-l-4 bg-zinc-950 p-3 transition-colors hover:border-zinc-600 ${REVIEW_STATE_STRIPE[row.reviewState] ?? "border-l-zinc-700"}`}>
+        <ImpactChip hostCount={row.hostCount} pending={pending} />
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-medium text-zinc-100">{isNext && <span className="mr-2 rounded-full border border-[rgba(179,14,20,0.4)] bg-[rgba(179,14,20,0.12)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#ff8f96]">Next</span>}{row.remediationTitle || "Recommended remediation"}</p>
+          <p className="mt-1 truncate text-xs text-zinc-400" title={row.cves.join(", ")}>{shownCves.join(", ")}{moreCves > 0 && ` +${moreCves} more`}</p>
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-xs text-zinc-500">
+            <span className="truncate">{row.companyName ?? (row.source === "stored-findings" ? "Unassigned" : `CrowdStrike tenant ${row.tenantId}`)}</span>
+            <span>{row.findingCount.toLocaleString()} findings · {patchGroupTicketState(row)}</span>
+            <span>{ageBadge(ageDays(row.preparedAt), pending, sla ? slaDaysFor(row.worstSeverity, sla) : null)}</span>
+          </div>
+        </div>
+        <button type="button" className={`${styles.button} h-fit shrink-0`} disabled={Boolean(busy)} onClick={() => void open(row.id)}>{busy === row.id ? "Opening…" : "Review"}</button>
+      </div>;
+    })}</div>
     {more && <button type="button" className={`${styles.button} mt-4`} disabled={Boolean(busy)} onClick={() => void load(page + 1)}>Load more</button>}
     {selected && <div className="mt-6 rounded-xl border border-zinc-700 bg-zinc-950 p-5">
       <div className="flex flex-wrap justify-between gap-3"><div><h3 className="text-lg font-medium text-white">{selected.group.title || "Recommended remediation"}</h3>
