@@ -164,6 +164,105 @@ export async function upsertFindingRisk(db: Awaited<ReturnType<typeof riskScorin
   return { id, scoreChanged };
 }
 
+// Batched sibling of upsertFindingRisk, for a bulk recompute pass (hundreds
+// of thousands to millions of findings). upsertFindingRisk's one
+// SELECT-then-INSERT round trip per finding is fine at ordinary scale but
+// becomes hours of sequential network latency once a tenant has millions of
+// findings (the first real-world run at that scale is what surfaced this).
+// Same logic as upsertFindingRisk -- override preservation, verification
+// status stickiness, risk_history on material change -- just resolved
+// against one batch existing-lookup instead of one per finding, and written
+// with one multi-row upsert instead of one per finding. upsertFindingRisk
+// itself is untouched for callers that still want single-finding semantics.
+export async function upsertFindingRiskBatch(
+  db: Awaited<ReturnType<typeof riskScoringDatabase>>,
+  tenantKey: string,
+  inputs: UpsertFindingRiskInput[],
+): Promise<{ scored: number }> {
+  if (!inputs.length) return { scored: 0 };
+
+  const keys = inputs.map((i) => ({ cve: i.cve, host_key: i.hostKey }));
+  const existingRows = (await db.query(`
+    SELECT fr.id, fr.cve, fr.host_key, fr.risk_score, fr.effective_swath, fr.swath_override_by, fr.verification_status, fr.verified_at
+    FROM finding_risk fr
+    JOIN jsonb_to_recordset($2::jsonb) AS k(cve TEXT, host_key TEXT) ON fr.cve = k.cve AND fr.host_key = k.host_key
+    WHERE fr.tenant_key = $1
+  `, [tenantKey, JSON.stringify(keys)])).rows as {
+    id: string; cve: string; host_key: string; risk_score: number; effective_swath: number;
+    swath_override_by: string | null; verification_status: string; verified_at: string | null;
+  }[];
+  const existingByKey = new Map(existingRows.map((r) => [`${r.cve}\u0000${r.host_key}`, r]));
+
+  const rows: Record<string, unknown>[] = [];
+  const historyRows: { id: string; finding_risk_id: string; field: string; old_value: string | null; new_value: string | null; reason: string | null }[] = [];
+
+  for (const input of inputs) {
+    const existing = existingByKey.get(`${input.cve}\u0000${input.hostKey}`);
+    // Same stickiness rules as upsertFindingRisk: a human Swath override and
+    // a verified-remediated status both survive a routine recalculation.
+    const effectiveSwathForHistory = existing?.swath_override_by ? existing.effective_swath : input.effectiveSwath;
+    const verificationStatus = existing?.verification_status === "verified_remediated"
+      ? "verified_remediated" : (input.verificationStatus ?? existing?.verification_status ?? "detected");
+    const newlyVerified = verificationStatus === "verified_remediated" && existing?.verification_status !== "verified_remediated";
+    const verifiedAt = newlyVerified ? new Date().toISOString() : (existing ? existing.verified_at : null);
+    const id = existing?.id ?? randomUUID();
+    rows.push({
+      id, tenant_key: input.tenantKey, company_id: input.companyId, cve: input.cve, host_key: input.hostKey,
+      hostname: input.hostname, severity: input.severity,
+      risk_score: input.riskScore, technical_score: input.technicalScore, exploit_likelihood_score: input.exploitLikelihoodScore,
+      threat_activity_score: input.threatActivityScore, asset_context_score: input.assetContextScore, additional_context_score: input.additionalContextScore,
+      reasons: input.reasons,
+      calculated_swath: input.calculatedSwath, effective_swath: input.effectiveSwath,
+      epss_probability: input.epssProbability, epss_percentile: input.epssPercentile, cisa_kev: input.cisaKev,
+      known_exploit: input.knownExploit, active_exploitation: input.activeExploitation,
+      ransomware_association: input.ransomwareAssociation, internet_exposed: input.internetExposed,
+      asset_criticality: input.assetCriticality, verification_status: verificationStatus, verified_at: verifiedAt,
+    });
+    if (existing && existing.risk_score !== input.riskScore)
+      historyRows.push({ id: randomUUID(), finding_risk_id: id, field: "risk_score", old_value: String(existing.risk_score), new_value: String(input.riskScore), reason: input.reasons.slice(0, 3).join("; ") || null });
+    if (existing && existing.effective_swath !== effectiveSwathForHistory && !existing.swath_override_by)
+      historyRows.push({ id: randomUUID(), finding_risk_id: id, field: "effective_swath", old_value: String(existing.effective_swath), new_value: String(effectiveSwathForHistory), reason: "Recalculated" });
+    if (existing && existing.verification_status !== verificationStatus)
+      historyRows.push({ id: randomUUID(), finding_risk_id: id, field: "verification_status", old_value: existing.verification_status, new_value: verificationStatus, reason: null });
+  }
+
+  await db.query(`
+    INSERT INTO finding_risk (id, tenant_key, company_id, cve, host_key, hostname, severity,
+      risk_score, technical_score, exploit_likelihood_score, threat_activity_score, asset_context_score, additional_context_score, reasons,
+      calculated_swath, effective_swath, epss_probability, epss_percentile, cisa_kev, known_exploit, active_exploitation,
+      ransomware_association, internet_exposed, asset_criticality, verification_status, verified_at, risk_calculated_at, last_seen)
+    SELECT r.id, r.tenant_key, r.company_id, r.cve, r.host_key, r.hostname, r.severity,
+      r.risk_score, r.technical_score, r.exploit_likelihood_score, r.threat_activity_score, r.asset_context_score, r.additional_context_score, r.reasons,
+      r.calculated_swath, r.effective_swath, r.epss_probability, r.epss_percentile, r.cisa_kev, r.known_exploit, r.active_exploitation,
+      r.ransomware_association, r.internet_exposed, r.asset_criticality, r.verification_status, r.verified_at, now(), now()
+    FROM jsonb_to_recordset($1::jsonb) AS r(
+      id UUID, tenant_key TEXT, company_id TEXT, cve TEXT, host_key TEXT, hostname TEXT, severity TEXT,
+      risk_score INT, technical_score INT, exploit_likelihood_score INT, threat_activity_score INT, asset_context_score INT, additional_context_score INT, reasons JSONB,
+      calculated_swath INT, effective_swath INT, epss_probability REAL, epss_percentile REAL, cisa_kev BOOLEAN, known_exploit BOOLEAN, active_exploitation BOOLEAN,
+      ransomware_association BOOLEAN, internet_exposed BOOLEAN, asset_criticality TEXT, verification_status TEXT, verified_at TIMESTAMPTZ)
+    ON CONFLICT (tenant_key, cve, host_key) DO UPDATE SET
+      company_id=EXCLUDED.company_id, hostname=EXCLUDED.hostname, severity=EXCLUDED.severity, risk_score=EXCLUDED.risk_score,
+      technical_score=EXCLUDED.technical_score, exploit_likelihood_score=EXCLUDED.exploit_likelihood_score,
+      threat_activity_score=EXCLUDED.threat_activity_score, asset_context_score=EXCLUDED.asset_context_score, additional_context_score=EXCLUDED.additional_context_score,
+      reasons=EXCLUDED.reasons, calculated_swath=EXCLUDED.calculated_swath,
+      effective_swath=CASE WHEN finding_risk.swath_override_by IS NULL THEN EXCLUDED.effective_swath ELSE finding_risk.effective_swath END,
+      epss_probability=EXCLUDED.epss_probability, epss_percentile=EXCLUDED.epss_percentile, cisa_kev=EXCLUDED.cisa_kev,
+      known_exploit=EXCLUDED.known_exploit, active_exploitation=EXCLUDED.active_exploitation, ransomware_association=EXCLUDED.ransomware_association,
+      internet_exposed=EXCLUDED.internet_exposed, asset_criticality=EXCLUDED.asset_criticality, verification_status=EXCLUDED.verification_status,
+      verified_at=EXCLUDED.verified_at, risk_calculated_at=now(), last_seen=now()
+  `, [JSON.stringify(rows)]);
+
+  if (historyRows.length) {
+    await db.query(`
+      INSERT INTO risk_history (id, finding_risk_id, changed_at, field, old_value, new_value, reason, actor)
+      SELECT h.id, h.finding_risk_id, now(), h.field, h.old_value, h.new_value, h.reason, 'risk-engine'
+      FROM jsonb_to_recordset($1::jsonb) AS h(id UUID, finding_risk_id UUID, field TEXT, old_value TEXT, new_value TEXT, reason TEXT)
+    `, [JSON.stringify(historyRows)]);
+  }
+
+  return { scored: inputs.length };
+}
+
 export async function recordRiskHistory(db: Awaited<ReturnType<typeof riskScoringDatabase>>, findingRiskId: string, field: string, oldValue: string | null, newValue: string | null, reason: string | null, actor: string): Promise<void> {
   await db.query("INSERT INTO risk_history (id, finding_risk_id, field, old_value, new_value, reason, actor) VALUES ($1,$2,$3,$4,$5,$6,$7)",
     [randomUUID(), findingRiskId, field, oldValue, newValue, reason, actor]);

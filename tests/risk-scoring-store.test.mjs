@@ -124,6 +124,91 @@ test("setVerificationStatus records the transition and sets verified_at only for
   assert.match(verified.sql, /verified_at=now\(\)/);
 });
 
+// upsertFindingRiskBatch -- the bulk sibling used by a full tenant recompute
+// pass instead of one upsertFindingRisk call per finding (see
+// lib/risk-scoring-store.ts for why: a tenant with millions of findings made
+// that one SELECT-then-INSERT round trip per finding take hours). Same
+// override/verification-status stickiness and risk_history rules, just
+// resolved against one batch existing-lookup instead of N.
+function fakeBatchDb({ existingRows = [] } = {}) {
+  const calls = [];
+  const query = async (sql, params) => {
+    calls.push({ sql, params });
+    if (sql.includes("JOIN jsonb_to_recordset($2::jsonb)")) return { rows: existingRows };
+    return { rows: [], rowCount: 1 };
+  };
+  return { calls, query, connect: async () => ({ query, release: () => {} }) };
+}
+
+const BATCH_INPUT = {
+  tenantKey: "tenant-1", companyId: "CO-1", cve: "CVE-2026-1111", hostKey: "host-a", hostname: "host-a.local", severity: "Critical",
+  riskScore: 850, technicalScore: 240, exploitLikelihoodScore: 220, threatActivityScore: 200, assetContextScore: 150, additionalContextScore: 40,
+  reasons: ["CISA Known Exploited Vulnerability", "Internet-facing asset"],
+  calculatedSwath: 1, effectiveSwath: 1, epssProbability: 0.9, epssPercentile: 0.98, cisaKev: true, knownExploit: true,
+  activeExploitation: false, ransomwareAssociation: false, internetExposed: true, assetCriticality: "High",
+};
+
+test("upsertFindingRiskBatch: an empty batch makes no queries", async () => {
+  const db = fakeBatchDb();
+  const store = await loadStore(db);
+  const result = await store.upsertFindingRiskBatch(db, "tenant-1", []);
+  assert.deepEqual(result, { scored: 0 });
+  assert.equal(db.calls.length, 0);
+});
+
+test("upsertFindingRiskBatch: brand new findings are inserted with no history rows", async () => {
+  const db = fakeBatchDb({ existingRows: [] });
+  const store = await loadStore(db);
+  const result = await store.upsertFindingRiskBatch(db, "tenant-1", [BATCH_INPUT, { ...BATCH_INPUT, cve: "CVE-2026-2222", hostKey: "host-b" }]);
+  assert.equal(result.scored, 2);
+  const insert = db.calls.find((c) => c.sql.includes("INSERT INTO finding_risk"));
+  assert.ok(insert);
+  const rows = JSON.parse(insert.params[0]);
+  assert.equal(rows.length, 2);
+  assert.equal(db.calls.some((c) => c.sql.includes("INSERT INTO risk_history")), false);
+});
+
+test("upsertFindingRiskBatch: a changed score for an existing finding records risk_history", async () => {
+  const db = fakeBatchDb({ existingRows: [
+    { id: "f1", cve: "CVE-2026-1111", host_key: "host-a", risk_score: 600, effective_swath: 2, swath_override_by: null, verification_status: "detected", verified_at: null },
+  ] });
+  const store = await loadStore(db);
+  await store.upsertFindingRiskBatch(db, "tenant-1", [BATCH_INPUT]); // new score 850, new effectiveSwath 1
+  const historyInsert = db.calls.find((c) => c.sql.includes("INSERT INTO risk_history"));
+  assert.ok(historyInsert);
+  const historyRows = JSON.parse(historyInsert.params[0]);
+  const scoreHistory = historyRows.find((r) => r.field === "risk_score");
+  assert.deepEqual([scoreHistory.old_value, scoreHistory.new_value], ["600", "850"]);
+  assert.equal(scoreHistory.finding_risk_id, "f1");
+  const swathHistory = historyRows.find((r) => r.field === "effective_swath");
+  assert.deepEqual([swathHistory.old_value, swathHistory.new_value], ["2", "1"]);
+});
+
+test("upsertFindingRiskBatch: a human Swath override is preserved -- no history row for the overridden field", async () => {
+  const db = fakeBatchDb({ existingRows: [
+    { id: "f1", cve: "CVE-2026-1111", host_key: "host-a", risk_score: 600, effective_swath: 4, swath_override_by: "chuck", verification_status: "detected", verified_at: null },
+  ] });
+  const store = await loadStore(db);
+  await store.upsertFindingRiskBatch(db, "tenant-1", [{ ...BATCH_INPUT, effectiveSwath: 1 }]); // engine says 1, human previously said 4
+  const insert = db.calls.find((c) => c.sql.includes("INSERT INTO finding_risk"));
+  assert.ok(insert.sql.includes("CASE WHEN finding_risk.swath_override_by IS NULL THEN EXCLUDED.effective_swath ELSE finding_risk.effective_swath END"));
+  const historyInsert = db.calls.find((c) => c.sql.includes("INSERT INTO risk_history"));
+  const swathHistory = historyInsert ? JSON.parse(historyInsert.params[0]).find((r) => r.field === "effective_swath") : undefined;
+  assert.equal(swathHistory, undefined);
+});
+
+test("upsertFindingRiskBatch: a finding already verified_remediated stays verified through a rescore", async () => {
+  const db = fakeBatchDb({ existingRows: [
+    { id: "f1", cve: "CVE-2026-1111", host_key: "host-a", risk_score: 600, effective_swath: 2, swath_override_by: null, verification_status: "verified_remediated", verified_at: "2026-09-01T00:00:00.000Z" },
+  ] });
+  const store = await loadStore(db);
+  await store.upsertFindingRiskBatch(db, "tenant-1", [{ ...BATCH_INPUT, verificationStatus: "detected" }]); // routine rescore must not clobber it
+  const insert = db.calls.find((c) => c.sql.includes("INSERT INTO finding_risk"));
+  const rows = JSON.parse(insert.params[0]);
+  assert.equal(rows[0].verification_status, "verified_remediated");
+  assert.equal(rows[0].verified_at, "2026-09-01T00:00:00.000Z");
+});
+
 // riskScoringDatabase() itself -- unlike every test above, which passes a
 // fake db directly to each function, these actually exercise the connection
 // resolution. This is deliberately applicationDatabase(), NOT

@@ -1,6 +1,6 @@
 import { classifyAsset } from "./threat";
 import { calculateRiskScore, calculateSwath, type AssetType, type RiskScoreInput } from "./risk-scoring";
-import { getCveEnrichment, getRiskConfig, riskScoringDatabase, upsertFindingRisk } from "./risk-scoring-store";
+import { getCveEnrichment, getRiskConfig, riskScoringDatabase, upsertFindingRiskBatch, type UpsertFindingRiskInput } from "./risk-scoring-store";
 import { listCompletedSpotlightRecords, type SpotlightRecord } from "./spotlight-record-store";
 import { patchTicketDatabase } from "./patch-ticket-store";
 
@@ -104,6 +104,11 @@ export async function computeFindingRiskForTenant(tenantKey: string, companyId: 
   let page: SpotlightRecord[] = [];
   do {
     page = await listCompletedSpotlightRecords(tenantKey, 1000, offset);
+    // Computed for the whole page first, then written in one batch below --
+    // a tenant's full record set used to mean one SELECT-then-INSERT round
+    // trip per finding (millions of sequential network round trips at real
+    // scale); batching cuts that to ~2 round trips per 1000 findings.
+    const pageInputs: UpsertFindingRiskInput[] = [];
     for (const record of page) {
       try {
         const cve = record.cve.toUpperCase();
@@ -126,7 +131,7 @@ export async function computeFindingRiskForTenant(tenantKey: string, companyId: 
         };
         const score = calculateRiskScore(input, weights);
         const swath = calculateSwath(input, score.total, swathThresholds);
-        await upsertFindingRisk(riskDb, {
+        pageInputs.push({
           tenantKey, companyId, cve, hostKey: hostKeyFor(record), hostname: record.hostname, severity: record.severity,
           riskScore: score.total, technicalScore: score.technical, exploitLikelihoodScore: score.exploitLikelihood,
           threatActivityScore: score.threatActivity, assetContextScore: score.assetContext, additionalContextScore: score.additionalContext,
@@ -136,9 +141,17 @@ export async function computeFindingRiskForTenant(tenantKey: string, companyId: 
           internetExposed: input.internetExposed, assetCriticality: input.assetCriticality,
           verificationStatus: deriveVerificationStatus(coverage.get(cve)),
         });
-        findingsScored++; distinctCves.add(cve);
+        distinctCves.add(cve);
       } catch {
         errors++; // one malformed record must not abort the whole tenant's pass
+      }
+    }
+    if (pageInputs.length) {
+      try {
+        const result = await upsertFindingRiskBatch(riskDb, tenantKey, pageInputs);
+        findingsScored += result.scored;
+      } catch {
+        errors += pageInputs.length; // this page's write failed; keep walking the rest
       }
     }
     offset += page.length;

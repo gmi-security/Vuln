@@ -50,7 +50,7 @@ async function loadCompute({ records, ticketRows = [], enrichment = new Map() })
       riskScoringDatabase: async () => ({ query: async () => ({ rows: [] }) }),
       getRiskConfig: async () => ({ weights: engine.DEFAULT_RISK_WEIGHTS, swathThresholds: engine.DEFAULT_SWATH_THRESHOLDS }),
       getCveEnrichment: async (_db, _cves) => enrichment,
-      upsertFindingRisk: async (_db, input) => { upserted.push(input); return { id: "f1", scoreChanged: true }; },
+      upsertFindingRiskBatch: async (_db, _tenantKey, inputs) => { upserted.push(...inputs); return { scored: inputs.length }; },
     },
     "./patch-ticket-store": { patchTicketDatabase: async () => ({ query: async () => ({ rows: ticketRows }) }) },
   })("lib/finding-risk-compute.ts");
@@ -126,4 +126,21 @@ test("one malformed record does not abort the rest of the tenant's pass", async 
   // null-guard on raw -- this proves the null-raw case is handled, not skipped.
   assert.equal(result.errors, 0);
   assert.equal(upserted.length, 2);
+});
+
+test("a failed batch write counts as an error per record but does not abort the tenant's pass", async () => {
+  const engine = await loader()("lib/risk-scoring.ts");
+  const mod = await loader({
+    "./spotlight-record-store": { listCompletedSpotlightRecords: async (_tenantKey, _limit, offset) => (offset ?? 0) === 0 ? [record(), record({ cve: "CVE-2026-2222", sourceId: "s2" })] : [] },
+    "./risk-scoring-store": {
+      riskScoringDatabase: async () => ({ query: async () => ({ rows: [] }) }),
+      getRiskConfig: async () => ({ weights: engine.DEFAULT_RISK_WEIGHTS, swathThresholds: engine.DEFAULT_SWATH_THRESHOLDS }),
+      getCveEnrichment: async () => new Map(),
+      upsertFindingRiskBatch: async () => { throw new Error("connection reset"); },
+    },
+    "./patch-ticket-store": { patchTicketDatabase: async () => ({ query: async () => ({ rows: [] }) }) },
+  })("lib/finding-risk-compute.ts");
+  const result = await mod.computeFindingRiskForTenant("tenant-1", "CO-1");
+  assert.equal(result.findingsScored, 0);
+  assert.equal(result.errors, 2);
 });
