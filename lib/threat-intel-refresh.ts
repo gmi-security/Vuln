@@ -29,10 +29,15 @@ const THREAT_INTEL_TIMEOUT_MS = 15_000;
 // A tenant's full CVE set run one request at a time used to mean tens of
 // thousands of sequential round trips to a single source (a real tenant's
 // first run had ~12k distinct CVEs) -- bounded concurrency instead of
-// Promise.all-everything, same pattern as lib/crowdstrike.ts's Spotlight
-// hydration, so this doesn't hammer the source harder than a modest
-// production instance can take.
-const THREAT_INTEL_CONCURRENCY = 8;
+// Promise.all-everything, so this doesn't fire literally thousands of
+// requests at once, but still high enough to actually move fast.
+// Overridable without a redeploy (just an app restart), same pattern as
+// SPOTLIGHT_DISCOVERY_PAGE_SIZE in lib/crowdstrike.ts, in case a given
+// instance can't handle this many at once.
+const THREAT_INTEL_CONCURRENCY = (() => {
+  const raw = Number(process.env.THREAT_INTEL_CONCURRENCY);
+  return Number.isInteger(raw) && raw > 0 ? raw : 40;
+})();
 
 async function runWithConcurrency<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
   let next = 0;
