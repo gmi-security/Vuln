@@ -643,15 +643,19 @@ export function createSpotlightRecordStore(db: Database) {
     return Number(result.rows[0]?.count ?? 0);
   }
 
-  async function listCompletedSpotlightRecords(tenantKey: string, limit = 100, offset = 0): Promise<SpotlightRecord[]> {
+  // Keyset (not OFFSET) pagination: OFFSET forces Postgres to walk and
+  // discard every prior row on each call, which is fine at page 5 but makes
+  // a full walk of a multi-million-row tenant cost O(n^2) overall. Paging by
+  // "source_id > last seen" instead costs O(n) total, same as the PK order
+  // this table is already stored in (source_id is part of the PK).
+  async function listCompletedSpotlightRecords(tenantKey: string, limit = 100, afterSourceId = ""): Promise<SpotlightRecord[]> {
     await ensureSchema();
     const safeLimit = Math.min(1000, Math.max(1, Math.trunc(limit) || 100));
-    const safeOffset = Math.max(0, Math.trunc(offset) || 0);
     const result = await db.query(`SELECT r.source_id, r.tenant_key, r.company_id, r.hostname,
       r.local_ip, r.external_ip, r.cve, r.severity, r.status, r.description,
       r.remediation, r.observed_at, r.raw FROM spotlight_import_records r
       JOIN spotlight_import_current c ON c.tenant_key = r.tenant_key AND c.run_id = r.run_id
-      WHERE r.tenant_key = $1 ORDER BY r.source_id LIMIT $2 OFFSET $3`, [tenantKey, safeLimit, safeOffset]);
+      WHERE r.tenant_key = $1 AND r.source_id > $2 ORDER BY r.source_id LIMIT $3`, [tenantKey, afterSourceId, safeLimit]);
     return result.rows.map(row => ({
       sourceId: row.source_id, tenantKey: row.tenant_key, companyId: row.company_id,
       hostname: row.hostname, localIp: row.local_ip, externalIp: row.external_ip,
@@ -755,6 +759,6 @@ export const failSpotlightRun = (runId: string, error: string) =>
   configuredStore().failSpotlightRun(runId, error);
 export const countCompletedSpotlightRecords = (tenantKey: string) =>
   configuredStore().countCompletedSpotlightRecords(tenantKey);
-export const listCompletedSpotlightRecords = (tenantKey: string, limit?: number, offset?: number) =>
-  configuredStore().listCompletedSpotlightRecords(tenantKey, limit, offset);
+export const listCompletedSpotlightRecords = (tenantKey: string, limit?: number, afterSourceId?: string) =>
+  configuredStore().listCompletedSpotlightRecords(tenantKey, limit, afterSourceId);
 export const pruneSpotlightRuns = (tenantKey: string) => configuredStore().pruneSpotlightRuns(tenantKey);

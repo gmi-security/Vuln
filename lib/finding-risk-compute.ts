@@ -87,25 +87,24 @@ export async function computeFindingRiskForTenant(tenantKey: string, companyId: 
   const { weights, swathThresholds } = await getRiskConfig(riskDb);
   const coverage = await ticketCoverageByCve(tenantKey);
 
-  let offset = 0, findingsScored = 0, errors = 0;
-  const distinctCves = new Set<string>();
-  const allCves = new Set<string>();
-  const batch: SpotlightRecord[] = [];
-  do {
-    batch.length = 0;
-    batch.push(...await listCompletedSpotlightRecords(tenantKey, 1000, offset));
-    for (const r of batch) allCves.add(r.cve.toUpperCase());
-    offset += batch.length;
-  } while (batch.length === 1000);
-  console.error(`[risk-refresh] ${tenantKey}: ${offset} records / ${allCves.size} distinct CVEs to score`);
+  // Distinct CVEs come from one aggregate query, not by paging the whole
+  // multi-million-row record set through application code just to build a
+  // Set -- that used to mean walking the entire tenant's records twice
+  // (once here, once below to actually score) before any work got done.
+  const allCves = new Set<string>((await riskDb.query(
+    "SELECT DISTINCT r.cve FROM spotlight_import_records r JOIN spotlight_import_current c ON c.tenant_key=r.tenant_key AND c.run_id=r.run_id WHERE r.tenant_key=$1",
+    [tenantKey],
+  )).rows.map((row: { cve: string }) => row.cve.toUpperCase()));
+  console.error(`[risk-refresh] ${tenantKey}: ${allCves.size} distinct CVEs to score`);
 
   const enrichment = await getCveEnrichment(riskDb, Array.from(allCves));
 
-  offset = 0;
+  let findingsScored = 0, errors = 0, scanned = 0, afterId = "";
+  const distinctCves = new Set<string>();
   let page: SpotlightRecord[] = [];
   do {
-    page = await listCompletedSpotlightRecords(tenantKey, 1000, offset);
-    if (offset % 10_000 === 0) console.error(`[risk-refresh] ${tenantKey}: scoring at offset ${offset}, ${findingsScored} written so far`);
+    page = await listCompletedSpotlightRecords(tenantKey, 1000, afterId);
+    if (scanned % 10_000 === 0) console.error(`[risk-refresh] ${tenantKey}: scoring at ${scanned} scanned, ${findingsScored} written so far`);
     // Computed for the whole page first, then written in one batch below --
     // a tenant's full record set used to mean one SELECT-then-INSERT round
     // trip per finding (millions of sequential network round trips at real
@@ -156,7 +155,8 @@ export async function computeFindingRiskForTenant(tenantKey: string, companyId: 
         errors += pageInputs.length; // this page's write failed; keep walking the rest
       }
     }
-    offset += page.length;
+    scanned += page.length;
+    if (page.length) afterId = page[page.length - 1].sourceId;
   } while (page.length === 1000);
 
   return { tenantKey, findingsScored, distinctCves: distinctCves.size, errors };

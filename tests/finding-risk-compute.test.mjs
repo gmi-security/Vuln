@@ -45,7 +45,7 @@ async function loadCompute({ records, ticketRows = [], enrichment = new Map() })
   const upserted = [];
   const engine = await loader()("lib/risk-scoring.ts");
   const mod = await loader({
-    "./spotlight-record-store": { listCompletedSpotlightRecords: async (tenantKey, limit, offset) => (offset ?? 0) === 0 ? records : [] },
+    "./spotlight-record-store": { listCompletedSpotlightRecords: async (tenantKey, limit, afterId) => (afterId ?? "") === "" ? records : [] },
     "./risk-scoring-store": {
       riskScoringDatabase: async () => ({ query: async () => ({ rows: [] }) }),
       getRiskConfig: async () => ({ weights: engine.DEFAULT_RISK_WEIGHTS, swathThresholds: engine.DEFAULT_SWATH_THRESHOLDS }),
@@ -131,7 +131,7 @@ test("one malformed record does not abort the rest of the tenant's pass", async 
 test("a failed batch write counts as an error per record but does not abort the tenant's pass", async () => {
   const engine = await loader()("lib/risk-scoring.ts");
   const mod = await loader({
-    "./spotlight-record-store": { listCompletedSpotlightRecords: async (_tenantKey, _limit, offset) => (offset ?? 0) === 0 ? [record(), record({ cve: "CVE-2026-2222", sourceId: "s2" })] : [] },
+    "./spotlight-record-store": { listCompletedSpotlightRecords: async (_tenantKey, _limit, afterId) => (afterId ?? "") === "" ? [record(), record({ cve: "CVE-2026-2222", sourceId: "s2" })] : [] },
     "./risk-scoring-store": {
       riskScoringDatabase: async () => ({ query: async () => ({ rows: [] }) }),
       getRiskConfig: async () => ({ weights: engine.DEFAULT_RISK_WEIGHTS, swathThresholds: engine.DEFAULT_SWATH_THRESHOLDS }),
@@ -143,4 +143,32 @@ test("a failed batch write counts as an error per record but does not abort the 
   const result = await mod.computeFindingRiskForTenant("tenant-1", "CO-1");
   assert.equal(result.findingsScored, 0);
   assert.equal(result.errors, 2);
+});
+
+test("pages by source_id cursor, not OFFSET -- a full page requests the next page starting after the last sourceId seen", async () => {
+  const engine = await loader()("lib/risk-scoring.ts");
+  const page1 = Array.from({ length: 1000 }, (_, i) => record({ sourceId: `s${String(i + 1).padStart(4, "0")}` }));
+  const page2 = [record({ sourceId: "s1001", cve: "CVE-2026-2222" })];
+  const calls = [];
+  const mod = await loader({
+    "./spotlight-record-store": {
+      listCompletedSpotlightRecords: async (_tenantKey, _limit, afterId) => {
+        calls.push(afterId);
+        if ((afterId ?? "") === "") return page1;
+        if (afterId === "s1000") return page2;
+        return [];
+      },
+    },
+    "./risk-scoring-store": {
+      riskScoringDatabase: async () => ({ query: async () => ({ rows: [] }) }),
+      getRiskConfig: async () => ({ weights: engine.DEFAULT_RISK_WEIGHTS, swathThresholds: engine.DEFAULT_SWATH_THRESHOLDS }),
+      getCveEnrichment: async () => new Map(),
+      upsertFindingRiskBatch: async (_db, _tenantKey, inputs) => ({ scored: inputs.length }),
+    },
+    "./patch-ticket-store": { patchTicketDatabase: async () => ({ query: async () => ({ rows: [] }) }) },
+  })("lib/finding-risk-compute.ts");
+  const result = await mod.computeFindingRiskForTenant("tenant-1", "CO-1");
+  // Three calls: "" -> page1 (1000, so keep going), "s1000" -> page2 (1, so stop).
+  assert.deepEqual(calls, ["", "s1000"]);
+  assert.equal(result.findingsScored, 1001);
 });
