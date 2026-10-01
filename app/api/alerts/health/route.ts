@@ -77,6 +77,8 @@ export async function GET(request: Request) {
           body: {
             configured: true,
             reachable: false,
+            authError: false,
+            checkError: false,
             message: "Could not reach the Resend API.",
           },
         };
