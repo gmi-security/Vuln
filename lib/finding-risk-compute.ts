@@ -99,16 +99,22 @@ export async function computeFindingRiskForTenant(tenantKey: string, companyId: 
 
   const enrichment = await getCveEnrichment(riskDb, Array.from(allCves));
 
+  const PAGE_SIZE = 5000;
   let findingsScored = 0, errors = 0, scanned = 0, afterId = "";
   const distinctCves = new Set<string>();
-  let page: SpotlightRecord[] = [];
-  do {
-    page = await listCompletedSpotlightRecords(tenantKey, 1000, afterId);
-    if (scanned % 10_000 === 0) console.error(`[risk-refresh] ${tenantKey}: scoring at ${scanned} scanned, ${findingsScored} written so far`);
-    // Computed for the whole page first, then written in one batch below --
-    // a tenant's full record set used to mean one SELECT-then-INSERT round
-    // trip per finding (millions of sequential network round trips at real
-    // scale); batching cuts that to ~2 round trips per 1000 findings.
+  // Prefetch the next page while this page is being scored and written --
+  // riskDb is a real Pool, so the next SELECT runs on its own connection
+  // concurrently with the current page's upsert instead of waiting behind
+  // it. Combined with a 5x bigger page size, this cuts a multi-million-row
+  // tenant's walk from thousands of fully sequential round trips to a much
+  // smaller, overlapped number.
+  let page: SpotlightRecord[] = await listCompletedSpotlightRecords(tenantKey, PAGE_SIZE, afterId);
+  while (page.length) {
+    if (scanned % 25_000 < PAGE_SIZE) console.error(`[risk-refresh] ${tenantKey}: scoring at ${scanned} scanned, ${findingsScored} written so far`);
+    const lastId = page[page.length - 1].sourceId;
+    const nextPagePromise = page.length === PAGE_SIZE
+      ? listCompletedSpotlightRecords(tenantKey, PAGE_SIZE, lastId)
+      : Promise.resolve<SpotlightRecord[]>([]);
     const pageInputs: UpsertFindingRiskInput[] = [];
     for (const record of page) {
       try {
@@ -156,8 +162,9 @@ export async function computeFindingRiskForTenant(tenantKey: string, companyId: 
       }
     }
     scanned += page.length;
-    if (page.length) afterId = page[page.length - 1].sourceId;
-  } while (page.length === 1000);
+    afterId = lastId;
+    page = await nextPagePromise;
+  }
 
   return { tenantKey, findingsScored, distinctCves: distinctCves.size, errors };
 }

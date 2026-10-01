@@ -147,15 +147,16 @@ test("a failed batch write counts as an error per record but does not abort the 
 
 test("pages by source_id cursor, not OFFSET -- a full page requests the next page starting after the last sourceId seen", async () => {
   const engine = await loader()("lib/risk-scoring.ts");
-  const page1 = Array.from({ length: 1000 }, (_, i) => record({ sourceId: `s${String(i + 1).padStart(4, "0")}` }));
-  const page2 = [record({ sourceId: "s1001", cve: "CVE-2026-2222" })];
+  const PAGE_SIZE = 5000;
+  const page1 = Array.from({ length: PAGE_SIZE }, (_, i) => record({ sourceId: `s${String(i + 1).padStart(5, "0")}` }));
+  const page2 = [record({ sourceId: "s05001", cve: "CVE-2026-2222" })];
   const calls = [];
   const mod = await loader({
     "./spotlight-record-store": {
       listCompletedSpotlightRecords: async (_tenantKey, _limit, afterId) => {
         calls.push(afterId);
         if ((afterId ?? "") === "") return page1;
-        if (afterId === "s1000") return page2;
+        if (afterId === "s05000") return page2;
         return [];
       },
     },
@@ -168,7 +169,7 @@ test("pages by source_id cursor, not OFFSET -- a full page requests the next pag
     "./patch-ticket-store": { patchTicketDatabase: async () => ({ query: async () => ({ rows: [] }) }) },
   })("lib/finding-risk-compute.ts");
   const result = await mod.computeFindingRiskForTenant("tenant-1", "CO-1");
-  // Three calls: "" -> page1 (1000, so keep going), "s1000" -> page2 (1, so stop).
-  assert.deepEqual(calls, ["", "s1000"]);
-  assert.equal(result.findingsScored, 1001);
+  // Two calls: "" -> page1 (full PAGE_SIZE, so keep going), "s05000" -> page2 (short, so stop).
+  assert.deepEqual(calls, ["", "s05000"]);
+  assert.equal(result.findingsScored, PAGE_SIZE + 1);
 });

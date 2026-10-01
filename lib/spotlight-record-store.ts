@@ -650,7 +650,7 @@ export function createSpotlightRecordStore(db: Database) {
   // this table is already stored in (source_id is part of the PK).
   async function listCompletedSpotlightRecords(tenantKey: string, limit = 100, afterSourceId = ""): Promise<SpotlightRecord[]> {
     await ensureSchema();
-    const safeLimit = Math.min(1000, Math.max(1, Math.trunc(limit) || 100));
+    const safeLimit = Math.min(5000, Math.max(1, Math.trunc(limit) || 100));
     const result = await db.query(`SELECT r.source_id, r.tenant_key, r.company_id, r.hostname,
       r.local_ip, r.external_ip, r.cve, r.severity, r.status, r.description,
       r.remediation, r.observed_at, r.raw FROM spotlight_import_records r
