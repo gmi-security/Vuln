@@ -259,6 +259,28 @@ const EXPRT_SEV: Record<string, Severity> = {
 
 export type SpotlightListResult = { findings: SpotlightFinding[]; truncated: boolean };
 
+// Synthesized for an ID the entities endpoint no longer returns -- CrowdStrike
+// stops resolving an ID once the underlying finding is closed/remediated/
+// removed, which routinely happens to some fraction of IDs discovered hours
+// earlier on a multi-hour scan against a live, constantly-changing dataset.
+// Recorded as closed rather than dropped, so the run's "every discovered ID
+// has exactly one record" guarantee (enforced at promotion) still holds and
+// the finding doesn't just silently vanish from the dataset.
+function tombstoneSpotlightResource(id: string): SpotlightFinding {
+  return {
+    id, raw: { id, unresolved: true },
+    cve: `CS-${id}`,
+    hostname: "", localIp: "", externalIp: "", os: "",
+    severity: "Medium", cvss: 0,
+    title: "CrowdStrike Spotlight finding (no longer resolvable)",
+    description: "CrowdStrike no longer returns details for this finding ID; it was likely closed or remediated after discovery.",
+    remediation: "",
+    exploitAvailable: false,
+    status: "closed",
+    exprRating: "",
+  };
+}
+
 function parseSpotlightResource(config: FalconTenant, v: any): SpotlightFinding {
   const id = String(v?.id ?? "").trim();
   if (!id) throw new Error(`Spotlight source vulnerability ID is missing for ${config.label}.`);
@@ -345,12 +367,25 @@ export async function createSpotlightSession(config: FalconTenant) {
       const response = await request(url.toString());
       if (!response.ok) throw new Error(`Spotlight entities ${response.status}: ${await response.text().catch(() => response.statusText)}`);
       const json: any = await response.json();
-      if (!Array.isArray(json?.resources) || json.resources.length !== group.length)
-        throw new Error(`Spotlight entity hydration incomplete for ${config.label}: expected ${group.length} findings.`);
-      const returnedIds = new Set(json.resources.map((item: any) => String(item?.id ?? "").trim()));
-      if (returnedIds.has("") || returnedIds.size !== group.length || group.some(id => !returnedIds.has(id)))
+      if (!Array.isArray(json?.resources) || json.resources.length > group.length)
+        throw new Error(`Spotlight entity hydration returned an invalid response for ${config.label}.`);
+      const requested = new Set(group);
+      const returnedIds = new Set<string>(json.resources.map((item: any) => String(item?.id ?? "").trim()));
+      if (returnedIds.has("") || returnedIds.size !== json.resources.length || Array.from(returnedIds).some(id => !requested.has(id)))
         throw new Error(`Spotlight entity hydration IDs mismatch for ${config.label}.`);
-      return json.resources.map((item: any) => parseSpotlightResource(config, item));
+      const findings = json.resources.map((item: any) => parseSpotlightResource(config, item));
+      // A multi-hour scan walks a live, constantly-changing dataset -- an ID
+      // discovered hours ago can legitimately stop resolving by the time
+      // hydration reaches it. That's expected churn, not a broken response
+      // (anything actually wrong with the response -- bad shape, duplicate
+      // or unrequested IDs -- still throws above), so record it as closed
+      // instead of failing the whole run.
+      if (json.resources.length < group.length) {
+        const missing = group.filter(id => !returnedIds.has(id));
+        console.error(`[spotlight] ${missing.length} ID(s) for ${config.label} no longer resolvable, recording as closed: ${missing.join(",")}`);
+        findings.push(...missing.map(tombstoneSpotlightResource));
+      }
+      return findings;
     });
     return results.flat();
   }

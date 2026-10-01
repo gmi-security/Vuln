@@ -188,6 +188,39 @@ test("Spotlight session returns bounded ID pages and hydrates their exact source
   });
 });
 
+test("an ID no longer resolvable by hydration is recorded as closed instead of failing the run", async () => {
+  await withFetch((url) => {
+    if (url.includes("/oauth2/token")) return json({ access_token: "tok" });
+    if (url.includes("/spotlight/entities/vulnerabilities/v2"))
+      // CrowdStrike omits "source-2" entirely rather than erroring -- this is
+      // the real shape of a finding that closed/was remediated between
+      // discovery and hydration on a long-running scan.
+      return json({ resources: [{ id: "source-1", cve: { id: "CVE-2026-1234" }, host_info: { hostname: "atlas-host" } }] });
+    throw new Error(`Unexpected request: ${url}`);
+  }, async () => {
+    const session = await createSpotlightSession(atlas);
+    const records = await session.hydrateIds(["source-1", "source-2"]);
+    assert.deepEqual(records.map(record => record.id).sort(), ["source-1", "source-2"]);
+    const tombstone = records.find(record => record.id === "source-2");
+    assert.equal(tombstone.status, "closed");
+    assert.equal(tombstone.raw.unresolved, true);
+    const real = records.find(record => record.id === "source-1");
+    assert.equal(real.raw.host_info.hostname, "atlas-host");
+  });
+});
+
+test("hydration still rejects a response returning an ID that was never requested", async () => {
+  await withFetch((url) => {
+    if (url.includes("/oauth2/token")) return json({ access_token: "tok" });
+    if (url.includes("/spotlight/entities/vulnerabilities/v2"))
+      return json({ resources: [{ id: "some-other-id", cve: { id: "CVE-2026-1234" } }] });
+    throw new Error(`Unexpected request: ${url}`);
+  }, async () => {
+    const session = await createSpotlightSession(atlas);
+    await assert.rejects(() => session.hydrateIds(["source-1"]), /hydrat.*ids.*mismatch/i);
+  });
+});
+
 test("debug count probe reads pagination totals without downloading assets or vulnerabilities", async () => {
   await withFetch((url) => {
     if (url.includes("/oauth2/token")) return json({ access_token: "tok" });
