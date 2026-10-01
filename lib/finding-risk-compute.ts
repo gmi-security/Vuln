@@ -28,6 +28,44 @@ function extractPublishedAt(record: SpotlightRecord): string | null {
   return raw?.cve?.published_date ?? null;
 }
 
+// CrowdStrike reports its own ground-truth asset_criticality/internet_exposure
+// per finding (host_info facet) -- classifyAsset's hostname-substring
+// heuristic below exists only for when CrowdStrike has no real signal (an
+// "Unassigned" tier, an unrecognized/missing exposure string, or no host_info
+// at all). Previously this record.raw data was discarded entirely in favor
+// of guessing from the hostname text, which meant asset-tag hostnames (this
+// tenant's convention, e.g. "C000160") never matched any hint and silently
+// defaulted to Normal/Internal regardless of CrowdStrike's actual data --
+// killing both of calculateSwath's emergency-elevation paths for this tenant.
+function extractHostInfo(record: SpotlightRecord): { assetCriticality: string; internetExposure: string } {
+  const raw = record.raw as { host_info?: { asset_criticality?: string; internet_exposure?: string } } | undefined;
+  return { assetCriticality: String(raw?.host_info?.asset_criticality ?? "").trim(), internetExposure: String(raw?.host_info?.internet_exposure ?? "").trim() };
+}
+
+// CrowdStrike's documented asset_criticality tiers: Critical, High,
+// Noncritical, Unassigned. "Unassigned" (or anything unrecognized) means no
+// human set a tier -- not evidence the asset is actually Normal -- so it
+// falls through to the heuristic rather than being treated as a real answer.
+function criticalityFromCrowdStrike(raw: string): "Crown Jewel" | "High" | "Normal" | null {
+  switch (raw.toLowerCase()) {
+    case "critical": return "Crown Jewel";
+    case "high": return "High";
+    case "noncritical": case "non-critical": return "Normal";
+    default: return null;
+  }
+}
+
+// CrowdStrike's internet_exposure field isn't fully documented publicly;
+// only trust unambiguous text ("not exposed" vs "exposed") and fall back to
+// the heuristic for "Unknown", empty, or anything else unrecognized.
+function exposureFromCrowdStrike(raw: string): "Internet-facing" | "Internal" | null {
+  const v = raw.toLowerCase();
+  if (!v || v === "unknown") return null;
+  if (v.includes("not exposed")) return "Internal";
+  if (v.includes("exposed")) return "Internet-facing";
+  return null;
+}
+
 function inferAssetType(hostname: string, criticality: "Crown Jewel" | "High" | "Normal" | "Low"): AssetType {
   const h = hostname.toLowerCase();
   if (/\bdc\d*\b|-dc\b/.test(h)) return "domain_controller";
@@ -120,7 +158,10 @@ export async function computeFindingRiskForTenant(tenantKey: string, companyId: 
       try {
         const cve = record.cve.toUpperCase();
         const enriched = enrichment.get(cve);
-        const { exposure, criticality } = classifyAsset(record.hostname || record.localIp || "");
+        const hostInfo = extractHostInfo(record);
+        const heuristic = classifyAsset(record.hostname || record.localIp || "");
+        const criticality = criticalityFromCrowdStrike(hostInfo.assetCriticality) ?? heuristic.criticality;
+        const exposure = exposureFromCrowdStrike(hostInfo.internetExposure) ?? heuristic.exposure;
         const assetType = inferAssetType(record.hostname, criticality);
         const input: RiskScoreInput = {
           cve, cvss: extractCvss(record) ?? enriched?.cvssScore ?? null,

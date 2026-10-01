@@ -75,6 +75,31 @@ test("a KEV'd, internet-facing, high-CVSS finding scores high and lands Swath 1"
   assert.ok(upserted[0].riskScore >= 600, `expected a meaningfully high score, got ${upserted[0].riskScore}`);
 });
 
+test("CrowdStrike's own asset_criticality/internet_exposure override the hostname heuristic when present", async () => {
+  const { mod, upserted } = await loadCompute({
+    // "C000160" is an asset-tag hostname matching none of classifyAsset's
+    // hints -- it would heuristically resolve to Normal/Internal, exactly
+    // the bug this fix addresses, except CrowdStrike itself reports this
+    // host as Critical/Internet Exposed.
+    records: [record({ hostname: "C000160", raw: { cve: { cvss_v3: 9.8 }, host_info: { asset_criticality: "Critical", internet_exposure: "Internet Exposed" } } })],
+  });
+  await mod.computeFindingRiskForTenant("tenant-1", "CO-1");
+  assert.equal(upserted[0].assetCriticality, "Crown Jewel");
+  assert.equal(upserted[0].internetExposed, true);
+});
+
+test("an 'Unassigned' asset_criticality and 'Unknown' internet_exposure fall back to the hostname heuristic", async () => {
+  const { mod, upserted } = await loadCompute({
+    // "sql-prod01" matches classifyAsset's "sql" hint (Crown Jewel) and its
+    // public-domain hint (Internet-facing) -- CrowdStrike supplying no real
+    // signal must not silently downgrade that to Normal/Internal.
+    records: [record({ hostname: "sql-prod01.mycompany.com", raw: { cve: { cvss_v3: 9.8 }, host_info: { asset_criticality: "Unassigned", internet_exposure: "Unknown" } } })],
+  });
+  await mod.computeFindingRiskForTenant("tenant-1", "CO-1");
+  assert.equal(upserted[0].assetCriticality, "Crown Jewel");
+  assert.equal(upserted[0].internetExposed, true);
+});
+
 test("verification status: no covering ticket means 'detected'", async () => {
   const { mod, upserted } = await loadCompute({ records: [record()], ticketRows: [] });
   await mod.computeFindingRiskForTenant("tenant-1", "CO-1");
