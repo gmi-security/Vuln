@@ -19,8 +19,12 @@ async function refreshTenant(tenantKey: string, companyId: string): Promise<{ sc
     "SELECT DISTINCT cve FROM spotlight_import_records r JOIN spotlight_import_current c ON c.tenant_key=r.tenant_key AND c.run_id=r.run_id WHERE r.tenant_key=$1",
     [tenantKey],
   )).rows.map((row: { cve: string }) => row.cve);
+  console.error(`[risk-refresh] ${tenantKey}: enriching ${cves.length} distinct CVEs (CISA KEV/EPSS/MISP/OpenCTI/IntelOwl)...`);
   const enrichResult = await refreshCveEnrichment(cves);
+  console.error(`[risk-refresh] ${tenantKey}: enrichment done -- kev=${enrichResult.kevEntries} epss=${enrichResult.epssUpdated} activeExploitation=${enrichResult.activeExploitationSignals} errors=${enrichResult.errors}`);
+  console.error(`[risk-refresh] ${tenantKey}: scoring findings...`);
   const computeResult = await computeFindingRiskForTenant(tenantKey, companyId);
+  console.error(`[risk-refresh] ${tenantKey}: scored ${computeResult.findingsScored} findings (${computeResult.distinctCves} distinct CVEs), errors=${computeResult.errors}`);
   return { scored: computeResult.findingsScored, errors: enrichResult.errors + computeResult.errors };
 }
 
@@ -30,20 +34,23 @@ export async function refreshAllTenantsRisk(): Promise<RiskRefreshResult> {
   const db = await riskScoringDatabase();
   const tenants = (await db.query("SELECT DISTINCT r.tenant_key, r.company_id FROM spotlight_import_records r JOIN spotlight_import_current c ON c.tenant_key=r.tenant_key AND c.run_id=r.run_id"))
     .rows as { tenant_key: string; company_id: string }[];
+  console.error(`[risk-refresh] starting pass for ${tenants.length} tenant(s): ${tenants.map(t => t.tenant_key).join(", ")}`);
   let findingsScored = 0, errors = 0;
   for (const { tenant_key, company_id } of tenants) {
     try {
       const result = await refreshTenant(tenant_key, company_id);
       findingsScored += result.scored; errors += result.errors;
       await recordRiskSnapshot(db, company_id);
-    } catch {
+    } catch (err) {
       errors++; // one tenant's failure (CrowdStrike timeout, malformed data) must not block the rest
+      console.error(`[risk-refresh] ${tenant_key}: tenant pass failed:`, err instanceof Error ? err.message : err);
     }
   }
   if (tenants.length) await recordRiskSnapshot(db, "global").catch(() => {});
   // Ticket priority reconciliation reads finding_risk, so it runs after
   // scoring completes for this pass, not interleaved per-tenant.
   await reconcileTicketPriorityToSwath().catch((err) => { errors++; console.error("[risk-refresh] priority reconciliation failed:", err instanceof Error ? err.message : err); });
+  console.error(`[risk-refresh] pass complete: tenantsProcessed=${tenants.length} findingsScored=${findingsScored} errors=${errors}`);
   return { tenantsProcessed: tenants.length, findingsScored, errors };
 }
 

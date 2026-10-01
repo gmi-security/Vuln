@@ -97,6 +97,7 @@ export async function computeFindingRiskForTenant(tenantKey: string, companyId: 
     for (const r of batch) allCves.add(r.cve.toUpperCase());
     offset += batch.length;
   } while (batch.length === 1000);
+  console.error(`[risk-refresh] ${tenantKey}: ${offset} records / ${allCves.size} distinct CVEs to score`);
 
   const enrichment = await getCveEnrichment(riskDb, Array.from(allCves));
 
@@ -104,6 +105,7 @@ export async function computeFindingRiskForTenant(tenantKey: string, companyId: 
   let page: SpotlightRecord[] = [];
   do {
     page = await listCompletedSpotlightRecords(tenantKey, 1000, offset);
+    if (offset % 10_000 === 0) console.error(`[risk-refresh] ${tenantKey}: scoring at offset ${offset}, ${findingsScored} written so far`);
     // Computed for the whole page first, then written in one batch below --
     // a tenant's full record set used to mean one SELECT-then-INSERT round
     // trip per finding (millions of sequential network round trips at real
