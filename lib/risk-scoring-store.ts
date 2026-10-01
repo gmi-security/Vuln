@@ -181,6 +181,20 @@ export async function upsertFindingRiskBatch(
 ): Promise<{ scored: number }> {
   if (!inputs.length) return { scored: 0 };
 
+  // Two inputs sharing the same (cve, hostKey) in one batch would give the
+  // INSERT below's ON CONFLICT (tenant_key, cve, host_key) two source rows
+  // targeting the same conflict key -- Postgres rejects that outright
+  // ("ON CONFLICT DO UPDATE command cannot affect row a second time"),
+  // failing the ENTIRE batch, not just the duplicate. CrowdStrike can
+  // report more than one finding for the same CVE on the same host
+  // (overlapping scan passes/detections), so collapse to the last one
+  // seen before doing anything else -- finding_risk is keyed uniquely on
+  // (tenant_key, cve, host_key) regardless, so only one row could ever
+  // exist for that pair anyway.
+  const deduped = new Map<string, UpsertFindingRiskInput>();
+  for (const input of inputs) deduped.set(`${input.cve}\u0000${input.hostKey}`, input);
+  inputs = [...deduped.values()];
+
   const keys = inputs.map((i) => ({ cve: i.cve, host_key: i.hostKey }));
   const existingRows = (await db.query(`
     SELECT fr.id, fr.cve, fr.host_key, fr.risk_score, fr.effective_swath, fr.swath_override_by, fr.verification_status, fr.verified_at

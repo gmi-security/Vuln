@@ -156,6 +156,21 @@ test("upsertFindingRiskBatch: an empty batch makes no queries", async () => {
   assert.equal(db.calls.length, 0);
 });
 
+test("upsertFindingRiskBatch: duplicate cve+hostKey pairs in one batch collapse to one row instead of colliding on the same ON CONFLICT target", async () => {
+  const db = fakeBatchDb({ existingRows: [] });
+  const store = await loadStore(db);
+  // Two source findings for the same CVE on the same host (e.g. overlapping
+  // scan passes) -- without de-duping, these would give the INSERT's
+  // ON CONFLICT (tenant_key, cve, host_key) two rows targeting the same
+  // key, which Postgres rejects outright for the whole batch.
+  const result = await store.upsertFindingRiskBatch(db, "tenant-1", [BATCH_INPUT, { ...BATCH_INPUT, riskScore: 900 }]);
+  assert.equal(result.scored, 1);
+  const insert = db.calls.find((c) => c.sql.includes("INSERT INTO finding_risk"));
+  const rows = JSON.parse(insert.params[0]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].risk_score, 900); // last one seen wins
+});
+
 test("upsertFindingRiskBatch: brand new findings are inserted with no history rows", async () => {
   const db = fakeBatchDb({ existingRows: [] });
   const store = await loadStore(db);
