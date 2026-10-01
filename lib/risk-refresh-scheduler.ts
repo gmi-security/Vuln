@@ -21,7 +21,7 @@ async function refreshTenant(tenantKey: string, companyId: string): Promise<{ sc
   )).rows.map((row: { cve: string }) => row.cve);
   console.error(`[risk-refresh] ${tenantKey}: enriching ${cves.length} distinct CVEs (CISA KEV/EPSS/MISP/OpenCTI/IntelOwl)...`);
   const enrichResult = await refreshCveEnrichment(cves);
-  console.error(`[risk-refresh] ${tenantKey}: enrichment done -- kev=${enrichResult.kevEntries} epss=${enrichResult.epssUpdated} activeExploitation=${enrichResult.activeExploitationSignals} errors=${enrichResult.errors}`);
+  console.error(`[risk-refresh] ${tenantKey}: enrichment done -- kev=${enrichResult.kevEntries} epss=${enrichResult.epssUpdated} activeExploitation=${enrichResult.activeExploitationSignals} skipped(fresh)=${enrichResult.skipped} errors=${enrichResult.errors}`);
   console.error(`[risk-refresh] ${tenantKey}: scoring findings...`);
   const computeResult = await computeFindingRiskForTenant(tenantKey, companyId);
   console.error(`[risk-refresh] ${tenantKey}: scored ${computeResult.findingsScored} findings (${computeResult.distinctCves} distinct CVEs), errors=${computeResult.errors}`);

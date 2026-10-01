@@ -57,7 +57,7 @@ async function loadScheduler({ tenantRows, refreshTenantResult = { findingsScore
   const computeCalls = [];
   const mod = await loader({
     "./elastic-vuln-server": { elasticVulnEnabled: () => true },
-    "./cve-enrichment-refresh": { refreshCveEnrichment: async () => ({ kevEntries: 0, epssUpdated: 0, activeExploitationSignals: 0, errors: 0 }) },
+    "./cve-enrichment-refresh": { refreshCveEnrichment: async () => ({ kevEntries: 0, epssUpdated: 0, activeExploitationSignals: 0, errors: 0, skipped: 0 }) },
     "./finding-risk-compute": { computeFindingRiskForTenant: async (tenantKey, companyId) => { computeCalls.push({ tenantKey, companyId }); return refreshTenantResult; } },
     "./risk-scoring-store": { riskScoringDatabase: async () => riskDb, recordRiskSnapshot: async () => {} },
     "./swath-ticket-priority": { reconcileTicketPriorityToSwath: async () => ({ checked: 0, updated: 0, errors: 0 }) },
@@ -85,7 +85,7 @@ test("one tenant's failure does not block the others", async () => {
   let call = 0;
   const mod = await loader({
     "./elastic-vuln-server": { elasticVulnEnabled: () => true },
-    "./cve-enrichment-refresh": { refreshCveEnrichment: async () => ({ kevEntries: 0, epssUpdated: 0, activeExploitationSignals: 0, errors: 0 }) },
+    "./cve-enrichment-refresh": { refreshCveEnrichment: async () => ({ kevEntries: 0, epssUpdated: 0, activeExploitationSignals: 0, errors: 0, skipped: 0 }) },
     "./finding-risk-compute": { computeFindingRiskForTenant: async () => { call++; if (call === 1) throw new Error("CrowdStrike timeout"); return { findingsScored: 5, distinctCves: 5, errors: 0 }; } },
     "./risk-scoring-store": { riskScoringDatabase: async () => riskDb, recordRiskSnapshot: async () => {} },
     "./swath-ticket-priority": { reconcileTicketPriorityToSwath: async () => ({ checked: 0, updated: 0, errors: 0 }) },

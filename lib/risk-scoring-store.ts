@@ -357,6 +357,20 @@ export async function getCveEnrichment(db: Awaited<ReturnType<typeof riskScoring
   return out;
 }
 
+// Which of `cves` have no row yet, or weren't refreshed within maxAgeMs --
+// KEV/EPSS/MISP/OpenCTI/IntelOwl data doesn't meaningfully change minute to
+// minute (CISA/FIRST.org themselves only publish daily), so re-fetching a
+// CVE enriched an hour ago on every single risk-refresh pass is pure waste
+// at real scale (thousands of distinct CVEs, most unchanged run to run).
+export async function staleOrMissingCves(db: Awaited<ReturnType<typeof riskScoringDatabase>>, cves: string[], maxAgeMs: number): Promise<string[]> {
+  if (!cves.length) return [];
+  const fresh = new Set((await db.query(
+    "SELECT cve FROM cve_enrichment WHERE cve = ANY($1::text[]) AND updated_at > now() - ($2::double precision * interval '1 millisecond')",
+    [cves, maxAgeMs],
+  )).rows.map((row: { cve: string }) => row.cve));
+  return cves.filter((cve) => !fresh.has(cve));
+}
+
 export async function upsertCveEnrichment(db: Awaited<ReturnType<typeof riskScoringDatabase>>, rows: (Partial<CveEnrichmentRow> & { cve: string })[]): Promise<void> {
   for (const row of rows) {
     await db.query(`

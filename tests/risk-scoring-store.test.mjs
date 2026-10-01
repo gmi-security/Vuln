@@ -209,6 +209,34 @@ test("upsertFindingRiskBatch: a finding already verified_remediated stays verifi
   assert.equal(rows[0].verified_at, "2026-09-01T00:00:00.000Z");
 });
 
+// staleOrMissingCves -- gates the per-CVE MISP/OpenCTI/EPSS lookups in
+// lib/cve-enrichment-refresh.ts so a CVE enriched recently isn't re-fetched
+// on every single risk-refresh pass.
+test("staleOrMissingCves: an empty input makes no query and returns nothing", async () => {
+  const calls = [];
+  const db = { query: async (sql, params) => { calls.push({ sql, params }); return { rows: [] }; } };
+  const store = await loadStore(db);
+  const result = await store.staleOrMissingCves(db, [], 86_400_000);
+  assert.deepEqual(result, []);
+  assert.equal(calls.length, 0);
+});
+
+test("staleOrMissingCves: a CVE with no enrichment row at all counts as stale", async () => {
+  const db = { query: async () => ({ rows: [] }) }; // nothing matches -- nothing is "fresh"
+  const store = await loadStore(db);
+  const result = await store.staleOrMissingCves(db, ["CVE-2026-1111"], 86_400_000);
+  assert.deepEqual(result, ["CVE-2026-1111"]);
+});
+
+test("staleOrMissingCves: a recently-enriched CVE is excluded, an older/missing one is not", async () => {
+  const calls = [];
+  const db = { query: async (sql, params) => { calls.push({ sql, params }); return { rows: [{ cve: "CVE-2026-1111" }] }; } };
+  const store = await loadStore(db);
+  const result = await store.staleOrMissingCves(db, ["CVE-2026-1111", "CVE-2026-2222"], 86_400_000);
+  assert.deepEqual(result, ["CVE-2026-2222"]);
+  assert.deepEqual(calls[0].params, [["CVE-2026-1111", "CVE-2026-2222"], 86_400_000]);
+});
+
 // riskScoringDatabase() itself -- unlike every test above, which passes a
 // fake db directly to each function, these actually exercise the connection
 // resolution. This is deliberately applicationDatabase(), NOT
