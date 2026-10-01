@@ -10,6 +10,7 @@ import { DASHBOARD_CONNECTORS } from "./dashboard-query-connectors";
 import { executePatchConsolidation, executePatchRequest, parseCrowdStrikeConnection, sealCrowdStrike, testCrowdStrikeConnection, verifyPatchFix } from "./crowdstrike-dashboard-client";
 import { type CrowdStrikeConnection } from "./crowdstrike-dashboard";
 import { installDailyOpenVulnerabilityTile } from "./dashboard-daily-trend";
+import { installExprtRankedCveTile } from "./dashboard-exprt-tile";
 
 let dedicatedPool: Pool | undefined;
 let ready: Promise<void> | undefined;
@@ -69,6 +70,7 @@ export async function dashboardDatabase(): Promise<Pool> {
       await db.query("INSERT INTO elastic_dashboard_queries (id, definition) VALUES ($1, $2::jsonb) ON CONFLICT (id) DO NOTHING",
         [DEFAULT_COVERAGE.id, JSON.stringify(DEFAULT_COVERAGE)]);
       await installDailyOpenVulnerabilityTile(db);
+      await installExprtRankedCveTile(db);
     })().catch((error) => { ready = undefined; throw error; });
   }
   await ready;

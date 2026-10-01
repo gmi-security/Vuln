@@ -95,6 +95,7 @@ export function patchWorklist(records: Iterable<Vulnerability>, top: number): Qu
 }
 
 export function summarizeVulnerabilities(records: Iterable<Vulnerability>, options: CrowdStrikeOptions): QueryResult {
+  if (options.view === "exprt-cves") return cveDeviceTable(records, options.top, "exprt");
   if (options.view === "cve-devices") return cveDeviceTable(records, options.top);
   if (options.view === "patch-worklist") return patchWorklist(records, options.top);
   const groups = new Map<string, Set<string>>();
@@ -117,16 +118,18 @@ export function summarizeVulnerabilities(records: Iterable<Vulnerability>, optio
     note: `Top ${Math.min(rows.length, options.top)} of ${rows.length} groups, calculated from all matching findings. Unique CVEs or hosts can appear in more than one group.` };
 }
 
-export function cveDeviceTable(records: Iterable<Vulnerability>, top: number): QueryResult {
+export function cveDeviceTable(records: Iterable<Vulnerability>, top: number, ranking: "severity" | "exprt" = "severity"): QueryResult {
   const rank = (severity: string) => ({ CRITICAL: 5, HIGH: 4, MEDIUM: 3, LOW: 2, NONE: 1 }[severity] ?? 0);
-  const groups = new Map<string, { severity: string; devices: Set<string>; findings: Set<string>; cvss: number | null; kev: boolean | null; epss: number | null }>();
+  const groups = new Map<string, { severity: string; exprt: string; devices: Set<string>; findings: Set<string>; cvss: number | null; kev: boolean | null; epss: number | null }>();
   let excluded = 0;
   for (const row of records) {
     if (!["open", "reopen"].includes(row.status)) continue;
+    if (ranking === "exprt" && !["CRITICAL", "HIGH", "MEDIUM", "LOW"].includes(row.exprt)) continue;
     if (!/^CVE-\d{4}-\d+$/i.test(row.cve)) { excluded++; continue; }
     if (!row.hostId) throw new DashboardError("A CVE finding is missing its host ID. Complete affected-device counts cannot be calculated.");
     const cve = row.cve.toUpperCase();
-    const group = groups.get(cve) ?? { severity: row.severity, devices: new Set<string>(), findings: new Set<string>(), cvss: null, kev: null, epss: null };
+    const group = groups.get(cve) ?? { severity: row.severity, exprt: row.exprt, devices: new Set<string>(), findings: new Set<string>(), cvss: null, kev: null, epss: null };
+    if (ranking === "exprt" && group.exprt !== row.exprt) throw new DashboardError("CrowdStrike returned conflicting ExPRT ratings for a CVE. Retry; no partial device counts were saved.");
     group.devices.add(JSON.stringify([row.cid, row.hostId]));
     group.findings.add(JSON.stringify([row.cid, row.id]));
     if (rank(row.severity) > rank(group.severity)) group.severity = row.severity;
@@ -135,7 +138,15 @@ export function cveDeviceTable(records: Iterable<Vulnerability>, top: number): Q
     if (row.epss !== null) group.epss = row.epss;
     groups.set(cve, group);
   }
-  const rows = [...groups].sort(([a, x], [b, y]) => rank(y.severity) - rank(x.severity) || y.devices.size - x.devices.size || a.localeCompare(b));
+  const rows = [...groups].sort(([a, x], [b, y]) => rank(y[ranking]) - rank(x[ranking]) || y.devices.size - x.devices.size || a.localeCompare(b));
+  if (ranking === "exprt") return {
+    columns: [{ name: "cve", type: "keyword" }, { name: "exprt_rating", type: "keyword" },
+      { name: "affected_devices", type: "long" }, { name: "open_findings", type: "long" },
+      { name: "severity", type: "keyword" }, { name: "cvss", type: "double" }, { name: "cisa_kev", type: "boolean" }],
+    rows: rows.slice(0, top).map(([cve, row]) => [cve, row.exprt, row.devices.size, row.findings.size, row.severity, row.cvss, row.kev]),
+    truncated: false,
+    note: `Top ${Math.min(top, rows.length)} rated CVEs by CrowdStrike ExPRT (Critical, High, Medium, Low), then unique affected devices. Open/reopened findings only; each tenant/device counts once per CVE. CVEs without a recognized ExPRT rating are not ranked. CVSS severity is shown separately. ${excluded ? `${excluded} findings without a CVE identifier excluded. ` : ""}Counts reflect the matching population observed during collection.`,
+  };
   return { columns: [{ name: "cve", type: "keyword" }, { name: "severity", type: "keyword" },
     { name: "affected_devices", type: "long" }, { name: "open_findings", type: "long" },
     { name: "cvss", type: "double" }, { name: "cisa_kev", type: "boolean" }, { name: "epss", type: "double" }],

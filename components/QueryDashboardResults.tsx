@@ -96,7 +96,7 @@ export default function QueryDashboardResults({ result, display, chart, prepareP
   const devicesIndex = result.columns.findIndex((column) => column.name === "affected_devices");
   const maxDevices = Math.max(1, ...result.rows.map((row) => typeof row[devicesIndex] === "number" ? row[devicesIndex] as number : 0));
   function cell(value: QueryResult["rows"][number][number], name: string) {
-    const level = /severity/i.test(name) && typeof value === "string" ? severity(value) : undefined;
+    const level = (/severity/i.test(name) || name === "exprt_rating") && typeof value === "string" ? severity(value) : undefined;
     if (level) return <span className={`${styles.badge} ${severityClass[level]}`}>{level}</span>;
     if (name === "cisa_kev" && value === true) return <span className="text-[#ff4d57]">Listed</span>;
     if (typeof value === "string") return <CveText text={value} onSelect={cve => setSelected({ cve, row: selected?.row })} />;

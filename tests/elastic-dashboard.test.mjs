@@ -556,6 +556,21 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
     await store.deleteDashboardTile(daily.id, "daily-delete");
     await installDailyOpenVulnerabilityTile(db);
     assert.ok((await db.query("SELECT deleted_at FROM elastic_dashboard_queries WHERE id = $1", [daily.id])).rows[0].deleted_at);
+    // Append ExPRT after every current tile, even when older tiles have NULL order.
+    await db.query("UPDATE elastic_dashboard_queries SET display_order = NULL WHERE id = 'extra'");
+    const beforeExprt = (await store.readDashboard(true)).queries.map(q => q.id);
+    const exprtModule = await load("lib/dashboard-exprt-tile.ts"); await exprtModule.evaluate();
+    const { installExprtRankedCveTile, EXPRT_RANKED_CVES: exprt } = exprtModule.namespace;
+    await installExprtRankedCveTile(db);
+    await installExprtRankedCveTile(db);
+    assert.deepEqual((await store.readDashboard(true)).queries.map(q => q.id), [...beforeExprt, exprt.id]);
+    assert.equal((await db.query("SELECT count(*)::int AS count FROM elastic_dashboard_audit WHERE query_id = $1", [exprt.id])).rows[0].count, 1);
+    await db.query("UPDATE elastic_dashboard_queries SET definition = jsonb_set(definition, '{title}', '\"My ExPRT table\"') WHERE id = $1", [exprt.id]);
+    await installExprtRankedCveTile(db);
+    assert.equal((await db.query("SELECT definition FROM elastic_dashboard_queries WHERE id = $1", [exprt.id])).rows[0].definition.title, "My ExPRT table");
+    await store.deleteDashboardTile(exprt.id, "delete-exprt");
+    await installExprtRankedCveTile(db);
+    assert.ok(!(await store.readDashboard(true)).queries.some(q => q.id === exprt.id));
     // Leave the isolated DB unconnected for the subsequent HTTP authorization checks.
     await db.query("DELETE FROM elastic_dashboard_connection");
     await db.query("DELETE FROM dashboard_source_connections; DELETE FROM dashboard_daily_history; DELETE FROM elastic_dashboard_queries WHERE definition->>'source' = 'crowdstrike'");

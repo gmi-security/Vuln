@@ -167,17 +167,19 @@ export async function executeCrowdStrike(connection: CrowdStrikeConnection, valu
       rows: [counts], truncated: false,
       note: "CrowdStrike CVSS severity counts for this filter, one finding per vulnerability instance. Counts are separate API observations collected during this refresh, not a single atomic snapshot. None and Unknown are retained; these are not GMI priorities or ExPRT ratings." };
   }
-  if (options.view === "cve-devices") {
+  if (options.view === "cve-devices" || options.view === "exprt-cves") {
     const records = new Map<string, Vulnerability>(), epssCache = new Map<string, number>();
-    // Severity is the primary ordering key. Finish each severity completely;
-    // lower severities cannot displace a full top-N from completed higher ones.
-    for (const severity of ["CRITICAL", "HIGH", "MEDIUM", "LOW", "NONE", "UNKNOWN"]) {
-      const batch = await collectRecords(auth, deadline, `(${input.query})+cve.severity:'${severity}'`, ["cve"], 1000);
+    const exprt = options.view === "exprt-cves";
+    const field = exprt ? "cve.exprt_rating" : "cve.severity";
+    // Finish a complete rating band before ranking. Lower bands cannot
+    // displace a full top-N, so stop without collecting the rest of the estate.
+    for (const rating of exprt ? ["CRITICAL", "HIGH", "MEDIUM", "LOW"] : ["CRITICAL", "HIGH", "MEDIUM", "LOW", "NONE", "UNKNOWN"]) {
+      const batch = await collectRecords(auth, deadline, `(${input.query})+${field}:'${rating}'`, ["cve"], 1000);
       for (const [id, row] of batch) {
-        if (row.severity !== severity || records.has(id)) throw new DashboardError("CrowdStrike findings changed severity during collection. Retry; no partial device counts were saved.");
+        if ((exprt ? row.exprt : row.severity) !== rating || records.has(id)) throw new DashboardError(`CrowdStrike findings changed ${exprt ? "ExPRT rating" : "severity"} during collection. Retry; no partial device counts were saved.`);
         records.set(id, row);
       }
-      await enrichEpss(records, epssCache);
+      if (!exprt) await enrichEpss(records, epssCache);
       const result = dataset.summarize(records.values(), options);
       if (result.rows.length >= options.top) return result;
     }

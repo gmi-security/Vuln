@@ -51,6 +51,71 @@ async function mockHttp(replies, work) {
 const auth = { access_token: "fake-access-token" };
 
 const cveOptions = { ...options, view: "cve-devices", measure: "hosts", groupBy: "cve", top: 10 };
+const exprtOptions = { ...cveOptions, view: "exprt-cves" };
+const exprtRaw = (id, cve, exprt, props = {}) => raw(id, { cve: { id: cve, severity: "LOW", exprt_rating: exprt, base_score: 3.5 }, ...props });
+
+test("ExPRT ranks independently of CVSS and deduplicates tenant/device identities", () => {
+  const records = [
+    exprtRaw("a", "CVE-2026-1000", "CRITICAL"),
+    exprtRaw("b", "CVE-2026-1000", "CRITICAL"),
+    exprtRaw("c", "CVE-2026-1001", "CRITICAL"),
+    exprtRaw("d", "CVE-2026-1001", "CRITICAL", { cid: "tenant-b" }),
+    exprtRaw("e", "CVE-2026-1002", "HIGH", { cve: { id: "CVE-2026-1002", exprt_rating: "HIGH", severity: "CRITICAL", base_score: 9.8 } }),
+    exprtRaw("f", "CVE-2026-1003", "MEDIUM"), exprtRaw("g", "CVE-2026-1004", "LOW"),
+    exprtRaw("h", "CVE-2026-1005", "UNKNOWN"), exprtRaw("i", "CVE-2026-1006", "CRITICAL", { status: "closed" }),
+  ].map(adapter.normalizeVulnerability);
+  const result = adapter.summarizeVulnerabilities(records, exprtOptions);
+  assert.deepEqual(result.rows.map(row => row.slice(0, 4)), [
+    ["CVE-2026-1001", "CRITICAL", 2, 2], ["CVE-2026-1000", "CRITICAL", 1, 2],
+    ["CVE-2026-1002", "HIGH", 1, 1], ["CVE-2026-1003", "MEDIUM", 1, 1], ["CVE-2026-1004", "LOW", 1, 1],
+  ]);
+  assert.equal(result.columns[1].name, "exprt_rating");
+  assert.equal(result.rows[2][4], "CRITICAL", "CVSS severity remains separate from ExPRT");
+  assert.match(result.note, /without a recognized ExPRT rating are not ranked/);
+  assert.throws(() => adapter.summarizeVulnerabilities([...records,
+    adapter.normalizeVulnerability(exprtRaw("changed", "CVE-2026-1000", "HIGH"))], exprtOptions), /conflicting ExPRT/);
+});
+
+test("ExPRT collection completes the highest band before selecting top CVEs", async () => {
+  const rows = Array.from({ length: 10 }, (_, i) => exprtRaw(`exprt-${i}`, `CVE-2026-${1000 + i}`, "CRITICAL"));
+  const extra = exprtRaw("late-device", "CVE-2026-1009", "CRITICAL", { aid: "host-2" });
+  await mockHttp([auth, page(rows, "second", 11), page([extra], "", 11)], async calls => {
+    const result = await client.executeCrowdStrike(connection, { ...input, crowdstrike: exprtOptions });
+    assert.equal(result.rows.length, 10);
+    assert.deepEqual(result.rows[0].slice(0, 4), ["CVE-2026-1009", "CRITICAL", 2, 2]);
+    assert.equal(calls.length, 3, "No lower-band or EPSS requests are needed");
+    for (const call of calls.slice(1)) {
+      assert.equal(call.url.searchParams.get("filter"), "(status:['open','reopen'])+cve.exprt_rating:'CRITICAL'");
+      assert.deepEqual(call.url.searchParams.getAll("facet"), ["cve"]);
+    }
+  });
+});
+
+test("ExPRT collection fills from lower bands and refuses incomplete or changed populations", async () => {
+  const high = exprtRaw("high", "CVE-2026-1000", "HIGH");
+  await mockHttp([auth, page([]), page([high]), page([]), page([])], async calls => {
+    const result = await client.executeCrowdStrike(connection, { ...input, crowdstrike: exprtOptions });
+    assert.equal(result.rows[0][1], "HIGH");
+    assert.deepEqual(calls.slice(1).map(call => call.url.searchParams.get("filter")),
+      ["CRITICAL", "HIGH", "MEDIUM", "LOW"].map(r => `(status:['open','reopen'])+cve.exprt_rating:'${r}'`));
+  });
+  await mockHttp([auth, page([high])], async () => {
+    await assert.rejects(client.executeCrowdStrike(connection, { ...input, crowdstrike: exprtOptions }), /changed ExPRT/);
+  });
+  await mockHttp([auth, page([exprtRaw("one", "CVE-2026-1000", "CRITICAL")], "", 2)], async () => {
+    await assert.rejects(client.executeCrowdStrike(connection, { ...input, crowdstrike: exprtOptions }), /before all findings/);
+  });
+});
+
+test("ExPRT tile settings support editing larger tables without changing the ranking view", async () => {
+  const tileModule = await load("lib/dashboard-exprt-tile.ts"); await tileModule.evaluate();
+  const tile = tileModule.namespace.EXPRT_RANKED_CVES;
+  assert.equal(contract.parseDefinition(tile, tile.id).crowdstrike.view, "exprt-cves");
+  for (const top of [100, 250, 500]) assert.equal(contract.parseQueryInput({ ...input, crowdstrike: { ...exprtOptions, top } }).crowdstrike.top, top);
+  assert.throws(() => contract.parseDefinition({ ...tile, display: "metrics" }, tile.id), /Use Table/);
+  assert.throws(() => contract.parseQueryInput({ ...input, crowdstrike: { ...exprtOptions, history: true } }));
+  assert.throws(() => contract.parseQueryInput({ ...input, crowdstrike: { ...exprtOptions, measure: "findings" } }), /unique hosts/);
+});
 
 test("daily finding history uses one bounded count request for populations above two million", async () => {
   const dailyModule = await load("lib/dashboard-daily-trend.ts"); await dailyModule.evaluate();
