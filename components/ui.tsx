@@ -14,7 +14,7 @@ export function StatCard({
   icon: React.ReactNode;
 }) {
   return (
-    <section className="rounded-2xl border border-[rgba(179,14,20,0.14)] bg-[linear-gradient(180deg,#0b0b0b,#070707)] p-4 shadow-[0_12px_32px_rgba(0,0,0,0.22)]">
+    <section className="rounded-2xl border border-[rgba(179,14,20,0.14)] bg-[linear-gradient(180deg,#0b0b0b,#070707)] p-4 shadow-[0_12px_32px_rgba(10,1,2,0.3)] transition duration-200 hover:border-[rgba(179,14,20,0.24)]">
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="text-xs text-zinc-400">{label}</div>
@@ -47,7 +47,7 @@ export function PanelCard({
   return (
     <section
       className={[
-        "rounded-[30px] border border-[rgba(179,14,20,0.16)] bg-[#050505] p-5 shadow-[0_20px_80px_rgba(0,0,0,0.34)]",
+        "rounded-3xl border border-[rgba(179,14,20,0.16)] bg-[#050505] p-5 shadow-[0_20px_60px_rgba(10,1,2,0.4)]",
         className ?? "",
       ].join(" ")}
     >
@@ -84,16 +84,16 @@ export function Pill({
 }
 
 export const inputClass =
-  "h-[52px] w-full rounded-2xl border border-zinc-800 bg-[#0b0b0b] px-4 text-sm text-white outline-none placeholder:text-zinc-500 focus:border-[rgba(179,14,20,0.34)]";
+  "h-11 w-full rounded-xl border border-zinc-800 bg-[#0b0b0b] px-4 text-sm text-white outline-none transition duration-200 placeholder:text-zinc-500 focus:border-[rgba(179,14,20,0.45)] focus:ring-2 focus:ring-[rgba(179,14,20,0.18)]";
 
 export const selectClass =
-  "h-[52px] rounded-2xl border border-zinc-800 bg-[#0b0b0b] px-4 text-sm text-white outline-none focus:border-[rgba(179,14,20,0.34)]";
+  "h-11 rounded-xl border border-zinc-800 bg-[#0b0b0b] px-4 text-sm text-white outline-none transition duration-200 focus:border-[rgba(179,14,20,0.45)] focus:ring-2 focus:ring-[rgba(179,14,20,0.18)]";
 
 export const primaryButtonClass =
-  "flex h-[52px] items-center justify-center gap-2 rounded-2xl border border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.16)] px-5 text-sm font-medium text-white transition hover:bg-[rgba(179,14,20,0.28)]";
+  "flex h-11 items-center justify-center gap-2 rounded-xl border border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.16)] px-5 text-sm font-medium text-white transition duration-200 hover:bg-[rgba(179,14,20,0.28)] active:scale-[0.98] focus-visible:ring-2 focus-visible:ring-[rgba(179,14,20,0.4)] focus-visible:outline-none";
 
 export const ghostButtonClass =
-  "flex h-[52px] items-center justify-center gap-2 rounded-2xl border border-zinc-800 bg-[#0b0b0b] px-5 text-sm text-white transition hover:bg-[#101010]";
+  "flex h-11 items-center justify-center gap-2 rounded-xl border border-zinc-800 bg-[#0b0b0b] px-5 text-sm text-white transition duration-200 hover:border-zinc-700 hover:bg-[#101010] active:scale-[0.98] focus-visible:ring-2 focus-visible:ring-[rgba(179,14,20,0.3)] focus-visible:outline-none";
 
 export const scrollAreaClass =
   "overflow-y-auto [scrollbar-width:thin] [scrollbar-color:rgba(179,14,20,0.45)_#090909] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-[#090909] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[rgba(179,14,20,0.45)]";

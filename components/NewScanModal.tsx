@@ -153,7 +153,7 @@ export default function NewScanModal({
                 Company
               </label>
               {lockedCompany ? (
-                <div className="flex h-[52px] items-center rounded-2xl border border-zinc-800 bg-[#0b0b0b] px-4 text-sm text-zinc-300">
+                <div className="flex h-11 items-center rounded-xl border border-zinc-800 bg-[#0b0b0b] px-4 text-sm text-zinc-300">
                   {lockedCompany.name}
                 </div>
               ) : (

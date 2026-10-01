@@ -437,7 +437,7 @@ export default function VulnFindingsPage() {
           <button
             onClick={() => setExploitOnly((prev) => !prev)}
             className={[
-              "flex h-[52px] items-center justify-center gap-2 rounded-2xl border px-4 text-sm transition",
+              "flex h-11 items-center justify-center gap-2 rounded-xl border px-4 text-sm transition duration-200 active:scale-[0.98]",
               exploitOnly
                 ? "border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.16)] text-white"
                 : "border-zinc-800 bg-[#0b0b0b] text-zinc-300 hover:bg-[#101010]",
@@ -448,7 +448,7 @@ export default function VulnFindingsPage() {
           <button
             onClick={() => setOverdueOnly((prev) => !prev)}
             className={[
-              "flex h-[52px] items-center justify-center gap-2 rounded-2xl border px-4 text-sm transition",
+              "flex h-11 items-center justify-center gap-2 rounded-xl border px-4 text-sm transition duration-200 active:scale-[0.98]",
               overdueOnly
                 ? "border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.16)] text-white"
                 : "border-zinc-800 bg-[#0b0b0b] text-zinc-300 hover:bg-[#101010]",
@@ -963,7 +963,7 @@ export default function VulnFindingsPage() {
                           assignee: assigneeDraft.trim() || null,
                         })
                       }
-                      className="h-[52px] shrink-0 rounded-2xl border border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.16)] px-5 text-sm text-white transition hover:bg-[rgba(179,14,20,0.28)]"
+                      className="h-11 shrink-0 rounded-xl border border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.16)] px-5 text-sm text-white transition duration-200 hover:bg-[rgba(179,14,20,0.28)] active:scale-[0.98]"
                     >
                       Assign
                     </button>

@@ -352,7 +352,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
               {[5, 15, 30, 60, 1440].map((minutes) => <option key={minutes} value={minutes}>{minutes === 1440 ? "Daily" : `${minutes} minutes`}</option>)}
             </select>
           </label>
-          <label className="flex h-[52px] items-center gap-2 text-sm text-zinc-300"><input type="checkbox" checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })} />Automatic refresh</label>
+          <label className="flex h-11 items-center gap-2 text-sm text-zinc-300"><input type="checkbox" checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })} />Automatic refresh</label>
         </div>
         {isChartDisplay(draft.display) && <div className="rounded-xl border border-zinc-800 p-4">
           <p className="mb-3 text-sm text-zinc-400">Return one row per category and a numeric value, such as tier and findings. For trends, return a time bucket and a count.</p>
