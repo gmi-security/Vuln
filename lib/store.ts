@@ -78,7 +78,7 @@ import {
 } from "@/lib/spiderfoot";
 import { elasticVulnEnabled } from "@/lib/elastic-vuln-server";
 import { getScannedHostnamesByCompany, riskScoringDatabase, type HostRiskRow } from "@/lib/risk-scoring-store";
-import { getManagedHostnames } from "@/lib/elastic-crowdstrike-coverage";
+import { getManagedHostnames, getDiscoveredHostnames } from "@/lib/elastic-crowdstrike-coverage";
 import {
   artemisAddTargets,
   artemisConfig,
@@ -2183,6 +2183,75 @@ export function mergeSpotlightCoverage(
   return coverage;
 }
 
+// Genuinely new "known" assets from a source that isn't a vulnerability
+// scanner (CrowdStrike Discover's unmanaged/unsupported inventory: a device
+// seen on the network with no Falcon sensor, so it carries no scan data of
+// its own and falconListAssets() never imports it). Unlike
+// mergeSpotlightCoverage (whose input IS scan/EDR coverage), this treats
+// each host as newly-known inventory: a host already known is left alone, a
+// host that was an unexplained "scanned, not known" shadow row turns out to
+// be a real device after all and is promoted into matched, and anything
+// left over becomes a fresh "known, not scanned" gap -- a candidate for the
+// next gap-scan.
+export function mergeDiscoveredAssets(
+  coverage: AssetCoverage,
+  hostsByCompany: Map<string, { hostname: string }[]>,
+  companyNames: Map<string, string>,
+  source: string,
+): AssetCoverage {
+  for (const [companyId, hosts] of hostsByCompany) {
+    const byKey = new Map(
+      hosts
+        .map((h) => [h.hostname.trim().toLowerCase(), h.hostname] as const)
+        .filter(([key]) => key),
+    );
+    for (const row of coverage.matched) {
+      if (row.companyId === companyId) byKey.delete(row.identifier.trim().toLowerCase());
+    }
+    for (const row of coverage.knownNotScanned) {
+      if (row.companyId === companyId) byKey.delete(row.identifier.trim().toLowerCase());
+    }
+    if (!byKey.size) continue;
+
+    const stillShadow: CoverageRow[] = [];
+    for (const row of coverage.scannedNotKnown) {
+      const key = row.identifier.trim().toLowerCase();
+      if (row.companyId === companyId && byKey.has(key)) {
+        byKey.delete(key);
+        coverage.matched.push({ ...row, source });
+      } else {
+        stillShadow.push(row);
+      }
+    }
+    coverage.scannedNotKnown = stillShadow;
+
+    for (const hostname of byKey.values()) {
+      coverage.knownNotScanned.push({
+        identifier: hostname,
+        companyId,
+        companyName: companyNames.get(companyId) ?? "—",
+        exposure: null,
+        criticality: null,
+        owner: null,
+        source,
+        openFindings: 0,
+        worstRisk: 0,
+      });
+    }
+  }
+
+  coverage.matched.sort((a, b) => b.worstRisk - a.worstRisk);
+  coverage.knownNotScanned.sort((a, b) => a.companyName.localeCompare(b.companyName));
+  coverage.summary = {
+    known: coverage.matched.length + coverage.knownNotScanned.length,
+    scanned: coverage.matched.length + coverage.scannedNotKnown.length,
+    matched: coverage.matched.length,
+    knownNotScanned: coverage.knownNotScanned.length,
+    scannedNotKnown: coverage.scannedNotKnown.length,
+  };
+  return coverage;
+}
+
 // assetCoverage() plus the Spotlight merge, best-effort -- a missing or
 // unreachable risk-scoring DB must never block coverage reads or gap-scans.
 export async function assetCoverageWithSpotlight(filter?: { companyId?: string }): Promise<AssetCoverage> {
@@ -2211,7 +2280,7 @@ export async function assetCoverageWithSpotlight(filter?: { companyId?: string }
   // whose hostnames don't overlap any known asset can't be safely attributed
   // to a company, so it's skipped rather than guessed at.
   try {
-    const managed = await getManagedHostnames();
+    const [managed, discovered] = await Promise.all([getManagedHostnames(), getDiscoveredHostnames()]);
     if (managed.length) {
       const hostnameToCompany = new Map<string, string>();
       for (const a of s.assets.values()) {
@@ -2219,6 +2288,10 @@ export async function assetCoverageWithSpotlight(filter?: { companyId?: string }
           if (key) hostnameToCompany.set(key.trim().toLowerCase(), a.companyId);
         }
       }
+      // Resolved from MANAGED hosts only (they overlap known assets by
+      // construction). Discovered (unmanaged/unsupported) hosts share the
+      // same cid per tenant, so the same map attributes them too -- without
+      // ever needing their hostnames to already be known.
       const cidToCompany = new Map<string, string>();
       for (const { cid, hostname } of managed) {
         if (cidToCompany.has(cid)) continue;
@@ -2235,6 +2308,20 @@ export async function assetCoverageWithSpotlight(filter?: { companyId?: string }
       }
       if (elasticHostsByCompany.size) {
         coverage = mergeSpotlightCoverage(coverage, elasticHostsByCompany, companyNames);
+      }
+
+      if (discovered.length) {
+        const discoveredByCompany = new Map<string, { hostname: string }[]>();
+        for (const { cid, hostname } of discovered) {
+          const companyId = cidToCompany.get(cid);
+          if (!companyId || (filter?.companyId && companyId !== filter.companyId)) continue;
+          const list = discoveredByCompany.get(companyId) ?? [];
+          list.push({ hostname });
+          discoveredByCompany.set(companyId, list);
+        }
+        if (discoveredByCompany.size) {
+          coverage = mergeDiscoveredAssets(coverage, discoveredByCompany, companyNames, "crowdstrike");
+        }
       }
     }
   } catch (err) {

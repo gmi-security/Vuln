@@ -57,17 +57,27 @@ const MANAGED_HOSTS_QUERY = `FROM logs-crowdstrike.discover_asset-*
 | STATS BY cid, hostname
 | LIMIT 10000`;
 
+// entity_type "unmanaged"/"unsupported": CrowdStrike Discover has seen the
+// device on the network, but it has no Falcon sensor, so falconListAssets()
+// (the sensor-based Falcon Host inventory) never sees it either -- it's
+// invisible to every "known asset" source this app has today. Same shape as
+// the managed query, just a different entity_type filter.
+const DISCOVERED_HOSTS_QUERY = `FROM logs-crowdstrike.discover_asset-*
+| WHERE entity_type IN ("unmanaged", "unsupported") AND hostname IS NOT NULL AND hostname != ""
+| STATS BY cid, hostname
+| LIMIT 10000`;
+
 // Deliberately not lib/elastic-dashboard.ts's parseQueryResult(): that
-// enforces a 32-column/101-row cap meant for dashboard tiles, which this
-// query (potentially thousands of managed hosts) would always exceed.
+// enforces a 32-column/101-row cap meant for dashboard tiles, which these
+// queries (potentially thousands of hosts) would always exceed.
 // Elasticsearch's raw ES|QL response shape is { columns, values }.
-export async function getManagedHostnames(): Promise<ManagedHost[]> {
+async function runHostnameQuery(query: string, label: string): Promise<ManagedHost[]> {
   const connection = await getElasticConnection();
   if (!connection) return [];
   const reply = await elasticJsonRequest(connection, "/_query?format=json&allow_partial_results=false", "POST", {
-    query: validateQuery(MANAGED_HOSTS_QUERY), columnar: false,
+    query: validateQuery(query), columnar: false,
   });
-  if (reply.warning) throw new Error("Elastic returned a partial/warning result for managed-host coverage.");
+  if (reply.warning) throw new Error(`Elastic returned a partial/warning result for ${label} coverage.`);
   const columns = reply.body.columns;
   const values = reply.body.values;
   if (!Array.isArray(columns) || !Array.isArray(values)) return [];
@@ -83,4 +93,12 @@ export async function getManagedHostnames(): Promise<ManagedHost[]> {
     }
   }
   return out;
+}
+
+export async function getManagedHostnames(): Promise<ManagedHost[]> {
+  return runHostnameQuery(MANAGED_HOSTS_QUERY, "managed-host");
+}
+
+export async function getDiscoveredHostnames(): Promise<ManagedHost[]> {
+  return runHostnameQuery(DISCOVERED_HOSTS_QUERY, "discovered-asset");
 }
