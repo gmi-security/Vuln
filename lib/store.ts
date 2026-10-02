@@ -1726,6 +1726,75 @@ export function deleteCompany(id: string): { deleted: true } | { error: string }
   return { deleted: true };
 }
 
+export type MergeCompaniesResult = {
+  assetsMoved: number;
+  findingsMoved: number;
+  scansMoved: number;
+};
+
+// Merge `fromId` into `intoId`: reassign its scans/findings, merge its
+// assets through the same upsertAsset dedup path a normal sync uses (not a
+// blind copy -- an asset that already exists under `intoId` with the same
+// identifier gets merged, not duplicated), then delete the now-empty
+// `fromId`. For cleaning up a duplicate company created by a name-matching
+// miss (see normalizeCompanyName's history in lib/company-name.ts) without
+// having to re-run every sync from scratch.
+export function mergeCompanies(
+  fromId: string,
+  intoId: string,
+): MergeCompaniesResult | { error: string } {
+  const s = store();
+  const from = s.companies.get(fromId);
+  const into = s.companies.get(intoId);
+  if (!from) return { error: `Source company ${fromId} not found.` };
+  if (!into) return { error: `Target company ${intoId} not found.` };
+  if (fromId === intoId) return { error: "Source and target are the same company." };
+
+  const movingAssets = Array.from(s.assets.values()).filter((a) => a.companyId === fromId);
+  for (const a of movingAssets) {
+    upsertAsset(s, {
+      identifier: a.identifier,
+      hostname: a.hostname,
+      ipAddresses: a.ipAddresses,
+      companyId: into.id,
+      companyName: into.name,
+      exposure: a.exposure,
+      criticality: a.criticality,
+      os: a.os,
+      owner: a.owner,
+      tags: a.tags,
+      source: a.source,
+      externalId: a.externalId,
+    });
+    s.assets.delete(a.id);
+  }
+
+  let findingsMoved = 0;
+  for (const f of s.findings.values()) {
+    if (f.companyId === fromId) {
+      f.companyId = into.id;
+      f.companyName = into.name;
+      findingsMoved += 1;
+    }
+  }
+
+  let scansMoved = 0;
+  for (const sc of s.scans.values()) {
+    if (sc.companyId === fromId) {
+      sc.companyId = into.id;
+      sc.companyName = into.name;
+      scansMoved += 1;
+    }
+  }
+
+  markDirty();
+  const del = deleteCompany(fromId);
+  if ("error" in del) {
+    return { error: `Merged data but could not delete ${fromId}: ${del.error}` };
+  }
+  return { assetsMoved: movingAssets.length, findingsMoved, scansMoved };
+}
+
 export function listFolders(companyId?: string): Folder[] {
   const s = store();
   tick(s);
@@ -5333,6 +5402,23 @@ export type AutomateImportResult = {
 // company created for it (mirroring importTidalInventory) so every
 // Automate-visible customer's inventory is captured, not just the ones that
 // happened to already exist.
+// Automate client names that can never textually match a Vuln company via
+// normalizeCompanyName, because the Vuln-side name is pinned elsewhere and
+// can't just be renamed to agree. Currently only GMI's own entry: its
+// internal company is named "GMI Scans" (ARTEMIS_TAG_COMPANY above routes
+// SONAR scans to that exact string), which will never equal Automate's
+// "Global Market Innovators, Inc." no matter how it's normalized. Without
+// this, every sync would recreate that duplicate company from scratch.
+function resolveAutomateAliasCompany(
+  s: StoreShape,
+  clientName: string,
+): InternalCompany | undefined {
+  if (normalizeCompanyName(clientName) === normalizeCompanyName("Global Market Innovators, Inc.")) {
+    return Array.from(s.companies.values()).find((c) => c.kind === "internal");
+  }
+  return undefined;
+}
+
 export async function importFromAutomate(): Promise<AutomateImportResult | { error: string }> {
   const config = automateConfig();
   if (!config) {
@@ -5358,9 +5444,9 @@ export async function importFromAutomate(): Promise<AutomateImportResult | { err
   let assetsUpserted = 0;
   for (const client of clients) {
     const clientNorm = normalizeCompanyName(client.name);
-    let company = Array.from(s.companies.values()).find(
-      (c) => normalizeCompanyName(c.name) === clientNorm,
-    );
+    let company =
+      Array.from(s.companies.values()).find((c) => normalizeCompanyName(c.name) === clientNorm) ??
+      resolveAutomateAliasCompany(s, client.name);
     if (company) {
       companiesMatched += 1;
     } else {
