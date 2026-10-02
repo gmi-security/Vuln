@@ -147,7 +147,7 @@ export default function VulnCoveragePage() {
     <VulnShell
       eyebrow="Coverage"
       title="Asset coverage"
-      subtitle="Known assets (Tidal inventory) vs scanned assets (seen in results). Surfaces inventory we haven't scanned and scanned hosts that aren't in inventory — matched per customer."
+      subtitle="Known assets (Tidal, manual, or CrowdStrike inventory) vs scanned assets (seen in results). Surfaces inventory we haven't scanned and scanned hosts that aren't in inventory — matched per customer."
       actions={
         <>
           <button
@@ -185,7 +185,7 @@ export default function VulnCoveragePage() {
           </div>
           <p className="mt-1 text-xs text-zinc-500">
             Automatically launch a scan whenever a known asset has no coverage —
-            on the diff and after each Tidal sync.
+            on the diff and after each inventory sync.
           </p>
           {toggleError ? (
             <p className="mt-1 text-xs text-[#ff4d57]">{toggleError}</p>
@@ -227,7 +227,7 @@ export default function VulnCoveragePage() {
         <StatCard
           label="Known assets"
           value={s ? s.known : "—"}
-          sublabel="In Tidal / manual inventory"
+          sublabel="In Tidal, manual, or CrowdStrike inventory"
           icon={<IconDatabaseCog size={26} />}
         />
         <StatCard
@@ -263,7 +263,7 @@ export default function VulnCoveragePage() {
 
       <PanelCard
         eyebrow="Scanned, not in inventory"
-        description="Assets seen in scan results but absent from the inventory — reconcile in Tidal or investigate as shadow IT"
+        description="Assets seen in scan results but absent from the inventory — reconcile in Tidal/CrowdStrike or investigate as shadow IT"
       >
         <CoverageTable
           rows={coverage?.scannedNotKnown ?? []}
