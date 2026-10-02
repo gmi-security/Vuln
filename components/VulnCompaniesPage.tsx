@@ -1,8 +1,8 @@
 "use client";
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { Building2, ChevronDown, Database, DownloadCloud, FolderKanban, Laptop, Plus, Radar, RefreshCw, ShieldAlert, ShieldCheck, X } from "lucide-react";
+import { Building2, FolderKanban, Plus, Radar, RefreshCw, ShieldAlert, X } from "lucide-react";
 import { IconAlertTriangle, IconBug } from "@tabler/icons-react";
 import VulnShell from "@/components/VulnShell";
 import {
@@ -24,33 +24,6 @@ export default function VulnCompaniesPage() {
   const [contactEmail, setContactEmail] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const [importing, setImporting] = useState(false);
-  const [importMsg, setImportMsg] = useState<
-    { ok: boolean; text: string } | null
-  >(null);
-  // Stops the Tidal sync poll loop when the page unmounts — otherwise it keeps
-  // polling (and calling setState) for up to an hour after navigation.
-  const aliveRef = useRef(true);
-  useEffect(() => {
-    aliveRef.current = true;
-    return () => {
-      aliveRef.current = false;
-    };
-  }, []);
-
-  // The five sync/import actions are secondary to "Add company" — tucked
-  // into one dropdown instead of five equal-weight buttons across the header.
-  const [syncMenuOpen, setSyncMenuOpen] = useState(false);
-  const syncMenuRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    function onClick(event: MouseEvent) {
-      if (syncMenuRef.current && !syncMenuRef.current.contains(event.target as Node)) {
-        setSyncMenuOpen(false);
-      }
-    }
-    document.addEventListener("mousedown", onClick);
-    return () => document.removeEventListener("mousedown", onClick);
-  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -67,156 +40,6 @@ export default function VulnCompaniesPage() {
     const timer = setInterval(() => void load(), 5000);
     return () => clearInterval(timer);
   }, [load]);
-
-  async function importNessus() {
-    setImporting(true);
-    setImportMsg(null);
-    try {
-      const res = await fetch("/api/nessus/import", { method: "POST" });
-      const json = await res.json();
-      if (!res.ok) {
-        setImportMsg({ ok: false, text: json.error ?? "Import failed." });
-        return;
-      }
-      const r = json.result;
-      setImportMsg({
-        ok: true,
-        text: `Imported ${r.companiesCreated} new compan${r.companiesCreated === 1 ? "y" : "ies"} (${r.companiesMatched} matched), ${r.scansImported} scans, ${r.findingsImported} findings.`,
-      });
-      await load();
-    } catch {
-      setImportMsg({ ok: false, text: "Failed to reach the import API." });
-    } finally {
-      setImporting(false);
-    }
-  }
-
-  async function syncIntune() {
-    setImporting(true);
-    setImportMsg(null);
-    try {
-      const res = await fetch("/api/intune/import", { method: "POST" });
-      const json = await res.json();
-      if (!res.ok) {
-        setImportMsg({ ok: false, text: json.error ?? "Intune sync failed." });
-        return;
-      }
-      const r = json.result;
-      const auto = r.autoScan?.assetsQueued
-        ? ` Auto-scan launched ${r.autoScan.scansLaunched} scan${r.autoScan.scansLaunched === 1 ? "" : "s"} for ${r.autoScan.assetsQueued} new asset${r.autoScan.assetsQueued === 1 ? "" : "s"}.`
-        : "";
-      setImportMsg({
-        ok: true,
-        text: `Synced ${r.assetsUpserted} Intune device${r.assetsUpserted === 1 ? "" : "s"} to ${r.company}; repriced ${r.findingsRescored} findings.${auto}`,
-      });
-      await load();
-    } catch {
-      setImportMsg({ ok: false, text: "Failed to reach the Intune API." });
-    } finally {
-      setImporting(false);
-    }
-  }
-
-  async function importDefender() {
-    setImporting(true);
-    setImportMsg(null);
-    try {
-      const res = await fetch("/api/defender/import", { method: "POST" });
-      const json = await res.json();
-      if (!res.ok) {
-        setImportMsg({ ok: false, text: json.error ?? "Defender import failed." });
-        return;
-      }
-      const r = json.result;
-      setImportMsg({
-        ok: true,
-        text: `Imported ${r.findingsImported} Defender findings across ${r.hostsAffected} host${r.hostsAffected === 1 ? "" : "s"} to ${r.company}.`,
-      });
-      await load();
-    } catch {
-      setImportMsg({ ok: false, text: "Failed to reach the Defender API." });
-    } finally {
-      setImporting(false);
-    }
-  }
-
-  async function syncCrowdstrike() {
-    setImporting(true);
-    setImportMsg(null);
-    try {
-      const res = await fetch("/api/crowdstrike/import", { method: "POST" });
-      const json = await res.json();
-      if (!res.ok) {
-        setImportMsg({ ok: false, text: json.error ?? "CrowdStrike sync failed." });
-        return;
-      }
-      const r = json.result;
-      setImportMsg({
-        ok: true,
-        text: `Synced ${r.assetsUpserted} CrowdStrike host${r.assetsUpserted === 1 ? "" : "s"} to ${r.company}; repriced ${r.findingsRescored} findings.`,
-      });
-      await load();
-    } catch {
-      setImportMsg({ ok: false, text: "Failed to reach the CrowdStrike API." });
-    } finally {
-      setImporting(false);
-    }
-  }
-
-  async function syncTidal() {
-    setImporting(true);
-    setImportMsg(null);
-    try {
-      const res = await fetch("/api/tidal/import", { method: "POST" });
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok || json.error) {
-        setImportMsg({ ok: false, text: json.error ?? "Tidal sync failed." });
-        setImporting(false);
-        return;
-      }
-      // Background job — poll until it finishes (spans ~49 client companies).
-      for (let i = 0; i < 3000; i += 1) {
-        await new Promise((r) => setTimeout(r, 1200));
-        if (!aliveRef.current) return; // unmounted — stop polling
-        let st: any = null;
-        try {
-          const pr = await fetch("/api/tidal/import", { cache: "no-store" });
-          st = (await pr.json().catch(() => ({}))).status;
-        } catch {
-          continue;
-        }
-        if (!aliveRef.current) return;
-        if (!st) break;
-        if (st.running) {
-          setImportMsg({
-            ok: true,
-            text: `Syncing Tidal… ${st.companiesDone}/${st.companiesTotal || "?"} customers, ${st.assetsFound} assets${st.currentCompany ? ` (${st.currentCompany})` : ""}`,
-          });
-          continue;
-        }
-        if (st.error) {
-          setImportMsg({ ok: false, text: st.error });
-        } else if (st.result) {
-          const r = st.result;
-          const auto = r.autoScan?.assetsQueued
-            ? ` Auto-scan launched ${r.autoScan.scansLaunched} scan${r.autoScan.scansLaunched === 1 ? "" : "s"} for ${r.autoScan.assetsQueued} new asset${r.autoScan.assetsQueued === 1 ? "" : "s"}.`
-            : "";
-          setImportMsg({
-            ok: true,
-            text: `Synced ${r.assetsUpserted} assets from Tidal (${r.companiesCreated} new customer${r.companiesCreated === 1 ? "" : "s"}); repriced ${r.findingsRescored} findings.${auto}`,
-          });
-          await load();
-        }
-        break;
-      }
-    } catch {
-      if (aliveRef.current) {
-        setImportMsg({ ok: false, text: "Failed to reach the Tidal API." });
-      }
-    } finally {
-      if (aliveRef.current) setImporting(false);
-    }
-  }
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -253,46 +76,13 @@ export default function VulnCompaniesPage() {
       subtitle="GMI (our own organization) plus the external clients we scan. Each company groups its scans into folders and rolls up its own open findings and exposure."
       actions={
         <>
-          <div ref={syncMenuRef} className="relative">
-            <button
-              onClick={() => setSyncMenuOpen((v) => !v)}
-              disabled={importing}
-              className={`${ghostButtonClass} disabled:opacity-50`}
-            >
-              <RefreshCw size={16} className={`text-zinc-400 ${importing ? "animate-spin" : ""}`} />
-              {importing ? "Syncing…" : "Sync data"}
-              <ChevronDown size={14} className={`text-zinc-500 transition-transform ${syncMenuOpen ? "rotate-180" : ""}`} />
-            </button>
-            <div
-              className={[
-                "absolute right-0 z-20 mt-2 w-64 overflow-hidden rounded-2xl border border-zinc-800 bg-[#0a0a0a] shadow-[0_20px_60px_rgba(0,0,0,0.5)] transition",
-                syncMenuOpen ? "visible opacity-100" : "invisible opacity-0",
-              ].join(" ")}
-            >
-              <div className="p-2">
-                {[
-                  { icon: Database, label: "Sync from Tidal", run: syncTidal },
-                  { icon: Laptop, label: "Sync from Intune", run: syncIntune },
-                  { icon: ShieldCheck, label: "Sync CrowdStrike hosts", run: syncCrowdstrike },
-                  { icon: DownloadCloud, label: "Import from Nessus", run: importNessus },
-                  { icon: ShieldAlert, label: "Import from Defender", run: importDefender },
-                ].map(({ icon: ItemIcon, label, run }) => (
-                  <button
-                    key={label}
-                    onClick={() => {
-                      setSyncMenuOpen(false);
-                      void run();
-                    }}
-                    disabled={importing}
-                    className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm text-zinc-200 transition hover:bg-zinc-900 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    <ItemIcon size={16} className="text-zinc-400" />
-                    {label}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
+          {/* Sync/import triggers now live only on Connectors (/connectors) --
+              this page used to duplicate the same import-API calls in a
+              stripped-down dropdown with no health check or progress feedback. */}
+          <Link href="/connectors" className={ghostButtonClass}>
+            <RefreshCw size={16} className="text-zinc-400" />
+            Sync data
+          </Link>
           <button onClick={() => setShowNew(true)} className={primaryButtonClass}>
             <Plus size={16} />
             Add company
@@ -300,19 +90,6 @@ export default function VulnCompaniesPage() {
         </>
       }
     >
-      {importMsg ? (
-        <div
-          className={[
-            "rounded-2xl border px-5 py-4 text-sm",
-            importMsg.ok
-              ? "border-emerald-900/60 bg-emerald-950/40 text-emerald-300"
-              : "border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.10)] text-[#ff4d57]",
-          ].join(" ")}
-        >
-          {importMsg.text}
-        </div>
-      ) : null}
-
       {companies.length === 0 ? (
         <PanelCard eyebrow="Companies">
           <div className="px-5 py-12 text-center text-sm text-zinc-500">
