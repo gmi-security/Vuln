@@ -356,6 +356,35 @@ export async function getRiskSummaryByCompany(db: Awaited<ReturnType<typeof risk
   return out;
 }
 
+export type HostRiskRow = { hostname: string; openFindings: number; worstRisk: number };
+
+// Coverage (lib/store.ts assetCoverage) only sees scan results that live in
+// the legacy in-memory store (Nessus/SpiderFoot/Artemis/Burp). CrowdStrike
+// Spotlight findings live entirely in finding_risk/Postgres and never touch
+// that store, so a tenant scanned almost exclusively via Spotlight shows up
+// as having near-zero coverage even though most of its inventory has real,
+// current findings. One GROUP BY per company+hostname so the coverage API
+// can merge this in without an N+1 per asset.
+export async function getScannedHostnamesByCompany(db: Awaited<ReturnType<typeof riskScoringDatabase>>, companyId?: string): Promise<Map<string, HostRiskRow[]>> {
+  const where = companyId ? "AND company_id=$1" : "";
+  const params = companyId ? [companyId] : [];
+  const rows = (await db.query(`
+    SELECT company_id, hostname,
+      count(*) FILTER (WHERE verification_status NOT IN ('verified_remediated'))::int AS open_findings,
+      coalesce(max(risk_score) FILTER (WHERE verification_status NOT IN ('verified_remediated')), 0)::int AS worst_risk
+    FROM finding_risk
+    WHERE hostname IS NOT NULL AND hostname <> '' ${where}
+    GROUP BY company_id, hostname
+  `, params)).rows;
+  const out = new Map<string, HostRiskRow[]>();
+  for (const row of rows) {
+    const list = out.get(row.company_id) ?? [];
+    list.push({ hostname: row.hostname, openFindings: row.open_findings, worstRisk: row.worst_risk });
+    out.set(row.company_id, list);
+  }
+  return out;
+}
+
 // An analyst override always wins over the next recalculation (see
 // upsertFindingRisk's CASE above) until explicitly cleared.
 export async function overrideSwath(db: Awaited<ReturnType<typeof riskScoringDatabase>>, findingRiskId: string, newSwath: number, actor: string, reason: string): Promise<void> {
