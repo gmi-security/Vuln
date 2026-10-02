@@ -1513,7 +1513,7 @@ function rollupFromLists(
   ).length;
   const composite = computeComposite(
     open,
-    inventoryAssets > 0 ? coverageFromLists(assets, findings) : null,
+    inventoryAssets > 0 ? coverageFromLists(assets, open) : null,
   );
   return {
     folderCount,
@@ -1946,6 +1946,7 @@ function buildOpenFindingCountIndex(findings: Finding[]): Map<string, number> {
   const idx = new Map<string, number>();
   for (const f of findings) {
     if (f.status !== "Open" && f.status !== "In Remediation") continue;
+    if (!isRemediationFinding(f)) continue; // OSINT isn't a vulnerability count
     const key = `${f.companyId}::${f.asset.trim().toLowerCase()}`;
     idx.set(key, (idx.get(key) ?? 0) + 1);
   }
@@ -2024,6 +2025,11 @@ export function assetCoverage(filter?: { companyId?: string }): AssetCoverage {
   >();
   for (const f of s.findings.values()) {
     if (filter?.companyId && f.companyId !== filter.companyId) continue;
+    // OSINT (SpiderFoot/Artemis) is an untuned quarterly recon sweep, not a
+    // scanner -- it must not count as "this asset is covered" nor produce
+    // "shadow IT" rows for every domain/mail-server/CDN IP it happens to
+    // touch. CrowdStrike/Nessus/Defender/Vulners are the real scanners.
+    if (!isRemediationFinding(f)) continue;
     const perCompany = scanned.get(f.companyId) ?? new Map();
     const key = f.asset.trim().toLowerCase();
     const entry = perCompany.get(key) ?? {
