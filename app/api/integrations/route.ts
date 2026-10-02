@@ -82,12 +82,12 @@ export async function GET() {
         vendor: "ConnectWise",
         kind: "Endpoint Inventory (RMM devices)",
         description:
-          "Per-customer device inventory pulled directly from ConnectWise Automate's own REST API — hostname, IP, OS, logged-in user, and server/workstation type. Matched against existing companies by exact name only; a client with no matching company is skipped, never auto-created. Feeds the environmental layer of real-risk scoring the same way Tidal does, for customers whose real inventory lives in Automate instead.",
+          "Per-customer device inventory pulled directly from ConnectWise Automate's own REST API — hostname, IP, OS, logged-in user, and server/workstation type. Matched against companies by normalized name (case/whitespace/punctuation-insensitive); a client with no match gets a new company created for it, covering Automate's full MSP roster. Feeds the environmental layer of real-risk scoring the same way Tidal does, for customers whose real inventory lives in Automate instead.",
         capabilities: [
           "Live device sync",
           "OS & IP addresses",
           "Owner (logged-in user)",
-          "No company auto-create",
+          "Auto-creates new companies",
         ],
         envVars: ["AUTOMATE_BASE_URL", "AUTOMATE_API_CLIENT_ID", "AUTOMATE_USERNAME", "AUTOMATE_PASSWORD"],
         configured: Boolean(automate),

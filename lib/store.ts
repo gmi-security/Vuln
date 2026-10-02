@@ -5318,20 +5318,38 @@ export async function importFromTidal(
 
 export type AutomateImportResult = {
   companiesMatched: number;
-  skipped: number;
+  companiesCreated: number;
+  createdCompanies: string[];
+  errors: string[];
   assetsUpserted: number;
   findingsRescored: number;
   autoScan?: AutoScanResult;
 };
 
+// Normalize a company name for matching, not display: fold Unicode
+// compatibility forms, map smart quotes/dashes to their ASCII equivalents,
+// collapse whitespace, and lowercase. A plain .toLowerCase() comparison
+// (what this replaced) missed Atlas Healthcare Partners on the first live
+// sync over nothing more than a punctuation/whitespace difference between
+// Automate's and Vuln's copies of the same name -- normalizing first makes
+// that whole class of false negative not happen again.
+function normalizeCompanyName(name: string): string {
+  return name
+    .normalize("NFKC")
+    .replace(/[‘’ʼ]/g, "'")
+    .replace(/[“”]/g, '"')
+    .replace(/[–—]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
 // Pull ConnectWise Automate's device inventory directly (see
 // lib/connectwise-automate.ts for why this bypasses Tidal). Matched against
-// EXISTING Vuln companies by exact name only -- unlike importTidalInventory,
-// this never auto-creates a company. Automate's own "Client" roster spans
-// GMI's entire MSP book, most of which have no corresponding Vuln company;
-// silently onboarding all of them as a side effect of an asset sync would
-// be a surprise, not a feature. Bringing a new client's Automate inventory
-// in is a deliberate company-creation step, not implicit here.
+// Vuln companies by normalized name; a client with no match gets a new
+// company created for it (mirroring importTidalInventory) so every
+// Automate-visible customer's inventory is captured, not just the ones that
+// happened to already exist.
 export async function importFromAutomate(): Promise<AutomateImportResult | { error: string }> {
   const config = automateConfig();
   if (!config) {
@@ -5351,11 +5369,12 @@ export async function importFromAutomate(): Promise<AutomateImportResult | { err
   }
 
   // TEMPORARY: the first live sync matched "Openworks" (a real, different
-  // Vuln company) but not Atlas -- exact-name matching is working as
-  // designed, something just doesn't match character-for-character. Log the
-  // precise strings on both sides for anything "atlas"-ish so the mismatch
-  // (whitespace, smart punctuation, abbreviation, etc.) is visible instead
-  // of guessed at. Remove once explained.
+  // Vuln company) but not Atlas even though exact-name matching was working
+  // as designed -- something didn't match character-for-character (likely
+  // whitespace or smart punctuation). Log the precise strings on both sides
+  // for anything "atlas"-ish, so a mismatch is visible instead of guessed
+  // at, and auto-create (below) doesn't silently mint a duplicate Atlas
+  // company. Remove once a few syncs confirm this is settled.
   for (const c of s.companies.values()) {
     if (c.name.toLowerCase().includes("atlas")) {
       console.error(`[automate-debug] vuln company: ${JSON.stringify(c.name)} (id=${c.id})`);
@@ -5368,25 +5387,32 @@ export async function importFromAutomate(): Promise<AutomateImportResult | { err
   }
 
   let companiesMatched = 0;
-  let skipped = 0;
+  let companiesCreated = 0;
+  const createdCompanies: string[] = [];
+  const errors: string[] = [];
   let assetsUpserted = 0;
   for (const client of clients) {
-    const company = Array.from(s.companies.values()).find(
-      (c) => c.name.toLowerCase() === client.name.toLowerCase(),
+    const clientNorm = normalizeCompanyName(client.name);
+    let company = Array.from(s.companies.values()).find(
+      (c) => normalizeCompanyName(c.name) === clientNorm,
     );
-    if (!company) {
-      skipped += 1;
-      continue;
+    if (company) {
+      companiesMatched += 1;
+    } else {
+      const created = createCompany({ name: client.name.trim() });
+      if ("error" in created) {
+        errors.push(`${client.name}: ${created.error}`);
+        continue;
+      }
+      company = s.companies.get(created.id)!;
+      companiesCreated += 1;
+      createdCompanies.push(company.name);
     }
-    companiesMatched += 1;
     let computers: AutomateAsset[];
     try {
       computers = await automateListComputers(config, client.id);
     } catch (err) {
-      console.error(
-        `[automate] could not pull computers for ${client.name}:`,
-        err instanceof Error ? err.message : err,
-      );
+      errors.push(`${client.name}: ${err instanceof Error ? err.message : String(err)}`);
       continue;
     }
     for (const a of computers) {
@@ -5416,7 +5442,7 @@ export async function importFromAutomate(): Promise<AutomateImportResult | { err
   }
 
   await flushNow();
-  return { companiesMatched, skipped, assetsUpserted, findingsRescored, autoScan };
+  return { companiesMatched, companiesCreated, createdCompanies, errors, assetsUpserted, findingsRescored, autoScan };
 }
 
 // --- Background Tidal sync with pollable progress ---------------------------
