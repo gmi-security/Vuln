@@ -241,6 +241,20 @@ const SEV_CVSS: Record<Severity, number> = {
 
 const CVE_RE = /CVE-\d{4}-\d{4,7}/i;
 
+// SpiderFoot's `source_data` is the DATA payload of the parent event in the
+// discovery chain — for most event types that's a hostname/IP/URL, but for
+// an event discovered off e.g. a WEBSERVER_HTTPHEADERS or RAW_RIR_DATA
+// parent, it's the parent's raw data: a JSON header dump, a whois blob, etc.
+// Using it unvalidated as the asset identifier puts that blob straight into
+// the findings table and every page that lists assets by it.
+export function isGarbageAssetIdentifier(id: string): boolean {
+  const t = id.trim();
+  if (!t) return true;
+  if (t.length > 200) return true;
+  if (t.startsWith("{") || t.startsWith("[")) return true;
+  return false;
+}
+
 function humanizeEventType(t: string): string {
   return t
     .replace(/_/g, " ")
@@ -277,8 +291,10 @@ export async function spiderfootImportFindings(
     if (!severity) continue; // skip informational OSINT events
     if (String(ev.false_positive ?? "0") === "1") continue;
     const data = String(ev.data ?? "").trim();
+    const sourceData = String(ev.source_data ?? "").trim();
+    const scanTarget = String(ev.scan_target ?? "").trim();
     const asset =
-      String(ev.source_data ?? ev.scan_target ?? "").trim() || "unknown";
+      (!isGarbageAssetIdentifier(sourceData) && sourceData) || scanTarget || "unknown";
     const cveMatch = data.match(CVE_RE) ?? asset.match(CVE_RE);
     const cve = cveMatch ? cveMatch[0].toUpperCase() : `SF-${type}`;
     const firstLine = data.split("\n")[0]?.slice(0, 120) ?? "";

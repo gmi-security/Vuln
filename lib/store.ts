@@ -70,6 +70,7 @@ import {
   type VulnersBridgeFinding,
 } from "@/lib/vulners";
 import {
+  isGarbageAssetIdentifier,
   spiderfootConfig,
   spiderfootImportFindings,
   spiderfootListScans,
@@ -551,6 +552,27 @@ function markDirty(): void {
   persistGlobal.__vulnDirty = true;
 }
 
+// One-time repair, run once per process on hydrate: earlier SpiderFoot
+// imports could store a parent event's raw data blob (HTTP header dumps,
+// whois text, ...) as the asset identifier instead of a hostname/IP (see
+// isGarbageAssetIdentifier in lib/spiderfoot.ts, fixed at the ingestion
+// site). Existing findings already persisted with a blob identifier need
+// fixing in place so Coverage/Findings/Reporting stop rendering raw JSON as
+// an "asset".
+function sanitizeSpiderfootAssets(s: StoreShape): void {
+  let fixed = 0;
+  for (const f of s.findings.values()) {
+    if (f.connector !== "spiderfoot" || !isGarbageAssetIdentifier(f.asset)) continue;
+    const scan = s.scans.get(f.scanId);
+    f.asset = scan?.targets?.[0] || scan?.name || "unknown";
+    fixed += 1;
+  }
+  if (fixed > 0) {
+    console.error(`[store] sanitized ${fixed} SpiderFoot finding(s) with a garbage asset identifier`);
+    markDirty();
+  }
+}
+
 // Serialize all snapshot writes through a single in-flight promise so an
 // interval tick and a flushNow() (or two mutations) can never commit out of
 // order and let a stale snapshot clobber a newer one.
@@ -642,7 +664,8 @@ async function doHydrate(): Promise<void> {
       globalStore.__vulnStore = deserializeStore(snap as never);
     }
   }
-  store(); // seed if still uninitialized
+  const s = store(); // seed if still uninitialized
+  sanitizeSpiderfootAssets(s);
   persistGlobal.__vulnHydrated = true;
   startFlusher();
   startScheduler();
