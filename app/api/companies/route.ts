@@ -1,11 +1,30 @@
 import { NextResponse } from "next/server";
 import { createCompany, ensureHydrated, listCompanies } from "@/lib/store";
+import { elasticVulnEnabled } from "@/lib/elastic-vuln-server";
+import { getRiskSummaryByCompany, riskScoringDatabase } from "@/lib/risk-scoring-store";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   await ensureHydrated();
-  return NextResponse.json({ companies: listCompanies() });
+  const companies = listCompanies();
+  // Merge in the real RBVM risk figures (finding_risk) alongside the legacy
+  // composite score -- best-effort: a company list must never break because
+  // the risk-scoring database is unreachable or a tenant has no Spotlight
+  // data yet (undefined, not 0, for "never scored").
+  if (elasticVulnEnabled()) {
+    try {
+      const db = await riskScoringDatabase();
+      const summaries = await getRiskSummaryByCompany(db);
+      for (const company of companies) {
+        const summary = summaries.get(company.id);
+        if (summary) { company.swath1Open = summary.swath1Open; company.totalOpenRisk = summary.totalOpenRisk; }
+      }
+    } catch (err) {
+      console.error("[companies] could not load RBVM risk summary:", err instanceof Error ? err.message : err);
+    }
+  }
+  return NextResponse.json({ companies });
 }
 
 export async function POST(request: Request) {

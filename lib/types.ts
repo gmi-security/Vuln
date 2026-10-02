@@ -69,6 +69,11 @@ export type Company = {
   // Composite security-posture score (0-100, higher = worse) and its band.
   compositeScore: number;
   compositeBand: "Low" | "Guarded" | "Elevated" | "High" | "Critical";
+  // Risk-Based Vulnerability Management figures (lib/risk-scoring-store.ts's
+  // finding_risk table) -- undefined when that pipeline has never scored
+  // this company (no Spotlight data, or RBVM not configured), not 0.
+  swath1Open?: number;
+  totalOpenRisk?: number;
   // True for demo/test companies — shown in the console but excluded from
   // production reporting and GRC push.
   isDemo: boolean;

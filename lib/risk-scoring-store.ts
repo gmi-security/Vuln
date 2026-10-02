@@ -330,6 +330,32 @@ export async function getRiskSummary(db: Awaited<ReturnType<typeof riskScoringDa
   };
 }
 
+// Bulk path for a companies listing: one GROUP BY instead of one
+// getRiskSummary() round trip per company (which would be O(companies) DB
+// calls on a page that renders every company at once).
+export async function getRiskSummaryByCompany(db: Awaited<ReturnType<typeof riskScoringDatabase>>): Promise<Map<string, RiskSummary>> {
+  const rows = (await db.query(`
+    SELECT company_id,
+      coalesce(sum(risk_score) FILTER (WHERE verification_status NOT IN ('verified_remediated')), 0)::bigint AS total_open_risk,
+      count(*) FILTER (WHERE risk_score >= 800 AND verification_status NOT IN ('verified_remediated'))::int AS critical_risk_count,
+      count(*) FILTER (WHERE effective_swath=1 AND verification_status NOT IN ('verified_remediated'))::int AS swath1_open,
+      count(*) FILTER (WHERE effective_swath=2 AND verification_status NOT IN ('verified_remediated'))::int AS swath2_open,
+      count(*) FILTER (WHERE cisa_kev AND verification_status NOT IN ('verified_remediated'))::int AS kev_open,
+      count(*) FILTER (WHERE internet_exposed AND risk_score >= 800 AND verification_status NOT IN ('verified_remediated'))::int AS internet_facing_critical_risk,
+      count(*) FILTER (WHERE verification_status='verified_remediated')::int AS verified_remediations,
+      count(*) FILTER (WHERE verification_status='pending_verification')::int AS awaiting_verification
+    FROM finding_risk GROUP BY company_id
+  `)).rows;
+  const out = new Map<string, RiskSummary>();
+  for (const row of rows) out.set(row.company_id, {
+    totalOpenRisk: Number(row.total_open_risk), criticalRiskCount: row.critical_risk_count,
+    swath1Open: row.swath1_open, swath2Open: row.swath2_open, kevOpen: row.kev_open,
+    internetFacingCriticalRisk: row.internet_facing_critical_risk,
+    verifiedRemediations: row.verified_remediations, awaitingVerification: row.awaiting_verification,
+  });
+  return out;
+}
+
 // An analyst override always wins over the next recalculation (see
 // upsertFindingRisk's CASE above) until explicitly cleared.
 export async function overrideSwath(db: Awaited<ReturnType<typeof riskScoringDatabase>>, findingRiskId: string, newSwath: number, actor: string, reason: string): Promise<void> {

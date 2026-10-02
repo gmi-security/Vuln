@@ -252,6 +252,25 @@ test("staleOrMissingCves: a recently-enriched CVE is excluded, an older/missing 
   assert.deepEqual(calls[0].params, [["CVE-2026-1111", "CVE-2026-2222"], 86_400_000]);
 });
 
+// getRiskSummaryByCompany -- the companies-list page's bulk path: one GROUP
+// BY instead of one getRiskSummary() round trip per company.
+test("getRiskSummaryByCompany groups totals per company_id in a single query", async () => {
+  const rows = [
+    { company_id: "CO-1", total_open_risk: "1500", critical_risk_count: 2, swath1_open: 3, swath2_open: 1, kev_open: 4, internet_facing_critical_risk: 1, verified_remediations: 0, awaiting_verification: 0 },
+    { company_id: "CO-2", total_open_risk: "0", critical_risk_count: 0, swath1_open: 0, swath2_open: 0, kev_open: 0, internet_facing_critical_risk: 0, verified_remediations: 0, awaiting_verification: 0 },
+  ];
+  const calls = [];
+  const db = { query: async (sql, params) => { calls.push({ sql, params }); return { rows }; } };
+  const store = await loadStore(db);
+  const summaries = await store.getRiskSummaryByCompany(db);
+  assert.equal(summaries.size, 2);
+  assert.deepEqual(summaries.get("CO-1"), {
+    totalOpenRisk: 1500, criticalRiskCount: 2, swath1Open: 3, swath2Open: 1,
+    kevOpen: 4, internetFacingCriticalRisk: 1, verifiedRemediations: 0, awaitingVerification: 0,
+  });
+  assert.match(calls[0].sql, /GROUP BY company_id/);
+});
+
 // riskScoringDatabase() itself -- unlike every test above, which passes a
 // fake db directly to each function, these actually exercise the connection
 // resolution. This is deliberately applicationDatabase(), NOT

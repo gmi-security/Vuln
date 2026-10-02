@@ -366,7 +366,7 @@ export default function VulnCompaniesPage() {
                   </div>
                 </div>
 
-                <div className="mt-5 grid grid-cols-4 gap-3">
+                <div className={`mt-5 grid gap-3 ${company.swath1Open != null ? "grid-cols-5" : "grid-cols-4"}`}>
                   <Stat
                     icon={<IconBug size={18} />}
                     value={company.openFindings}
@@ -377,6 +377,13 @@ export default function VulnCompaniesPage() {
                     value={company.criticalOpen}
                     label="Critical"
                   />
+                  {company.swath1Open != null ? (
+                    <Stat
+                      icon={<ShieldAlert size={18} />}
+                      value={company.swath1Open}
+                      label="Swath 1"
+                    />
+                  ) : null}
                   <Stat
                     icon={<Radar size={18} />}
                     value={company.exposureFindings}
