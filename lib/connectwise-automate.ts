@@ -160,9 +160,17 @@ export async function automateListComputers(
       );
     }
     const rows: any[] = await res.json();
+    const normalized = Array.isArray(rows) ? rows.map(normalizeComputer).filter((a) => a.hostname) : [];
+    // TEMPORARY: production returned far fewer assets (135) than this exact
+    // logic pulls live (1,161) -- narrowing down where the two diverge.
+    // Remove once explained.
+    console.error(
+      `[automate-debug] client=${clientId} page=${page} rawRows=${Array.isArray(rows) ? rows.length : "NOT-ARRAY:" + JSON.stringify(rows).slice(0, 200)} afterHostnameFilter=${normalized.length}`,
+    );
     if (!Array.isArray(rows) || rows.length === 0) break;
-    out.push(...rows.map(normalizeComputer).filter((a) => a.hostname));
+    out.push(...normalized);
     if (rows.length < PAGE) break;
   }
+  console.error(`[automate-debug] client=${clientId} TOTAL=${out.length}`);
   return out;
 }
