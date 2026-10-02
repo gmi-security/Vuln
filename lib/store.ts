@@ -76,6 +76,8 @@ import {
   spiderfootListScans,
   spiderfootStartScan,
 } from "@/lib/spiderfoot";
+import { elasticVulnEnabled } from "@/lib/elastic-vuln-server";
+import { getScannedHostnamesByCompany, riskScoringDatabase, type HostRiskRow } from "@/lib/risk-scoring-store";
 import {
   artemisAddTargets,
   artemisConfig,
@@ -2105,6 +2107,92 @@ export function assetCoverage(filter?: { companyId?: string }): AssetCoverage {
   };
 }
 
+// assetCoverage() only sees scan results in this legacy in-memory store
+// (Nessus/SpiderFoot/Artemis/Burp). CrowdStrike Spotlight findings live
+// entirely in finding_risk/Postgres and never touch this store, so a tenant
+// scanned mostly via Spotlight looks almost entirely unscanned without this
+// merge. Mutates and returns `coverage` in place; shared by the coverage API
+// route (read path) and autoScanGaps (so a gap-scan is never launched
+// against assets Spotlight already covers).
+export function mergeSpotlightCoverage(
+  coverage: AssetCoverage,
+  hostsByCompany: Map<string, HostRiskRow[]>,
+  companyNames: Map<string, string>,
+): AssetCoverage {
+  for (const [companyId, hosts] of hostsByCompany) {
+    const byHostname = new Map(hosts.map((h) => [h.hostname.trim().toLowerCase(), h]));
+    const applyHit = (row: CoverageRow): boolean => {
+      if (row.companyId !== companyId) return false;
+      const key = row.identifier.trim().toLowerCase();
+      const hit = byHostname.get(key);
+      if (!hit) return false;
+      row.openFindings = Math.max(row.openFindings, hit.openFindings);
+      row.worstRisk = Math.max(row.worstRisk, hit.worstRisk);
+      byHostname.delete(key);
+      return true;
+    };
+
+    for (const row of coverage.matched) applyHit(row);
+
+    const stillUnscanned: CoverageRow[] = [];
+    for (const row of coverage.knownNotScanned) {
+      if (applyHit(row)) coverage.matched.push(row);
+      else stillUnscanned.push(row);
+    }
+    coverage.knownNotScanned = stillUnscanned;
+
+    // Spotlight hosts left over aren't in this company's known inventory --
+    // same as a scanned-but-unknown asset from the legacy diff.
+    const existingShadow = new Set(
+      coverage.scannedNotKnown
+        .filter((r) => r.companyId === companyId)
+        .map((r) => r.identifier.trim().toLowerCase()),
+    );
+    for (const [key, host] of byHostname) {
+      if (existingShadow.has(key)) continue;
+      coverage.scannedNotKnown.push({
+        identifier: host.hostname,
+        companyId,
+        companyName: companyNames.get(companyId) ?? "—",
+        exposure: null,
+        criticality: null,
+        owner: null,
+        source: null,
+        openFindings: host.openFindings,
+        worstRisk: host.worstRisk,
+      });
+    }
+  }
+
+  coverage.matched.sort((a, b) => b.worstRisk - a.worstRisk);
+  coverage.scannedNotKnown.sort((a, b) => b.worstRisk - a.worstRisk);
+  coverage.summary = {
+    known: coverage.matched.length + coverage.knownNotScanned.length,
+    scanned: coverage.matched.length + coverage.scannedNotKnown.length,
+    matched: coverage.matched.length,
+    knownNotScanned: coverage.knownNotScanned.length,
+    scannedNotKnown: coverage.scannedNotKnown.length,
+  };
+  return coverage;
+}
+
+// assetCoverage() plus the Spotlight merge, best-effort -- a missing or
+// unreachable risk-scoring DB must never block coverage reads or gap-scans.
+export async function assetCoverageWithSpotlight(filter?: { companyId?: string }): Promise<AssetCoverage> {
+  const coverage = assetCoverage(filter);
+  if (!elasticVulnEnabled()) return coverage;
+  try {
+    const db = await riskScoringDatabase();
+    const hostsByCompany = await getScannedHostnamesByCompany(db, filter?.companyId);
+    const s = store();
+    const companyNames = new Map(Array.from(s.companies.values()).map((c) => [c.id, c.name]));
+    return mergeSpotlightCoverage(coverage, hostsByCompany, companyNames);
+  } catch (err) {
+    console.error("[coverage] could not merge Spotlight host coverage:", err instanceof Error ? err.message : err);
+    return coverage;
+  }
+}
+
 function copySettings(settings: Settings): Settings {
   return {
     ...settings,
@@ -2172,7 +2260,11 @@ export type AutoScanResult = {
 // idempotent: once an asset has findings it leaves the gap and won't re-scan.
 export async function autoScanGaps(): Promise<AutoScanResult> {
   const s = store();
-  const coverage = assetCoverage();
+  // Spotlight-merged, not the raw legacy diff -- otherwise every gap-scan
+  // (including the automatic one that fires after a CrowdStrike/Intune sync
+  // with autoScanNewAssets on) launches Nessus discovery against assets
+  // Spotlight already has current findings for.
+  const coverage = await assetCoverageWithSpotlight();
   const byCompany = new Map<string, string[]>();
   for (const row of coverage.knownNotScanned) {
     const list = byCompany.get(row.companyId) ?? [];
