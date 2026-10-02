@@ -51,7 +51,7 @@ export default function VulnCoveragePage() {
   const [companyFilter, setCompanyFilter] = useCompanyFilter();
   const [autoScan, setAutoScan] = useState(false);
   const [scanning, setScanning] = useState(false);
-  const [scanMsg, setScanMsg] = useState<string | null>(null);
+  const [scanMsg, setScanMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [toggleError, setToggleError] = useState<string | null>(null);
   // Monotonic request id — a slow older response must never overwrite a newer one.
   const loadSeq = useRef(0);
@@ -117,14 +117,23 @@ export default function VulnCoveragePage() {
       const res = await fetch("/api/coverage/autoscan", { method: "POST" });
       const json = await res.json();
       const r = json.result;
-      setScanMsg(
-        r.assetsQueued > 0
-          ? `Launched ${r.scansLaunched} scan${r.scansLaunched === 1 ? "" : "s"} across ${r.companies} customer${r.companies === 1 ? "" : "s"}, covering ${r.assetsQueued} new asset${r.assetsQueued === 1 ? "" : "s"}.`
-          : "No unscanned assets — coverage is complete.",
-      );
+      if (r.gapsFound === 0) {
+        setScanMsg({ ok: true, text: "No unscanned assets — coverage is complete." });
+      } else if (r.assetsQueued > 0) {
+        const failedNote = r.errors.length ? ` ${r.errors.length} customer${r.errors.length === 1 ? "" : "s"} failed to launch: ${r.errors.join("; ")}` : "";
+        setScanMsg({
+          ok: r.errors.length === 0,
+          text: `Launched ${r.scansLaunched} scan${r.scansLaunched === 1 ? "" : "s"} across ${r.companies} customer${r.companies === 1 ? "" : "s"}, covering ${r.assetsQueued} new asset${r.assetsQueued === 1 ? "" : "s"}.${failedNote}`,
+        });
+      } else {
+        setScanMsg({
+          ok: false,
+          text: `Found ${r.gapsFound} gap asset${r.gapsFound === 1 ? "" : "s"} but could not launch any scans: ${r.errors.join("; ")}`,
+        });
+      }
       await load();
     } catch {
-      setScanMsg("Failed to launch auto-scan.");
+      setScanMsg({ ok: false, text: "Failed to launch auto-scan." });
     } finally {
       setScanning(false);
     }
@@ -203,8 +212,15 @@ export default function VulnCoveragePage() {
       </div>
 
       {scanMsg ? (
-        <div className="rounded-2xl border border-emerald-900/60 bg-emerald-950/40 px-5 py-3 text-sm text-emerald-300">
-          {scanMsg}
+        <div
+          className={[
+            "rounded-2xl border px-5 py-3 text-sm",
+            scanMsg.ok
+              ? "border-emerald-900/60 bg-emerald-950/40 text-emerald-300"
+              : "border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.10)] text-[#ff4d57]",
+          ].join(" ")}
+        >
+          {scanMsg.text}
         </div>
       ) : null}
       <div className="grid gap-5 md:grid-cols-2 2xl:grid-cols-4">

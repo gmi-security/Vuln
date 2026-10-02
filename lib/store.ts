@@ -2253,6 +2253,8 @@ export type AutoScanResult = {
   scansLaunched: number;
   assetsQueued: number;
   companies: number;
+  gapsFound: number; // targets identified, regardless of launch success
+  errors: string[]; // one entry per company whose scan failed to launch
 };
 
 // Launch scans for every known-but-unscanned asset, one scan per customer
@@ -2274,8 +2276,11 @@ export async function autoScanGaps(): Promise<AutoScanResult> {
 
   let scansLaunched = 0;
   let assetsQueued = 0;
+  let gapsFound = 0;
+  const errors: string[] = [];
   for (const [companyId, targets] of byCompany) {
     if (!targets.length) continue;
+    gapsFound += targets.length;
     const folder = ensureFolder(s, companyId, "Auto-Scan");
     const result = await startScan({
       name: "Auto-scan: newly discovered assets",
@@ -2286,12 +2291,15 @@ export async function autoScanGaps(): Promise<AutoScanResult> {
       folderId: folder.id,
       requestedBy: "auto-scan",
     });
-    if (!("error" in result)) {
+    if ("error" in result) {
+      const company = s.companies.get(companyId);
+      errors.push(`${company?.name ?? companyId}: ${result.error}`);
+    } else {
       scansLaunched += 1;
       assetsQueued += targets.length;
     }
   }
-  return { scansLaunched, assetsQueued, companies: byCompany.size };
+  return { scansLaunched, assetsQueued, companies: byCompany.size, gapsFound, errors };
 }
 
 // Wipe all data and repopulate purely from the real Nessus scanner. Used to
