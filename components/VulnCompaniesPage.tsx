@@ -130,7 +130,7 @@ export default function VulnCompaniesPage() {
                       </div>
                     </div>
                   </div>
-                  <div className="text-right">
+                  <div className="text-right" title="Legacy posture score (0-100): severity mix, KEV pressure, SLA breaches, and scan coverage blended into one number. Separate from the RBVM Tier figures below.">
                     <div
                       className="text-3xl font-semibold tracking-[-0.03em]"
                       style={{ color: compositeColor(company.compositeScore) }}
@@ -158,7 +158,8 @@ export default function VulnCompaniesPage() {
                     <Stat
                       icon={<ShieldAlert size={18} />}
                       value={company.swath1Open}
-                      label="Tier 1"
+                      label="RBVM Tier 1"
+                      title="Risk-Based Vulnerability Management: findings tiered Immediate (Tier 1) by the separate RBVM scoring engine -- not the composite score above, and not the same count as Critical."
                     />
                   ) : null}
                   <Stat
@@ -292,13 +293,15 @@ function Stat({
   icon,
   value,
   label,
+  title,
 }: {
   icon: React.ReactNode;
   value: React.ReactNode;
   label: string;
+  title?: string;
 }) {
   return (
-    <div className="rounded-2xl border border-zinc-900 bg-[#090909] p-3 text-center">
+    <div className="rounded-2xl border border-zinc-900 bg-[#090909] p-3 text-center" title={title}>
       <div className="mx-auto mb-2 flex h-8 w-8 items-center justify-center rounded-full border border-[rgba(179,14,20,0.20)] bg-[rgba(179,14,20,0.06)] text-[#b30e14]">
         {icon}
       </div>

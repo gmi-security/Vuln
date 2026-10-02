@@ -3100,7 +3100,12 @@ export function computeCompliance(filter?: {
   // full rescans of both collections on every uncached load.
   const findingsByCompany = new Map<string, Finding[]>();
   for (const f of s.findings.values()) {
-    if (f.status !== "Open" && f.status !== "In Remediation") continue;
+    // Same open+remediation-worthy filter as rollupFromLists/computeMetrics/
+    // computeRemediationSla -- this used to check status only, so a company
+    // with Critical/High OSINT findings (leaked creds, exposed panels) would
+    // show a different "open/critical" count here than on every other page
+    // for the exact same company at the exact same moment.
+    if (!isOpen(f) || !isRemediationFinding(f)) continue;
     const list = findingsByCompany.get(f.companyId);
     if (list) list.push(f);
     else findingsByCompany.set(f.companyId, [f]);
