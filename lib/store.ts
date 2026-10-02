@@ -1,4 +1,5 @@
 import { DEMO_ASSETS, DEMO_PORTS, VULN_CATALOG } from "@/lib/catalog";
+import { normalizeCompanyName } from "@/lib/company-name";
 import { getDemoProfile, isPlanned } from "@/lib/connectors";
 import {
   CORRELATED_CONNECTORS,
@@ -1654,7 +1655,7 @@ export function createCompany(input: {
   if (!name) return { error: "Company name is required." };
   if (
     Array.from(s.companies.values()).some(
-      (c) => c.name.toLowerCase() === name.toLowerCase(),
+      (c) => normalizeCompanyName(c.name) === normalizeCompanyName(name),
     )
   ) {
     return { error: "A company with that name already exists." };
@@ -1692,7 +1693,7 @@ export function updateCompany(
     if (!name) return { error: "Company name cannot be empty." };
     if (
       Array.from(s.companies.values()).some(
-        (c) => c.id !== id && c.name.toLowerCase() === name.toLowerCase(),
+        (c) => c.id !== id && normalizeCompanyName(c.name) === normalizeCompanyName(name),
       )
     ) {
       return { error: "A company with that name already exists." };
@@ -5254,7 +5255,7 @@ export async function importTidalInventory(
   for (const t of assets) {
     const customer = t.customer.trim() || "Unassigned";
     let company = Array.from(s.companies.values()).find(
-      (c) => c.name.toLowerCase() === customer.toLowerCase(),
+      (c) => normalizeCompanyName(c.name) === normalizeCompanyName(customer),
     );
     if (!company) {
       const created = createCompany({ name: customer });
@@ -5325,24 +5326,6 @@ export type AutomateImportResult = {
   findingsRescored: number;
   autoScan?: AutoScanResult;
 };
-
-// Normalize a company name for matching, not display: fold Unicode
-// compatibility forms, map smart quotes/dashes to their ASCII equivalents,
-// collapse whitespace, and lowercase. A plain .toLowerCase() comparison
-// (what this replaced) missed Atlas Healthcare Partners on the first live
-// sync over nothing more than a punctuation/whitespace difference between
-// Automate's and Vuln's copies of the same name -- normalizing first makes
-// that whole class of false negative not happen again.
-function normalizeCompanyName(name: string): string {
-  return name
-    .normalize("NFKC")
-    .replace(/[‘’ʼ]/g, "'")
-    .replace(/[“”]/g, '"')
-    .replace(/[–—]/g, "-")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
-}
 
 // Pull ConnectWise Automate's device inventory directly (see
 // lib/connectwise-automate.ts for why this bypasses Tidal). Matched against
@@ -5809,7 +5792,7 @@ async function importEndpoints(
   if (customerName) {
     // Pin to a named client company; create it if first encounter.
     internal = Array.from(s.companies.values()).find(
-      (c) => c.name.toLowerCase() === customerName.toLowerCase(),
+      (c) => normalizeCompanyName(c.name) === normalizeCompanyName(customerName),
     );
     if (!internal) {
       const created = createCompany({ name: customerName });
@@ -6011,7 +5994,7 @@ export async function importFromDefender(): Promise<
   if (customer) {
     company =
       Array.from(s.companies.values()).find(
-        (c) => c.name.toLowerCase() === customer.toLowerCase(),
+        (c) => normalizeCompanyName(c.name) === normalizeCompanyName(customer),
       ) ?? undefined;
     if (!company) {
       const created = createCompany({ name: customer });
@@ -6183,7 +6166,7 @@ export async function importFromNessus(): Promise<
     if (folder.type === "trash" || folder.type === "main") continue;
     if (BUILTIN_FOLDERS.has(folder.name.trim().toLowerCase())) continue;
     const existing = Array.from(s.companies.values()).find(
-      (c) => c.name.toLowerCase() === folder.name.toLowerCase(),
+      (c) => normalizeCompanyName(c.name) === normalizeCompanyName(folder.name),
     );
     let companyId: string;
     if (existing) {

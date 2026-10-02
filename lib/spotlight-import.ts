@@ -1,6 +1,22 @@
 import type { FalconTenant, SpotlightFinding } from "./crowdstrike";
 import type { SpotlightRecord } from "./spotlight-record-store";
 
+// Duplicated from lib/company-name.ts rather than imported: this module is
+// loaded with zero runtime dependencies elsewhere (see
+// tests/spotlight-import.test.mjs, which links it against a stub that
+// throws on any import), so it can't pull in even a trivial pure helper
+// from another file. Keep in sync if the shared version changes.
+function normalizeCompanyName(name: string): string {
+  return name
+    .normalize("NFKC")
+    .replace(/[‘’ʼ]/g, "'")
+    .replace(/[“”]/g, '"')
+    .replace(/[–—]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
 type CompanyBinding = { id: string; name: string };
 export type SpotlightTenantSelection = {
   config: FalconTenant;
@@ -22,7 +38,7 @@ export function selectSpotlightTenant(
   }
   const candidates = named.map(config => ({
     config,
-    company: companies.find(company => company.name.trim().toLowerCase() === config.customerName!.trim().toLowerCase()),
+    company: companies.find(company => normalizeCompanyName(company.name) === normalizeCompanyName(config.customerName!)),
   })).filter((item): item is { config: FalconTenant; company: CompanyBinding } => Boolean(item.company));
   const matches = requestedCompanyId
     ? candidates.filter(item => item.company.id === requestedCompanyId)
