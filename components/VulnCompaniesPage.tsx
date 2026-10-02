@@ -158,7 +158,7 @@ export default function VulnCompaniesPage() {
                     <Stat
                       icon={<ShieldAlert size={18} />}
                       value={company.swath1Open}
-                      label="Swath 1"
+                      label="Tier 1"
                     />
                   ) : null}
                   <Stat
