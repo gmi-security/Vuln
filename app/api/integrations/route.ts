@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { tidalConfig } from "@/lib/tidal";
 import { intuneConfig } from "@/lib/intune";
 import { falconConfig } from "@/lib/crowdstrike";
+import { automateConfig } from "@/lib/connectwise-automate";
 import { grcConfig } from "@/lib/grc";
 import { emailConfigured, slackConfigured } from "@/lib/alerts";
 import { n8nConfig, n8nMcpConfig } from "@/lib/n8n";
@@ -14,6 +15,7 @@ export async function GET() {
   const tidal = tidalConfig();
   const intune = intuneConfig();
   const falcon = falconConfig();
+  const automate = automateConfig();
   const grc = grcConfig();
   const n8nWebhook = n8nConfig();
   const n8nMcp = n8nMcpConfig();
@@ -73,6 +75,24 @@ export async function GET() {
         configured: Boolean(falcon),
         status: falcon ? "Connected" : "Demo Mode",
         docsUrl: "https://falcon.crowdstrike.com/documentation/page/host-and-host-group-management-apis",
+      },
+      {
+        id: "automate",
+        name: "ConnectWise Automate",
+        vendor: "ConnectWise",
+        kind: "Endpoint Inventory (RMM devices)",
+        description:
+          "Per-customer device inventory pulled directly from ConnectWise Automate's own REST API — hostname, IP, OS, logged-in user, and server/workstation type. Matched against existing companies by exact name only; a client with no matching company is skipped, never auto-created. Feeds the environmental layer of real-risk scoring the same way Tidal does, for customers whose real inventory lives in Automate instead.",
+        capabilities: [
+          "Live device sync",
+          "OS & IP addresses",
+          "Owner (logged-in user)",
+          "No company auto-create",
+        ],
+        envVars: ["AUTOMATE_BASE_URL", "AUTOMATE_API_CLIENT_ID", "AUTOMATE_USERNAME", "AUTOMATE_PASSWORD"],
+        configured: Boolean(automate),
+        status: automate ? "Connected" : "Not Configured",
+        docsUrl: "https://docs.connectwise.com/ConnectWise_Automate_Documentation/010/120",
       },
       {
         id: "grc",

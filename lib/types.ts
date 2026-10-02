@@ -105,6 +105,7 @@ export type AssetSource =
   | "tidal"
   | "intune"
   | "crowdstrike"
+  | "automate"
   | "nmap"
   | "manual"
   | "inferred";

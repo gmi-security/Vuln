@@ -67,6 +67,7 @@ const cardIcon: Record<string, React.ElementType> = {
   zap: IconBug,
   tidal: IconDatabaseCog,
   intune: IconDeviceLaptop,
+  automate: IconDatabaseCog,
   "crowdstrike-devices": IconShieldSearch,
   grc: IconClipboardCheck,
   n8n: IconPlugConnected,
@@ -98,6 +99,7 @@ const SYNC_ENDPOINTS: Record<string, string> = {
   artemis: "/api/artemis/import",
   tidal: "/api/tidal/import",
   intune: "/api/intune/import",
+  automate: "/api/automate/import",
   burp: "/api/burp/import",
   nmap: "/api/nmap/import",
   vulners: "/api/vulners/import",
@@ -504,7 +506,11 @@ function IntegrationCard({ card }: { card: CardData }) {
   // immediately, not tucked behind a click.
   const [expanded, setExpanded] = useState(!card.configured && card.status !== "Planned");
   const isTidal = card.id === "tidal";
-  const isCrowdstrike = card.id === "crowdstrike" || card.id === "crowdstrike-devices";
+  // "automate" shares the exact same background-job/CsSyncStatus shape as
+  // the CrowdStrike syncs (POST kicks off a job, GET polls it), so it reuses
+  // the same polling path rather than the synchronous-result else branch.
+  const isCrowdstrike =
+    card.id === "crowdstrike" || card.id === "crowdstrike-devices" || card.id === "automate";
   // Offline upload fallback: Tidal takes a CSV inventory export, Burp takes an
   // XML issue export. Same flow, different endpoint/format.
   const uploadSpec =

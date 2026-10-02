@@ -33,6 +33,12 @@ import {
   type TidalProgress,
 } from "@/lib/tidal";
 import { intuneConfig, intuneListAssets } from "@/lib/intune";
+import {
+  automateConfig,
+  automateListClients,
+  automateListComputers,
+  type AutomateAsset,
+} from "@/lib/connectwise-automate";
 import { falconConfigs, falconListAssets, createSpotlightSession, SPOTLIGHT_DISCOVERY_PARTITIONS } from "@/lib/crowdstrike";
 import { selectSpotlightTenant, type SpotlightTenantSelection } from "@/lib/spotlight-import";
 import { runPartitionedSpotlightImport } from "@/lib/spotlight-resumable-import";
@@ -5310,6 +5316,92 @@ export async function importFromTidal(
   return importTidalInventory(assets);
 }
 
+export type AutomateImportResult = {
+  companiesMatched: number;
+  skipped: number;
+  assetsUpserted: number;
+  findingsRescored: number;
+  autoScan?: AutoScanResult;
+};
+
+// Pull ConnectWise Automate's device inventory directly (see
+// lib/connectwise-automate.ts for why this bypasses Tidal). Matched against
+// EXISTING Vuln companies by exact name only -- unlike importTidalInventory,
+// this never auto-creates a company. Automate's own "Client" roster spans
+// GMI's entire MSP book, most of which have no corresponding Vuln company;
+// silently onboarding all of them as a side effect of an asset sync would
+// be a surprise, not a feature. Bringing a new client's Automate inventory
+// in is a deliberate company-creation step, not implicit here.
+export async function importFromAutomate(): Promise<AutomateImportResult | { error: string }> {
+  const config = automateConfig();
+  if (!config) {
+    return {
+      error:
+        "ConnectWise Automate is not configured. Set AUTOMATE_BASE_URL, AUTOMATE_API_CLIENT_ID, AUTOMATE_USERNAME, AUTOMATE_PASSWORD.",
+    };
+  }
+  const s = store();
+  let clients;
+  try {
+    clients = await automateListClients(config);
+  } catch (err) {
+    return {
+      error: err instanceof Error ? err.message : "Failed to reach the ConnectWise Automate API.",
+    };
+  }
+
+  let companiesMatched = 0;
+  let skipped = 0;
+  let assetsUpserted = 0;
+  for (const client of clients) {
+    const company = Array.from(s.companies.values()).find(
+      (c) => c.name.toLowerCase() === client.name.toLowerCase(),
+    );
+    if (!company) {
+      skipped += 1;
+      continue;
+    }
+    companiesMatched += 1;
+    let computers: AutomateAsset[];
+    try {
+      computers = await automateListComputers(config, client.id);
+    } catch (err) {
+      console.error(
+        `[automate] could not pull computers for ${client.name}:`,
+        err instanceof Error ? err.message : err,
+      );
+      continue;
+    }
+    for (const a of computers) {
+      upsertAsset(s, {
+        identifier: a.hostname,
+        hostname: a.hostname,
+        ipAddresses: a.ipAddresses,
+        companyId: company.id,
+        companyName: company.name,
+        exposure: a.exposure,
+        criticality: a.criticality,
+        os: a.os,
+        owner: a.owner,
+        tags: a.tags,
+        source: "automate",
+        externalId: a.externalId,
+      });
+      assetsUpserted += 1;
+    }
+  }
+
+  const findingsRescored = await rescoreAllFindings(s, (f) => f.assetSource === "automate");
+
+  let autoScan: AutoScanResult | undefined;
+  if (s.settings.autoScanNewAssets) {
+    autoScan = await autoScanGaps();
+  }
+
+  await flushNow();
+  return { companiesMatched, skipped, assetsUpserted, findingsRescored, autoScan };
+}
+
 // --- Background Tidal sync with pollable progress ---------------------------
 // The live sync spans ~49 client companies and can pull thousands of devices,
 // so it runs as a background job. The UI starts it (POST) and polls its status
@@ -5334,6 +5426,7 @@ const syncJobGlobal = globalThis as unknown as {
   __vulnTidalSync?: TidalSyncStatus;
   __vulnCsDevicesSync?: CsSyncStatus;
   __vulnCsSpotlightSync?: CsSyncStatus;
+  __vulnAutomateSync?: CsSyncStatus;
   __vulnSyncAll?: SyncAllStatus;
 };
 
@@ -5489,6 +5582,34 @@ export function startCsDevicesSync(): { started: boolean; error?: string } {
       }
     } catch (err) {
       syncJobGlobal.__vulnCsDevicesSync = { ...csDevicesSync(), running: false, phase: "Error", error: err instanceof Error ? err.message : "Sync failed.", finishedAt: Date.now() };
+    }
+  })();
+  return { started: true };
+}
+
+function automateSync(): CsSyncStatus {
+  if (!syncJobGlobal.__vulnAutomateSync) syncJobGlobal.__vulnAutomateSync = csIdleState();
+  return syncJobGlobal.__vulnAutomateSync;
+}
+
+export function getAutomateSyncStatus(): CsSyncStatus {
+  return automateSync();
+}
+
+export function startAutomateSync(): { started: boolean; error?: string } {
+  if (!automateConfig()) return { started: false, error: "ConnectWise Automate is not configured." };
+  if (automateSync().running) return { started: false, error: "Automate sync already running." };
+  syncJobGlobal.__vulnAutomateSync = { running: true, phase: "Syncing", startedAt: Date.now(), finishedAt: null, result: null, error: null };
+  void (async () => {
+    try {
+      const r = await importFromAutomate();
+      if ("error" in r) {
+        syncJobGlobal.__vulnAutomateSync = { ...automateSync(), running: false, phase: "Error", error: r.error, finishedAt: Date.now() };
+      } else {
+        syncJobGlobal.__vulnAutomateSync = { ...automateSync(), running: false, phase: "Done", result: r, finishedAt: Date.now() };
+      }
+    } catch (err) {
+      syncJobGlobal.__vulnAutomateSync = { ...automateSync(), running: false, phase: "Error", error: err instanceof Error ? err.message : "Sync failed.", finishedAt: Date.now() };
     }
   })();
   return { started: true };
