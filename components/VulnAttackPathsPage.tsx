@@ -9,6 +9,7 @@ import {
 } from "@tabler/icons-react";
 import VulnShell from "@/components/VulnShell";
 import { PanelCard, Pill, StatCard, ghostButtonClass, selectClass } from "@/components/ui";
+import { useCompanyFilter } from "@/lib/useCompanyFilter";
 import { compositeColor, exposureClass, riskColor } from "@/lib/format";
 import type { AttackEntry, AttackPathResult, Company } from "@/lib/types";
 
@@ -21,7 +22,7 @@ const roleClass: Record<string, string> = {
 export default function VulnAttackPathsPage() {
   const [data, setData] = useState<AttackPathResult | null>(null);
   const [companies, setCompanies] = useState<Company[]>([]);
-  const [companyFilter, setCompanyFilter] = useState("All");
+  const [companyFilter, setCompanyFilter] = useCompanyFilter();
   // Monotonic request id — a slow older response must never overwrite a newer one.
   const loadSeq = useRef(0);
 

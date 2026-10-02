@@ -1,5 +1,10 @@
+import { Suspense } from "react";
 import VulnCompliancePage from "@/components/VulnCompliancePage";
 
 export default function CompliancePage() {
-  return <VulnCompliancePage />;
+  return (
+    <Suspense>
+      <VulnCompliancePage />
+    </Suspense>
+  );
 }

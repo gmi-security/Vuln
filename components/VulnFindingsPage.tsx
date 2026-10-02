@@ -8,6 +8,7 @@ import React, {
   useState,
 } from "react";
 import { useSearchParams } from "next/navigation";
+import { useCompanyFilter } from "@/lib/useCompanyFilter";
 import {
   ChevronLeft,
   ChevronRight,
@@ -121,9 +122,7 @@ export default function VulnFindingsPage() {
   const [severityFilter, setSeverityFilter] = useState("All");
   const [statusFilter, setStatusFilter] = useState("All");
   const [connectorFilter, setConnectorFilter] = useState("All");
-  const [companyFilter, setCompanyFilter] = useState(
-    searchParams.get("company") ?? "All",
-  );
+  const [companyFilter, setCompanyFilter] = useCompanyFilter();
   const [companies, setCompanies] = useState<{ id: string; name: string }[]>([]);
   const [exploitOnly, setExploitOnly] = useState(false);
   const [overdueOnly, setOverdueOnly] = useState(false);

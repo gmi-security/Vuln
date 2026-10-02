@@ -9,9 +9,10 @@ import {
   IconShieldLock,
 } from "@tabler/icons-react";
 import VulnShell from "@/components/VulnShell";
-import { PanelCard, Pill, StatCard, ghostButtonClass, primaryButtonClass } from "@/components/ui";
+import { PanelCard, Pill, StatCard, ghostButtonClass, primaryButtonClass, selectClass } from "@/components/ui";
 import { compositeColor } from "@/lib/format";
-import type { ComplianceResult, CompliancePosture } from "@/lib/types";
+import { useCompanyFilter } from "@/lib/useCompanyFilter";
+import type { Company, ComplianceResult, CompliancePosture } from "@/lib/types";
 
 const statusClass: Record<string, string> = {
   Pass: "bg-emerald-950/60 text-emerald-300 border border-emerald-900/60",
@@ -26,15 +27,18 @@ export default function VulnCompliancePage() {
     { id: string; name: string; short: string }[]
   >([]);
   const [selected, setSelected] = useState("pci");
+  const [companyFilter, setCompanyFilter] = useCompanyFilter();
+  const [companies, setCompanies] = useState<Company[]>([]);
   const [pushing, setPushing] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   // Monotonic request id — a slow older response must never overwrite a newer one.
   const loadSeq = useRef(0);
 
-  const load = useCallback(async (framework: string) => {
+  const load = useCallback(async (framework: string, companyId: string) => {
     const seq = ++loadSeq.current;
     try {
-      const res = await fetch(`/api/compliance?framework=${framework}`, {
+      const q = companyId !== "All" ? `&companyId=${encodeURIComponent(companyId)}` : "";
+      const res = await fetch(`/api/compliance?framework=${framework}${q}`, {
         cache: "no-store",
       });
       const json = await res.json();
@@ -47,8 +51,15 @@ export default function VulnCompliancePage() {
   }, []);
 
   useEffect(() => {
-    void load(selected);
-  }, [load, selected]);
+    void load(selected, companyFilter);
+  }, [load, selected, companyFilter]);
+
+  useEffect(() => {
+    void fetch("/api/companies", { cache: "no-store" })
+      .then((res) => res.json())
+      .then((json) => setCompanies(json.companies ?? []))
+      .catch(() => undefined);
+  }, []);
 
   async function pushToGrc(companyId?: string) {
     setPushing(true);
@@ -97,13 +108,23 @@ export default function VulnCompliancePage() {
             <Upload size={16} />
             {pushing ? "Pushing..." : "Push all to GRC"}
           </button>
-          <button onClick={() => void load(selected)} className={ghostButtonClass}>
+          <button onClick={() => void load(selected, companyFilter)} className={ghostButtonClass}>
             <RefreshCcw size={16} className="text-zinc-400" />
             Refresh
           </button>
         </>
       }
     >
+      <select
+        value={companyFilter}
+        onChange={(e) => setCompanyFilter(e.target.value)}
+        className={selectClass}
+      >
+        <option value="All">All companies</option>
+        {companies.map((c) => (
+          <option key={c.id} value={c.id}>{c.name}</option>
+        ))}
+      </select>
       {frameworks.length ? (
         <div className="flex flex-wrap gap-2">
           {frameworks.map((fw) => (

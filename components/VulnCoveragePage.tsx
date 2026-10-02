@@ -10,6 +10,7 @@ import {
   IconRadar2,
 } from "@tabler/icons-react";
 import VulnShell from "@/components/VulnShell";
+import { useCompanyFilter } from "@/lib/useCompanyFilter";
 import {
   PanelCard,
   StatCard,
@@ -47,7 +48,7 @@ type Coverage = {
 export default function VulnCoveragePage() {
   const [coverage, setCoverage] = useState<Coverage | null>(null);
   const [companies, setCompanies] = useState<Company[]>([]);
-  const [companyFilter, setCompanyFilter] = useState("All");
+  const [companyFilter, setCompanyFilter] = useCompanyFilter();
   const [autoScan, setAutoScan] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [scanMsg, setScanMsg] = useState<string | null>(null);

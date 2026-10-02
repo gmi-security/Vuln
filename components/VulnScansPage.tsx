@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
+import { useCompanyFilter } from "@/lib/useCompanyFilter";
 import {
   Building2,
   Folder as FolderIcon,
@@ -43,20 +44,24 @@ export default function VulnScansPage({
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("All");
   const [connectorFilter, setConnectorFilter] = useState("All");
-  const [companyFilter, setCompanyFilter] = useState("All");
+  const [companyFilter, setCompanyFilter] = useCompanyFilter();
   const [showNew, setShowNew] = useState(searchParams.get("new") === "1");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
+  // Scoped server-side (not fetched-then-filtered client-side) -- this used
+  // to request every company's scans on every 3s poll regardless of the
+  // dropdown, then throw most of the response away in the filter below.
   const load = useCallback(async () => {
     try {
-      const res = await fetch("/api/scans", { cache: "no-store" });
+      const qs = companyFilter !== "All" ? `?companyId=${encodeURIComponent(companyFilter)}` : "";
+      const res = await fetch(`/api/scans${qs}`, { cache: "no-store" });
       const json = await res.json();
       setScans(json.scans ?? []);
     } catch {
       // keep last snapshot
     }
-  }, []);
+  }, [companyFilter]);
 
   useEffect(() => {
     void load();
@@ -72,12 +77,12 @@ export default function VulnScansPage({
     return () => clearInterval(timer);
   }, [load]);
 
+  // Company scoping now happens server-side in load() above; `scans` is
+  // already just this selection's rows.
   const filtered = useMemo(() => {
     return scans.filter((scan) => {
       if (statusFilter !== "All" && scan.status !== statusFilter) return false;
       if (connectorFilter !== "All" && scan.connector !== connectorFilter)
-        return false;
-      if (companyFilter !== "All" && scan.companyId !== companyFilter)
         return false;
       if (search) {
         const haystack =
@@ -86,7 +91,7 @@ export default function VulnScansPage({
       }
       return true;
     });
-  }, [scans, search, statusFilter, connectorFilter, companyFilter]);
+  }, [scans, search, statusFilter, connectorFilter]);
 
   // Group filtered scans as company -> folder -> scans[].
   const grouped = useMemo(() => {

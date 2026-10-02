@@ -13,11 +13,15 @@ import {
   Bug,
   ChevronLeft,
   ChevronRight,
+  ClipboardCheck,
   Folder as FolderIcon,
   FolderPlus,
   Mail,
   Play,
+  Radar,
+  ScanSearch,
   Search,
+  Share2,
 } from "lucide-react";
 import { IconAlertTriangle, IconBug, IconGauge, IconRadar } from "@tabler/icons-react";
 import VulnShell from "@/components/VulnShell";
@@ -387,6 +391,22 @@ export default function VulnCompanyDetailPage({
         >
           <Bug size={16} className="text-zinc-400" />
           View findings
+        </Link>
+        <Link href={`/scans?company=${companyId}`} className={ghostButtonClass}>
+          <Radar size={16} className="text-zinc-400" />
+          View scans
+        </Link>
+        <Link href={`/coverage?company=${companyId}`} className={ghostButtonClass}>
+          <ScanSearch size={16} className="text-zinc-400" />
+          View coverage
+        </Link>
+        <Link href={`/attack-paths?company=${companyId}`} className={ghostButtonClass}>
+          <Share2 size={16} className="text-zinc-400" />
+          View attack paths
+        </Link>
+        <Link href={`/compliance?company=${companyId}`} className={ghostButtonClass}>
+          <ClipboardCheck size={16} className="text-zinc-400" />
+          View compliance
         </Link>
         {addingFolder ? (
           <form onSubmit={addFolder} className="flex items-center gap-2">
