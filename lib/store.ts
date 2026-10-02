@@ -78,6 +78,7 @@ import {
 } from "@/lib/spiderfoot";
 import { elasticVulnEnabled } from "@/lib/elastic-vuln-server";
 import { getScannedHostnamesByCompany, riskScoringDatabase, type HostRiskRow } from "@/lib/risk-scoring-store";
+import { getManagedHostnames } from "@/lib/elastic-crowdstrike-coverage";
 import {
   artemisAddTargets,
   artemisConfig,
@@ -2185,18 +2186,62 @@ export function mergeSpotlightCoverage(
 // assetCoverage() plus the Spotlight merge, best-effort -- a missing or
 // unreachable risk-scoring DB must never block coverage reads or gap-scans.
 export async function assetCoverageWithSpotlight(filter?: { companyId?: string }): Promise<AssetCoverage> {
-  const coverage = assetCoverage(filter);
-  if (!elasticVulnEnabled()) return coverage;
-  try {
-    const db = await riskScoringDatabase();
-    const hostsByCompany = await getScannedHostnamesByCompany(db, filter?.companyId);
-    const s = store();
-    const companyNames = new Map(Array.from(s.companies.values()).map((c) => [c.id, c.name]));
-    return mergeSpotlightCoverage(coverage, hostsByCompany, companyNames);
-  } catch (err) {
-    console.error("[coverage] could not merge Spotlight host coverage:", err instanceof Error ? err.message : err);
-    return coverage;
+  let coverage = assetCoverage(filter);
+  const s = store();
+  const companyNames = new Map(Array.from(s.companies.values()).map((c) => [c.id, c.name]));
+
+  if (elasticVulnEnabled()) {
+    try {
+      const db = await riskScoringDatabase();
+      const hostsByCompany = await getScannedHostnamesByCompany(db, filter?.companyId);
+      coverage = mergeSpotlightCoverage(coverage, hostsByCompany, companyNames);
+    } catch (err) {
+      console.error("[coverage] could not merge Spotlight host coverage:", err instanceof Error ? err.message : err);
+    }
   }
+
+  // finding_risk (above) is finding-level: a fully patched managed host with
+  // zero open findings never appears there and would still show as a gap.
+  // CrowdStrike's own discover_asset index is asset-level (entity_type:
+  // "managed" means a live Falcon sensor, independent of current findings),
+  // so it catches what the finding-level merge structurally can't. There's
+  // no stored CrowdStrike cid -> companyId mapping anywhere in this app
+  // (finding_risk's tenant_key is already our own companyId, not CrowdStrike's
+  // cid) -- resolve it by hostname overlap with known assets instead: a cid
+  // whose hostnames don't overlap any known asset can't be safely attributed
+  // to a company, so it's skipped rather than guessed at.
+  try {
+    const managed = await getManagedHostnames();
+    if (managed.length) {
+      const hostnameToCompany = new Map<string, string>();
+      for (const a of s.assets.values()) {
+        for (const key of [a.identifier, a.hostname, ...a.ipAddresses]) {
+          if (key) hostnameToCompany.set(key.trim().toLowerCase(), a.companyId);
+        }
+      }
+      const cidToCompany = new Map<string, string>();
+      for (const { cid, hostname } of managed) {
+        if (cidToCompany.has(cid)) continue;
+        const companyId = hostnameToCompany.get(hostname.trim().toLowerCase());
+        if (companyId) cidToCompany.set(cid, companyId);
+      }
+      const elasticHostsByCompany = new Map<string, HostRiskRow[]>();
+      for (const { cid, hostname } of managed) {
+        const companyId = cidToCompany.get(cid);
+        if (!companyId || (filter?.companyId && companyId !== filter.companyId)) continue;
+        const list = elasticHostsByCompany.get(companyId) ?? [];
+        list.push({ hostname, openFindings: 0, worstRisk: 0 });
+        elasticHostsByCompany.set(companyId, list);
+      }
+      if (elasticHostsByCompany.size) {
+        coverage = mergeSpotlightCoverage(coverage, elasticHostsByCompany, companyNames);
+      }
+    }
+  } catch (err) {
+    console.error("[coverage] could not merge CrowdStrike managed-asset coverage:", err instanceof Error ? err.message : err);
+  }
+
+  return coverage;
 }
 
 function copySettings(settings: Settings): Settings {
