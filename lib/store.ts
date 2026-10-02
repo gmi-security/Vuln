@@ -5350,6 +5350,23 @@ export async function importFromAutomate(): Promise<AutomateImportResult | { err
     };
   }
 
+  // TEMPORARY: the first live sync matched "Openworks" (a real, different
+  // Vuln company) but not Atlas -- exact-name matching is working as
+  // designed, something just doesn't match character-for-character. Log the
+  // precise strings on both sides for anything "atlas"-ish so the mismatch
+  // (whitespace, smart punctuation, abbreviation, etc.) is visible instead
+  // of guessed at. Remove once explained.
+  for (const c of s.companies.values()) {
+    if (c.name.toLowerCase().includes("atlas")) {
+      console.error(`[automate-debug] vuln company: ${JSON.stringify(c.name)} (id=${c.id})`);
+    }
+  }
+  for (const client of clients) {
+    if (client.name.toLowerCase().includes("atlas")) {
+      console.error(`[automate-debug] automate client: ${JSON.stringify(client.name)} (id=${client.id})`);
+    }
+  }
+
   let companiesMatched = 0;
   let skipped = 0;
   let assetsUpserted = 0;
