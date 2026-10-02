@@ -421,6 +421,44 @@ async function pullDevices(
   return out;
 }
 
+// TEMPORARY schema-discovery helper: Tidal's portal has a live, connected
+// ConnectWise Automate integration per client company (visible under SD
+// Devices -> AUTOMATE) that DEVICE_SOURCES above never queries -- this
+// samples a couple of raw records so normAutomate() can be written against
+// real field names instead of guessed ones. Remove once that's done.
+export async function debugAutomateSample(
+  companyNameQuery: string,
+): Promise<{ company: string; keys: string[]; sample: unknown[] }> {
+  const config = tidalConfig();
+  if (!config) throw new Error("Tidal is not configured.");
+  const jar = await tidalLogin(config);
+  const companies = await listCompanies(config, jar);
+  const company = companies.find((c) =>
+    c.name.toLowerCase().includes(companyNameQuery.toLowerCase()),
+  );
+  if (!company) {
+    throw new Error(
+      `No Tidal company matching "${companyNameQuery}" (${companies.length} companies visible).`,
+    );
+  }
+  await switchCompany(config, jar, company.id);
+  const res = await fetch(`${config.url}/api/v1/integrations/automate/devices?per_page=5`, {
+    headers: jarHeaders(config, jar),
+    cache: "no-store",
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`Automate devices ${res.status}: ${text.slice(0, 500)}`);
+  }
+  const data: any = JSON.parse(text);
+  const rows: any[] = Array.isArray(data) ? data : (data?.data ?? []);
+  return {
+    company: company.name,
+    keys: rows[0] ? Object.keys(rows[0]) : [],
+    sample: rows.slice(0, 2),
+  };
+}
+
 // Progress updates emitted during a sync so a long run can drive a UI.
 export type TidalProgress = {
   phase?: string;
