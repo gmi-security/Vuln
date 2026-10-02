@@ -5368,24 +5368,6 @@ export async function importFromAutomate(): Promise<AutomateImportResult | { err
     };
   }
 
-  // TEMPORARY: the first live sync matched "Openworks" (a real, different
-  // Vuln company) but not Atlas even though exact-name matching was working
-  // as designed -- something didn't match character-for-character (likely
-  // whitespace or smart punctuation). Log the precise strings on both sides
-  // for anything "atlas"-ish, so a mismatch is visible instead of guessed
-  // at, and auto-create (below) doesn't silently mint a duplicate Atlas
-  // company. Remove once a few syncs confirm this is settled.
-  for (const c of s.companies.values()) {
-    if (c.name.toLowerCase().includes("atlas")) {
-      console.error(`[automate-debug] vuln company: ${JSON.stringify(c.name)} (id=${c.id})`);
-    }
-  }
-  for (const client of clients) {
-    if (client.name.toLowerCase().includes("atlas")) {
-      console.error(`[automate-debug] automate client: ${JSON.stringify(client.name)} (id=${client.id})`);
-    }
-  }
-
   let companiesMatched = 0;
   let companiesCreated = 0;
   const createdCompanies: string[] = [];
@@ -5443,85 +5425,6 @@ export async function importFromAutomate(): Promise<AutomateImportResult | { err
 
   await flushNow();
   return { companiesMatched, companiesCreated, createdCompanies, errors, assetsUpserted, findingsRescored, autoScan };
-}
-
-// TEMPORARY one-shot fix: Vuln's Atlas company (CO-147284) was created as
-// "Atlas Healthcare" -- missing "Partners" -- while both Automate and Tidal
-// call it "Atlas Healthcare Partners". That's a genuine name difference, not
-// a formatting artifact (normalizeCompanyName correctly did NOT match it),
-// so the Automate auto-create path may have minted a second, duplicate
-// company for it. This is idempotent and safe to call more than once:
-// find any OTHER company whose name matches "Atlas Healthcare Partners"
-// (post-normalization), merge its assets into CO-147284 through the same
-// upsertAsset dedup path a normal sync uses (not a blind copy -- an asset
-// that already exists under CO-147284 with the same identifier gets merged,
-// not duplicated), delete the now-empty duplicate, then rename CO-147284 to
-// the canonical name so every future sync (Automate, and still Tidal) just
-// matches it directly. Remove once run.
-export type AtlasAutomateFixResult = {
-  duplicateFound: string | null;
-  assetsMerged: number;
-  renamed: boolean;
-};
-
-export async function fixAtlasAutomateCompany(): Promise<AtlasAutomateFixResult | { error: string }> {
-  const s = store();
-  const CANONICAL_ID = "CO-147284";
-  const CANONICAL_NAME = "Atlas Healthcare Partners";
-  const canonical = s.companies.get(CANONICAL_ID);
-  if (!canonical) return { error: `${CANONICAL_ID} not found.` };
-
-  const dupe = Array.from(s.companies.values()).find(
-    (c) => c.id !== canonical.id && normalizeCompanyName(c.name) === normalizeCompanyName(CANONICAL_NAME),
-  );
-
-  let assetsMerged = 0;
-  let duplicateFound: string | null = null;
-  if (dupe) {
-    duplicateFound = dupe.id;
-    const moving = Array.from(s.assets.values()).filter((a) => a.companyId === dupe.id);
-    for (const a of moving) {
-      upsertAsset(s, {
-        identifier: a.identifier,
-        hostname: a.hostname,
-        ipAddresses: a.ipAddresses,
-        companyId: canonical.id,
-        companyName: canonical.name,
-        exposure: a.exposure,
-        criticality: a.criticality,
-        os: a.os,
-        owner: a.owner,
-        tags: a.tags,
-        source: a.source,
-        externalId: a.externalId,
-      });
-      s.assets.delete(a.id);
-      assetsMerged += 1;
-    }
-    for (const f of s.findings.values()) {
-      if (f.companyId === dupe.id) {
-        f.companyId = canonical.id;
-        f.companyName = canonical.name;
-      }
-    }
-    markDirty();
-    const del = deleteCompany(dupe.id);
-    if ("error" in del) {
-      return {
-        error: `Merged ${assetsMerged} assets but could not delete duplicate ${dupe.id}: ${del.error}`,
-      };
-    }
-  }
-
-  let renamed = false;
-  if (canonical.name !== CANONICAL_NAME) {
-    const updated = updateCompany(canonical.id, { name: CANONICAL_NAME });
-    if ("error" in updated) return { error: `Could not rename ${canonical.id}: ${updated.error}` };
-    renamed = true;
-  }
-
-  await flushNow();
-  return { duplicateFound, assetsMerged, renamed };
 }
 
 // --- Background Tidal sync with pollable progress ---------------------------
