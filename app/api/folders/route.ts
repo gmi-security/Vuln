@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createFolder, ensureHydrated, listFolders } from "@/lib/store";
+import { stringFieldError } from "@/lib/validate";
 
 export const dynamic = "force-dynamic";
 
@@ -21,6 +22,8 @@ export async function POST(request: Request) {
   if (!body.companyId) {
     return NextResponse.json({ error: "companyId is required." }, { status: 400 });
   }
+  const fieldError = stringFieldError(body, ["companyId", "name"]);
+  if (fieldError) return NextResponse.json({ error: fieldError }, { status: 400 });
   const result = createFolder(body.companyId, body.name ?? "");
   if ("error" in result) {
     return NextResponse.json({ error: result.error }, { status: 400 });

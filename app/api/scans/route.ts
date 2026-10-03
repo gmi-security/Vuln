@@ -3,6 +3,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { ensureHydrated, listScans, startScan } from "@/lib/store";
 import type { ConnectorId } from "@/lib/types";
+import { stringFieldError } from "@/lib/validate";
 
 export const dynamic = "force-dynamic";
 
@@ -34,6 +35,11 @@ export async function POST(request: Request) {
   const validConnectors: ConnectorId[] = ["nessus", "vulners", "crowdstrike", "defender", "qualys", "spiderfoot", "artemis", "burp", "nmap", "zap"];
   if (!body.connector || !validConnectors.includes(body.connector)) {
     return NextResponse.json({ error: "Unknown connector." }, { status: 400 });
+  }
+  const fieldError = stringFieldError(body, ["name", "profile", "companyId", "folderId", "folderName"]);
+  if (fieldError) return NextResponse.json({ error: fieldError }, { status: 400 });
+  if (Array.isArray(body.targets) && body.targets.some((t) => typeof t !== "string")) {
+    return NextResponse.json({ error: '"targets" array elements must be strings.' }, { status: 400 });
   }
 
   const targets = (

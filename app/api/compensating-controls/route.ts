@@ -3,6 +3,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { createCompensatingControl, ensureHydrated, listCompensatingControls } from "@/lib/store";
 import type { CompensatingControlStatus } from "@/lib/types";
+import { stringFieldError } from "@/lib/validate";
 
 export const dynamic = "force-dynamic";
 
@@ -34,6 +35,10 @@ export async function POST(request: Request) {
   if (!body.companyId) {
     return NextResponse.json({ error: "companyId is required." }, { status: 400 });
   }
+  const fieldError = stringFieldError(body, [
+    "companyId", "title", "description", "cveMatch", "assetMatch", "evidence", "reviewBy",
+  ]);
+  if (fieldError) return NextResponse.json({ error: fieldError }, { status: 400 });
   const session = await getServerSession(authOptions);
   const createdBy = session?.user?.email ?? session?.user?.name ?? "unknown";
 

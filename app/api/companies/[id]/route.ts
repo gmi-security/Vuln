@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { deleteCompany, ensureHydrated, getCompany, updateCompany } from "@/lib/store";
+import { stringFieldError } from "@/lib/validate";
 
 export const dynamic = "force-dynamic";
 
@@ -33,6 +34,8 @@ export async function PATCH(
   } catch {
     return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
   }
+  const fieldError = stringFieldError(body, ["name", "industry", "contactName", "contactEmail"]);
+  if (fieldError) return NextResponse.json({ error: fieldError }, { status: 400 });
   const result = updateCompany(id, body);
   if ("error" in result) {
     const status = result.error === "Company not found." ? 404 : 400;

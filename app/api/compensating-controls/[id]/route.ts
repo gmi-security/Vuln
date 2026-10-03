@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { deleteCompensatingControl, ensureHydrated, updateCompensatingControl } from "@/lib/store";
 import type { CompensatingControlStatus } from "@/lib/types";
+import { stringFieldError } from "@/lib/validate";
 
 export const dynamic = "force-dynamic";
 
@@ -25,6 +26,10 @@ export async function PATCH(
   } catch {
     return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
   }
+  const fieldError = stringFieldError(body, [
+    "title", "description", "cveMatch", "assetMatch", "evidence", "reviewBy",
+  ]);
+  if (fieldError) return NextResponse.json({ error: fieldError }, { status: 400 });
   const result = await updateCompensatingControl(id, {
     ...(body.title !== undefined ? { title: body.title } : {}),
     ...(body.description !== undefined ? { description: body.description } : {}),

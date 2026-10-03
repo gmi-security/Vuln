@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createCompany, ensureHydrated, listCompanies } from "@/lib/store";
 import { elasticVulnEnabled } from "@/lib/elastic-vuln-server";
 import { getRiskSummaryByCompany, riskScoringDatabase } from "@/lib/risk-scoring-store";
+import { stringFieldError } from "@/lib/validate";
 
 export const dynamic = "force-dynamic";
 
@@ -40,6 +41,8 @@ export async function POST(request: Request) {
   } catch {
     return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
   }
+  const fieldError = stringFieldError(body, ["name", "industry", "contactName", "contactEmail"]);
+  if (fieldError) return NextResponse.json({ error: fieldError }, { status: 400 });
   const result = createCompany({
     name: body.name ?? "",
     industry: body.industry,
