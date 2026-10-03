@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/auth";
 import { falconConfigs, type FalconTenant } from "@/lib/crowdstrike";
 
 export const dynamic = "force-dynamic";
@@ -8,8 +10,13 @@ export const dynamic = "force-dynamic";
 // with our production secret(s). Cache the result briefly so an anonymous
 // caller hitting this repeatedly can't hammer Falcon's token endpoint /
 // trip its own abuse detection on our credentials.
+//
+// The cache holds only the raw per-tenant probe results, never a
+// request-specific response body -- the public/authenticated split below
+// is computed fresh every request so an anonymous caller can never be
+// served a cached authenticated response.
 const CACHE_MS = 60_000;
-let cached: { body: unknown; status: number; at: number } | null = null;
+let cached: { tenants: Awaited<ReturnType<typeof probeTenant>>[] | null; at: number } | null = null;
 
 async function probeTenant(config: FalconTenant) {
   const label = config.customerName ?? config.label;
@@ -44,35 +51,52 @@ async function probeTenant(config: FalconTenant) {
 }
 
 export async function GET() {
+  // Per-tenant customerName/label (the MSP's real client names, from
+  // FALCON_CUSTOMER_N) and raw vendor error text are only for a signed-in
+  // caller -- an anonymous request gets the same aggregate-only shape every
+  // other connector health route (nessus/spiderfoot/artemis/burp/nmap/zap)
+  // already uses.
+  const session = await getServerSession(authOptions);
+  const authed = Boolean(session?.user);
+
+  let tenants: Awaited<ReturnType<typeof probeTenant>>[] | null;
   if (cached && Date.now() - cached.at < CACHE_MS) {
-    return NextResponse.json(cached.body, { status: cached.status });
+    tenants = cached.tenants;
+  } else {
+    const configs = falconConfigs();
+    tenants = configs.length ? await Promise.all(configs.map(probeTenant)) : null;
+    cached = { tenants, at: Date.now() };
   }
 
-  const configs = falconConfigs();
-  if (!configs.length) {
+  if (!tenants) {
     const body = {
       configured: false,
       reachable: false,
       status: "Not Configured",
       message: "Set FALCON_CLIENT_ID, FALCON_CLIENT_SECRET, and FALCON_CLOUD.",
     };
-    cached = { body, status: 503, at: Date.now() };
     return NextResponse.json(body, { status: 503 });
   }
 
-  const tenants = await Promise.all(configs.map(probeTenant));
   const allReachable = tenants.every((t) => t.reachable);
-  const body = {
-    configured: true,
-    reachable: allReachable,
-    status: allReachable ? "Connected" : "Degraded",
-    message: allReachable
-      ? tenants.length > 1
-        ? `All ${tenants.length} CrowdStrike tenants reachable.`
-        : tenants[0].message
-      : `${tenants.filter((t) => !t.reachable).length} of ${tenants.length} CrowdStrike tenant(s) unreachable.`,
-    tenants: tenants.length > 1 ? tenants : undefined,
-  };
-  cached = { body, status: allReachable ? 200 : 503, at: Date.now() };
+  const unreachableCount = tenants.filter((t) => !t.reachable).length;
+  const body = authed
+    ? {
+        configured: true,
+        reachable: allReachable,
+        status: allReachable ? "Connected" : "Degraded",
+        message: allReachable
+          ? tenants.length > 1
+            ? `All ${tenants.length} CrowdStrike tenants reachable.`
+            : tenants[0].message
+          : `${unreachableCount} of ${tenants.length} CrowdStrike tenant(s) unreachable.`,
+        tenants: tenants.length > 1 ? tenants : undefined,
+      }
+    : {
+        configured: true,
+        reachable: allReachable,
+        status: allReachable ? "Connected" : "Degraded",
+        message: allReachable ? "CrowdStrike reachable." : `${unreachableCount} of ${tenants.length} CrowdStrike tenant(s) unreachable.`,
+      };
   return NextResponse.json(body, { status: allReachable ? 200 : 503 });
 }
