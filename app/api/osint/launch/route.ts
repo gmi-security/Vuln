@@ -12,6 +12,7 @@ export async function POST() {
     const result = await launchOsintScans();
     return NextResponse.json({ result });
   } catch (err) {
+    console.error("[osint/launch]", err);
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "OSINT launch failed." },
       { status: 502 },

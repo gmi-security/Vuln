@@ -10,6 +10,7 @@ export async function POST() {
     const result = await pivotOsintToNessus();
     return NextResponse.json({ result });
   } catch (err) {
+    console.error("[attack-surface/pivot]", err);
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Attack-surface pivot failed." },
       { status: 502 },

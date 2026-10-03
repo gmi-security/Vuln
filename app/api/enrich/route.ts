@@ -13,6 +13,7 @@ export async function POST() {
     const result = await enrichThreatIntel();
     return NextResponse.json({ result });
   } catch (err) {
+    console.error("[enrich]", err);
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Enrichment failed." },
       { status: 502 },

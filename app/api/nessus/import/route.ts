@@ -13,6 +13,7 @@ export async function POST() {
     }
     return NextResponse.json({ result });
   } catch (err) {
+    console.error("[nessus/import]", err);
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Nessus import failed." },
       { status: 502 },

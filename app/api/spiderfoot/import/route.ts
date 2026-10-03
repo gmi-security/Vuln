@@ -14,6 +14,7 @@ export async function POST() {
     }
     return NextResponse.json({ result });
   } catch (err) {
+    console.error("[spiderfoot/import]", err);
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "SpiderFoot import failed." },
       { status: 502 },

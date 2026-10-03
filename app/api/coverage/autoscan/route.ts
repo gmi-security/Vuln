@@ -10,6 +10,7 @@ export async function POST() {
     const result = await autoScanGaps();
     return NextResponse.json({ result });
   } catch (err) {
+    console.error("[coverage/autoscan]", err);
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Auto-scan failed." },
       { status: 502 },
