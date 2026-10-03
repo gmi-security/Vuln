@@ -215,7 +215,11 @@ function normalizeFalconHost(raw: any): FalconAsset {
     .filter(Boolean)
     .map((x: unknown) => String(x));
   return {
-    externalId: String(raw?.device_id ?? raw?.cid ?? ""),
+    // device_id only -- cid is the tenant's Customer ID, the SAME value for
+    // every device in the tenant, not a per-device identifier. Falling back
+    // to it would make every record missing device_id collide on externalId
+    // and silently overwrite each other via upsertAsset's dedup match.
+    externalId: String(raw?.device_id ?? ""),
     hostname: String(raw?.hostname ?? ""),
     ipAddresses: ips,
     os,
@@ -533,9 +537,13 @@ export async function falconListAssets(config: FalconConfig): Promise<FalconAsse
       );
     }
     const j: any = await r.json();
+    // A device with a sensor but no resolved hostname yet is still a real,
+    // Falcon-covered endpoint -- dropping it outright (rather than keeping
+    // it keyed by externalId, same as importEndpoints()'s own fallback)
+    // silently undercounts real sensor coverage.
     return (j?.resources ?? [])
       .map(normalizeFalconHost)
-      .filter((a: FalconAsset) => a.hostname);
+      .filter((a: FalconAsset) => a.hostname || a.externalId);
   };
 
   // Fetch first page to learn the total, then fire remaining pages, bounded.

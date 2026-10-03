@@ -124,7 +124,12 @@ function normalizeComputer(raw: any): AutomateAsset {
   const owner = String(raw?.LastUserName ?? loggedIn ?? "").replace(/^[^\\]*\\/, "");
   const ip = String(raw?.LocalIPAddress ?? "").trim();
   return {
-    externalId: `automate:${raw?.Id ?? ""}`,
+    // Only emit a prefixed id when Id is actually present -- `automate:${""}`
+    // would still be a non-empty, truthy externalId, so every record missing
+    // Id would collide on it and silently overwrite each other via
+    // upsertAsset's dedup match (same bug class as Tidal's/CrowdStrike's
+    // equivalent fallbacks, just fixed).
+    externalId: raw?.Id != null ? `automate:${raw.Id}` : "",
     hostname: String(raw?.ComputerName ?? "").trim(),
     ipAddresses: ip ? [ip] : [],
     os: [raw?.OperatingSystemName, raw?.OperatingSystemVersion].filter(Boolean).join(" ").trim(),

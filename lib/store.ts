@@ -4070,6 +4070,7 @@ export type TidalImportResult = {
   companiesCreated: number;
   assetsUpserted: number;
   findingsRescored: number;
+  errors?: string[];
   autoScan?: AutoScanResult;
 };
 
@@ -5316,6 +5317,7 @@ export async function importFromArtemis(): Promise<
 // authoritative environment. Assets come from a Tidal CSV export or the API.
 export async function importTidalInventory(
   assets: TidalAsset[],
+  errors?: string[],
 ): Promise<TidalImportResult> {
   const s = store();
 
@@ -5361,7 +5363,7 @@ export async function importTidalInventory(
   }
 
   await flushNow();
-  return { companiesCreated, assetsUpserted, findingsRescored, autoScan };
+  return { companiesCreated, assetsUpserted, findingsRescored, errors, autoScan };
 }
 
 // Live sync: sign in to Tidal with email + password and pull the inventory
@@ -5375,15 +5377,15 @@ export async function importFromTidal(
         "Tidal is not configured. Set TIDAL_EMAIL and TIDAL_PASSWORD to sign in and pull the live inventory (or upload a CSV export).",
     };
   }
-  let assets;
+  let listResult;
   try {
-    assets = await tidalListAssets(onProgress);
+    listResult = await tidalListAssets(onProgress);
   } catch (err) {
     return {
       error: err instanceof Error ? err.message : "Failed to reach the Tidal API.",
     };
   }
-  return importTidalInventory(assets);
+  return importTidalInventory(listResult.assets, listResult.errors);
 }
 
 export type AutomateImportResult = {

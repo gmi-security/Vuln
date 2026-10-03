@@ -205,12 +205,21 @@ function firstPathSegment(path: string): string {
   return path.split(/[\\/]+/).map((x) => x.trim()).filter(Boolean)[0] ?? "";
 }
 
+// Prefixed source id, or "" (not a bare "prefix:") when every candidate
+// field is empty -- a non-empty-but-fake id would still pass upsertAsset's
+// `input.externalId &&` dedup check and collide every device missing the
+// same fields onto one asset record.
+function prefixedId(prefix: string, ...candidates: string[]): string {
+  const id = candidates.find(Boolean);
+  return id ? `${prefix}:${id}` : "";
+}
+
 // Intune (Microsoft Endpoint Manager): managed endpoints, no IP (agent-based).
 function normIntune(raw: any, ctx: NormCtx): TidalAsset {
   const email = s(raw?.user_principal_name) || s(raw?.email_address);
   const domain = email.includes("@") ? email.split("@").pop() ?? "" : "";
   return {
-    externalId: `intune:${s(raw?.device_id) || s(raw?.serial_number) || s(raw?.azure_ad_device_id)}`,
+    externalId: prefixedId("intune", s(raw?.device_id), s(raw?.serial_number), s(raw?.azure_ad_device_id)),
     hostname: s(raw?.device_name) || s(raw?.managed_device_name),
     ipAddresses: [],
     os: joinNonEmpty([raw?.operating_system, raw?.os_version]),
@@ -235,7 +244,7 @@ function normAuvik(raw: any, ctx: NormCtx): TidalAsset {
   const tenantId = s(raw?.tenant_id);
   const site = ctx.auvikTenants.get(tenantId) || s(raw?.tenant_domain_prefix);
   return {
-    externalId: `auvik:${s(raw?.device_id) || s(raw?.serial_number)}`,
+    externalId: prefixedId("auvik", s(raw?.device_id), s(raw?.serial_number)),
     hostname: s(raw?.device_name) || ips[0] || "",
     ipAddresses: ips,
     os: joinNonEmpty([raw?.make_model, raw?.firmware_version]) || s(raw?.device_type),
@@ -259,7 +268,7 @@ function normSoti(raw: any, _ctx: NormCtx): TidalAsset {
   const path = s(raw?.identity?.path);
   const site = firstPathSegment(path);
   return {
-    externalId: `soti:${s(raw?.identity?.device_id) || s(raw?.hardware?.serial_number)}`,
+    externalId: prefixedId("soti", s(raw?.identity?.device_id), s(raw?.hardware?.serial_number)),
     hostname: s(raw?.identity?.device_name) || ip,
     ipAddresses: ip ? [ip] : [],
     os: joinNonEmpty([raw?.identity?.platform, raw?.os?.version]),
@@ -404,19 +413,30 @@ async function pullDevices(
     for (const r of rows) out.push(source.norm(r, ctx));
 
     // Two pagination shapes: Intune is cursor-based (has_next + links.next);
-    // Auvik/SOTI are page-based (current_page/last_page, no has_next). Follow
-    // links.next unless we're explicitly at the end of either scheme.
+    // Auvik/SOTI are page-based (current_page/last_page, no has_next).
     const pg = data?.pagination;
-    const next = pg?.links?.next;
-    let more = false;
-    if (next) {
-      if (pg.has_next === true) more = true; // cursor
-      else if (pg.has_next === undefined) {
-        // page-based: continue while there are pages left
-        more = pg.last_page == null || Number(pg.current_page) < Number(pg.last_page);
+    let nextUrl: string | null = null;
+    if (pg?.has_next === true && pg?.links?.next) {
+      // Cursor-based: follow the server-supplied link.
+      nextUrl = rehost(config, String(pg.links.next));
+    } else if (pg?.has_next === undefined && pg?.current_page != null) {
+      // Page-based: classic page-number pagination may not send a links.next
+      // URL at all, so continuation can't be gated on one being present --
+      // that silently truncated to page 1 whenever it was absent. Follow
+      // links.next if given, otherwise build the next page ourselves.
+      const current = Number(pg.current_page);
+      const last = pg.last_page == null ? null : Number(pg.last_page);
+      if (last == null || current < last) {
+        if (pg.links?.next) {
+          nextUrl = rehost(config, String(pg.links.next));
+        } else {
+          const pageUrl: URL = new URL(url);
+          pageUrl.searchParams.set("page", String(current + 1));
+          nextUrl = pageUrl.toString();
+        }
       }
     }
-    url = more ? rehost(config, String(next)) : null;
+    url = nextUrl;
   }
   return out;
 }
@@ -430,14 +450,21 @@ export type TidalProgress = {
   assetsFound?: number;
 };
 
+export type TidalListResult = { assets: TidalAsset[]; errors: string[] };
+
 // Log in, enumerate every client company, and pull each one's devices in its
 // own session context. Every asset is attributed to the company it was pulled
 // under — the authoritative customer boundary, so there is no cross-customer
 // bleed. Keeps only records with something scannable (a hostname or an IP).
-// onProgress (optional) is invoked as each company is processed.
+// onProgress (optional) is invoked as each company is processed. A
+// per-company failure is logged immediately (not just collected) and
+// returned alongside the assets -- previously it was only surfaced when
+// EVERY company failed, so one company silently and permanently losing
+// sync (e.g. revoked portal access) looked identical to a clean full
+// success as long as the other ~48 companies kept working.
 export async function tidalListAssets(
   onProgress?: (p: TidalProgress) => void,
-): Promise<TidalAsset[]> {
+): Promise<TidalListResult> {
   const config = tidalConfig();
   if (!config) throw new Error("Tidal is not configured. Set TIDAL_EMAIL and TIDAL_PASSWORD.");
 
@@ -469,20 +496,25 @@ export async function tidalListAssets(
         try {
           assets.push(...(await pullDevices(config, jar, source, ctx)));
         } catch (err) {
-          errors.push(`${company.name}: ${err instanceof Error ? err.message : String(err)}`);
+          const msg = `${company.name}: ${err instanceof Error ? err.message : String(err)}`;
+          errors.push(msg);
+          console.error("[tidal]", msg);
         }
       }
     } catch (err) {
-      errors.push(`${company.name}: ${err instanceof Error ? err.message : String(err)}`);
+      const msg = `${company.name}: ${err instanceof Error ? err.message : String(err)}`;
+      errors.push(msg);
+      console.error("[tidal]", msg);
     }
     done += 1;
     onProgress?.({ companiesDone: done, assetsFound: assets.length });
   }
 
   const scannable = assets.filter((a) => a.hostname || a.ipAddresses.length);
-  // Only surface an error if we got nothing at all and something went wrong.
+  // Only throw (fail the whole sync) if we got nothing at all; a partial
+  // failure still returns its errors for the caller to surface.
   if (scannable.length === 0 && errors.length) throw new Error(errors[0]);
-  return scannable;
+  return { assets: scannable, errors };
 }
 
 // --- CSV import (offline fallback) -----------------------------------------
