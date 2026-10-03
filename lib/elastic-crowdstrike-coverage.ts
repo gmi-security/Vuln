@@ -44,9 +44,21 @@ async function getElasticConnection(): Promise<ElasticConnection | null> {
   // The table is created by lib/elastic-dashboard-store.ts's own
   // dashboardDatabase() the first time the Reporting dashboard is used; a
   // missing table here just means Elastic was never connected, same as a
-  // missing row.
-  const result = await db.query("SELECT secret FROM elastic_dashboard_connection WHERE id = 1").catch(() => null);
-  if (!result?.rows.length) return null;
+  // missing row -- but only that specific case should read as "not
+  // configured". A blanket catch here would also swallow a real outage
+  // (bad credential, dropped connection, pool exhaustion) identically,
+  // which this function's callers can't tell apart from "Elastic was never
+  // connected" -- a false negative in exactly the coverage gap this file
+  // exists to prevent. Same pattern as spotlight-record-store.ts's
+  // getLatestSpotlightRunState().
+  let result;
+  try {
+    result = await db.query("SELECT secret FROM elastic_dashboard_connection WHERE id = 1");
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "42P01") return null;
+    throw error;
+  }
+  if (!result.rows.length) return null;
   return openConnection(result.rows[0].secret);
 }
 

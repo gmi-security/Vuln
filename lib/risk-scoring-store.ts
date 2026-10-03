@@ -294,9 +294,19 @@ export async function listTopRisk(db: Awaited<ReturnType<typeof riskScoringDatab
   if (filter.internetExposedOnly) clauses.push("internet_exposed=true");
   if (filter.minScore != null) push("risk_score>=$$", filter.minScore);
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
-  const limit = Math.min(filter.limit ?? 200, 1000), offset = filter.offset ?? 0;
+  // Validate as finite non-negative integers before use -- an unvalidated
+  // NaN (e.g. ?limit=abc) previously got string-interpolated straight into
+  // the SQL text as the literal "NaN", and even a valid number was
+  // interpolated rather than bound like every other value in this query.
+  const rawLimit = Number(filter.limit);
+  const rawOffset = Number(filter.offset);
+  const limit = Number.isFinite(rawLimit) && rawLimit >= 0 ? Math.min(Math.floor(rawLimit), 1000) : 200;
+  const offset = Number.isFinite(rawOffset) && rawOffset >= 0 ? Math.floor(rawOffset) : 0;
   const [rows, count] = await Promise.all([
-    db.query(`SELECT * FROM finding_risk ${where} ORDER BY risk_score DESC LIMIT ${limit} OFFSET ${offset}`, params),
+    db.query(
+      `SELECT * FROM finding_risk ${where} ORDER BY risk_score DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      [...params, limit, offset],
+    ),
     db.query(`SELECT count(*)::int AS n FROM finding_risk ${where}`, params),
   ]);
   return { rows: rows.rows.map(fromRow), total: count.rows[0].n };
@@ -401,9 +411,11 @@ export async function clearSwathOverride(db: Awaited<ReturnType<typeof riskScori
 }
 
 export async function setVerificationStatus(db: Awaited<ReturnType<typeof riskScoringDatabase>>, findingRiskId: string, status: string, actor: string): Promise<void> {
+  const existing = (await db.query("SELECT verification_status FROM finding_risk WHERE id=$1", [findingRiskId])).rows[0] as { verification_status: string | null } | undefined;
+  if (!existing) throw new Error("Finding not found");
   const verifiedAt = status === "verified_remediated" ? "now()" : "NULL";
   await db.query(`UPDATE finding_risk SET verification_status=$2, verified_at=${verifiedAt} WHERE id=$1`, [findingRiskId, status]);
-  await recordRiskHistory(db, findingRiskId, "verification_status", null, status, null, actor);
+  await recordRiskHistory(db, findingRiskId, "verification_status", existing.verification_status, status, null, actor);
 }
 
 export type CveEnrichmentRow = {

@@ -41,6 +41,9 @@ function fakeDb({ existingFindingRow = undefined } = {}) {
     if (sql.includes("SELECT effective_swath FROM finding_risk WHERE id=$1")) {
       return { rows: existingFindingRow ? [{ effective_swath: existingFindingRow.effective_swath }] : [] };
     }
+    if (sql.includes("SELECT verification_status FROM finding_risk WHERE id=$1")) {
+      return { rows: existingFindingRow ? [{ verification_status: existingFindingRow.verification_status ?? null }] : [] };
+    }
     return { rows: [], rowCount: 1 };
   };
   return { calls, query, connect: async () => ({ query, release: () => {} }) };
@@ -113,7 +116,7 @@ test("overrideSwath on an unknown finding throws instead of silently no-op'ing",
 });
 
 test("setVerificationStatus records the transition and sets verified_at only for verified_remediated", async () => {
-  const db = fakeDb();
+  const db = fakeDb({ existingFindingRow: { verification_status: null } });
   const store = await loadStore(db);
   await store.setVerificationStatus(db, "f1", "pending_verification", "system");
   const pending = db.calls.find((c) => c.sql.includes("UPDATE finding_risk SET verification_status"));
@@ -122,6 +125,20 @@ test("setVerificationStatus records the transition and sets verified_at only for
   await store.setVerificationStatus(db, "f1", "verified_remediated", "system");
   const verified = db.calls.find((c) => c.sql.includes("UPDATE finding_risk SET verification_status"));
   assert.match(verified.sql, /verified_at=now\(\)/);
+});
+
+test("setVerificationStatus records the real prior status in risk_history instead of a hardcoded null", async () => {
+  const db = fakeDb({ existingFindingRow: { verification_status: "pending_verification" } });
+  const store = await loadStore(db);
+  await store.setVerificationStatus(db, "f1", "verified_remediated", "chuck");
+  const history = db.calls.find((c) => c.sql.includes("INSERT INTO risk_history"));
+  assert.deepEqual(history.params, [history.params[0], "f1", "verification_status", "pending_verification", "verified_remediated", null, "chuck"]);
+});
+
+test("setVerificationStatus on an unknown finding throws instead of silently no-op'ing", async () => {
+  const db = fakeDb({ existingFindingRow: undefined });
+  const store = await loadStore(db);
+  await assert.rejects(() => store.setVerificationStatus(db, "missing", "verified_remediated", "chuck"), /not found/i);
 });
 
 // upsertFindingRiskBatch -- the bulk sibling used by a full tenant recompute
