@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useCompanyFilter } from "@/lib/useCompanyFilter";
@@ -48,15 +48,23 @@ export default function VulnScansPage({
   const [showNew, setShowNew] = useState(searchParams.get("new") === "1");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  // Monotonic request id -- a slow/old request (company filter switched
+  // mid-flight, or a 3s poll tick straddling a filter change) must never
+  // overwrite a newer one. Without this, a late "All companies" response
+  // landing after a fast "Acme Corp" response would silently replace the
+  // correct scoped rows with every customer's scans.
+  const loadSeq = useRef(0);
 
   // Scoped server-side (not fetched-then-filtered client-side) -- this used
   // to request every company's scans on every 3s poll regardless of the
   // dropdown, then throw most of the response away in the filter below.
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     try {
       const qs = companyFilter !== "All" ? `?companyId=${encodeURIComponent(companyFilter)}` : "";
       const res = await fetch(`/api/scans${qs}`, { cache: "no-store" });
       const json = await res.json();
+      if (seq !== loadSeq.current) return; // superseded by a newer request
       setScans(json.scans ?? []);
     } catch {
       // keep last snapshot

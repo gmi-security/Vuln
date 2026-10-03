@@ -215,6 +215,7 @@ export default function VulnCompanyDetailPage({
   }
 
   async function sendReportEmail() {
+    if (emailPhase === "sending") return; // a fast double-click must not send the email twice
     setEmailPhase("sending");
     setEmailResult(null);
     try {

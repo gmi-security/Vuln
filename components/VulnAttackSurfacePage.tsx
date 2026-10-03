@@ -73,7 +73,7 @@ const sevDot: Record<string, string> = {
 export default function VulnAttackSurfacePage() {
   const [data, setData] = useState<SurfaceResult | null>(null);
   const [pivoting, setPivoting] = useState(false);
-  const [pivotMsg, setPivotMsg] = useState<string | null>(null);
+  const [pivotMsg, setPivotMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -97,11 +97,11 @@ export default function VulnAttackSurfacePage() {
       const r = (await res.json()).result;
       setPivotMsg(
         r
-          ? `Queued ${r.scansLaunched} Nessus scan(s) across ${r.companies} client(s) — ${r.assetsQueued} exposed asset(s), ${r.skipped} already covered.`
-          : "Pivot failed.",
+          ? { ok: true, text: `Queued ${r.scansLaunched} Nessus scan(s) across ${r.companies} client(s) — ${r.assetsQueued} exposed asset(s), ${r.skipped} already covered.` }
+          : { ok: false, text: "Pivot failed." },
       );
     } catch {
-      setPivotMsg("Pivot failed.");
+      setPivotMsg({ ok: false, text: "Pivot failed." });
     } finally {
       setPivoting(false);
     }
@@ -133,8 +133,15 @@ export default function VulnAttackSurfacePage() {
       }
     >
       {pivotMsg ? (
-        <div className="rounded-2xl border border-emerald-900/60 bg-emerald-950/40 px-5 py-3 text-sm text-emerald-300">
-          {pivotMsg}
+        <div
+          className={[
+            "rounded-2xl border px-5 py-3 text-sm",
+            pivotMsg.ok
+              ? "border-emerald-900/60 bg-emerald-950/40 text-emerald-300"
+              : "border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.10)] text-[#ff4d57]",
+          ].join(" ")}
+        >
+          {pivotMsg.text}
         </div>
       ) : null}
 

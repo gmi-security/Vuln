@@ -41,6 +41,7 @@ export default function VulnExecReport({ companyId }: { companyId: string }) {
   const [sendResult, setSendResult] = useState<SendResult | null>(null);
 
   async function sendReportEmail() {
+    if (sendPhase === "sending") return; // a fast double-click must not send the email twice
     setSendPhase("sending"); setSendResult(null);
     try {
       const res = await fetch(`/api/report/${companyId}/send`, { method: "POST" });

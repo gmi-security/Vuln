@@ -664,7 +664,7 @@ function IntegrationCard({ card }: { card: CardData }) {
       if (!st.running) {
         finished = true;
         if (st.error) setSyncMsg({ ok: false, text: st.error });
-        else if (st.result) setSyncMsg({ ok: true, text: summarizeSync(st.result) });
+        else if (st.result) setSyncMsg({ ok: syncOk(st.result), text: summarizeSync(st.result) });
         break;
       }
     }
@@ -688,7 +688,7 @@ function IntegrationCard({ card }: { card: CardData }) {
       if (!res.ok || json.error) {
         setSyncMsg({ ok: false, text: json.error ?? `Import failed (HTTP ${res.status})` });
       } else {
-        setSyncMsg({ ok: true, text: summarizeSync(json.result ?? json) });
+        setSyncMsg({ ok: syncOk(json.result ?? json), text: summarizeSync(json.result ?? json) });
       }
     } catch (err) {
       setSyncMsg({
