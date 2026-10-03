@@ -1473,7 +1473,10 @@ function companyCoverage(
   for (const a of s.assets.values()) if (a.companyId === companyId) known.push(a);
   const findingAssets = new Set<string>();
   for (const f of s.findings.values()) {
-    if (f.companyId === companyId) findingAssets.add(f.asset.trim().toLowerCase());
+    // OSINT (SpiderFoot/Artemis) is an untuned recon sweep, not a scanner --
+    // must not count as "this asset is covered" here either, same as
+    // assetCoverage()'s own guard.
+    if (f.companyId === companyId && isRemediationFinding(f)) findingAssets.add(f.asset.trim().toLowerCase());
   }
   let scanned = 0;
   for (const a of known) {
@@ -1774,6 +1777,13 @@ export function mergeCompanies(
     if (f.companyId === fromId) {
       f.companyId = into.id;
       f.companyName = into.name;
+      // Cached realRisk/riskPriority/compensatingControl are scoped to the
+      // OLD company (compensating controls never apply across companies --
+      // see bestCompensatingControl) -- rescore now so they reflect the
+      // target company's controls immediately instead of staying stale
+      // until some unrelated future sync happens to call
+      // rescoreAllFindings().
+      rescoreFinding(s, f);
       findingsMoved += 1;
     }
   }
@@ -7132,6 +7142,9 @@ export function computeMetrics(filter?: { companyId?: string }): QuantifyMetrics
         }
         const findingAssetsByCompany = new Map<string, Set<string>>();
         for (const f of s.findings.values()) {
+          // Same OSINT guard as companyCoverage()/assetCoverage() -- a
+          // SpiderFoot/Artemis-only touch must not count as scan coverage.
+          if (!isRemediationFinding(f)) continue;
           const key = f.asset.trim().toLowerCase();
           const set = findingAssetsByCompany.get(f.companyId);
           if (set) set.add(key);
