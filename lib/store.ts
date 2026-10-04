@@ -5054,7 +5054,7 @@ export async function syncAllConnectors(): Promise<SyncAllEntry[]> {
   // pipeline behind Spotlight specifically, whose own import is
   // deliberately resumable/checkpointed because a full sync can
   // legitimately run for hours.
-  const SYNC_STAGGER_MS = 3 * 60_000;
+  const SYNC_STAGGER_MS = 25 * 60_000;
   const out: SyncAllEntry[] = [];
   let started = 0;
   for (const job of jobs) {
