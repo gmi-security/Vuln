@@ -5024,6 +5024,15 @@ export async function syncAllConnectors(): Promise<SyncAllEntry[]> {
     },
     { connector: "Defender", ready: Boolean(defenderConfig()), run: importFromDefender },
     { connector: "Tidal", ready: Boolean(tidalConfig()), run: importFromTidal },
+    {
+      connector: "ConnectWise Automate",
+      ready: Boolean(automateConfig()),
+      run: async () => {
+        const r = startAutomateSync();
+        if (!r.started) return { error: r.error ?? "Could not start sync." };
+        return { message: "Sync started in background." };
+      },
+    },
     { connector: "Intune", ready: Boolean(intuneConfig()), run: importFromIntune },
     { connector: "SpiderFoot", ready: Boolean(spiderfootConfig()), run: importFromSpiderfoot },
     { connector: "Artemis", ready: Boolean(artemisConfig()), run: importFromArtemis },
