@@ -5042,12 +5042,28 @@ export async function syncAllConnectors(): Promise<SyncAllEntry[]> {
     { connector: "Vulners Bridge", ready: Boolean(vulnersBridgeConfig()), run: importFromVulnersBridge },
   ];
 
+  // Stagger each connector's START, not just rely on the loop's natural
+  // sequencing: CrowdStrike Devices, CrowdStrike Spotlight, and ConnectWise
+  // Automate are each fire-and-forget background jobs (their run() returns
+  // almost instantly once started, to avoid the DO 120s gateway timeout --
+  // see the comment below), so without a deliberate gap the loop would
+  // launch all three in the same instant and they'd run concurrently,
+  // hammering CrowdStrike's and Automate's APIs and this server's own CPU
+  // at once. A fixed delay between starts (rather than waiting for each to
+  // fully finish) avoids that pile-up without blocking the rest of the
+  // pipeline behind Spotlight specifically, whose own import is
+  // deliberately resumable/checkpointed because a full sync can
+  // legitimately run for hours.
+  const SYNC_STAGGER_MS = 3 * 60_000;
   const out: SyncAllEntry[] = [];
+  let started = 0;
   for (const job of jobs) {
     if (!job.ready) {
       out.push({ connector: job.connector, configured: false, ok: false });
       continue;
     }
+    if (started > 0) await new Promise((resolve) => setTimeout(resolve, SYNC_STAGGER_MS));
+    started += 1;
     try {
       const r = await job.run();
       if (r && typeof r === "object" && "error" in r) {
