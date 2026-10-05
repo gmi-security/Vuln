@@ -10,7 +10,7 @@ import {
 import VulnShell from "@/components/VulnShell";
 import RiskGauge from "@/components/RiskGauge";
 import { KennaStatChip, PanelCard, Pill, ghostButtonClass, primaryButtonClass, selectClass } from "@/components/ui";
-import { compositeColor } from "@/lib/format";
+import { compositeColor, coverageColor } from "@/lib/format";
 import { useCompanyFilter } from "@/lib/useCompanyFilter";
 import type { Company, ComplianceResult, CompliancePosture } from "@/lib/types";
 
@@ -27,15 +27,6 @@ const statusBarColor: Record<string, string> = {
   "At Risk": "#f5a623",
   Info: "#52525b",
 };
-
-// Compliance score is "higher is better" -- same inverted scale as coverage.
-function complianceColor(score: number): string {
-  if (score >= 90) return "#10b981";
-  if (score >= 75) return "#4aa3ff";
-  if (score >= 50) return "#f5a623";
-  if (score >= 25) return "#f97316";
-  return "#b30e14";
-}
 
 export default function VulnCompliancePage() {
   const [data, setData] = useState<ComplianceResult | null>(null);
@@ -176,7 +167,7 @@ export default function VulnCompliancePage() {
         <div className="flex flex-col items-center justify-center gap-2 lg:border-r lg:border-zinc-900 lg:pr-6">
           <RiskGauge
             score={agg ? agg.avgScore : 0}
-            color={agg ? complianceColor(agg.avgScore) : "#71717a"}
+            color={agg ? coverageColor(agg.avgScore) : "#71717a"}
             label="Avg compliance"
             sublabel="across all clients"
           />

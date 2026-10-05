@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AlertTriangle, Monitor, RefreshCw, ShieldCheck } from "lucide-react";
+import { Monitor, RefreshCw, ShieldCheck } from "lucide-react";
 import VulnShell from "@/components/VulnShell";
-import { ghostButtonClass, PanelCard, StatCard } from "@/components/ui";
+import RiskGauge from "@/components/RiskGauge";
+import { ghostButtonClass, KennaStatChip, PanelCard } from "@/components/ui";
+import { coverageColor } from "@/lib/format";
 import type { ElasticCoverageView } from "@/lib/elastic-vuln";
 
 export default function VulnElasticPage({ view: initialView }: { view: ElasticCoverageView }) {
@@ -38,11 +40,7 @@ export default function VulnElasticPage({ view: initialView }: { view: ElasticCo
     unavailable: "Results are temporarily unavailable. Try refreshing shortly.",
     live: stale ? "Results are more than 30 minutes old. Showing the last successful query." : "Showing the latest saved query result.",
   };
-  const cards = [
-    { label: "Managed assets", value: results?.managed.toLocaleString("en-US") ?? "—", icon: <ShieldCheck size={24} /> },
-    { label: "Unmanaged assets", value: results?.unmanaged.toLocaleString("en-US") ?? "—", icon: <Monitor size={24} /> },
-    { label: "Asset coverage", value: results?.coverage_pct == null ? "—" : `${results.coverage_pct.toFixed(1)}%`, icon: <AlertTriangle size={24} /> },
-  ];
+  const coveragePct = results?.coverage_pct ?? null;
   return (
     <VulnShell eyebrow="CrowdStrike · Elasticsearch" title="Elastic asset coverage"
       subtitle="Managed and unmanaged assets observed in your CrowdStrike Discover data."
@@ -55,8 +53,29 @@ export default function VulnElasticPage({ view: initialView }: { view: ElasticCo
           ? new Date(view.snapshot.collectedAt).toISOString().replace("T", " ").replace(".000Z", " UTC") : "not yet available"}.</p>
       </div>
       {error && <p role="alert" className="text-sm text-red-300">{error}</p>}
-      <div className="grid gap-4 lg:grid-cols-3">
-        {cards.map((card) => <StatCard key={card.label} {...card} sublabel={sample ? "Sample data" : "Latest saved query"} />)}
+      <div className="flex flex-col items-center gap-6 rounded-[28px] border border-[rgba(179,14,20,0.16)] bg-[linear-gradient(180deg,#0b0b0b,#060606)] p-6 shadow-[0_12px_32px_rgba(10,1,2,0.3)] lg:flex-row lg:items-stretch">
+        <div className="flex flex-col items-center justify-center gap-2 lg:border-r lg:border-zinc-900 lg:pr-6">
+          <RiskGauge
+            score={coveragePct ?? 0}
+            color={coveragePct != null ? coverageColor(coveragePct) : "#71717a"}
+            label="Asset coverage"
+            sublabel={sample ? "sample data" : "managed ÷ total"}
+          />
+        </div>
+        <div className="grid flex-1 grid-cols-2 gap-3">
+          <KennaStatChip
+            icon={<ShieldCheck size={16} />}
+            label="Managed assets"
+            value={results?.managed ?? null}
+            tone="ok"
+          />
+          <KennaStatChip
+            icon={<Monitor size={16} />}
+            label="Unmanaged assets"
+            value={results?.unmanaged ?? null}
+            tone="warning"
+          />
+        </div>
       </div>
       <PanelCard eyebrow="Coverage breakdown" description="Coverage is managed ÷ (managed + unmanaged).">
         {results?.coverage_pct != null ? <>
