@@ -134,6 +134,16 @@ export function compositeColor(score: number): string {
   return "#10b981";
 }
 
+// "Higher is better" percentage (scan coverage, compliance, asset coverage)
+// -- the inverse of compositeColor's "higher is worse" scale.
+export function coverageColor(pct: number): string {
+  if (pct >= 90) return "#10b981";
+  if (pct >= 75) return "#4aa3ff";
+  if (pct >= 50) return "#f5a623";
+  if (pct >= 25) return "#f97316";
+  return "#b30e14";
+}
+
 export function riskColor(score: number): string {
   if (score >= 80) return "#b30e14";
   if (score >= 60) return "#f97316";

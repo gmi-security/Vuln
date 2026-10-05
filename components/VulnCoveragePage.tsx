@@ -18,18 +18,8 @@ import {
   primaryButtonClass,
   selectClass,
 } from "@/components/ui";
-import { exposureClass, riskColor } from "@/lib/format";
+import { coverageColor, exposureClass, riskColor } from "@/lib/format";
 import type { Company } from "@/lib/types";
-
-// Coverage % is "higher is better" -- the inverse of a risk score -- so its
-// color stops run green-at-high instead of red-at-high.
-function coverageColor(pct: number): string {
-  if (pct >= 90) return "#10b981";
-  if (pct >= 75) return "#4aa3ff";
-  if (pct >= 50) return "#f5a623";
-  if (pct >= 25) return "#f97316";
-  return "#b30e14";
-}
 
 type CoverageRow = {
   identifier: string;
