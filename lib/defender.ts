@@ -120,17 +120,30 @@ async function defenderListMachines(token: string): Promise<Map<string, Defender
   return machines;
 }
 
+export type DefenderImportFindingsResult = {
+  findings: DefenderFinding[];
+  // Every device the tenant's Machine.Read.All grant can see, whether or not
+  // it currently has any software vulnerabilities — lets the caller
+  // reconcile (close findings no longer reported) without mistaking "no
+  // findings" for "device wasn't checked". Empty when that grant is
+  // missing/unreachable, in which case the caller must not reconcile (we
+  // genuinely don't know which devices this run covered).
+  scannedDevices: { name: string; aliases: string[] }[];
+};
+
 // List software vulnerabilities per device, following @odata.nextLink paging.
-export async function defenderListFindings(): Promise<DefenderFinding[]> {
+export async function defenderListFindings(): Promise<DefenderImportFindingsResult> {
   const config = defenderConfig();
   if (!config) throw new Error("Defender is not configured.");
   const token = await defenderToken(config);
   let machines = new Map<string, DefenderMachine>();
+  let machinesAvailable = true;
   try {
     machines = await defenderListMachines(token);
   } catch {
     // Machine.Read.All not granted, or the machines API is unreachable —
     // findings still import fine, just without the extra IP aliases.
+    machinesAvailable = false;
   }
 
   const findings: DefenderFinding[] = [];
@@ -176,5 +189,13 @@ export async function defenderListFindings(): Promise<DefenderFinding[]> {
     }
     url = data?.["@odata.nextLink"] ?? null;
   }
-  return findings;
+  const scannedDevices = machinesAvailable
+    ? [...machines.values()]
+        .filter((m) => m.name)
+        .map((m) => ({
+          name: m.name,
+          aliases: [...new Set([m.name, m.ip, m.externalIp].filter(Boolean))],
+        }))
+    : [];
+  return { findings, scannedDevices };
 }

@@ -302,15 +302,30 @@ function primaryCve(cves: string[], pluginId: number): string {
 // Pull per-host vulnerabilities, enriching plugins with full detail
 // (description, solution, CVE, CVSS). Detail lookups are budget-capped per
 // import but cached across imports so coverage grows over time.
+export type NessusScannedHost = {
+  hostname: string;
+  assetAliases: string[];
+};
+
+export type NessusImportFindingsResult = {
+  findings: NessusFinding[];
+  // Every host actually included in this scan's result set, whether or not
+  // it currently has any vulnerabilities — lets the caller reconcile (close
+  // findings no longer reported) without mistaking "no findings" for "host
+  // wasn't scanned".
+  scannedHosts: NessusScannedHost[];
+};
+
 export async function nessusImportFindings(
   nessusScanId: number,
   detailBudget = 500,
-): Promise<NessusFinding[]> {
+): Promise<NessusImportFindingsResult> {
   const config = nessusConfig();
   if (!config) throw new Error("Nessus is not configured.");
   const detail = await api(config, "GET", `/scans/${nessusScanId}`);
   const hosts: any[] = detail?.hosts ?? [];
   const findings: NessusFinding[] = [];
+  const scannedHosts: NessusScannedHost[] = [];
   const pluginCache = new Map<number, any>();
   let detailCalls = 0;
 
@@ -324,6 +339,7 @@ export async function nessusImportFindings(
       hostDetail?.info?.["host-fqdn"] ?? hostDetail?.info?.["host-ip"] ?? host.hostname;
     const assetAliases = [...new Set([hostDetail?.info?.["host-fqdn"], hostDetail?.info?.["host-ip"], host.hostname]
       .filter((x): x is string => typeof x === "string" && x.length > 0))];
+    scannedHosts.push({ hostname, assetAliases });
     const vulns: any[] = (hostDetail?.vulnerabilities ?? []).sort(
       (a: any, b: any) => (b.severity ?? 0) - (a.severity ?? 0),
     );
@@ -397,5 +413,5 @@ export async function nessusImportFindings(
       });
     }
   }
-  return findings;
+  return { findings, scannedHosts };
 }

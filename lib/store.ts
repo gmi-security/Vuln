@@ -273,6 +273,45 @@ export function correlateFinding(
   rescoreFinding(s, existing);
 }
 
+// Reconciliation: no import path ever marked a finding Resolved just
+// because a later scan stopped reporting it (the only other place that
+// happens is a human manually changing status via updateFinding()). Over
+// years of recurring scans that means every finding ever detected stays
+// "Open" forever unless an analyst hand-closes it one at a time — the real
+// cause of implausibly large open-finding counts on long-lived customers.
+//
+// Call this after an import whose source represents a COMPLETE current
+// snapshot for the assets it covers (a full per-host Nessus plugin list, a
+// whole-tenant Defender pull, a fresh per-IP Vulners Bridge sweep) — never
+// for a partial/manual upload, where "not mentioned" doesn't mean "fixed".
+// coveredAssetKeys is every asset actually checked this run (via
+// canonicalAssetKey, including hosts with zero current findings);
+// touchedKeys is every correlationKey() this run still found reported. Any
+// other open finding on a covered asset from the same connector is stale —
+// the thing it flagged is gone as of this scan — so it's closed, not
+// deleted, with a clear resolution reason for the audit trail.
+function closeStaleFindings(
+  s: StoreShape,
+  companyId: string,
+  connector: ConnectorId,
+  coveredAssetKeys: Set<string>,
+  touchedKeys: Set<string>,
+  observedAtIso: string,
+): number {
+  let closed = 0;
+  for (const f of s.findings.values()) {
+    if (f.companyId !== companyId || f.connector !== connector) continue;
+    if (f.status !== "Open" && f.status !== "In Remediation") continue;
+    if (!coveredAssetKeys.has(canonicalAssetKey(s, companyId, f.asset))) continue;
+    if (touchedKeys.has(correlationKey(s, companyId, f.cve, f.asset))) continue;
+    f.status = "Resolved";
+    f.resolvedAt = observedAtIso;
+    closed += 1;
+  }
+  if (closed > 0) markDirty();
+  return closed;
+}
+
 // In-memory operational store. Scans progress in real time (progress is a
 // function of elapsed wall clock, so it advances between requests without a
 // background worker) and completed scans materialize findings. Swap for
@@ -1309,16 +1348,18 @@ async function refreshVendorScans(s: StoreShape): Promise<void> {
 }
 
 async function importVendorFindings(s: StoreShape, scan: InternalScan): Promise<void> {
-  const imported = await nessusImportFindings(scan.vendor!.nessusScanId);
+  const { findings: imported, scannedHosts } = await nessusImportFindings(scan.vendor!.nessusScanId);
   const completedAt = scan.completedAt ?? new Date().toISOString();
   // Company-scoped, cross-connector correlation: customers can share asset
   // strings (10.x IPs, DESKTOP-XXXX), so one client's finding must never
   // swallow another's, but a CVE another connector already reported on the
   // same host in the same company is the same real vulnerability.
   const index = buildCorrelationIndex(s);
+  const touchedKeys = new Set<string>();
   for (const item of imported) {
     linkIdentities(s, scan.companyId, item.assetAliases);
     const key = correlationKey(s, scan.companyId, item.cve, item.asset);
+    touchedKeys.add(key);
     const existing = index.get(key);
     if (existing) {
       correlateFinding(s, existing, {
@@ -1365,6 +1406,16 @@ async function importVendorFindings(s: StoreShape, scan: InternalScan): Promise<
     s.findings.set(created.id, created);
     index.set(key, created);
   }
+  // Every host Nessus actually included in this run's result set — whether
+  // or not it currently has findings — so a now-clean host's prior findings
+  // get closed instead of staying "Open" forever once remediated.
+  const coveredAssetKeys = new Set<string>();
+  for (const host of scannedHosts) {
+    for (const alias of [host.hostname, ...host.assetAliases]) {
+      if (alias) coveredAssetKeys.add(canonicalAssetKey(s, scan.companyId, alias));
+    }
+  }
+  closeStaleFindings(s, scan.companyId, scan.connector, coveredAssetKeys, touchedKeys, completedAt);
   const all = Array.from(s.findings.values()).filter((f) => f.scanId === scan.id);
   scan.findingsCount = all.length;
   const counts = emptySeverityCounts();
@@ -4758,6 +4809,14 @@ export async function importFromVulnersBridge(): Promise<
   let skipped = 0;
   const scanByCompany = new Map<string, InternalScan>();
   const index = buildCorrelationIndex(s);
+  // A target that completes (even with zero results) is a genuine current
+  // check of that host — tracked per company so stale "vulners" findings on
+  // hosts we just confirmed clean (or whose prior CVEs are gone) can be
+  // closed once, after the full sweep, instead of per-target. A target whose
+  // bridge scan failed (the catch below) is never added here: we don't know
+  // its current state, so its existing findings are left untouched.
+  const touchedKeys = new Set<string>();
+  const coveredByCompany = new Map<string, Set<string>>();
 
   // Collect unique IPs from asset inventory — scan each once.
   const targets = new Map<string, { companyId: string; companyName: string; asset: InternalAsset }>();
@@ -4782,6 +4841,10 @@ export async function importFromVulnersBridge(): Promise<
       skipped += 1;
       continue;
     }
+    const covered = coveredByCompany.get(companyId) ?? new Set<string>();
+    covered.add(canonicalAssetKey(s, companyId, ip));
+    if (asset.hostname) covered.add(canonicalAssetKey(s, companyId, asset.hostname));
+    coveredByCompany.set(companyId, covered);
     if (!results.length) { hostsScanned += 1; continue; }
     hostsScanned += 1;
 
@@ -4826,6 +4889,7 @@ export async function importFromVulnersBridge(): Promise<
       // them permanently so any connector reporting either one correlates.
       linkIdentities(s, companyId, [ip, asset.hostname]);
       const keys = [correlationKey(s, companyId, v.cve, ip), ...(asset.hostname ? [correlationKey(s, companyId, v.cve, asset.hostname)] : [])];
+      for (const k of keys) touchedKeys.add(k);
       const existing = keys.map((k) => index.get(k)).find((f): f is Finding => Boolean(f));
       if (existing) {
         correlateFinding(s, existing, {
@@ -4876,6 +4940,10 @@ export async function importFromVulnersBridge(): Promise<
       scan.hostsScanned += 1;
       findingsImported += 1;
     }
+  }
+
+  for (const [companyId, covered] of coveredByCompany) {
+    closeStaleFindings(s, companyId, "vulners", covered, touchedKeys, nowIso);
   }
 
   await flushNow();
@@ -6103,8 +6171,9 @@ export async function importFromDefender(): Promise<
   }
   const s = store();
   let items;
+  let scannedDevices: { name: string; aliases: string[] }[];
   try {
-    items = await defenderListFindings();
+    ({ findings: items, scannedDevices } = await defenderListFindings());
   } catch (err) {
     return {
       error: err instanceof Error ? err.message : "Failed to reach the Defender API.",
@@ -6163,9 +6232,11 @@ export async function importFromDefender(): Promise<
 
   let findingsImported = 0;
   const index = buildCorrelationIndex(s);
+  const touchedKeys = new Set<string>();
   for (const item of items) {
     linkIdentities(s, company.id, item.assetAliases);
     const key = correlationKey(s, company.id, item.cve, item.asset);
+    touchedKeys.add(key);
     const existing = index.get(key);
     if (existing) {
       correlateFinding(s, existing, {
@@ -6212,6 +6283,23 @@ export async function importFromDefender(): Promise<
     s.findings.set(id, created);
     index.set(key, created);
     findingsImported += 1;
+  }
+
+  // SoftwareVulnerabilitiesByMachine is a full current-state snapshot, so a
+  // device Machine.Read.All can see is fully covered by this run even when
+  // it has zero current findings -- close whatever's left over from a
+  // vulnerability Defender no longer reports there. Skipped when the
+  // machines grant is unavailable (scannedDevices is empty): with no device
+  // list, "not in `items`" could mean fixed OR could mean "we can't see
+  // this device at all", and guessing wrong would hide real risk.
+  const coveredAssetKeys = new Set<string>();
+  for (const device of scannedDevices) {
+    for (const alias of device.aliases) {
+      coveredAssetKeys.add(canonicalAssetKey(s, company.id, alias));
+    }
+  }
+  if (coveredAssetKeys.size > 0) {
+    closeStaleFindings(s, company.id, "defender", coveredAssetKeys, touchedKeys, nowIso);
   }
 
   const all = Array.from(s.findings.values()).filter((f) => f.scanId === scanId);
@@ -6564,6 +6652,25 @@ async function runVulnersBridgeScanAsync(
         rescoreFinding(s, f);
         s.findings.set(fid, f);
       }
+      // A completed bridge scan of this exact target is a full current-state
+      // check of it — any other open Vulners finding on this same target not
+      // among this round's results is stale (the CVE it flagged is gone).
+      const currentCves = new Set(results.map((v) => v.cve));
+      let closedHere = 0;
+      for (const f of s.findings.values()) {
+        if (
+          f.companyId === companyId &&
+          f.connector === "vulners" &&
+          f.asset === target &&
+          (f.status === "Open" || f.status === "In Remediation") &&
+          !currentCves.has(f.cve)
+        ) {
+          f.status = "Resolved";
+          f.resolvedAt = nowIso;
+          closedHere += 1;
+        }
+      }
+      if (closedHere > 0) markDirty();
     }
   } catch (err) {
     const current = s.scans.get(scanId);
