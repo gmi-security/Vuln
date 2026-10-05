@@ -37,6 +37,7 @@ import {
   formatDateTime,
   riskColor,
   riskPriorityClass,
+  severityBarColor,
   severityClass,
 } from "@/lib/format";
 import type { CvssVersion, Finding, FindingStatus } from "@/lib/types";
@@ -575,10 +576,14 @@ export default function VulnFindingsPage() {
                   }
                 }}
                 className={[
-                  "grid w-full cursor-pointer grid-cols-[28px_100px_1.9fr_1.1fr_120px_80px_100px_130px_110px_80px] items-center gap-4 border-b border-zinc-900/70 px-5 py-4 text-left transition last:border-b-0 hover:bg-[#0a0a0a]",
+                  "relative grid w-full cursor-pointer grid-cols-[28px_100px_1.9fr_1.1fr_120px_80px_100px_130px_110px_80px] items-center gap-4 border-b border-zinc-900/70 px-5 py-4 text-left transition last:border-b-0 hover:bg-[#0a0a0a]",
                   focusId === finding.id ? "bg-[rgba(179,14,20,0.06)]" : "",
                 ].join(" ")}
               >
+                <div
+                  className="absolute inset-y-0 left-0 w-[3px]"
+                  style={{ background: severityBarColor[finding.severity] }}
+                />
                 <div onClick={(e) => e.stopPropagation()}>
                   <input
                     type="checkbox"
