@@ -15,13 +15,13 @@ import TrendChart, { type TrendSnapshot } from "@/components/TrendChart";
 import CompositeScoreInfo from "@/components/CompositeScoreInfo";
 import RiskDashboard from "@/components/RiskDashboard";
 import RiskGauge from "@/components/RiskGauge";
+import SeverityDonut from "@/components/SeverityDonut";
 import { KennaStatChip, PanelCard, Pill, primaryButtonClass } from "@/components/ui";
 import {
   compositeColor,
   connectorLabels,
   formatDateTime,
   scanStatusClass,
-  severityBarColor,
   severityClass,
 } from "@/lib/format";
 import type { Connector, QuantifyMetrics, Scan, Severity } from "@/lib/types";
@@ -169,10 +169,6 @@ export default function VulnDashboardPage() {
   }, [load, running.length]);
 
   const recentScans = scans.slice(0, 6);
-  const maxSeverity = Math.max(
-    1,
-    ...SEVERITIES.map((s) => metrics?.severityCounts[s] ?? 0),
-  );
 
   const hasData = metrics !== null && metrics.totalOpen > 0;
   const critDelta = snapshots ? weeklyCriticalDelta(snapshots) : null;
@@ -220,6 +216,7 @@ export default function VulnDashboardPage() {
             color={metrics ? compositeColor(metrics.composite.score) : "#71717a"}
             label="Composite risk"
             sublabel={metrics?.composite.band}
+            critical={metrics ? metrics.composite.score >= 80 : false}
           />
           <span className="inline-flex items-center gap-1.5 text-xs text-zinc-500">
             exposure {metrics?.exposureScore ?? "—"}
@@ -230,24 +227,25 @@ export default function VulnDashboardPage() {
           <KennaStatChip
             icon={<IconBug size={16} />}
             label="Open findings"
-            value={metrics ? metrics.totalOpen : "—"}
+            value={metrics ? metrics.totalOpen : null}
           />
           <KennaStatChip
             icon={<IconAlertTriangle size={16} />}
             label="Critical open"
-            value={metrics ? metrics.severityCounts.Critical : "—"}
+            value={metrics ? metrics.severityCounts.Critical : null}
             tone="critical"
           />
           <KennaStatChip
             icon={<IconFlame size={16} />}
             label="Actively exploited (KEV)"
-            value={metrics ? metrics.kevOpen : "—"}
+            value={metrics ? metrics.kevOpen : null}
             tone="critical"
+            pulse={Boolean(metrics && metrics.kevOpen > 0)}
           />
           <KennaStatChip
             icon={<IconBolt size={16} />}
             label="Public exploit available"
-            value={metrics ? metrics.exploitableOpen : "—"}
+            value={metrics ? metrics.exploitableOpen : null}
             tone="warning"
           />
           <KennaStatChip
@@ -451,28 +449,10 @@ export default function VulnDashboardPage() {
             eyebrow="Open by severity"
             description="Current open findings"
           >
-            <div className="space-y-3">
-              {SEVERITIES.map((severity) => {
-                const count = metrics?.severityCounts[severity] ?? 0;
-                return (
-                  <div key={severity} className="flex items-center gap-3">
-                    <div className="w-16 text-sm text-zinc-400">{severity}</div>
-                    <div className="h-3 flex-1 overflow-hidden rounded-full bg-[#101010]">
-                      <div
-                        className="h-full rounded-full transition-all duration-500"
-                        style={{
-                          width: `${Math.round((count / maxSeverity) * 100)}%`,
-                          background: severityBarColor[severity],
-                        }}
-                      />
-                    </div>
-                    <div className="w-8 text-right text-sm font-medium text-white">
-                      {count}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+            <SeverityDonut
+              counts={metrics?.severityCounts ?? ({} as Record<Severity, number>)}
+              order={SEVERITIES}
+            />
           </PanelCard>
 
           <PanelCard

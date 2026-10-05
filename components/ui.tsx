@@ -1,6 +1,7 @@
 "use client";
 
 import React from "react";
+import { useCountUp } from "@/lib/useCountUp";
 
 export function StatCard({
   label,
@@ -41,29 +42,54 @@ export function KennaStatChip({
   label,
   value,
   tone = "neutral",
+  pulse = false,
 }: {
   icon: React.ReactNode;
   label: React.ReactNode;
-  value: React.ReactNode;
+  value: number | null;
   tone?: "critical" | "warning" | "ok" | "neutral";
+  // Ambient glow pulse for a tile that genuinely demands attention (e.g. a
+  // nonzero actively-exploited count) -- used sparingly, not on every tile,
+  // or it stops meaning anything.
+  pulse?: boolean;
 }) {
   const toneColor =
     tone === "critical" ? "#b30e14" : tone === "warning" ? "#f5a623" : tone === "ok" ? "#10b981" : "#9ca3af";
+  const animated = useCountUp(value ?? 0);
   return (
-    <div className="flex flex-1 flex-col items-center gap-2 rounded-2xl border border-zinc-900 bg-[#090909] px-3 py-4 text-center transition hover:border-zinc-800">
+    <div
+      className="group relative flex flex-1 flex-col items-center gap-2 overflow-hidden rounded-2xl border px-3 py-4 text-center transition-all duration-300 hover:-translate-y-0.5"
+      style={{
+        borderColor: `${toneColor}2e`,
+        background: `linear-gradient(165deg, ${toneColor}14, #090909 68%)`,
+        animation: pulse ? "kennaChipPulse 2.4s ease-in-out infinite" : undefined,
+        // @ts-expect-error -- CSS custom property, not a real React style key
+        "--chip-glow": toneColor,
+      }}
+    >
+      <style>{`
+        @keyframes kennaChipPulse {
+          0%, 100% { box-shadow: 0 0 0 1px var(--chip-glow, transparent) inset, 0 0 0 0 transparent; }
+          50% { box-shadow: 0 0 0 1px var(--chip-glow, transparent) inset, 0 0 18px 1px color-mix(in srgb, var(--chip-glow, transparent) 45%, transparent); }
+        }
+      `}</style>
+      <div
+        className="pointer-events-none absolute inset-0 opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+        style={{ boxShadow: `inset 0 0 28px ${toneColor}22, 0 8px 24px ${toneColor}26` }}
+      />
       <span
-        className="flex h-8 w-8 items-center justify-center rounded-full border"
+        className="relative flex h-8 w-8 items-center justify-center rounded-full border"
         style={{ borderColor: `${toneColor}55`, color: toneColor, background: `${toneColor}1a` }}
       >
         {icon}
       </span>
       <span
-        className="rounded-full px-3 py-0.5 text-lg font-bold tabular-nums"
+        className="relative rounded-full px-3 py-0.5 text-lg font-bold tabular-nums"
         style={{ color: toneColor, background: `${toneColor}14` }}
       >
-        {value}
+        {value === null ? "—" : Math.round(animated).toLocaleString()}
       </span>
-      <span className="text-[11px] leading-tight text-zinc-400">{label}</span>
+      <span className="relative text-[11px] leading-tight text-zinc-400">{label}</span>
     </div>
   );
 }

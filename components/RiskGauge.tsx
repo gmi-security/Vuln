@@ -1,30 +1,31 @@
 "use client";
 
 import React from "react";
+import { useCountUp } from "@/lib/useCountUp";
 
-// Kenna-style circular risk gauge: a ring of tick marks (not a smooth arc)
-// that fill clockwise from 12 o'clock as the score rises, with the score
-// itself as a big number in the center. Visually modeled on Kenna
-// Security's "Current Score" ring, built from plain SVG (no chart library)
-// so it stays in our own dark/red theme instead of picking up a generic
-// chart palette.
+// Kenna-style circular risk gauge, pushed further: a ring of tick marks that
+// sweep in clockwise on mount (like a radar lock-on) instead of appearing
+// static, with a soft color-matched glow and a slow ambient pulse when the
+// score is in critical territory. Pure SVG + CSS, no chart library, so it
+// stays in our own dark/red theme.
 function polarToCartesian(cx: number, cy: number, r: number, angleDeg: number) {
   const rad = ((angleDeg - 90) * Math.PI) / 180;
   return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
 }
 
 const TICK_COUNT = 64;
-const TICK_INNER = 5; // half-length of each tick, px, inward from the ring radius
-const TICK_OUTER = 5; // half-length of each tick, px, outward from the ring radius
+const TICK_INNER = 5;
+const TICK_OUTER = 5;
 
 export default function RiskGauge({
   score,
   max = 100,
   color,
-  trackColor = "#1c1c1c",
+  trackColor = "#17171a",
   size = 176,
   label,
   sublabel,
+  critical = false,
 }: {
   score: number;
   max?: number;
@@ -33,9 +34,11 @@ export default function RiskGauge({
   size?: number;
   label?: string;
   sublabel?: string;
+  critical?: boolean;
 }) {
   const pct = Math.max(0, Math.min(1, score / max));
   const filledTicks = Math.round(pct * TICK_COUNT);
+  const animatedScore = useCountUp(score);
   const cx = size / 2;
   const cy = size / 2;
   const r = size / 2 - 14;
@@ -50,11 +53,36 @@ export default function RiskGauge({
   return (
     <div
       className="relative shrink-0"
-      style={{ width: size, height: size }}
+      style={{
+        width: size,
+        height: size,
+        animation: critical ? "riskGaugePulse 2.4s ease-in-out infinite" : undefined,
+        // @ts-expect-error -- CSS custom property, not a real React style key
+        "--glow": color,
+      }}
       role="img"
       aria-label={`${label ?? "Score"}: ${Math.round(score)} of ${max}`}
     >
-      <svg width={size} height={size} className="block">
+      <style>{`
+        @keyframes riskGaugeTickIn {
+          from { opacity: 0; }
+          to { opacity: 1; }
+        }
+        @keyframes riskGaugePulse {
+          0%, 100% { filter: drop-shadow(0 0 6px var(--glow, transparent)); }
+          50% { filter: drop-shadow(0 0 18px var(--glow, transparent)); }
+        }
+        @keyframes riskGaugeScoreIn {
+          from { opacity: 0; transform: scale(0.85); }
+          to { opacity: 1; transform: scale(1); }
+        }
+      `}</style>
+      <svg
+        width={size}
+        height={size}
+        className="block"
+        style={{ filter: `drop-shadow(0 0 7px ${color}66)` }}
+      >
         {ticks.map((t) => (
           <line
             key={t.i}
@@ -65,16 +93,24 @@ export default function RiskGauge({
             stroke={t.filled ? color : trackColor}
             strokeWidth={2.25}
             strokeLinecap="round"
-            style={{ transition: "stroke 0.5s ease" }}
+            style={
+              t.filled
+                ? {
+                    opacity: 0,
+                    animation: "riskGaugeTickIn 0.18s ease-out forwards",
+                    animationDelay: `${t.i * 9}ms`,
+                  }
+                : undefined
+            }
           />
         ))}
       </svg>
-      <div className="absolute inset-0 flex flex-col items-center justify-center">
-        <span
-          className="text-4xl font-bold tabular-nums"
-          style={{ color }}
-        >
-          {Math.round(score)}
+      <div
+        className="absolute inset-0 flex flex-col items-center justify-center"
+        style={{ animation: "riskGaugeScoreIn 0.5s ease-out 0.3s both" }}
+      >
+        <span className="text-4xl font-bold tabular-nums" style={{ color }}>
+          {Math.round(animatedScore)}
         </span>
         {label ? (
           <span className="mt-1 text-[11px] uppercase tracking-[0.2em] text-zinc-500">
