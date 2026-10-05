@@ -96,6 +96,19 @@ export const exposureClass: Record<string, string> = {
   Isolated: "text-sky-300",
 };
 
+export const exposureDotClass: Record<string, string> = {
+  "Internet-facing": "bg-[#ff4d57]",
+  Internal: "bg-zinc-500",
+  Isolated: "bg-sky-400",
+};
+
+export const criticalityClass: Record<string, string> = {
+  "Crown Jewel": "bg-[rgba(179,14,20,0.16)] text-[#ff8f96] border border-[rgba(179,14,20,0.45)]",
+  High: "bg-[rgba(245,110,35,0.12)] text-orange-300 border border-orange-900/60",
+  Normal: "bg-zinc-900 text-zinc-400 border border-zinc-800",
+  Low: "bg-zinc-900 text-zinc-600 border border-zinc-800",
+};
+
 export const compositeBandClass: Record<string, string> = {
   Critical: "bg-[rgba(179,14,20,0.16)] text-[#ff4d57] border border-[rgba(179,14,20,0.45)]",
   High: "bg-[rgba(245,110,35,0.12)] text-orange-300 border border-orange-900/60",

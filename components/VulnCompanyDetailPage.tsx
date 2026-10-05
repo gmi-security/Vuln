@@ -23,19 +23,28 @@ import {
   Search,
   Share2,
 } from "lucide-react";
-import { IconAlertTriangle, IconBug, IconGauge, IconRadar } from "@tabler/icons-react";
+import { IconAlertTriangle, IconBolt, IconBug, IconFlame, IconRadar } from "@tabler/icons-react";
 import VulnShell from "@/components/VulnShell";
 import NewScanModal from "@/components/NewScanModal";
 import CompensatingControlsPanel from "@/components/CompensatingControlsPanel";
+import CompositeScoreInfo from "@/components/CompositeScoreInfo";
+import RiskGauge from "@/components/RiskGauge";
 import {
+  KennaStatChip,
   PanelCard,
   Pill,
-  StatCard,
   ghostButtonClass,
   inputClass,
   primaryButtonClass,
 } from "@/components/ui";
-import { connectorLabels, formatDateTime, scanStatusClass } from "@/lib/format";
+import {
+  compositeColor,
+  connectorLabels,
+  criticalityClass,
+  exposureDotClass,
+  formatDateTime,
+  scanStatusClass,
+} from "@/lib/format";
 import type {
   Company,
   Connector,
@@ -45,7 +54,6 @@ import type {
   Scan,
   ScanProfile,
 } from "@/lib/types";
-import { exposureClass } from "@/lib/format";
 
 const assetSourceLabel: Record<string, string> = {
   tidal: "Tidal",
@@ -159,6 +167,15 @@ export default function VulnCompanyDetailPage({
     const timer = setInterval(() => void load(), 4000);
     return () => clearInterval(timer);
   }, [load]);
+
+  const runningScans = useMemo(
+    () =>
+      scans.filter(
+        (s) =>
+          s.status === "Queued" || s.status === "Running" || s.status === "Paused",
+      ),
+    [scans],
+  );
 
   const byFolder = useMemo(() => {
     const map = new Map<string, Scan[]>();
@@ -358,31 +375,52 @@ export default function VulnCompanyDetailPage({
         </>
       }
     >
-      <div className="grid gap-5 md:grid-cols-2 2xl:grid-cols-4">
-        <StatCard
-          label="Open findings"
-          value={metrics ? metrics.totalOpen : "—"}
-          sublabel={`${metrics?.exploitableOpen ?? 0} with known exploit`}
-          icon={<IconBug size={26} />}
-        />
-        <StatCard
-          label="Critical open"
-          value={metrics ? metrics.severityCounts.Critical : "—"}
-          sublabel={`${metrics?.severityCounts.High ?? 0} high open`}
-          icon={<IconAlertTriangle size={26} />}
-        />
-        <StatCard
-          label="Exposure score"
-          value={metrics ? metrics.exposureScore : "—"}
-          sublabel={`Avg CVSS ${metrics?.avgCvss ?? "—"}`}
-          icon={<IconGauge size={26} />}
-        />
-        <StatCard
-          label="Scans"
-          value={company ? company.scanCount : "—"}
-          sublabel={`${company?.activeScans ?? 0} active · ${folders.length} folders`}
-          icon={<IconRadar size={26} />}
-        />
+      <div className="flex flex-col items-center gap-6 rounded-[28px] border border-[rgba(179,14,20,0.16)] bg-[linear-gradient(180deg,#0b0b0b,#060606)] p-6 shadow-[0_12px_32px_rgba(10,1,2,0.3)] lg:flex-row lg:items-stretch">
+        <div className="flex flex-col items-center justify-center gap-2 lg:border-r lg:border-zinc-900 lg:pr-6">
+          <RiskGauge
+            score={metrics ? metrics.composite.score : 0}
+            color={metrics ? compositeColor(metrics.composite.score) : "#71717a"}
+            label="Composite risk"
+            sublabel={metrics?.composite.band}
+            critical={metrics ? metrics.composite.score >= 80 : false}
+          />
+          <span className="inline-flex items-center gap-1.5 text-xs text-zinc-500">
+            exposure {metrics?.exposureScore ?? "—"}
+            <CompositeScoreInfo />
+          </span>
+        </div>
+        <div className="grid flex-1 grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
+          <KennaStatChip
+            icon={<IconBug size={16} />}
+            label="Open findings"
+            value={metrics ? metrics.totalOpen : null}
+          />
+          <KennaStatChip
+            icon={<IconAlertTriangle size={16} />}
+            label="Critical open"
+            value={metrics ? metrics.severityCounts.Critical : null}
+            tone="critical"
+          />
+          <KennaStatChip
+            icon={<IconFlame size={16} />}
+            label="Actively exploited (KEV)"
+            value={metrics ? metrics.kevOpen : null}
+            tone="critical"
+            pulse={Boolean(metrics && metrics.kevOpen > 0)}
+          />
+          <KennaStatChip
+            icon={<IconBolt size={16} />}
+            label="Public exploit available"
+            value={metrics ? metrics.exploitableOpen : null}
+            tone="warning"
+          />
+          <KennaStatChip
+            icon={<IconRadar size={16} />}
+            label="Active scans"
+            value={company ? runningScans.length : null}
+            tone="ok"
+          />
+        </div>
       </div>
 
       <div className="flex flex-wrap items-center gap-3">
@@ -535,12 +573,17 @@ export default function VulnCompanyDetailPage({
                         </div>
                       ) : null}
                     </div>
-                    <div
-                      className={`text-sm ${exposureClass[asset.exposure] ?? "text-zinc-300"}`}
-                    >
+                    <div className="flex items-center gap-2 text-sm text-zinc-300">
+                      <span
+                        className={`h-1.5 w-1.5 shrink-0 rounded-full ${exposureDotClass[asset.exposure] ?? "bg-zinc-600"}`}
+                      />
                       {asset.exposure}
                     </div>
-                    <div className="text-sm text-zinc-300">{asset.criticality}</div>
+                    <div>
+                      <Pill className={criticalityClass[asset.criticality] ?? criticalityClass.Normal}>
+                        {asset.criticality}
+                      </Pill>
+                    </div>
                     <div className="min-w-0 text-sm text-zinc-400">
                       <div className="truncate">{asset.owner || "—"}</div>
                       <div className="truncate text-xs text-zinc-600">
@@ -552,7 +595,11 @@ export default function VulnCompanyDetailPage({
                         {assetSourceLabel[asset.source]}
                       </Pill>
                     </div>
-                    <div className="text-sm text-zinc-300">{asset.openFindings}</div>
+                    <div
+                      className={`text-sm font-semibold tabular-nums ${asset.openFindings > 0 ? "text-white" : "text-zinc-700"}`}
+                    >
+                      {asset.openFindings}
+                    </div>
                   </div>
                 ))}
               </div>
