@@ -3,40 +3,12 @@
 import React from "react";
 import { useCountUp } from "@/lib/useCountUp";
 
-export function StatCard({
-  label,
-  value,
-  sublabel,
-  icon,
-}: {
-  label: React.ReactNode;
-  value: React.ReactNode;
-  sublabel: React.ReactNode;
-  icon: React.ReactNode;
-}) {
-  return (
-    <section className="rounded-2xl border border-[rgba(179,14,20,0.14)] bg-[linear-gradient(180deg,#0b0b0b,#070707)] p-4 shadow-[0_12px_32px_rgba(10,1,2,0.3)] transition duration-200 hover:border-[rgba(179,14,20,0.24)]">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <div className="text-xs text-zinc-400">{label}</div>
-          <div className="mt-2 text-3xl font-semibold tracking-[-0.02em] text-white">
-            {value}
-          </div>
-          <div className="mt-1.5 text-xs text-zinc-500">{sublabel}</div>
-        </div>
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[rgba(179,14,20,0.22)] bg-[rgba(179,14,20,0.08)] text-[#b30e14]">
-          {icon}
-        </div>
-      </div>
-    </section>
-  );
-}
-
 // Compact stat chip modeled on Kenna Security's top-row tiles (icon badge,
-// a pill-shaped colored number, a small label underneath) -- denser than
-// StatCard, meant to sit in a row next to a RiskGauge the way Kenna's
-// "Top Priority / Active Breaches / Easily Exploitable" row sits beside
-// its risk-score ring.
+// a pill-shaped colored number, a small label underneath) -- meant to sit
+// in a row next to a RiskGauge the way Kenna's "Top Priority / Active
+// Breaches / Easily Exploitable" row sits beside its risk-score ring. Used
+// on every page's stat row now; it replaced the plainer StatCard this
+// session, which has no callers left.
 export function KennaStatChip({
   icon,
   label,
