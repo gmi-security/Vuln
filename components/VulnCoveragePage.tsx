@@ -7,19 +7,29 @@ import {
   IconAlertTriangle,
   IconDatabaseCog,
   IconEye,
-  IconRadar2,
 } from "@tabler/icons-react";
 import VulnShell from "@/components/VulnShell";
+import RiskGauge from "@/components/RiskGauge";
 import { useCompanyFilter } from "@/lib/useCompanyFilter";
 import {
+  KennaStatChip,
   PanelCard,
-  StatCard,
   ghostButtonClass,
   primaryButtonClass,
   selectClass,
 } from "@/components/ui";
 import { exposureClass, riskColor } from "@/lib/format";
 import type { Company } from "@/lib/types";
+
+// Coverage % is "higher is better" -- the inverse of a risk score -- so its
+// color stops run green-at-high instead of red-at-high.
+function coverageColor(pct: number): string {
+  if (pct >= 90) return "#10b981";
+  if (pct >= 75) return "#4aa3ff";
+  if (pct >= 50) return "#f5a623";
+  if (pct >= 25) return "#f97316";
+  return "#b30e14";
+}
 
 type CoverageRow = {
   identifier: string;
@@ -223,31 +233,34 @@ export default function VulnCoveragePage() {
           {scanMsg.text}
         </div>
       ) : null}
-      <div className="grid gap-5 md:grid-cols-2 2xl:grid-cols-4">
-        <StatCard
-          label="Known assets"
-          value={s ? s.known : "—"}
-          sublabel="In Tidal, manual, or CrowdStrike inventory"
-          icon={<IconDatabaseCog size={26} />}
-        />
-        <StatCard
-          label="Scan coverage"
-          value={coveragePct >= 0 ? `${coveragePct}%` : "—"}
-          sublabel={s ? `${s.matched} of ${s.known} known assets scanned` : ""}
-          icon={<IconRadar2 size={26} />}
-        />
-        <StatCard
-          label="Known, not scanned"
-          value={s ? s.knownNotScanned : "—"}
-          sublabel="Inventory blind spots — scan these"
-          icon={<IconAlertTriangle size={26} />}
-        />
-        <StatCard
-          label="Scanned, not in inventory"
-          value={s ? s.scannedNotKnown : "—"}
-          sublabel="Shadow / unmanaged assets"
-          icon={<IconEye size={26} />}
-        />
+      <div className="flex flex-col items-center gap-6 rounded-[28px] border border-[rgba(179,14,20,0.16)] bg-[linear-gradient(180deg,#0b0b0b,#060606)] p-6 shadow-[0_12px_32px_rgba(10,1,2,0.3)] lg:flex-row lg:items-stretch">
+        <div className="flex flex-col items-center justify-center gap-2 lg:border-r lg:border-zinc-900 lg:pr-6">
+          <RiskGauge
+            score={coveragePct >= 0 ? coveragePct : 0}
+            color={coveragePct >= 0 ? coverageColor(coveragePct) : "#71717a"}
+            label="Scan coverage"
+            sublabel={s ? `${s.matched} of ${s.known} known` : undefined}
+          />
+        </div>
+        <div className="grid flex-1 grid-cols-2 gap-3 sm:grid-cols-3">
+          <KennaStatChip
+            icon={<IconDatabaseCog size={16} />}
+            label="Known assets"
+            value={s ? s.known : null}
+          />
+          <KennaStatChip
+            icon={<IconAlertTriangle size={16} />}
+            label="Known, not scanned"
+            value={s ? s.knownNotScanned : null}
+            tone="warning"
+          />
+          <KennaStatChip
+            icon={<IconEye size={16} />}
+            label="Scanned, not in inventory"
+            value={s ? s.scannedNotKnown : null}
+            tone="warning"
+          />
+        </div>
       </div>
 
       <PanelCard
@@ -316,8 +329,15 @@ function CoverageTable({
         {rows.map((r, i) => (
           <div
             key={`${r.companyName}-${r.identifier}-${i}`}
-            className="grid grid-cols-[1.7fr_1.1fr_1fr_120px_110px] items-center gap-4 border-b border-zinc-900/70 px-5 py-3 last:border-b-0"
+            className="relative grid grid-cols-[1.7fr_1.1fr_1fr_120px_110px] items-center gap-4 border-b border-zinc-900/70 px-5 py-3 last:border-b-0"
           >
+            <div
+              className="absolute inset-y-0 left-0 w-[3px]"
+              style={{
+                background:
+                  kind === "matched" ? riskColor(r.worstRisk) : kind === "shadow" ? "#f97316" : "#f5a623",
+              }}
+            />
             <div className="truncate font-medium text-white">{r.identifier}</div>
             <div className="truncate text-sm text-zinc-400">{r.companyName}</div>
             <div className="text-sm">
