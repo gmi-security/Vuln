@@ -482,6 +482,18 @@ const statusClass: Record<ConnectorStatus, string> = {
   Error: "bg-[rgba(179,14,20,0.16)] text-[#ff4d57] border border-[rgba(179,14,20,0.45)]",
 };
 
+// Presence-style status dot on each connector's icon badge, same idea as a
+// SaaS integration hub -- a glance at the icon tells you live vs. not
+// without reading the status pill.
+const statusDotColor: Record<ConnectorStatus, string> = {
+  Connected: "#10b981",
+  "Demo Mode": "#f5a623",
+  "Not Configured": "#52525b",
+  "CSV Upload": "#38bdf8",
+  Planned: "#3f3f46",
+  Error: "#b30e14",
+};
+
 function IntegrationCard({ card }: { card: CardData }) {
   const Icon = cardIcon[card.id] ?? IconRadar;
   const syncUrl = SYNC_ENDPOINTS[card.id];
@@ -711,8 +723,16 @@ function IntegrationCard({ card }: { card: CardData }) {
         className="flex w-full items-start gap-4 text-left"
         aria-expanded={expanded}
       >
-        <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full border border-[rgba(179,14,20,0.22)] bg-[rgba(179,14,20,0.08)] text-[#b30e14]">
+        <div className="relative flex h-14 w-14 shrink-0 items-center justify-center rounded-full border border-[rgba(179,14,20,0.22)] bg-[rgba(179,14,20,0.08)] text-[#b30e14]">
           <Icon size={26} />
+          <span
+            className="absolute bottom-0 right-0 h-3.5 w-3.5 rounded-full border-2 border-[#050505]"
+            style={{
+              background: statusDotColor[card.status],
+              boxShadow: card.status === "Connected" ? `0 0 6px ${statusDotColor[card.status]}` : undefined,
+            }}
+            title={card.status}
+          />
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center justify-between gap-3">
