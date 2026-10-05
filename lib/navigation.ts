@@ -4,6 +4,7 @@ import {
   Building2,
   ClipboardCheck,
   Flame,
+  GitBranch,
   PlugZap,
   Radar,
   ScanSearch,
@@ -33,5 +34,6 @@ export const baseNavItems: VulnNavItem[] = [
   { label: "Attack Paths", icon: Share2, href: "/attack-paths" },
   { label: "Compliance", icon: ClipboardCheck, href: "/compliance" },
   { label: "Remediation SLA", icon: Timer, href: "/sla" },
+  { label: "AppSec", icon: GitBranch, href: "/appsec" },
   { label: "Connectors", icon: PlugZap, href: "/connectors" },
 ];
