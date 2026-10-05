@@ -39,14 +39,22 @@ export default function RiskGauge({
   const pct = Math.max(0, Math.min(1, score / max));
   const filledTicks = Math.round(pct * TICK_COUNT);
   const animatedScore = useCountUp(score);
+  // Every dimension below is tuned against the 176px default -- scale them
+  // together so the gauge still reads correctly (ticks, inset, text) when
+  // reused small (e.g. a compact per-row/per-card indicator) instead of
+  // only ever looking right at one fixed size.
+  const scale = size / 176;
   const cx = size / 2;
   const cy = size / 2;
-  const r = size / 2 - 14;
+  const r = size / 2 - 14 * scale;
+  const tickStroke = Math.max(1, 2.25 * scale);
+  const scoreFontPx = Math.max(11, Math.round(size * 0.2));
+  const labelFontPx = Math.max(7, Math.round(size * 0.0625));
 
   const ticks = Array.from({ length: TICK_COUNT }, (_, i) => {
     const angle = (i / TICK_COUNT) * 360;
-    const p1 = polarToCartesian(cx, cy, r - TICK_INNER, angle);
-    const p2 = polarToCartesian(cx, cy, r + TICK_OUTER, angle);
+    const p1 = polarToCartesian(cx, cy, r - TICK_INNER * scale, angle);
+    const p2 = polarToCartesian(cx, cy, r + TICK_OUTER * scale, angle);
     return { i, p1, p2, filled: i < filledTicks };
   });
 
@@ -91,7 +99,7 @@ export default function RiskGauge({
             x2={t.p2.x}
             y2={t.p2.y}
             stroke={t.filled ? color : trackColor}
-            strokeWidth={2.25}
+            strokeWidth={tickStroke}
             strokeLinecap="round"
             style={
               t.filled
@@ -109,16 +117,24 @@ export default function RiskGauge({
         className="absolute inset-0 flex flex-col items-center justify-center"
         style={{ animation: "riskGaugeScoreIn 0.5s ease-out 0.3s both" }}
       >
-        <span className="text-4xl font-bold tabular-nums" style={{ color }}>
+        <span
+          className="font-bold tabular-nums"
+          style={{ color, fontSize: scoreFontPx, lineHeight: 1 }}
+        >
           {Math.round(animatedScore)}
         </span>
         {label ? (
-          <span className="mt-1 text-[11px] uppercase tracking-[0.2em] text-zinc-500">
+          <span
+            className="mt-1 uppercase tracking-[0.2em] text-zinc-500"
+            style={{ fontSize: labelFontPx }}
+          >
             {label}
           </span>
         ) : null}
         {sublabel ? (
-          <span className="mt-0.5 text-[11px] text-zinc-600">{sublabel}</span>
+          <span className="mt-0.5 text-zinc-600" style={{ fontSize: labelFontPx }}>
+            {sublabel}
+          </span>
         ) : null}
       </div>
     </div>

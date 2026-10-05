@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Building2, FolderKanban, Plus, Radar, RefreshCw, ShieldAlert, X } from "lucide-react";
 import { IconAlertTriangle, IconBug } from "@tabler/icons-react";
 import VulnShell from "@/components/VulnShell";
+import RiskGauge from "@/components/RiskGauge";
 import {
   PanelCard,
   Pill,
@@ -98,9 +99,17 @@ export default function VulnCompaniesPage() {
         </PanelCard>
       ) : (
         <div className="grid gap-5 xl:grid-cols-2">
-          {companies.map((company) => (
+          {companies.map((company) => {
+            const bandColor = compositeColor(company.compositeScore);
+            return (
             <Link key={company.id} href={`/companies/${company.id}`}>
-              <section className="h-full rounded-[30px] border border-[rgba(179,14,20,0.16)] bg-[#050505] p-5 shadow-[0_20px_80px_rgba(0,0,0,0.34)] transition hover:border-[rgba(179,14,20,0.35)] hover:bg-[#070707]">
+              <section
+                className="relative h-full overflow-hidden rounded-[30px] border border-[rgba(179,14,20,0.16)] bg-[#050505] p-5 shadow-[0_20px_80px_rgba(0,0,0,0.34)] transition hover:border-[rgba(179,14,20,0.35)] hover:bg-[#070707]"
+              >
+                <div
+                  className="absolute inset-y-0 left-0 w-1"
+                  style={{ background: bandColor, boxShadow: `0 0 12px ${bandColor}88` }}
+                />
                 <div className="flex items-start justify-between gap-4">
                   <div className="flex items-center gap-4">
                     <div className="flex h-14 w-14 items-center justify-center rounded-full border border-[rgba(179,14,20,0.22)] bg-[rgba(179,14,20,0.08)] text-[#b30e14]">
@@ -130,14 +139,17 @@ export default function VulnCompaniesPage() {
                       </div>
                     </div>
                   </div>
-                  <div className="text-right" title="Legacy posture score (0-100): severity mix, KEV pressure, SLA breaches, and scan coverage blended into one number. Separate from the RBVM Tier figures below.">
-                    <div
-                      className="text-3xl font-semibold tracking-[-0.03em]"
-                      style={{ color: compositeColor(company.compositeScore) }}
-                    >
-                      {company.compositeScore}
-                    </div>
-                    <Pill className={compositeBandClass[company.compositeBand]}>
+                  <div
+                    className="flex flex-col items-center"
+                    title="Legacy posture score (0-100): severity mix, KEV pressure, SLA breaches, and scan coverage blended into one number. Separate from the RBVM Tier figures below."
+                  >
+                    <RiskGauge
+                      score={company.compositeScore}
+                      color={bandColor}
+                      size={84}
+                      critical={company.compositeScore >= 80}
+                    />
+                    <Pill className={`${compositeBandClass[company.compositeBand]} mt-1`}>
                       {company.compositeBand}
                     </Pill>
                   </div>
@@ -198,7 +210,8 @@ export default function VulnCompaniesPage() {
                 </div>
               </section>
             </Link>
-          ))}
+            );
+          })}
         </div>
       )}
 
