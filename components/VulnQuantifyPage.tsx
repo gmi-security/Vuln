@@ -10,7 +10,8 @@ import {
   IconGauge,
 } from "@tabler/icons-react";
 import VulnShell from "@/components/VulnShell";
-import { PanelCard, Pill, StatCard, ghostButtonClass } from "@/components/ui";
+import RiskGauge from "@/components/RiskGauge";
+import { KennaStatChip, PanelCard, Pill, ghostButtonClass } from "@/components/ui";
 import {
   compositeBandClass,
   compositeColor,
@@ -108,38 +109,29 @@ export default function VulnQuantifyPage() {
         </button>
       }
     >
-      <div className="grid gap-5 md:grid-cols-2 2xl:grid-cols-4">
-        <StatCard
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <KennaStatChip
+          icon={<IconGauge size={16} />}
           label="Exposure score"
-          value={metrics ? metrics.exposureScore : "—"}
-          sublabel="Severity × exploitability × EPSS, 0–100"
-          icon={<IconGauge size={26} />}
+          value={metrics ? metrics.exposureScore : null}
         />
-        <StatCard
-          label="Actively exploited"
-          value={metrics ? metrics.kevOpen : "—"}
-          sublabel={`In CISA KEV · ${metrics?.exploitableOpen ?? 0} with public exploit`}
-          icon={<IconFlame size={26} />}
+        <KennaStatChip
+          icon={<IconFlame size={16} />}
+          label="Actively exploited (KEV)"
+          value={metrics ? metrics.kevOpen : null}
+          tone="critical"
+          pulse={Boolean(metrics && metrics.kevOpen > 0)}
         />
-        <StatCard
+        <KennaStatChip
+          icon={<IconAlertTriangle size={16} />}
           label="SLA breaches"
-          value={
-            metrics
-              ? metrics.slaBuckets.find((b) => b.breach)?.count ?? 0
-              : "—"
-          }
-          sublabel="Open findings past remediation SLA"
-          icon={<IconAlertTriangle size={26} />}
+          value={metrics ? metrics.slaBuckets.find((b) => b.breach)?.count ?? 0 : null}
+          tone="warning"
         />
-        <StatCard
-          label="Mean time to remediate"
-          value={
-            metrics?.meanTimeToRemediateDays != null
-              ? `${metrics.meanTimeToRemediateDays}d`
-              : "—"
-          }
-          sublabel="Across resolved findings"
-          icon={<IconClockHour4 size={26} />}
+        <KennaStatChip
+          icon={<IconClockHour4 size={16} />}
+          label="Mean time to remediate (days)"
+          value={metrics?.meanTimeToRemediateDays ?? null}
         />
       </div>
 
@@ -148,20 +140,16 @@ export default function VulnQuantifyPage() {
         description="One score blending open exposure, active exploitation, SLA breaches, and scan-coverage gaps"
       >
         <div className="grid gap-6 lg:grid-cols-[220px_minmax(0,1fr)]">
-          <div className="flex flex-col items-center justify-center rounded-[24px] border border-[rgba(179,14,20,0.16)] bg-[#040404] p-6 text-center">
-            <div
-              className="text-6xl font-semibold tracking-[-0.04em]"
-              style={{ color: compositeColor(metrics?.composite.score ?? 0) }}
-            >
-              {metrics ? metrics.composite.score : "—"}
-            </div>
-            <div className="mt-1 text-sm text-zinc-500">/ 100</div>
+          <div className="flex flex-col items-center justify-center gap-3 rounded-[24px] border border-[rgba(179,14,20,0.16)] bg-[#040404] p-6 text-center">
+            <RiskGauge
+              score={metrics ? metrics.composite.score : 0}
+              color={compositeColor(metrics?.composite.score ?? 0)}
+              critical={Boolean(metrics && metrics.composite.score >= 80)}
+            />
             {metrics ? (
-              <div className="mt-3">
-                <Pill className={compositeBandClass[metrics.composite.band]}>
-                  {metrics.composite.band}
-                </Pill>
-              </div>
+              <Pill className={compositeBandClass[metrics.composite.band]}>
+                {metrics.composite.band}
+              </Pill>
             ) : null}
           </div>
           <div className="space-y-4">
