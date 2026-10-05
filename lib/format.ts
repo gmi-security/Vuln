@@ -74,6 +74,15 @@ export const scanStatusClass: Record<ScanStatus, string> = {
   Failed: "bg-[rgba(179,14,20,0.20)] text-[#ff4d57] border border-[rgba(179,14,20,0.50)]",
 };
 
+export const scanStatusBarColor: Record<ScanStatus, string> = {
+  Queued: "#71717a",
+  Running: "#ff4d57",
+  Paused: "#f5a623",
+  Completed: "#10b981",
+  Stopped: "#52525b",
+  Failed: "#b30e14",
+};
+
 export const findingStatusClass: Record<FindingStatus, string> = {
   Open: "bg-[rgba(179,14,20,0.14)] text-[#ff4d57] border border-[rgba(179,14,20,0.40)]",
   "In Remediation": "bg-[rgba(245,166,35,0.10)] text-amber-300 border border-amber-900/60",

@@ -28,6 +28,7 @@ import {
 import {
   connectorLabels,
   formatDateTime,
+  scanStatusBarColor,
   scanStatusClass,
 } from "@/lib/format";
 import type { Company, Connector, Scan, ScanProfile } from "@/lib/types";
@@ -308,8 +309,12 @@ export default function VulnScansPage({
                   return (
                     <div
                       key={scan.id}
-                      className="grid grid-cols-[110px_1.7fr_130px_140px_1fr_100px_150px_170px] items-center gap-4 border-b border-zinc-900/70 px-5 py-4 last:border-b-0"
+                      className="relative grid grid-cols-[110px_1.7fr_130px_140px_1fr_100px_150px_170px] items-center gap-4 border-b border-zinc-900/70 px-5 py-4 last:border-b-0"
                     >
+                      <div
+                        className="absolute inset-y-0 left-0 w-[3px]"
+                        style={{ background: scanStatusBarColor[scan.status] }}
+                      />
                       <div className="font-medium text-[#ff4d57]">{scan.id}</div>
                       <div className="min-w-0">
                         <Link
@@ -325,7 +330,10 @@ export default function VulnScansPage({
                       <div className="text-sm text-zinc-300">
                         {connectorLabels[scan.connector]}
                       </div>
-                      <div>
+                      <div className="flex items-center gap-2">
+                        {scan.status === "Running" ? (
+                          <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-[#ff4d57]" />
+                        ) : null}
                         <Pill className={scanStatusClass[scan.status]}>
                           {scan.status}
                         </Pill>
