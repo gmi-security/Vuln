@@ -13,6 +13,8 @@ on:
           - baseline
   push:
     branches: [main]
+  schedule:
+    - cron: "0 */6 * * *"
 
 permissions:
   contents: read
@@ -43,6 +45,6 @@ jobs:
         run: gmi-appsec-ci --baseline "$GITHUB_WORKSPACE" "$GITHUB_REPOSITORY"
 
       - name: Run delta gate
-        if: ${{ (github.event_name == 'push' && !contains(github.event.head_commit.message, '[appsec-baseline]')) || (github.event_name == 'workflow_dispatch' && inputs.mode == 'scan') }}
+        if: ${{ (github.event_name == 'push' && !contains(github.event.head_commit.message, '[appsec-baseline]')) || (github.event_name == 'workflow_dispatch' && inputs.mode == 'scan') || github.event_name == 'schedule' }}
         shell: bash
         run: gmi-appsec-ci "$GITHUB_WORKSPACE" "$GITHUB_REPOSITORY"
