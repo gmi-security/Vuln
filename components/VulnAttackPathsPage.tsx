@@ -8,7 +8,7 @@ import {
   IconDoorEnter,
 } from "@tabler/icons-react";
 import VulnShell from "@/components/VulnShell";
-import { PanelCard, Pill, StatCard, ghostButtonClass, selectClass } from "@/components/ui";
+import { KennaStatChip, PanelCard, Pill, ghostButtonClass, selectClass } from "@/components/ui";
 import { useCompanyFilter } from "@/lib/useCompanyFilter";
 import { compositeColor, exposureClass, riskColor } from "@/lib/format";
 import type { AttackEntry, AttackPathResult, Company } from "@/lib/types";
@@ -78,24 +78,25 @@ export default function VulnAttackPathsPage() {
         </>
       }
     >
-      <div className="grid gap-5 md:grid-cols-3">
-        <StatCard
+      <div className="grid grid-cols-3 gap-3">
+        <KennaStatChip
+          icon={<IconDoorEnter size={16} />}
           label="Entry points"
-          value={s ? s.entryPoints : "—"}
-          sublabel="Internet-facing & exploitable"
-          icon={<IconDoorEnter size={26} />}
+          value={s ? s.entryPoints : null}
+          tone="warning"
         />
-        <StatCard
+        <KennaStatChip
+          icon={<IconCrown size={16} />}
           label="Crown jewels at risk"
-          value={s ? s.crownJewelsAtRisk : "—"}
-          sublabel="Reachable from an entry point"
-          icon={<IconCrown size={26} />}
+          value={s ? s.crownJewelsAtRisk : null}
+          tone="critical"
+          pulse={Boolean(s && s.crownJewelsAtRisk > 0)}
         />
-        <StatCard
+        <KennaStatChip
+          icon={<IconBomb size={16} />}
           label="Max blast radius"
-          value={s ? s.maxBlast : "—"}
-          sublabel="Worst single entry point, 0–100"
-          icon={<IconBomb size={26} />}
+          value={s ? s.maxBlast : null}
+          tone="critical"
         />
       </div>
 

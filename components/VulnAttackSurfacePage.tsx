@@ -3,7 +3,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { RefreshCcw, Globe, Server, KeyRound, Bug, Radar } from "lucide-react";
 import VulnShell from "@/components/VulnShell";
-import { StatCard, ghostButtonClass, primaryButtonClass } from "@/components/ui";
+import { KennaStatChip, ghostButtonClass, primaryButtonClass } from "@/components/ui";
 
 type SurfaceCategory =
   | "Exposed Services"
@@ -145,30 +145,29 @@ export default function VulnAttackSurfacePage() {
         </div>
       ) : null}
 
-      <div className="grid gap-5 md:grid-cols-2 2xl:grid-cols-4">
-        <StatCard
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <KennaStatChip
+          icon={<Globe size={16} />}
           label="Total exposures"
-          value={sum ? sum.total : "—"}
-          sublabel={sum ? `Artemis ${sum.bySource.artemis} · SpiderFoot ${sum.bySource.spiderfoot}` : "OSINT signals"}
-          icon={<Globe size={26} />}
+          value={sum ? sum.total : null}
         />
-        <StatCard
+        <KennaStatChip
+          icon={<Server size={16} />}
           label="Exposed assets"
-          value={sum ? sum.exposedAssets : "—"}
-          sublabel="Distinct hosts / domains"
-          icon={<Server size={26} />}
+          value={sum ? sum.exposedAssets : null}
         />
-        <StatCard
+        <KennaStatChip
+          icon={<KeyRound size={16} />}
           label="Leaked credentials"
-          value={sum ? sum.byCategory["Leaked Credentials"] : "—"}
-          sublabel="Compromised / breached"
-          icon={<KeyRound size={26} />}
+          value={sum ? sum.byCategory["Leaked Credentials"] : null}
+          tone="critical"
+          pulse={Boolean(sum && sum.byCategory["Leaked Credentials"] > 0)}
         />
-        <StatCard
+        <KennaStatChip
+          icon={<Bug size={16} />}
           label="Web weaknesses"
-          value={sum ? sum.byCategory["Web Vulnerabilities"] : "—"}
-          sublabel="Misconfig, injection, panels"
-          icon={<Bug size={26} />}
+          value={sum ? sum.byCategory["Web Vulnerabilities"] : null}
+          tone="warning"
         />
       </div>
 
