@@ -3,7 +3,8 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { RefreshCcw, ShieldCheck, AlarmClock, Timer, CheckCircle2 } from "lucide-react";
 import VulnShell from "@/components/VulnShell";
-import { StatCard, ghostButtonClass } from "@/components/ui";
+import RiskGauge from "@/components/RiskGauge";
+import { KennaStatChip, ghostButtonClass } from "@/components/ui";
 
 type SlaClientRow = {
   companyId: string;
@@ -110,31 +111,34 @@ export default function VulnSlaPage() {
         </button>
       }
     >
-      <div className="grid gap-5 md:grid-cols-2 2xl:grid-cols-4">
-        <StatCard
-          label="SLA compliance"
-          value={o ? `${o.slaCompliance}%` : "—"}
-          sublabel="Open findings within window"
-          icon={<ShieldCheck size={26} />}
-        />
-        <StatCard
-          label="SLA breached"
-          value={o ? o.breached : "—"}
-          sublabel="Past remediation deadline"
-          icon={<AlarmClock size={26} />}
-        />
-        <StatCard
-          label="Mean time to remediate"
-          value={o ? (o.mttrDays === null ? "—" : `${o.mttrDays}d`) : "—"}
-          sublabel="Avg across resolved findings"
-          icon={<Timer size={26} />}
-        />
-        <StatCard
-          label="Resolved (30d)"
-          value={o ? o.resolved30 : "—"}
-          sublabel="Closed in the last month"
-          icon={<CheckCircle2 size={26} />}
-        />
+      <div className="flex flex-col items-center gap-6 rounded-[28px] border border-[rgba(179,14,20,0.16)] bg-[linear-gradient(180deg,#0b0b0b,#060606)] p-6 shadow-[0_12px_32px_rgba(10,1,2,0.3)] lg:flex-row lg:items-stretch">
+        <div className="flex flex-col items-center justify-center gap-2 lg:border-r lg:border-zinc-900 lg:pr-6">
+          <RiskGauge
+            score={o ? o.slaCompliance : 0}
+            color={o ? complianceColor(o.slaCompliance) : "#71717a"}
+            label="SLA compliance"
+            sublabel="open findings within window"
+          />
+        </div>
+        <div className="grid flex-1 grid-cols-2 gap-3 sm:grid-cols-3">
+          <KennaStatChip
+            icon={<AlarmClock size={16} />}
+            label="SLA breached"
+            value={o ? o.breached : null}
+            tone="critical"
+          />
+          <KennaStatChip
+            icon={<Timer size={16} />}
+            label="Mean time to remediate (days)"
+            value={o?.mttrDays ?? null}
+          />
+          <KennaStatChip
+            icon={<CheckCircle2 size={16} />}
+            label="Resolved (30d)"
+            value={o ? o.resolved30 : null}
+            tone="ok"
+          />
+        </div>
       </div>
 
       <div className="rounded-2xl border border-[rgba(179,14,20,0.14)] bg-[#050505] p-5">
@@ -172,7 +176,11 @@ export default function VulnSlaPage() {
               <div className="text-right">Resolved 30d</div>
             </div>
             {(data?.clients ?? []).map((c) => (
-              <div key={c.companyId} className="grid grid-cols-[1.4fr_120px_1fr_90px_90px_90px] items-center gap-3 border-b border-zinc-900/60 py-3 text-sm">
+              <div key={c.companyId} className="relative grid grid-cols-[1.4fr_120px_1fr_90px_90px_90px] items-center gap-3 border-b border-zinc-900/60 py-3 pl-3 text-sm">
+                <div
+                  className="absolute inset-y-0 left-0 w-[3px]"
+                  style={{ background: complianceColor(c.slaCompliance) }}
+                />
                 <div className="min-w-0 truncate font-medium text-white">{c.companyName}</div>
                 <div>
                   <div className="flex items-center gap-2">
