@@ -5,15 +5,17 @@ import Link from "next/link";
 import { Play } from "lucide-react";
 import {
   IconAlertTriangle,
+  IconBolt,
   IconBug,
-  IconGauge,
+  IconFlame,
   IconRadar,
 } from "@tabler/icons-react";
 import VulnShell from "@/components/VulnShell";
 import TrendChart, { type TrendSnapshot } from "@/components/TrendChart";
 import CompositeScoreInfo from "@/components/CompositeScoreInfo";
 import RiskDashboard from "@/components/RiskDashboard";
-import { PanelCard, Pill, StatCard, primaryButtonClass } from "@/components/ui";
+import RiskGauge from "@/components/RiskGauge";
+import { KennaStatChip, PanelCard, Pill, primaryButtonClass } from "@/components/ui";
 import {
   compositeColor,
   connectorLabels,
@@ -211,48 +213,50 @@ export default function VulnDashboardPage() {
         </div>
       ) : null}
 
-      <div className="grid gap-5 md:grid-cols-2 2xl:grid-cols-4">
-        <StatCard
-          label="Open findings"
-          value={metrics ? metrics.totalOpen : "—"}
-          sublabel={`${metrics?.exploitableOpen ?? 0} with known exploit`}
-          icon={<IconBug size={26} />}
-        />
-        <StatCard
-          label="Critical open"
-          value={metrics ? metrics.severityCounts.Critical : "—"}
-          sublabel={`${metrics?.severityCounts.High ?? 0} high severity open`}
-          icon={<IconAlertTriangle size={26} />}
-        />
-        <StatCard
-          label="Active scans"
-          value={running.length}
-          sublabel={`${scans.length} scans total`}
-          icon={<IconRadar size={26} />}
-        />
-        <StatCard
-          label={
-            <span className="inline-flex items-center gap-1.5">
-              Composite risk
-              <CompositeScoreInfo />
-            </span>
-          }
-          value={
-            metrics ? (
-              <span style={{ color: compositeColor(metrics.composite.score) }}>
-                {metrics.composite.score}
-              </span>
-            ) : (
-              "—"
-            )
-          }
-          sublabel={
-            metrics
-              ? `${metrics.composite.band} · exposure ${metrics.exposureScore}`
-              : ""
-          }
-          icon={<IconGauge size={26} />}
-        />
+      <div className="flex flex-col items-center gap-6 rounded-[28px] border border-[rgba(179,14,20,0.16)] bg-[linear-gradient(180deg,#0b0b0b,#060606)] p-6 shadow-[0_12px_32px_rgba(10,1,2,0.3)] lg:flex-row lg:items-stretch">
+        <div className="flex flex-col items-center justify-center gap-2 lg:border-r lg:border-zinc-900 lg:pr-6">
+          <RiskGauge
+            score={metrics ? metrics.composite.score : 0}
+            color={metrics ? compositeColor(metrics.composite.score) : "#71717a"}
+            label="Composite risk"
+            sublabel={metrics?.composite.band}
+          />
+          <span className="inline-flex items-center gap-1.5 text-xs text-zinc-500">
+            exposure {metrics?.exposureScore ?? "—"}
+            <CompositeScoreInfo />
+          </span>
+        </div>
+        <div className="grid flex-1 grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
+          <KennaStatChip
+            icon={<IconBug size={16} />}
+            label="Open findings"
+            value={metrics ? metrics.totalOpen : "—"}
+          />
+          <KennaStatChip
+            icon={<IconAlertTriangle size={16} />}
+            label="Critical open"
+            value={metrics ? metrics.severityCounts.Critical : "—"}
+            tone="critical"
+          />
+          <KennaStatChip
+            icon={<IconFlame size={16} />}
+            label="Actively exploited (KEV)"
+            value={metrics ? metrics.kevOpen : "—"}
+            tone="critical"
+          />
+          <KennaStatChip
+            icon={<IconBolt size={16} />}
+            label="Public exploit available"
+            value={metrics ? metrics.exploitableOpen : "—"}
+            tone="warning"
+          />
+          <KennaStatChip
+            icon={<IconRadar size={16} />}
+            label="Active scans"
+            value={running.length}
+            tone="ok"
+          />
+        </div>
       </div>
 
       {metrics !== null && !hasData ? (

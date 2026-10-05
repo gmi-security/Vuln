@@ -31,6 +31,43 @@ export function StatCard({
   );
 }
 
+// Compact stat chip modeled on Kenna Security's top-row tiles (icon badge,
+// a pill-shaped colored number, a small label underneath) -- denser than
+// StatCard, meant to sit in a row next to a RiskGauge the way Kenna's
+// "Top Priority / Active Breaches / Easily Exploitable" row sits beside
+// its risk-score ring.
+export function KennaStatChip({
+  icon,
+  label,
+  value,
+  tone = "neutral",
+}: {
+  icon: React.ReactNode;
+  label: React.ReactNode;
+  value: React.ReactNode;
+  tone?: "critical" | "warning" | "ok" | "neutral";
+}) {
+  const toneColor =
+    tone === "critical" ? "#b30e14" : tone === "warning" ? "#f5a623" : tone === "ok" ? "#10b981" : "#9ca3af";
+  return (
+    <div className="flex flex-1 flex-col items-center gap-2 rounded-2xl border border-zinc-900 bg-[#090909] px-3 py-4 text-center transition hover:border-zinc-800">
+      <span
+        className="flex h-8 w-8 items-center justify-center rounded-full border"
+        style={{ borderColor: `${toneColor}55`, color: toneColor, background: `${toneColor}1a` }}
+      >
+        {icon}
+      </span>
+      <span
+        className="rounded-full px-3 py-0.5 text-lg font-bold tabular-nums"
+        style={{ color: toneColor, background: `${toneColor}14` }}
+      >
+        {value}
+      </span>
+      <span className="text-[11px] leading-tight text-zinc-400">{label}</span>
+    </div>
+  );
+}
+
 export function PanelCard({
   eyebrow,
   description,
