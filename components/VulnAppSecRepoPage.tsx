@@ -8,8 +8,8 @@ import { Pill, ghostButtonClass } from "@/components/ui";
 import { formatDateTime, severityClass } from "@/lib/format";
 import type { AppSecRepoDetail } from "@/lib/elastic-appsec";
 
-const SCAN_GRID = "grid grid-cols-[1fr_120px_90px_90px_110px] items-center gap-4";
-const FINDING_GRID = "grid grid-cols-[100px_1.6fr_1fr_120px_110px] items-center gap-4";
+const SCAN_GRID = "grid grid-cols-[1fr_110px_85px_85px_85px_85px_110px] items-center gap-4";
+const FINDING_GRID = "grid grid-cols-[95px_120px_1.6fr_1fr_110px_130px] items-center gap-4";
 
 function gateColor(gate: string | null): string {
   if (!gate) return "#52525b";
@@ -44,9 +44,7 @@ export default function VulnAppSecRepoPage({ repository }: { repository: string 
     }
   }, [repository]);
 
-  useEffect(() => {
-    void load();
-  }, [load]);
+  useEffect(() => { void load(); }, [load]);
 
   const latest = detail?.scans[0];
 
@@ -54,7 +52,7 @@ export default function VulnAppSecRepoPage({ repository }: { repository: string 
     <VulnShell
       eyebrow="AppSec · Repository"
       title={repository}
-      subtitle="Trivy scan history and open findings for this repository."
+      subtitle="Trivy scan history and current findings for this repository."
       actions={
         <>
           <Link href="/appsec" className={ghostButtonClass}>
@@ -83,6 +81,8 @@ export default function VulnAppSecRepoPage({ repository }: { repository: string 
           <span className="text-sm text-zinc-400">Latest scan</span>
           <span className="text-sm text-white">{formatDateTime(latest.completedAt)}</span>
           <span className="text-sm text-zinc-500">· {latest.findings} findings</span>
+          <span className="text-sm text-zinc-500">· +{latest.newCritical} critical / +{latest.newHigh} high</span>
+          <span className="text-sm text-zinc-500">· {latest.resolved} resolved</span>
           <span
             className="rounded-full border px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide"
             style={{ borderColor: `${gateColor(latest.gate)}55`, background: `${gateColor(latest.gate)}22`, color: gateColor(latest.gate) }}
@@ -98,6 +98,8 @@ export default function VulnAppSecRepoPage({ repository }: { repository: string 
           <div>Status</div>
           <div>Critical</div>
           <div>High</div>
+          <div>New C</div>
+          <div>New H</div>
           <div>Gate</div>
         </div>
         {(detail?.scans ?? []).map((scan) => (
@@ -107,12 +109,10 @@ export default function VulnAppSecRepoPage({ repository }: { repository: string 
               <div className="mt-0.5 truncate text-xs text-zinc-600">{scan.scanId}</div>
             </div>
             <div className="text-sm text-zinc-300">{scan.status ?? "—"}</div>
-            <div className="text-sm font-semibold tabular-nums" style={{ color: scan.critical > 0 ? "#b30e14" : "#3f3f46" }}>
-              {scan.critical}
-            </div>
-            <div className="text-sm font-semibold tabular-nums" style={{ color: scan.high > 0 ? "#f97316" : "#3f3f46" }}>
-              {scan.high}
-            </div>
+            <div className="text-sm font-semibold tabular-nums" style={{ color: scan.critical > 0 ? "#b30e14" : "#3f3f46" }}>{scan.critical}</div>
+            <div className="text-sm font-semibold tabular-nums" style={{ color: scan.high > 0 ? "#f97316" : "#3f3f46" }}>{scan.high}</div>
+            <div className="text-sm tabular-nums text-[#ff4d57]">{scan.newCritical}</div>
+            <div className="text-sm tabular-nums text-amber-300">{scan.newHigh}</div>
             <div>
               <span
                 className="rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
@@ -130,7 +130,7 @@ export default function VulnAppSecRepoPage({ repository }: { repository: string 
 
       <div className="overflow-hidden rounded-[24px] border border-[rgba(179,14,20,0.12)] bg-[#040404]">
         <div className="border-b border-zinc-900 px-5 py-3 text-xs uppercase tracking-[0.2em] text-zinc-500">
-          Open findings
+          Current findings
         </div>
         {detail?.findingsError ? (
           <div className="px-5 py-8 text-center text-sm text-zinc-500">
@@ -140,32 +140,33 @@ export default function VulnAppSecRepoPage({ repository }: { repository: string 
           <>
             <div className={`${FINDING_GRID} border-b border-zinc-900 px-5 py-3 text-xs uppercase tracking-[0.2em] text-zinc-500`}>
               <div>Severity</div>
+              <div>Type</div>
               <div>Finding</div>
-              <div>Package</div>
-              <div>Fixed in</div>
-              <div>First seen</div>
+              <div>Package / Target</div>
+              <div>Status</div>
+              <div>Observed</div>
             </div>
             {(detail?.findings ?? []).map((f) => (
-              <div key={f.id} className={`${FINDING_GRID} border-b border-zinc-900/70 px-5 py-4 last:border-b-0`}>
+              <div key={f.fingerprint || f.id} className={`${FINDING_GRID} border-b border-zinc-900/70 px-5 py-4 last:border-b-0`}>
                 <div>
                   <Pill className={severityClass[f.severity as keyof typeof severityClass] ?? severityClass.Info}>
                     {f.severity}
                   </Pill>
                 </div>
+                <div className="truncate text-xs uppercase tracking-wide text-zinc-500">{f.kind}</div>
                 <div className="min-w-0">
                   <div className="truncate text-sm font-medium text-white">{f.title}</div>
-                  {f.cve ? <div className="mt-0.5 text-xs text-[#ff8f96]">{f.cve}</div> : null}
+                  {(f.vulnerabilityId || f.id) ? (
+                    <div className="mt-0.5 text-xs text-[#ff8f96]">{f.vulnerabilityId || f.id}</div>
+                  ) : null}
                 </div>
-                <div className="min-w-0 truncate text-sm text-zinc-300">
-                  {f.package ?? "—"}
-                  {f.installedVersion ? <span className="text-zinc-600"> @{f.installedVersion}</span> : null}
-                </div>
-                <div className="text-sm text-zinc-400">{f.fixedVersion ?? "—"}</div>
-                <div className="text-sm text-zinc-400">{f.firstSeen ? formatDateTime(f.firstSeen) : "—"}</div>
+                <div className="min-w-0 truncate text-sm text-zinc-300">{f.package ?? f.target ?? "—"}</div>
+                <div className="text-sm text-zinc-400">{f.status ?? "—"}</div>
+                <div className="text-sm text-zinc-400">{f.observedAt ? formatDateTime(f.observedAt) : "—"}</div>
               </div>
             ))}
             {detail && detail.findings.length === 0 ? (
-              <div className="px-5 py-10 text-center text-sm text-zinc-500">No open findings.</div>
+              <div className="px-5 py-10 text-center text-sm text-zinc-500">No current findings.</div>
             ) : null}
           </>
         )}
