@@ -18,7 +18,7 @@ type SlaSeverity = Exclude<Severity, "Info">;
 type SlaSettings = Record<SlaSeverity, number>;
 
 const DEFAULT_SCHEDULE: ScheduleSettings = {
-  autoSyncEnabled: false,
+  autoSyncEnabled: true,
   autoSyncIntervalHours: 24,
   alertsEnabled: false,
   monthlyReportsEnabled: false,

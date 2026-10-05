@@ -437,7 +437,11 @@ function defaultSettings(): Settings {
   return {
     autoScanNewAssets: false,
     schedule: {
-      autoSyncEnabled: false,
+      // Default on: daily scanning with zero manual steps is the whole
+      // point of this app. A fresh install (or the one-time migration
+      // below, for a store that already has settings persisted from when
+      // this defaulted to false) starts auto-syncing immediately.
+      autoSyncEnabled: true,
       autoSyncIntervalHours: 24,
       alertsEnabled: true,
       monthlyReportsEnabled: false,
@@ -488,6 +492,13 @@ type StoreMeta = {
   // Set once importFromNessus has re-evaluated every existing record against
   // the corrected (completedAt-compared) logic, so it only resets once.
   nessusBackfillCorrected: boolean;
+  // One-time migration: autoSyncEnabled's default flipped false -> true.
+  // defaultSettings() alone only affects a brand-new store -- a store that
+  // already has settings persisted from before this change keeps its old
+  // persisted false forever (normalizeSettings merges persisted over
+  // defaults). This forces the flip exactly once for an existing store, then
+  // never touches it again, so a deliberate later "off" sticks normally.
+  autoSyncDefaultMigrated: boolean;
 };
 
 function defaultMeta(): StoreMeta {
@@ -502,6 +513,7 @@ function defaultMeta(): StoreMeta {
     lastNessusFreshCheckAt: null,
     lastSlaBreachCheckDay: null,
     nessusBackfillCorrected: false,
+    autoSyncDefaultMigrated: false,
   };
 }
 
@@ -677,6 +689,24 @@ function sanitizeSpiderfootAssets(s: StoreShape): void {
   }
 }
 
+// One-time: flip an existing store's persisted autoSyncEnabled to true now
+// that it defaults on. defaultSettings() alone only reaches a brand-new
+// store -- normalizeSettings() merges persisted values over the defaults,
+// so a store that already had `autoSyncEnabled: false` written (true for
+// every store before this change) keeps that false forever without this.
+// Runs once per store, ever: after it fires, autoSyncDefaultMigrated stays
+// true, so a deliberate later "off" via Settings sticks normally and this
+// never fights the user's own choice again.
+function migrateAutoSyncDefault(s: StoreShape): void {
+  if (s.meta.autoSyncDefaultMigrated) return;
+  s.meta.autoSyncDefaultMigrated = true;
+  if (!s.settings.schedule.autoSyncEnabled) {
+    s.settings.schedule.autoSyncEnabled = true;
+    console.error("[store] one-time migration: autoSyncEnabled defaulted on");
+  }
+  markDirty();
+}
+
 // Serialize all snapshot writes through a single in-flight promise so an
 // interval tick and a flushNow() (or two mutations) can never commit out of
 // order and let a stale snapshot clobber a newer one.
@@ -770,6 +800,7 @@ async function doHydrate(): Promise<void> {
   }
   const s = store(); // seed if still uninitialized
   sanitizeSpiderfootAssets(s);
+  migrateAutoSyncDefault(s);
   persistGlobal.__vulnHydrated = true;
   startFlusher();
   startScheduler();
