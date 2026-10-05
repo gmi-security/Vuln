@@ -551,8 +551,22 @@ export async function falconListAssets(config: FalconConfig): Promise<FalconAsse
   if (!first.ids.length) return [];
 
   const total = first.total || first.ids.length;
+  // Falcon's devices/queries/devices/v1 endpoint rejects offset+limit beyond
+  // 10,000 (a documented Falcon API ceiling, not a limit this code chose) --
+  // paging past it would throw and fail the ENTIRE sync for every device,
+  // not just the ones beyond 10k. Cap the walk there and say so loudly
+  // instead of crashing (previous behavior) or silently returning short
+  // (equally bad): a tenant this size needs a cursor-based rewrite of this
+  // endpoint, which is real work, not something to guess at silently here.
+  const OFFSET_CEILING = 10_000;
+  if (total > OFFSET_CEILING) {
+    console.error(
+      `[crowdstrike] ${config.baseUrl}: tenant reports ${total} devices, but offset pagination on this endpoint only reaches ${OFFSET_CEILING} -- ${total - OFFSET_CEILING} device(s) will NOT be pulled this sync. Needs a cursor-based rewrite for tenants this size.`,
+    );
+  }
+  const walkTotal = Math.min(total, OFFSET_CEILING);
   const remainingOffsets: number[] = [];
-  for (let off = PAGE; off < total; off += PAGE) remainingOffsets.push(off);
+  for (let off = PAGE; off < walkTotal; off += PAGE) remainingOffsets.push(off);
 
   const restPages = await runWithConcurrency(remainingOffsets, 8, fetchIdPage);
   const allIds = [first.ids, ...restPages.map((p) => p.ids)].flat();
