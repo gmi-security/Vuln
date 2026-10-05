@@ -3,11 +3,18 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { RefreshCcw, Flame, ShieldAlert, Clock, CalendarClock } from "lucide-react";
 import VulnShell from "@/components/VulnShell";
-import { Pill, StatCard, ghostButtonClass } from "@/components/ui";
+import { KennaStatChip, Pill, ghostButtonClass } from "@/components/ui";
 
 const cardClass =
-  "rounded-2xl border border-[rgba(179,14,20,0.14)] bg-[#050505] p-5";
+  "relative overflow-hidden rounded-2xl border border-[rgba(179,14,20,0.14)] bg-[#050505] p-5 pl-6";
 import { compositeColor } from "@/lib/format";
+
+const decisionBarColor: Record<string, string> = {
+  Act: "#b30e14",
+  Attend: "#f97316",
+  "Track*": "#f5a623",
+  Track: "#52525b",
+};
 
 type PriorityItem = {
   id: string;
@@ -89,30 +96,31 @@ export default function VulnPrioritiesPage() {
         </button>
       }
     >
-      <div className="grid gap-5 md:grid-cols-2 2xl:grid-cols-4">
-        <StatCard
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <KennaStatChip
+          icon={<Flame size={16} />}
           label="Act now"
-          value={s ? s.act : "—"}
-          sublabel="Immediate remediation"
-          icon={<Flame size={26} />}
+          value={s ? s.act : null}
+          tone="critical"
         />
-        <StatCard
+        <KennaStatChip
+          icon={<ShieldAlert size={16} />}
           label="Overdue"
-          value={s ? s.overdue : "—"}
-          sublabel="Past remediation SLA"
-          icon={<ShieldAlert size={26} />}
+          value={s ? s.overdue : null}
+          tone="critical"
         />
-        <StatCard
+        <KennaStatChip
+          icon={<Clock size={16} />}
           label="KEV overdue"
-          value={s ? s.kevOverdue : "—"}
-          sublabel="Actively exploited, past 14d"
-          icon={<Clock size={26} />}
+          value={s ? s.kevOverdue : null}
+          tone="critical"
+          pulse={Boolean(s && s.kevOverdue > 0)}
         />
-        <StatCard
+        <KennaStatChip
+          icon={<CalendarClock size={16} />}
           label="Due this week"
-          value={s ? s.dueThisWeek : "—"}
-          sublabel="SLA within 7 days"
-          icon={<CalendarClock size={26} />}
+          value={s ? s.dueThisWeek : null}
+          tone="warning"
         />
       </div>
 
@@ -121,6 +129,10 @@ export default function VulnPrioritiesPage() {
           const due = dueLabel(item);
           return (
             <div key={item.id} className={cardClass}>
+              <div
+                className="absolute inset-y-0 left-0 w-1"
+                style={{ background: decisionBarColor[item.decision] ?? "#52525b" }}
+              />
               <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                 <div className="flex min-w-0 items-start gap-4">
                   <div className="mt-0.5 w-8 shrink-0 text-right text-sm font-semibold text-zinc-600">
