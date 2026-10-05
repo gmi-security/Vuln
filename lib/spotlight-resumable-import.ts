@@ -24,6 +24,11 @@ export type ResumableSpotlightProgress = {
   tenant: string;
   fetched: number;
   stored: number;
+  // CrowdStrike's own reported total result count for this run, known once
+  // the first discovery page comes back (reportedTotal on savePage/
+  // savePartitionPage). Null until then, or if CrowdStrike never reports
+  // one -- callers must treat it as "no denominator yet", not zero.
+  expectedCount: number | null;
 };
 
 export async function runResumableSpotlightImport(
@@ -37,6 +42,7 @@ export async function runResumableSpotlightImport(
     phase, tenant: selection.config.label,
     fetched: run?.discoveredCount ?? 0,
     stored: run?.hydratedCount ?? 0,
+    expectedCount: run?.expectedCount ?? null,
   });
   report("Starting");
   try {
@@ -157,6 +163,7 @@ export async function runPartitionedSpotlightImport(
     phase, tenant: selection.config.label,
     fetched: run?.discoveredCount ?? 0,
     stored: run?.hydratedCount ?? 0,
+    expectedCount: run?.expectedCount ?? null,
   });
   report("Starting");
   try {

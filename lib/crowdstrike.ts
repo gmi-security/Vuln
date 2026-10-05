@@ -129,12 +129,24 @@ async function timedFetch(url: string, init: RequestInit, timeoutMs = 60_000): P
 // Runs `fn` over `items` with at most `limit` in flight at once, so a large
 // tenant's device/vuln hydration (which used to fire hundreds of requests in
 // one unbounded Promise.all) can't overwhelm CrowdStrike's rate limiter just
-// because the underlying dataset is large.
-async function runWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+// because the underlying dataset is large. onItemDone (optional) fires after
+// each item settles -- real incremental progress for a caller that knows
+// `items.length` as its denominator, not a fabricated estimate.
+async function runWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+  onItemDone?: (completed: number, total: number) => void,
+): Promise<R[]> {
   const results = new Array<R>(items.length);
   let next = 0;
+  let completed = 0;
   async function worker() {
-    for (let i = next++; i < items.length; i = next++) results[i] = await fn(items[i]);
+    for (let i = next++; i < items.length; i = next++) {
+      results[i] = await fn(items[i]);
+      completed += 1;
+      onItemDone?.(completed, items.length);
+    }
   }
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
   return results;
@@ -497,8 +509,14 @@ export async function spotlightListFindings(config: FalconTenant): Promise<Spotl
 
 // --- Falcon host inventory ---------------------------------------------------
 // List Falcon hosts: query device ids (first page gives total → remaining pages
-// fire in parallel), then hydrate all ID batches in parallel.
-export async function falconListAssets(config: FalconConfig): Promise<FalconAsset[]> {
+// fire in parallel), then hydrate all ID batches in parallel. onProgress
+// (optional) reports real counts against a known denominator -- device IDs
+// discovered vs. the tenant's own reported total, then devices hydrated vs.
+// IDs discovered -- for a caller that wants to show sync progress.
+export async function falconListAssets(
+  config: FalconConfig,
+  onProgress?: (fetched: number, total: number) => void,
+): Promise<FalconAsset[]> {
   const token = await falconToken(config);
   const authHeader = { Authorization: `Bearer ${token}`, Accept: "application/json" };
 
@@ -568,13 +586,20 @@ export async function falconListAssets(config: FalconConfig): Promise<FalconAsse
   const remainingOffsets: number[] = [];
   for (let off = PAGE; off < walkTotal; off += PAGE) remainingOffsets.push(off);
 
-  const restPages = await runWithConcurrency(remainingOffsets, 8, fetchIdPage);
+  onProgress?.(first.ids.length, walkTotal);
+  const restPages = await runWithConcurrency(remainingOffsets, 8, fetchIdPage, (completedPages) => {
+    onProgress?.(Math.min(walkTotal, first.ids.length + completedPages * PAGE), walkTotal);
+  });
   const allIds = [first.ids, ...restPages.map((p) => p.ids)].flat();
 
-  // Hydrate all ID batches, bounded (API accepts up to 500 per POST).
+  // Hydrate all ID batches, bounded (API accepts up to 500 per POST). This
+  // is the real bottleneck (one POST per up-to-500 devices), so progress
+  // from here on reports hydrated devices against the full discovered count.
   const idBatches: string[][] = [];
   for (let i = 0; i < allIds.length; i += PAGE) idBatches.push(allIds.slice(i, i + PAGE));
 
-  const results = await runWithConcurrency(idBatches, 8, hydrateIds);
+  const results = await runWithConcurrency(idBatches, 8, hydrateIds, (completedBatches) => {
+    onProgress?.(Math.min(allIds.length, completedBatches * PAGE), allIds.length);
+  });
   return results.flat();
 }

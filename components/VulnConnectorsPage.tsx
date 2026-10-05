@@ -48,11 +48,41 @@ type TidalSyncStatus = {
 type CsSyncStatus = {
   running: boolean;
   phase: string;
+  tenant?: string;
+  fetched?: number;
+  stored?: number;
+  // Known denominator, when the source can report one. Null/undefined means
+  // no real percent is available yet -- never fabricate one in that case.
+  total?: number | null;
   startedAt: number;
   finishedAt: number | null;
   result: unknown;
   error: string | null;
 };
+
+// Real elapsed/ETA from done-vs-total and wall-clock progress -- never a
+// fabricated estimate. Returns null when there's not enough to go on yet
+// (no progress made, or no known denominator).
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) return seconds ? `${minutes}m ${seconds}s` : `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remMinutes = minutes % 60;
+  return remMinutes ? `${hours}h ${remMinutes}m` : `${hours}h`;
+}
+
+function etaLabel(startedAt: number, done: number, total: number | null | undefined): string | null {
+  if (!total || done <= 0 || done >= total) return null;
+  const elapsedMs = Date.now() - startedAt;
+  if (elapsedMs <= 0) return null;
+  const rate = done / elapsedMs; // units per ms
+  const remainingMs = (total - done) / rate;
+  if (!Number.isFinite(remainingMs) || remainingMs < 0) return null;
+  return `~${formatDuration(remainingMs)} remaining`;
+}
 
 const cardIcon: Record<string, React.ElementType> = {
   nessus: IconRadar,
@@ -935,9 +965,37 @@ function IntegrationCard({ card }: { card: CardData }) {
       {isCrowdstrike && syncing && csProgress ? (
         <div className="mt-3 rounded-lg border border-zinc-800 bg-[#090909] px-3 py-3">
           <div className="flex items-center justify-between text-xs text-zinc-300">
-            <span className="flex items-center gap-1.5">
-              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#ff4d57]" />
+            <span className="flex items-center gap-1.5 truncate">
+              <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-[#ff4d57]" />
               {csProgress.phase === "Syncing" ? "Syncing from CrowdStrike API…" : csProgress.phase}
+            </span>
+            {csProgress.total ? (
+              <span className="shrink-0 tabular-nums text-zinc-500">
+                {Math.round(((csProgress.stored ?? 0) / csProgress.total) * 100)}%
+              </span>
+            ) : null}
+          </div>
+          <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-zinc-800">
+            <div
+              className={`h-full rounded-full bg-[#ff4d57] ${csProgress.total ? "transition-all duration-500" : "animate-pulse"}`}
+              style={{
+                width: csProgress.total
+                  ? `${Math.round(((csProgress.stored ?? 0) / csProgress.total) * 100)}%`
+                  : "100%",
+              }}
+            />
+          </div>
+          <div className="mt-2 flex items-center justify-between text-[11px] text-zinc-500">
+            <span className="tabular-nums">
+              {csProgress.total
+                ? `${(csProgress.stored ?? 0).toLocaleString()} / ${csProgress.total.toLocaleString()}`
+                : csProgress.fetched
+                  ? `${csProgress.fetched.toLocaleString()} fetched`
+                  : `elapsed ${formatDuration(Date.now() - csProgress.startedAt)}`}
+            </span>
+            <span className="truncate">
+              {etaLabel(csProgress.startedAt, csProgress.stored ?? 0, csProgress.total) ??
+                `elapsed ${formatDuration(Date.now() - csProgress.startedAt)}`}
             </span>
           </div>
         </div>
@@ -952,7 +1010,7 @@ function IntegrationCard({ card }: { card: CardData }) {
             </span>
             <span className="tabular-nums text-zinc-500">
               {progress.companiesTotal
-                ? `${progress.companiesDone}/${progress.companiesTotal}`
+                ? `${Math.round((progress.companiesDone / progress.companiesTotal) * 100)}%`
                 : ""}
             </span>
           </div>
@@ -967,8 +1025,17 @@ function IntegrationCard({ card }: { card: CardData }) {
             />
           </div>
           <div className="mt-2 flex items-center justify-between text-[11px] text-zinc-500">
-            <span className="truncate">{progress.currentCompany || " "}</span>
-            <span className="tabular-nums">{progress.assetsFound} assets</span>
+            <span className="truncate">
+              {progress.currentCompany || " "}
+              {progress.companiesTotal ? ` (${progress.companiesDone}/${progress.companiesTotal})` : ""}
+            </span>
+            <span className="flex shrink-0 items-center gap-2 tabular-nums">
+              <span>{progress.assetsFound} assets</span>
+              <span className="text-zinc-600">
+                {etaLabel(progress.startedAt, progress.companiesDone, progress.companiesTotal) ??
+                  `elapsed ${formatDuration(Date.now() - progress.startedAt)}`}
+              </span>
+            </span>
           </div>
         </div>
       ) : null}

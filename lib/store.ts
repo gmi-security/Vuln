@@ -5762,6 +5762,11 @@ export type CsSyncStatus = {
   tenant?: string;
   fetched?: number;
   stored?: number;
+  // Known denominator for a real percent, when the source can report one
+  // (CrowdStrike's own reported total for Spotlight; Falcon's device-query
+  // total for Devices). Null/undefined means "no denominator yet" -- the UI
+  // must show elapsed time instead of fabricating a percentage.
+  total?: number | null;
   startedAt: number;
   finishedAt: number | null;
   result: unknown;
@@ -5816,10 +5821,12 @@ export async function getCsSpotlightSyncStatusDurable(): Promise<CsSyncStatus & 
 export function startCsDevicesSync(): { started: boolean; error?: string } {
   if (!falconConfigs().length) return { started: false, error: "CrowdStrike is not configured." };
   if (csDevicesSync().running) return { started: false, error: "Devices sync already running." };
-  syncJobGlobal.__vulnCsDevicesSync = { running: true, phase: "Syncing", startedAt: Date.now(), finishedAt: null, result: null, error: null };
+  syncJobGlobal.__vulnCsDevicesSync = { running: true, phase: "Syncing", fetched: 0, stored: 0, total: null, startedAt: Date.now(), finishedAt: null, result: null, error: null };
   void (async () => {
     try {
-      const r = await importFromCrowdstrike();
+      const r = await importFromCrowdstrike((fetched, total) => {
+        syncJobGlobal.__vulnCsDevicesSync = { ...csDevicesSync(), fetched, stored: fetched, total };
+      });
       if ("error" in r) {
         syncJobGlobal.__vulnCsDevicesSync = { ...csDevicesSync(), running: false, phase: "Error", error: r.error, finishedAt: Date.now() };
       } else {
@@ -6078,9 +6085,9 @@ async function importEndpoints(
 // Sync CrowdStrike Falcon host inventory (the scan/coverage perspective).
 // Set FALCON_CUSTOMER to pin devices to a specific client company; omit to
 // attach to the internal GMI org (default for own-estate deployments).
-export async function importFromCrowdstrike(): Promise<
-  EndpointImportResult | { error: string }
-> {
+export async function importFromCrowdstrike(
+  onProgress?: (fetched: number, total: number) => void,
+): Promise<EndpointImportResult | { error: string }> {
   const configs = falconConfigs();
   if (!configs.length) {
     return {
@@ -6098,10 +6105,27 @@ export async function importFromCrowdstrike(): Promise<
   // against independent CrowdStrike tenants, so there's no reason one
   // tenant's fetch should wait on another's. Only the store-mutating import
   // step below runs sequentially per tenant (cheap: no more network calls).
+  // Per-tenant progress is summed into one combined fetched/total so a
+  // multi-tenant setup still reports one real percent, not N separate ones.
+  const perTenant = configs.map(() => ({ fetched: 0, total: 0 }));
+  const reportCombined = () => {
+    if (!onProgress) return;
+    let fetchedSum = 0;
+    let totalSum = 0;
+    for (const p of perTenant) {
+      fetchedSum += p.fetched;
+      totalSum += p.total;
+    }
+    onProgress(fetchedSum, totalSum);
+  };
   const fetched = await Promise.all(
-    configs.map(async (config) => {
+    configs.map(async (config, i) => {
       try {
-        return { config, devices: await falconListAssets(config), error: null as string | null };
+        const devices = await falconListAssets(config, (f, t) => {
+          perTenant[i] = { fetched: f, total: t };
+          reportCombined();
+        });
+        return { config, devices, error: null as string | null };
       } catch (err) {
         return {
           config,
@@ -6182,6 +6206,7 @@ export async function importFromCrowdstrikeSpotlight(
         tenant: progress.tenant,
         fetched: progress.fetched,
         stored: progress.stored,
+        total: progress.expectedCount,
       };
       if (progress.fetched - lastLogged >= 100_000) {
         lastLogged = progress.fetched;
