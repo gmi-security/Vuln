@@ -474,6 +474,13 @@ type StoreMeta = {
   lastMonthlyReportMonth: string | null; // "YYYY-MM" (UTC)
   lastNessusHealthOk: boolean | null; // watchdog state; null = never probed
   lastNessusHealthCheckAt: number | null; // epoch ms of the last watchdog probe
+  // Separate from server health: Nessus can be perfectly reachable/ready
+  // while no new scan results have actually landed in days (autoSync
+  // disabled, or every recurring scan's own schedule was disabled/deleted
+  // on the Nessus server side). This tracks "is data actually flowing",
+  // not "is the server up" -- see the freshness watchdog in schedulerTick.
+  lastNessusFreshOk: boolean | null;
+  lastNessusFreshCheckAt: number | null;
   lastSlaBreachCheckDay: string | null; // "YYYY-MM-DD" (UTC) — one digest per day
   // One-time correction: the recurring-scan-import fix's first backfill pass
   // unconditionally trusted Nessus's current lastModified as "already
@@ -491,6 +498,8 @@ function defaultMeta(): StoreMeta {
     lastMonthlyReportMonth: null,
     lastNessusHealthOk: null,
     lastNessusHealthCheckAt: null,
+    lastNessusFreshOk: null,
+    lastNessusFreshCheckAt: null,
     lastSlaBreachCheckDay: null,
     nessusBackfillCorrected: false,
   };
@@ -897,6 +906,54 @@ async function schedulerTick(): Promise<void> {
       }
     } catch (err) {
       console.error("[scheduler] nessus health probe failed:", err);
+    }
+  }
+
+  // Nessus freshness watchdog: the health probe above only confirms the
+  // server itself is reachable/ready -- it says nothing about whether new
+  // scan results are actually landing. A tenant whose Nessus is perfectly
+  // healthy but whose auto-sync is disabled, or whose every recurring scan
+  // schedule was turned off on the Nessus side, would sail through the
+  // health check forever while silently going stale. Checks hourly like the
+  // health probe; alerts on state transitions only (fresh -> stale once,
+  // not every hour it stays stale).
+  if (
+    sched.alertsEnabled &&
+    nessusConfig() &&
+    now - (s.meta.lastNessusFreshCheckAt ?? 0) >= 3_600_000
+  ) {
+    s.meta.lastNessusFreshCheckAt = now;
+    markDirty();
+    try {
+      const FRESHNESS_WINDOW_MS = 30 * 3_600_000; // 30h: daily cadence + scheduling slack
+      let mostRecentImport = 0;
+      for (const scan of s.scans.values()) {
+        if (scan.connector !== "nessus" || !scan.vendor?.imported || !scan.completedAt) continue;
+        const t = new Date(scan.completedAt).getTime();
+        if (t > mostRecentImport) mostRecentImport = t;
+      }
+      const fresh = mostRecentImport > 0 && now - mostRecentImport < FRESHNESS_WINDOW_MS;
+      const previousFresh = s.meta.lastNessusFreshOk;
+      if ((previousFresh === true || previousFresh === null) && !fresh) {
+        const ageLabel = mostRecentImport > 0
+          ? `${Math.round((now - mostRecentImport) / 3_600_000)}h ago`
+          : "never";
+        await sendOpsAlert(
+          "gmi-vuln: Nessus has gone stale",
+          `No Nessus scan has completed and imported in over 30 hours (last: ${ageLabel}). The scanner itself may be healthy, but something stopped new results from landing -- check Settings -> Automation (auto-sync enabled?) and the recurring scan schedules on the Nessus server itself.`,
+        );
+      } else if (previousFresh === false && fresh) {
+        await sendOpsAlert(
+          "gmi-vuln: Nessus is reporting again",
+          "A Nessus scan completed and imported within the last 30 hours after a stale period.",
+        );
+      }
+      if (previousFresh !== fresh) {
+        s.meta.lastNessusFreshOk = fresh;
+        markDirty();
+      }
+    } catch (err) {
+      console.error("[scheduler] nessus freshness check failed:", err);
     }
   }
 
