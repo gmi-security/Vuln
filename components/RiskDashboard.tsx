@@ -1,5 +1,6 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
+import { SlidersHorizontal } from "lucide-react";
 import { dashboardRequest } from "@/lib/dashboard-browser-client";
 import styles from "./QueryDashboard.module.css";
 
@@ -29,6 +30,18 @@ const VERIFICATION_LABEL: Record<string, string> = {
   detected: "Detected", ticket_created: "Ticket created", pending_verification: "Pending verification",
   verified_remediated: "Verified remediated", reopened: "Reopened",
 };
+
+// riskScore is 0-1000 (see ScoreExplain's own "/ 1000" label and the summary
+// tile's "Critical Risk (800+)" threshold) -- a different scale from
+// lib/format.ts's riskColor/compositeColor (0-100), so this mirrors their
+// same color stops at 10x rather than misusing those directly.
+function riskScoreColor(score: number): string {
+  if (score >= 800) return "#b30e14";
+  if (score >= 600) return "#f97316";
+  if (score >= 400) return "#f5a623";
+  if (score >= 200) return "#4aa3ff";
+  return "#10b981";
+}
 
 function SwathBadge({ swath, overridden }: { swath: number; overridden: boolean }) {
   const style = SWATH_STYLE[swath] ?? SWATH_STYLE[4];
@@ -75,26 +88,73 @@ function OverrideForm({ row, onDone }: { row: FindingRisk; onDone: () => void })
   </div>;
 }
 
+const ROW_GRID = "grid grid-cols-[64px_1fr_132px_72px_150px_32px] items-center gap-4";
+
 function RiskRow({ row, onChanged }: { row: FindingRisk; onChanged: () => void }) {
   const [expanded, setExpanded] = useState(false);
   const [overriding, setOverriding] = useState(false);
-  return <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-3">
-    <div className="flex flex-wrap items-start justify-between gap-2">
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-2">
-          <button type="button" className="text-lg font-bold text-white hover:underline" onClick={() => setExpanded((v) => !v)} title="Click to explain this score">{row.riskScore}</button>
-          <SwathBadge swath={row.effectiveSwath} overridden={Boolean(row.swathOverrideBy)} />
-          {row.cisaKev && <span className="rounded-full border border-[#ff4d57] bg-[rgba(179,14,20,0.14)] px-2 py-0.5 text-[10px] font-semibold uppercase text-[#ff8f96]">CISA KEV</span>}
-          {row.internetExposed && <span className="rounded-full border border-sky-600 bg-sky-950/30 px-2 py-0.5 text-[10px] font-semibold uppercase text-sky-300">Internet-facing</span>}
+  const color = riskScoreColor(row.riskScore);
+  return (
+    <div className="border-b border-zinc-900/70 last:border-b-0">
+      <div className={`${ROW_GRID} px-4 py-3 transition hover:bg-[#0a0a0a]`}>
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          title="Click to explain this score"
+          className="text-left text-xl font-bold tabular-nums transition hover:opacity-80"
+          style={{ color }}
+        >
+          {row.riskScore}
+        </button>
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="truncate text-sm font-medium text-white">{row.cve}</span>
+            {row.cisaKev && (
+              <span className="shrink-0 rounded-full border border-[#ff4d57] bg-[rgba(179,14,20,0.14)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[#ff8f96]">
+                KEV
+              </span>
+            )}
+            {row.ransomwareAssociation && (
+              <span className="shrink-0 rounded-full border border-[#ff4d57] bg-[rgba(179,14,20,0.14)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[#ff8f96]">
+                Ransomware
+              </span>
+            )}
+            {row.internetExposed && (
+              <span className="shrink-0 rounded-full border border-sky-600 bg-sky-950/30 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-sky-300">
+                Internet
+              </span>
+            )}
+          </div>
+          <div className="mt-0.5 truncate text-xs text-zinc-500">
+            {row.hostname || row.tenantKey} · {row.assetCriticality}
+          </div>
         </div>
-        <p className="mt-1 truncate text-sm text-zinc-200">{row.cve} — {row.hostname || row.tenantKey}</p>
-        <p className="mt-0.5 text-xs text-zinc-500">{row.assetCriticality} criticality · {VERIFICATION_LABEL[row.verificationStatus] ?? row.verificationStatus}{row.epssProbability != null && ` · EPSS ${Math.round(row.epssProbability * 100)}%`}</p>
+        <div>
+          <SwathBadge swath={row.effectiveSwath} overridden={Boolean(row.swathOverrideBy)} />
+        </div>
+        <div className="text-sm tabular-nums text-zinc-300">
+          {row.epssProbability != null ? `${Math.round(row.epssProbability * 100)}%` : "—"}
+        </div>
+        <div className="truncate text-xs text-zinc-400">
+          {VERIFICATION_LABEL[row.verificationStatus] ?? row.verificationStatus}
+        </div>
+        <button
+          type="button"
+          onClick={() => setOverriding((v) => !v)}
+          title="Override Swath"
+          className="justify-self-end text-zinc-600 transition hover:text-white"
+        >
+          <SlidersHorizontal size={15} />
+        </button>
       </div>
-      <button type="button" className={styles.button} onClick={() => setOverriding((v) => !v)}>Override Swath</button>
+      {expanded ? <div className="px-4 pb-3">
+        <ScoreExplain row={row} />
+      </div> : null}
+      {overriding ? <div className="px-4 pb-3">
+        <OverrideForm row={row} onDone={() => { setOverriding(false); onChanged(); }} />
+      </div> : null}
     </div>
-    {expanded && <ScoreExplain row={row} />}
-    {overriding && <OverrideForm row={row} onDone={() => { setOverriding(false); onChanged(); }} />}
-  </div>;
+  );
 }
 
 export default function RiskDashboard({ companyId }: { companyId?: string }) {
@@ -171,9 +231,19 @@ export default function RiskDashboard({ companyId }: { companyId?: string }) {
     </div>}
 
     <p className={`${styles.resultNote} mt-3`}>Sorted by Risk Score, highest first{swathFilter ? ` · filtered to Swath ${swathFilter}` : ""}. Ticket priority reconciles to Swath automatically unless a person has set it by hand.</p>
-    <div className="mt-3 space-y-2">
-      {rows.map((row) => <RiskRow key={row.id} row={row} onChanged={() => void reload()} />)}
-      {!rows.length && !loading && <p className={styles.resultNote}>No scored findings yet -- risk scoring runs on its own schedule once CrowdStrike Spotlight data is imported, or click &quot;Refresh risk data now&quot;.</p>}
+    <div className="mt-3 overflow-hidden rounded-[20px] border border-[rgba(179,14,20,0.12)] bg-[#040404]">
+      {rows.length ? <div className={`${ROW_GRID} border-b border-zinc-900 px-4 py-3 text-[11px] uppercase tracking-[0.2em] text-zinc-500`}>
+        <div>Score</div>
+        <div>Finding</div>
+        <div>Swath</div>
+        <div>EPSS</div>
+        <div>Status</div>
+        <div />
+      </div> : null}
+      <div className="max-h-[560px] overflow-y-auto">
+        {rows.map((row) => <RiskRow key={row.id} row={row} onChanged={() => void reload()} />)}
+      </div>
+      {!rows.length && !loading && <p className={`${styles.resultNote} px-4 py-8 text-center`}>No scored findings yet -- risk scoring runs on its own schedule once CrowdStrike Spotlight data is imported, or click &quot;Refresh risk data now&quot;.</p>}
     </div>
   </section>;
 }
