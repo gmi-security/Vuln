@@ -6,10 +6,10 @@ import {
   IconBuildingBank,
   IconCircleCheck,
   IconCircleX,
-  IconShieldLock,
 } from "@tabler/icons-react";
 import VulnShell from "@/components/VulnShell";
-import { PanelCard, Pill, StatCard, ghostButtonClass, primaryButtonClass, selectClass } from "@/components/ui";
+import RiskGauge from "@/components/RiskGauge";
+import { KennaStatChip, PanelCard, Pill, ghostButtonClass, primaryButtonClass, selectClass } from "@/components/ui";
 import { compositeColor } from "@/lib/format";
 import { useCompanyFilter } from "@/lib/useCompanyFilter";
 import type { Company, ComplianceResult, CompliancePosture } from "@/lib/types";
@@ -20,6 +20,22 @@ const statusClass: Record<string, string> = {
   "At Risk": "bg-[rgba(245,166,35,0.10)] text-amber-300 border border-amber-900/60",
   Info: "bg-zinc-900 text-zinc-400 border border-zinc-800",
 };
+
+const statusBarColor: Record<string, string> = {
+  Pass: "#10b981",
+  Fail: "#b30e14",
+  "At Risk": "#f5a623",
+  Info: "#52525b",
+};
+
+// Compliance score is "higher is better" -- same inverted scale as coverage.
+function complianceColor(score: number): string {
+  if (score >= 90) return "#10b981";
+  if (score >= 75) return "#4aa3ff";
+  if (score >= 50) return "#f5a623";
+  if (score >= 25) return "#f97316";
+  return "#b30e14";
+}
 
 export default function VulnCompliancePage() {
   const [data, setData] = useState<ComplianceResult | null>(null);
@@ -156,31 +172,35 @@ export default function VulnCompliancePage() {
         </div>
       ) : null}
 
-      <div className="grid gap-5 md:grid-cols-2 2xl:grid-cols-4">
-        <StatCard
-          label="Avg compliance"
-          value={agg ? agg.avgScore : "—"}
-          sublabel="Across all clients, 0–100"
-          icon={<IconShieldLock size={26} />}
-        />
-        <StatCard
-          label="Passing"
-          value={agg ? agg.passing : "—"}
-          sublabel={`of ${agg?.companies ?? 0} clients`}
-          icon={<IconCircleCheck size={26} />}
-        />
-        <StatCard
-          label="Failing"
-          value={agg ? agg.failing : "—"}
-          sublabel="Non-compliant clients"
-          icon={<IconCircleX size={26} />}
-        />
-        <StatCard
-          label="ASV failing"
-          value={agg ? agg.asvFailingCompanies : "—"}
-          sublabel="CVSS ≥ 4.0 on internet-facing"
-          icon={<IconBuildingBank size={26} />}
-        />
+      <div className="flex flex-col items-center gap-6 rounded-[28px] border border-[rgba(179,14,20,0.16)] bg-[linear-gradient(180deg,#0b0b0b,#060606)] p-6 shadow-[0_12px_32px_rgba(10,1,2,0.3)] lg:flex-row lg:items-stretch">
+        <div className="flex flex-col items-center justify-center gap-2 lg:border-r lg:border-zinc-900 lg:pr-6">
+          <RiskGauge
+            score={agg ? agg.avgScore : 0}
+            color={agg ? complianceColor(agg.avgScore) : "#71717a"}
+            label="Avg compliance"
+            sublabel="across all clients"
+          />
+        </div>
+        <div className="grid flex-1 grid-cols-2 gap-3 sm:grid-cols-3">
+          <KennaStatChip
+            icon={<IconCircleCheck size={16} />}
+            label="Passing"
+            value={agg ? agg.passing : null}
+            tone="ok"
+          />
+          <KennaStatChip
+            icon={<IconCircleX size={16} />}
+            label="Failing"
+            value={agg ? agg.failing : null}
+            tone="critical"
+          />
+          <KennaStatChip
+            icon={<IconBuildingBank size={16} />}
+            label="ASV failing"
+            value={agg ? agg.asvFailingCompanies : null}
+            tone="warning"
+          />
+        </div>
       </div>
 
       {(data?.companies ?? []).map((posture) => (
@@ -259,8 +279,12 @@ function ComplianceCard({
         {posture.requirements.map((r) => (
           <div
             key={r.id}
-            className="grid grid-cols-[160px_1.5fr_110px_70px] items-center gap-4 border-b border-zinc-900/70 px-5 py-4 last:border-b-0"
+            className="relative grid grid-cols-[160px_1.5fr_110px_70px] items-center gap-4 border-b border-zinc-900/70 px-5 py-4 last:border-b-0"
           >
+            <div
+              className="absolute inset-y-0 left-0 w-[3px]"
+              style={{ background: statusBarColor[r.status] ?? "#52525b" }}
+            />
             <div className="break-words text-xs font-medium text-[#ff8f96]">{r.id}</div>
             <div className="min-w-0">
               <div className="font-medium text-white">{r.title}</div>
