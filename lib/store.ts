@@ -273,6 +273,38 @@ export function correlateFinding(
   rescoreFinding(s, existing);
 }
 
+// canonicalAssetKey()'s lookupAsset() does a full linear scan of EVERY asset
+// in the store (all companies, not just this one) on every call — fine for a
+// single lookup, but called once per candidate finding it's a disaster:
+// closeStaleFindings can face tens of thousands of findings for one company,
+// and each one would re-scan the entire global asset list. Build the
+// (asset identifier/hostname/ip -> canonical key) map once per call instead,
+// scoped to just this company, so resolution is an O(1) Map lookup per
+// finding. resolveIdentity() (the alias fallback) is already an O(1)
+// union-find over a Map, so it's untouched.
+function buildCompanyAssetKeyIndex(s: StoreShape, companyId: string): Map<string, string> {
+  const idx = new Map<string, string>();
+  for (const a of s.assets.values()) {
+    if (a.companyId !== companyId) continue;
+    const key = `asset:${a.id}`;
+    for (const candidate of [a.identifier, a.hostname, ...a.ipAddresses]) {
+      if (candidate) idx.set(candidate.trim().toLowerCase(), key);
+    }
+  }
+  return idx;
+}
+
+function resolveAssetKey(
+  s: StoreShape,
+  companyId: string,
+  assetIndex: Map<string, string>,
+  asset: string,
+): string {
+  const hit = assetIndex.get(asset.trim().toLowerCase());
+  if (hit) return hit;
+  return `alias:${resolveIdentity(s, companyId, asset)}`;
+}
+
 // Reconciliation: no import path ever marked a finding Resolved just
 // because a later scan stopped reporting it (the only other place that
 // happens is a human manually changing status via updateFinding()). Over
@@ -290,23 +322,37 @@ export function correlateFinding(
 // other open finding on a covered asset from the same connector is stale —
 // the thing it flagged is gone as of this scan — so it's closed, not
 // deleted, with a clear resolution reason for the audit trail.
-function closeStaleFindings(
+//
+// Async and yields every 500 findings (same pattern as rescoreAllFindings)
+// because a long-lived customer's finding count is tens of thousands --
+// an unyielding synchronous pass that size blocks this single-instance
+// Node process's event loop for everyone, not just the company being
+// reconciled, for the whole duration.
+async function closeStaleFindings(
   s: StoreShape,
   companyId: string,
   connector: ConnectorId,
   coveredAssetKeys: Set<string>,
   touchedKeys: Set<string>,
   observedAtIso: string,
-): number {
+): Promise<number> {
+  const assetIndex = buildCompanyAssetKeyIndex(s, companyId);
   let closed = 0;
+  let i = 0;
   for (const f of s.findings.values()) {
-    if (f.companyId !== companyId || f.connector !== connector) continue;
-    if (f.status !== "Open" && f.status !== "In Remediation") continue;
-    if (!coveredAssetKeys.has(canonicalAssetKey(s, companyId, f.asset))) continue;
-    if (touchedKeys.has(correlationKey(s, companyId, f.cve, f.asset))) continue;
-    f.status = "Resolved";
-    f.resolvedAt = observedAtIso;
-    closed += 1;
+    if (f.companyId === companyId && f.connector === connector) {
+      if (
+        (f.status === "Open" || f.status === "In Remediation") &&
+        coveredAssetKeys.has(resolveAssetKey(s, companyId, assetIndex, f.asset)) &&
+        !touchedKeys.has(correlationKey(s, companyId, f.cve, f.asset))
+      ) {
+        f.status = "Resolved";
+        f.resolvedAt = observedAtIso;
+        closed += 1;
+      }
+    }
+    i += 1;
+    if (i % 500 === 0) await new Promise((resolve) => setImmediate(resolve));
   }
   if (closed > 0) markDirty();
   return closed;
@@ -1415,7 +1461,7 @@ async function importVendorFindings(s: StoreShape, scan: InternalScan): Promise<
       if (alias) coveredAssetKeys.add(canonicalAssetKey(s, scan.companyId, alias));
     }
   }
-  closeStaleFindings(s, scan.companyId, scan.connector, coveredAssetKeys, touchedKeys, completedAt);
+  await closeStaleFindings(s, scan.companyId, scan.connector, coveredAssetKeys, touchedKeys, completedAt);
   const all = Array.from(s.findings.values()).filter((f) => f.scanId === scan.id);
   scan.findingsCount = all.length;
   const counts = emptySeverityCounts();
@@ -4943,7 +4989,7 @@ export async function importFromVulnersBridge(): Promise<
   }
 
   for (const [companyId, covered] of coveredByCompany) {
-    closeStaleFindings(s, companyId, "vulners", covered, touchedKeys, nowIso);
+    await closeStaleFindings(s, companyId, "vulners", covered, touchedKeys, nowIso);
   }
 
   await flushNow();
@@ -6299,7 +6345,7 @@ export async function importFromDefender(): Promise<
     }
   }
   if (coveredAssetKeys.size > 0) {
-    closeStaleFindings(s, company.id, "defender", coveredAssetKeys, touchedKeys, nowIso);
+    await closeStaleFindings(s, company.id, "defender", coveredAssetKeys, touchedKeys, nowIso);
   }
 
   const all = Array.from(s.findings.values()).filter((f) => f.scanId === scanId);
