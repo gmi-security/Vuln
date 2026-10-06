@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { ensureHydrated, listCompanies, listFindings, startScan } from "@/lib/store";
+import { ensureHydrated, listCompanies, nessusBridgeTargetsForCompany, startScan } from "@/lib/store";
 import { adminTokenOk } from "@/lib/admin-auth";
 
 export const dynamic = "force-dynamic";
@@ -29,14 +29,7 @@ export async function POST(request: Request) {
   }> = [];
 
   for (const company of listCompanies()) {
-    const nessusTargets = Array.from(
-      new Set(
-        listFindings({ companyId: company.id })
-          .filter((f) => f.connector === "nessus")
-          .map((f) => f.asset)
-          .filter(Boolean),
-      ),
-    );
+    const nessusTargets = nessusBridgeTargetsForCompany(company.id);
     if (!nessusTargets.length) continue;
 
     if (dryRun) {

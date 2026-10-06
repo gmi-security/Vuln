@@ -14,9 +14,11 @@ import {
   nessusListFolders,
   nessusListScans,
   nessusScanControl,
+  nessusScanSchedule,
   nessusScanStatus,
   nessusServerStatus,
 } from "@/lib/nessus";
+import { lastNessusOccurrenceBefore, nextNessusOccurrenceAfter } from "@/lib/nessus-schedule";
 import {
   classifyAsset,
   computeRealRisk,
@@ -499,6 +501,11 @@ type StoreMeta = {
   // defaults). This forces the flip exactly once for an existing store, then
   // never touches it again, so a deliberate later "off" sticks normally.
   autoSyncDefaultMigrated: boolean;
+  // Dedup for the Nessus-offset Vulners Bridge scheduler (lib/nessus-offset-
+  // scheduler.ts): keyed by `${companyId}:${nessusScanId}`, value is the
+  // epoch ms of the Nessus occurrence already acted on, so a restart or a
+  // slow tick never launches the same offset scan twice for one occurrence.
+  nessusOffsetLastTriggered: Record<string, number>;
 };
 
 function defaultMeta(): StoreMeta {
@@ -509,6 +516,7 @@ function defaultMeta(): StoreMeta {
     lastMonthlyReportMonth: null,
     lastNessusHealthOk: null,
     lastNessusHealthCheckAt: null,
+    nessusOffsetLastTriggered: {},
     lastNessusFreshOk: null,
     lastNessusFreshCheckAt: null,
     lastSlaBreachCheckDay: null,
@@ -839,6 +847,19 @@ function todayUtc(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+// Nessus schedules change rarely; caching avoids hitting /editor/scan/{id}
+// on every 60s tick for every Nessus scan on record. Module-level (not
+// persisted) -- a restart just re-fetches once, which is fine.
+const nessusScheduleCache = new Map<number, { schedule: Awaited<ReturnType<typeof nessusScanSchedule>>; fetchedAt: number }>();
+
+async function cachedNessusSchedule(nessusScanId: number): Promise<Awaited<ReturnType<typeof nessusScanSchedule>>> {
+  const cached = nessusScheduleCache.get(nessusScanId);
+  if (cached && Date.now() - cached.fetchedAt < 3_600_000) return cached.schedule;
+  const schedule = await nessusScanSchedule(nessusScanId);
+  nessusScheduleCache.set(nessusScanId, { schedule, fetchedAt: Date.now() });
+  return schedule;
+}
+
 function startScheduler(): void {
   // Isolated previews must not launch scheduled scans, syncs, or reports.
   // Unset preserves the existing production behavior.
@@ -1025,6 +1046,138 @@ async function schedulerTick(): Promise<void> {
       console.error("[scheduler] SLA breach digest failed:", err);
     }
   }
+
+  // Vulners Bridge "ported from Nessus" offset scans: once per occurrence,
+  // 1 hour after each company's own Nessus scan actually runs (per its own
+  // schedule on the Nessus server, not a fixed interval this app invents),
+  // so the two active scanners never hit the same hosts at the same time.
+  if (vulnersBridgeConfig()) {
+    const nessusScanIdsByCompany = new Map<string, Set<number>>();
+    for (const scan of s.scans.values()) {
+      if (scan.connector !== "nessus" || !scan.vendor?.nessusScanId) continue;
+      const set = nessusScanIdsByCompany.get(scan.companyId) ?? new Set<number>();
+      set.add(scan.vendor.nessusScanId);
+      nessusScanIdsByCompany.set(scan.companyId, set);
+    }
+    for (const [companyId, scanIds] of nessusScanIdsByCompany) {
+      const company = s.companies.get(companyId);
+      if (!company) continue;
+      for (const nessusScanId of scanIds) {
+        try {
+          const schedule = await cachedNessusSchedule(nessusScanId);
+          // The occurrence whose +1h offset has already passed.
+          const occurrence = lastNessusOccurrenceBefore(schedule, now - 3_600_000);
+          if (occurrence == null) continue;
+          const key = `${companyId}:${nessusScanId}`;
+          if (s.meta.nessusOffsetLastTriggered[key] === occurrence) continue;
+          const targets = nessusBridgeTargetsForCompany(companyId);
+          if (!targets.length) continue;
+          s.meta.nessusOffsetLastTriggered[key] = occurrence;
+          markDirty();
+          const result = await startScan({
+            name: `GMI scan: ${company.name} (1h after Nessus)`,
+            connector: "vulners",
+            profile: "full-fast",
+            targets,
+            companyId,
+            requestedBy: "system@gmi.com (nessus-offset)",
+          });
+          if ("error" in result) {
+            console.error(`[scheduler] nessus-offset bridge scan failed for ${company.name}:`, result.error);
+          } else {
+            console.log(`[scheduler] nessus-offset bridge scan started for ${company.name}: ${result.id}`);
+          }
+        } catch (err) {
+          console.error(`[scheduler] nessus-offset check failed (scan ${nessusScanId}, ${company.name}):`, err);
+        }
+      }
+    }
+  }
+}
+
+export type NessusOffsetScheduleEntry = {
+  nessusScanId: number;
+  scanName: string;
+  enabled: boolean;
+  rrules: string | null;
+  timezone: string | null;
+  lastOccurrence: string | null; // ISO
+  nextOccurrence: string | null; // ISO
+  offsetLastTriggered: string | null; // ISO -- the Nessus occurrence last acted on
+  offsetNextTrigger: string | null; // ISO = nextOccurrence + 1h
+};
+
+export type NessusOffsetScheduleCompany = {
+  companyId: string;
+  companyName: string;
+  scans: NessusOffsetScheduleEntry[];
+};
+
+export type NessusOffsetScheduleMatrix = {
+  generatedAt: string;
+  bridgeConfigured: boolean;
+  autoSync: { enabled: boolean; intervalHours: number; lastRunAt: string | null };
+  companies: NessusOffsetScheduleCompany[];
+};
+
+// Powers the /schedule page -- when each company's Nessus scan actually
+// runs (per its own schedule on the Nessus server) vs. when its Vulners
+// Bridge "ported from Nessus" offset scan is due or already ran, so
+// overlap is visible at a glance instead of inferred from logs.
+export async function nessusOffsetScheduleMatrix(): Promise<NessusOffsetScheduleMatrix> {
+  const s = store();
+  tick(s);
+  const now = Date.now();
+
+  const scansByCompany = new Map<string, Map<number, string>>(); // companyId -> nessusScanId -> scan name
+  for (const scan of s.scans.values()) {
+    if (scan.connector !== "nessus" || !scan.vendor?.nessusScanId) continue;
+    const byId = scansByCompany.get(scan.companyId) ?? new Map<number, string>();
+    byId.set(scan.vendor.nessusScanId, scan.name);
+    scansByCompany.set(scan.companyId, byId);
+  }
+
+  const companies: NessusOffsetScheduleCompany[] = [];
+  for (const [companyId, byId] of scansByCompany) {
+    const company = s.companies.get(companyId);
+    if (!company) continue;
+    const scans: NessusOffsetScheduleEntry[] = [];
+    for (const [nessusScanId, scanName] of byId) {
+      let schedule: Awaited<ReturnType<typeof nessusScanSchedule>>;
+      try {
+        schedule = await cachedNessusSchedule(nessusScanId);
+      } catch {
+        continue;
+      }
+      const lastOccurrence = lastNessusOccurrenceBefore(schedule, now);
+      const nextOccurrence = nextNessusOccurrenceAfter(schedule, now);
+      const offsetLastTriggered = s.meta.nessusOffsetLastTriggered[`${companyId}:${nessusScanId}`] ?? null;
+      scans.push({
+        nessusScanId,
+        scanName,
+        enabled: schedule.enabled,
+        rrules: schedule.rrules,
+        timezone: schedule.timezone,
+        lastOccurrence: lastOccurrence != null ? new Date(lastOccurrence).toISOString() : null,
+        nextOccurrence: nextOccurrence != null ? new Date(nextOccurrence).toISOString() : null,
+        offsetLastTriggered: offsetLastTriggered != null ? new Date(offsetLastTriggered).toISOString() : null,
+        offsetNextTrigger: nextOccurrence != null ? new Date(nextOccurrence + 3_600_000).toISOString() : null,
+      });
+    }
+    if (scans.length) companies.push({ companyId, companyName: company.name, scans });
+  }
+  companies.sort((a, b) => a.companyName.localeCompare(b.companyName));
+
+  return {
+    generatedAt: new Date(now).toISOString(),
+    bridgeConfigured: Boolean(vulnersBridgeConfig()),
+    autoSync: {
+      enabled: s.settings.schedule.autoSyncEnabled,
+      intervalHours: s.settings.schedule.autoSyncIntervalHours,
+      lastRunAt: s.meta.lastAutoSyncAt != null ? new Date(s.meta.lastAutoSyncAt).toISOString() : null,
+    },
+    companies,
+  };
 }
 
 // Test customers (e.g. SplashWorks) never receive or appear in outbound
@@ -7235,6 +7388,22 @@ export function listFindings(filter?: {
   if (kind !== "all") all = all.filter((f) => findingClass(f) === kind);
   // Default to real-risk order so the most dangerous findings surface first.
   return all.sort((a, b) => b.realRisk - a.realRisk || b.cvss - a.cvss);
+}
+
+// Hosts a company's Nessus connector has actually reported findings on --
+// the Vulners Bridge "port from Nessus" source of truth (used by both
+// app/api/admin/port-nessus-to-bridge and the offset scheduler below).
+// Scan.targets is empty for an imported Nessus scan (it only records a
+// hostsScanned count), so this comes from Finding.asset instead.
+export function nessusBridgeTargetsForCompany(companyId: string): string[] {
+  return Array.from(
+    new Set(
+      listFindings({ companyId })
+        .filter((f) => f.connector === "nessus")
+        .map((f) => f.asset)
+        .filter(Boolean),
+    ),
+  );
 }
 
 export function updateFinding(
