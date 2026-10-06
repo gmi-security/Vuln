@@ -7,10 +7,14 @@ import type { Severity } from "@/lib/types";
 //      VULNERS_URL       override base URL (default: https://vulners.com)
 //
 // 2. Vulners Bridge (GMI Vuln API — a Greenbone/OpenVAS-backed scanner, run
-//    as an async task: create scan -> start -> poll -> fetch findings):
-//      VULNERS_BRIDGE_URL      base URL (with or without a trailing /api)
-//      VULNERS_BRIDGE_API_KEY  the service's machine API key, sent as the
-//                               X-API-Key header
+//    as an async task: create scan -> start -> poll -> fetch findings).
+//    Two independent credential pairs are recognized for this — they are
+//    two separate bridge deployments, not a combined requirement, and
+//    neither is touched/overwritten by the other:
+//      GMI_SCANNER_URL / GMI_SCANNER_API_KEY        checked first
+//      VULNERS_BRIDGE_URL / VULNERS_BRIDGE_API_KEY  fallback if unset
+//    Both send the key as the X-API-Key header against the same route
+//    shape (base URL with or without a trailing /api).
 //    Launches the "full-fast" scan config against the target host(s); this
 //    is the same config GMI's own scanner validation runs use.
 
@@ -54,8 +58,8 @@ function mapSeverity(cvss: number): Severity {
 export type VulnersBridgeConfig = { baseUrl: string; apiKey: string };
 
 export function vulnersBridgeConfig(): VulnersBridgeConfig | null {
-  const rawUrl = process.env.VULNERS_BRIDGE_URL?.trim();
-  const apiKey = process.env.VULNERS_BRIDGE_API_KEY?.trim();
+  const rawUrl = process.env.GMI_SCANNER_URL?.trim() || process.env.VULNERS_BRIDGE_URL?.trim();
+  const apiKey = process.env.GMI_SCANNER_API_KEY?.trim() || process.env.VULNERS_BRIDGE_API_KEY?.trim();
   if (!rawUrl || !apiKey) return null;
   // Accept the base URL with or without a trailing /api — every route below
   // is built as `${baseUrl}/api/...`, so normalize either form to the bare
