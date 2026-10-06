@@ -247,6 +247,47 @@ export async function nessusScanStatus(
   return { status, progress };
 }
 
+export type NessusScanSchedule = {
+  enabled: boolean;
+  starttime: string | null; // Nessus format: "YYYYMMDDTHHmmss"
+  timezone: string | null;
+  rrules: string | null; // e.g. "FREQ=DAILY;INTERVAL=1"
+};
+
+// The editor payload nests settings as an array of named UI-field
+// descriptors (data.settings.basic.inputs[].name === "schedule", alongside
+// unrelated sibling fields), not a flat object — and that nesting has
+// shifted between Nessus versions before. Walk the whole tree for the
+// first object shaped like a schedule descriptor instead of hardcoding a
+// path that the next version bump could silently break.
+function findScheduleNode(node: unknown, depth = 0): any {
+  if (!node || typeof node !== "object" || depth > 8) return null;
+  if (!Array.isArray(node) && "name" in (node as any) && (node as any).name === "schedule" && "rrules" in (node as any)) {
+    return node;
+  }
+  const values = Array.isArray(node) ? node : Object.values(node as Record<string, unknown>);
+  for (const value of values) {
+    const found = findScheduleNode(value, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+// Recurrence lives in the editor payload (full edit-settings), not the plain
+// /scans/{id} detail endpoint, which only carries results.
+export async function nessusScanSchedule(nessusScanId: number): Promise<NessusScanSchedule> {
+  const config = nessusConfig();
+  if (!config) throw new Error("Nessus is not configured.");
+  const data = await api(config, "GET", `/editor/scan/${nessusScanId}`);
+  const schedule = findScheduleNode(data?.settings) ?? {};
+  return {
+    enabled: Boolean(schedule?.enabled),
+    starttime: schedule?.starttime ?? null,
+    timezone: schedule?.timezone ?? null,
+    rrules: schedule?.rrules ?? null,
+  };
+}
+
 export async function nessusScanControl(
   nessusScanId: number,
   action: "pause" | "resume" | "stop",

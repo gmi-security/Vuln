@@ -2,6 +2,7 @@ import type * as React from "react";
 import {
   Bug,
   Building2,
+  CalendarClock,
   ClipboardCheck,
   Flame,
   GitBranch,
@@ -29,6 +30,7 @@ export const baseNavItems: VulnNavItem[] = [
   { label: "Prioritize", icon: Flame, href: "/priorities" },
   { label: "Companies", icon: Building2, href: "/companies" },
   { label: "Scans", icon: Radar, href: "/scans" },
+  { label: "Schedule", icon: CalendarClock, href: "/schedule" },
   { label: "Coverage", icon: ScanSearch, href: "/coverage" },
   { label: "Findings", icon: Bug, href: "/findings" },
   { label: "Attack Paths", icon: Share2, href: "/attack-paths" },
