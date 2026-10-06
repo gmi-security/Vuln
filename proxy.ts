@@ -19,6 +19,7 @@ export async function proxy(request: NextRequest) {
   if (
     isPublicAsset(pathname) ||
     pathname.startsWith("/api/auth") ||
+    pathname === "/.well-known/sonar-health" ||
     pathname === "/api/nessus/health" ||
     pathname === "/api/spiderfoot/health" ||
     pathname === "/api/artemis/health" ||
