@@ -6,14 +6,17 @@ import type { Severity } from "@/lib/types";
 //      VULNERS_API_KEY   API key for vulners.com
 //      VULNERS_URL       override base URL (default: https://vulners.com)
 //
-// 2. Vulners Bridge (VulnOps Core API — nmap --script vulners, run as an
-//    async job: launch -> poll -> fetch findings):
-//      VULNERS_BRIDGE_URL      base URL (with or without a trailing /api)
-//      VULNERS_BRIDGE_API_KEY  a "vops_"-prefixed machine API key, sent as
-//                               the X-API-Key header
-//    Always launches the "vuln" scan profile — it's the only one that runs
-//    the vulners NSE script; the others (discovery/quick/standard/full-tcp)
-//    never produce a vulnerability finding.
+// 2. Vulners Bridge (GMI Vuln API — a Greenbone/OpenVAS-backed scanner, run
+//    as an async task: create scan -> start -> poll -> fetch findings).
+//    Two independent credential pairs are recognized for this — they are
+//    two separate bridge deployments, not a combined requirement, and
+//    neither is touched/overwritten by the other:
+//      GMI_SCANNER_URL / GMI_SCANNER_API_KEY        checked first
+//      VULNERS_BRIDGE_URL / VULNERS_BRIDGE_API_KEY  fallback if unset
+//    Both send the key as the X-API-Key header against the same route
+//    shape (base URL with or without a trailing /api).
+//    Launches the "full-fast" scan config against the target host(s); this
+//    is the same config GMI's own scanner validation runs use.
 
 export type VulnersConfig = {
   apiKey: string;
@@ -51,12 +54,12 @@ function mapSeverity(cvss: number): Severity {
   return "Info";
 }
 
-// --- Vulners Bridge (VulnOps Core API, nmap active scanner) -----------------
+// --- Vulners Bridge (GMI Vuln API, Greenbone/OpenVAS active scanner) -------
 export type VulnersBridgeConfig = { baseUrl: string; apiKey: string };
 
 export function vulnersBridgeConfig(): VulnersBridgeConfig | null {
-  const rawUrl = process.env.VULNERS_BRIDGE_URL?.trim();
-  const apiKey = process.env.VULNERS_BRIDGE_API_KEY?.trim();
+  const rawUrl = process.env.GMI_SCANNER_URL?.trim() || process.env.VULNERS_BRIDGE_URL?.trim();
+  const apiKey = process.env.GMI_SCANNER_API_KEY?.trim() || process.env.VULNERS_BRIDGE_API_KEY?.trim();
   if (!rawUrl || !apiKey) return null;
   // Accept the base URL with or without a trailing /api — every route below
   // is built as `${baseUrl}/api/...`, so normalize either form to the bare
@@ -96,12 +99,9 @@ async function bridgeFetch(
   return res.json();
 }
 
-// Only the "vuln" profile runs the vulners NSE script — every other profile
-// (discovery/quick/standard/full-tcp) exists on the platform for plain nmap
-// use but would never produce a vulnerability finding through this connector.
-const BRIDGE_SCAN_PROFILE = "vuln";
+const BRIDGE_SCAN_PROFILE = "full-fast";
 
-export type VulnersBridgeJob = { jobId: number; status: string };
+export type VulnersBridgeJob = { jobId: string; status: string };
 
 export async function vulnersBridgeStartScan(
   target: string,
@@ -109,14 +109,19 @@ export async function vulnersBridgeStartScan(
 ): Promise<VulnersBridgeJob> {
   const cfg = vulnersBridgeConfig();
   if (!cfg) throw new Error("Vulners bridge is not configured.");
-  const data = await bridgeFetch(cfg, "/api/scan/execute", {
+  const created = await bridgeFetch(cfg, "/api/v1/scans", {
     method: "POST",
-    body: { target, profile: BRIDGE_SCAN_PROFILE, scan_type: "nmap", scan_name: scanName },
+    body: { name: scanName || `GMI scan: ${target}`, hosts: [target], profile: BRIDGE_SCAN_PROFILE },
     timeoutMs: 15_000,
   });
-  const jobId = Number(data?.job_id);
-  if (!Number.isFinite(jobId)) throw new Error("Bridge scan launch: no job_id returned.");
-  return { jobId, status: String(data?.status ?? "queued") };
+  const jobId = String(created?.id ?? "");
+  if (!jobId) throw new Error("Bridge scan launch: no scan id returned.");
+  const started = await bridgeFetch(cfg, `/api/v1/scans/${encodeURIComponent(jobId)}/start`, {
+    method: "POST",
+    body: { authorization_confirmed: true },
+    timeoutMs: 15_000,
+  });
+  return { jobId, status: mapBridgeStatus(started?.status ?? created?.status) };
 }
 
 export type VulnersBridgeJobStatus = {
@@ -124,43 +129,61 @@ export type VulnersBridgeJobStatus = {
   error: string | null;
 };
 
-export async function vulnersBridgeJobStatus(jobId: number): Promise<VulnersBridgeJobStatus> {
+// GVM task statuses ("New", "Requested", "Running", "Stop Requested",
+// "Stopped", "Interrupted", "Done") collapsed to the four states the poll
+// loop in lib/store.ts understands.
+function mapBridgeStatus(raw: unknown): "queued" | "running" | "complete" | "failed" {
+  const s = String(raw ?? "").toLowerCase();
+  if (s === "done") return "complete";
+  if (s === "running") return "running";
+  if (s === "new" || s === "requested") return "queued";
+  return "failed";
+}
+
+export async function vulnersBridgeJobStatus(jobId: string): Promise<VulnersBridgeJobStatus> {
   const cfg = vulnersBridgeConfig();
   if (!cfg) throw new Error("Vulners bridge is not configured.");
-  const data = await bridgeFetch(cfg, `/api/scan/jobs/${jobId}`, { timeoutMs: 15_000 });
-  return { status: String(data?.status ?? "unknown"), error: data?.error ?? null };
+  const data = await bridgeFetch(cfg, `/api/v1/scans/${encodeURIComponent(jobId)}`, { timeoutMs: 15_000 });
+  const status = mapBridgeStatus(data?.status);
+  return { status, error: status === "failed" ? `Scan status: ${data?.status ?? "unknown"}` : null };
 }
 
 export type VulnersBridgeFinding = {
   cve: string;
   cvss: number;
-  component: string; // e.g. "http (Port 80)"
+  component: string; // e.g. "Allowed HTTP Methods Enumeration (Port 443)"
   exploitAvailable: boolean;
   target: string;
 };
 
-// Pulls every finding row for a completed job and keeps only the real
-// vulnerability hits (source: "vulners") — the same endpoint also returns
-// one row per open port with source: "nmap" and no vuln_id, which is plain
-// port noise this connector isn't meant to import.
+// Pulls every finding row for a completed scan. Each row can carry zero or
+// more CVEs (via its `cves` array) — rows with none are OpenVAS recon/log
+// entries (open ports, banners, TLS config, etc.), not vulnerability hits,
+// so they're dropped. A row with multiple CVEs is emitted once per CVE,
+// sharing that row's severity.
 export async function vulnersBridgeJobFindings(
-  jobId: number,
+  jobId: string,
   target: string,
 ): Promise<VulnersBridgeFinding[]> {
   const cfg = vulnersBridgeConfig();
   if (!cfg) throw new Error("Vulners bridge is not configured.");
-  const rows = await bridgeFetch(cfg, `/api/scan/jobs/${jobId}/findings`, { timeoutMs: 30_000 });
-  if (!Array.isArray(rows)) return [];
-  return rows
-    .filter((r: any) => r?.source === "vulners" && r?.vuln_id)
-    .map((r: any) => ({
-      cve: String(r.vuln_id).toUpperCase(),
-      cvss: Number(r.cvss ?? 0),
-      component: `${r.service ?? "service"} (Port ${r.port ?? "?"})`,
-      exploitAvailable: false, // not provided by this API
-      target: r.host ?? target,
-    }))
-    .filter((f: VulnersBridgeFinding) => f.cve.startsWith("CVE-"));
+  const data = await bridgeFetch(cfg, `/api/v1/scans/${encodeURIComponent(jobId)}/findings`, { timeoutMs: 30_000 });
+  const rows = Array.isArray(data?.findings) ? data.findings : [];
+  const out: VulnersBridgeFinding[] = [];
+  for (const r of rows) {
+    const cves = Array.isArray(r?.cves) ? r.cves : [];
+    if (!cves.length) continue;
+    const portNum = String(r?.port ?? "").match(/^(\d+)/)?.[1] ?? r?.port ?? "?";
+    const component = `${r?.name ?? r?.nvt_name ?? "service"} (Port ${portNum})`;
+    const cvss = Number(r?.severity ?? 0);
+    const host = r?.host ?? target;
+    for (const c of cves) {
+      const cve = String(typeof c === "string" ? c : c?.id ?? c?.cve ?? "").toUpperCase();
+      if (!cve.startsWith("CVE-")) continue;
+      out.push({ cve, cvss, component, exploitAvailable: false, target: host });
+    }
+  }
+  return out;
 }
 
 // --- Reachability probe -----------------------------------------------------
@@ -176,14 +199,14 @@ export async function vulnersStatus(): Promise<{
   const bridge = vulnersBridgeConfig();
   if (bridge) {
     try {
-      // Cheap, static, auth-gated — a 200 here proves both reachability and
-      // a valid API key with no side effects (no scan is triggered).
-      await bridgeFetch(bridge, "/api/scan/config", { timeoutMs: 10_000 });
+      // Cheap, read-only, auth-gated — a 200 here proves both reachability
+      // and a valid API key with no side effects (no scan is triggered).
+      await bridgeFetch(bridge, "/api/v1/scanners", { timeoutMs: 10_000 });
       return {
         configured: true,
         reachable: true,
         status: "Connected",
-        message: "Vulners bridge reachable (nmap active scanner).",
+        message: "Vulners bridge reachable (OpenVAS active scanner).",
         authError: false,
         checkError: false,
       };

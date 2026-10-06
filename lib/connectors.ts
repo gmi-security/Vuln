@@ -6,11 +6,13 @@ import type { Connector, ConnectorId, ScanProfile } from "@/lib/types";
 
 type ConnectorDef = Omit<Connector, "status" | "configured"> & {
   planned?: boolean;
-  // Set when a connector supports two independent, alternative auth modes
-  // (e.g. Vulners' cloud API key vs its bridge URL+key) — configured is true
-  // if EITHER full set is present, not requiring both. envVars stays the
-  // union of both sets for display (each shown with its own set/unset pill).
-  envVarsAlt?: string[];
+  // Set when a connector supports independent, alternative auth modes (e.g.
+  // Vulners' cloud API key vs one of two separate bridge deployments, each
+  // with its own URL+key) — configured is true if the primary set OR ANY
+  // alt set is fully present; alt sets are independent of each other, not
+  // merged. envVars stays the union of all sets for display (each shown
+  // with its own set/unset pill).
+  envVarsAlt?: string[][];
   // Demo simulation profile: how long a simulated scan runs and how noisy it is.
   demo: {
     minDurationMs: number;
@@ -42,9 +44,14 @@ const CONNECTOR_DEFS: Record<ConnectorId, ConnectorDef> = {
     description:
       "Package-level audit and CVE enrichment via the Vulners cloud API, plus an active nmap --script vulners scan against a live target through the Vulners Bridge. Enriches findings with exploit and EPSS intelligence.",
     capabilities: ["Package audit", "CVE enrichment", "Exploit intel", "EPSS scores", "Active bridge scan"],
-    // Two independent auth modes — either is enough to be "configured".
+    // Three independent auth modes — any one is enough to be "configured".
+    // The two bridge pairs are separate scanner deployments; GMI_SCANNER_*
+    // is checked first by lib/vulners.ts if both happen to be set.
     envVars: ["VULNERS_API_KEY"],
-    envVarsAlt: ["VULNERS_BRIDGE_URL", "VULNERS_BRIDGE_API_KEY"],
+    envVarsAlt: [
+      ["GMI_SCANNER_URL", "GMI_SCANNER_API_KEY"],
+      ["VULNERS_BRIDGE_URL", "VULNERS_BRIDGE_API_KEY"],
+    ],
     docsUrl: "https://vulners.com/docs",
     demo: {
       minDurationMs: 30_000,
@@ -231,7 +238,7 @@ function envSetComplete(vars: string[]): boolean {
 // alternative set is — the two are independent auth modes, not a combined
 // requirement.
 function isConfigured(def: ConnectorDef): boolean {
-  return envSetComplete(def.envVars) || Boolean(def.envVarsAlt && envSetComplete(def.envVarsAlt));
+  return envSetComplete(def.envVars) || Boolean(def.envVarsAlt?.some((set) => envSetComplete(set)));
 }
 
 export function getConnectors(): Connector[] {
@@ -244,7 +251,7 @@ export function getConnectors(): Connector[] {
       kind: def.kind,
       description: def.description,
       capabilities: def.capabilities,
-      envVars: [...def.envVars, ...(def.envVarsAlt ?? [])],
+      envVars: [...def.envVars, ...(def.envVarsAlt ?? []).flat()],
       docsUrl: def.docsUrl,
       configured,
       status: def.planned
