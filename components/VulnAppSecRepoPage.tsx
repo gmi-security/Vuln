@@ -7,6 +7,7 @@ import VulnShell from "@/components/VulnShell";
 import { Pill, ghostButtonClass } from "@/components/ui";
 import { formatDateTime, severityClass } from "@/lib/format";
 import type { AppSecRepoDetail } from "@/lib/elastic-appsec";
+import AppSecTrendChart from "@/components/AppSecTrendChart";
 
 const SCAN_GRID = "grid grid-cols-[1fr_110px_85px_85px_85px_85px_110px] items-center gap-4";
 const FINDING_GRID = "grid grid-cols-[95px_120px_1.6fr_1fr_110px_130px] items-center gap-4";
@@ -91,6 +92,13 @@ export default function VulnAppSecRepoPage({ repository }: { repository: string 
           </span>
         </div>
       ) : null}
+
+      <div className="rounded-[24px] border border-[rgba(179,14,20,0.12)] bg-[#040404] px-5 py-5">
+        <div className="mb-3 text-xs uppercase tracking-[0.2em] text-zinc-500">
+          Fixes &amp; criticality over time
+        </div>
+        <AppSecTrendChart scans={detail?.scans ?? []} />
+      </div>
 
       <div className="overflow-hidden rounded-[24px] border border-[rgba(179,14,20,0.12)] bg-[#040404]">
         <div className={`${SCAN_GRID} border-b border-zinc-900 px-5 py-3 text-xs uppercase tracking-[0.2em] text-zinc-500`}>
