@@ -109,10 +109,16 @@ export async function vulnersBridgeStartScan(
 ): Promise<VulnersBridgeJob> {
   const cfg = vulnersBridgeConfig();
   if (!cfg) throw new Error("Vulners bridge is not configured.");
+  // Confirmed live under real load: 6 companies' scans each create+start
+  // their first target within the same few seconds, and gmi-vuln-api
+  // (apparently single-worker, GMP calls likely blocking its event loop)
+  // can take noticeably longer than 15s to respond while that many
+  // requests are in flight at once -- the request eventually succeeds
+  // server-side, but our client-side AbortSignal.timeout fired first.
   const created = await bridgeFetch(cfg, "/api/v1/scans", {
     method: "POST",
     body: { name: scanName || `GMI scan: ${target}`, hosts: [target], profile: BRIDGE_SCAN_PROFILE },
-    timeoutMs: 15_000,
+    timeoutMs: 60_000,
   });
   // The create response uses "task_id" (confirmed against a live call);
   // every other endpoint (GET /scans/{id}, /start) uses plain "id" for the
@@ -125,7 +131,7 @@ export async function vulnersBridgeStartScan(
   const started = await bridgeFetch(cfg, `/api/v1/scans/${encodeURIComponent(jobId)}/start`, {
     method: "POST",
     body: { authorization_confirmed: true },
-    timeoutMs: 15_000,
+    timeoutMs: 60_000,
   });
   return { jobId, status: mapBridgeStatus(started?.status ?? created?.status) };
 }
@@ -155,7 +161,7 @@ function mapBridgeStatus(raw: unknown): "queued" | "running" | "complete" | "fai
 export async function vulnersBridgeJobStatus(jobId: string): Promise<VulnersBridgeJobStatus> {
   const cfg = vulnersBridgeConfig();
   if (!cfg) throw new Error("Vulners bridge is not configured.");
-  const data = await bridgeFetch(cfg, `/api/v1/scans/${encodeURIComponent(jobId)}`, { timeoutMs: 15_000 });
+  const data = await bridgeFetch(cfg, `/api/v1/scans/${encodeURIComponent(jobId)}`, { timeoutMs: 30_000 });
   const status = mapBridgeStatus(data?.status);
   return { status, error: status === "failed" ? `Scan status: ${data?.status ?? "unknown"}` : null };
 }
