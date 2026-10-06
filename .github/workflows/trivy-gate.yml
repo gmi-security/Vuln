@@ -1,0 +1,68 @@
+name: GMI AppSec Gate
+
+on:
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  trivy:
+    name: GMI AppSec / Trivy
+    runs-on: [self-hosted, appsec, trivy]
+    timeout-minutes: 20
+
+    env:
+      TRIVY_CACHE_DIR: /var/lib/trivy-cache
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # SARIF (not the plain table) so GitHub renders each finding as an
+      # inline annotation on the exact line in the PR's Files Changed tab --
+      # with the rule's description and fix/remediation guidance attached --
+      # instead of a bare pass/fail buried in the Action log. --exit-code 1
+      # still fails this step (and the job) on a HIGH/CRITICAL finding; the
+      # upload step below runs anyway via if: always() so the annotations
+      # still appear on a red run.
+      - name: Block vulnerable or misconfigured code
+        run: |
+          trivy fs \
+            --scanners vuln,misconfig \
+            --severity HIGH,CRITICAL \
+            --format sarif \
+            --output trivy-vuln-misconfig.sarif \
+            --exit-code 1 \
+            --timeout 15m \
+            .
+
+      - name: Upload vulnerability/misconfig findings (with fix guidance) to GitHub
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-vuln-misconfig.sarif
+          category: trivy-vuln-misconfig
+
+      - name: Block detected secrets
+        if: always()
+        run: |
+          trivy fs \
+            --scanners secret \
+            --format sarif \
+            --output trivy-secrets.sarif \
+            --exit-code 1 \
+            --timeout 15m \
+            .
+
+      - name: Upload secret findings to GitHub
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-secrets.sarif
+          category: trivy-secrets
