@@ -1,0 +1,42 @@
+name: GMI AppSec Gate
+
+on:
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  trivy:
+    name: GMI AppSec / Trivy
+    runs-on: [self-hosted, appsec, trivy]
+    timeout-minutes: 20
+
+    env:
+      TRIVY_CACHE_DIR: /var/lib/trivy-cache
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Block vulnerable or misconfigured code
+        run: |
+          trivy fs \
+            --scanners vuln,misconfig \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            --timeout 15m \
+            .
+
+      - name: Block detected secrets
+        if: always()
+        run: |
+          trivy fs \
+            --scanners secret \
+            --exit-code 1 \
+            --timeout 15m \
+            .
