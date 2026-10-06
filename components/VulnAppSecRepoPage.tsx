@@ -97,7 +97,7 @@ export default function VulnAppSecRepoPage({ repository }: { repository: string 
         <div className="mb-3 text-xs uppercase tracking-[0.2em] text-zinc-500">
           Fixes &amp; criticality over time
         </div>
-        <AppSecTrendChart scans={detail?.scans ?? []} />
+        <AppSecTrendChart points={detail?.scans ?? []} />
       </div>
 
       <div className="overflow-hidden rounded-[24px] border border-[rgba(179,14,20,0.12)] bg-[#040404]">
