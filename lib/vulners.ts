@@ -142,7 +142,13 @@ function mapBridgeStatus(raw: unknown): "queued" | "running" | "complete" | "fai
   const s = String(raw ?? "").toLowerCase();
   if (s === "done") return "complete";
   if (s === "running") return "running";
-  if (s === "new" || s === "requested") return "queued";
+  // "new"/"requested" are the task-creation-flow values seen on the create
+  // and /start responses; "queued" is what a live poll of GET
+  // /api/v1/scans/{id} actually returns before the scanner picks it up --
+  // confirmed against a real response, not assumed from generic GVM
+  // status docs. Missing it here meant every scan was misclassified as
+  // failed on its very first poll, before ever getting a chance to run.
+  if (s === "new" || s === "requested" || s === "queued") return "queued";
   return "failed";
 }
 
