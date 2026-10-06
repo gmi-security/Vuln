@@ -114,7 +114,13 @@ export async function vulnersBridgeStartScan(
     body: { name: scanName || `GMI scan: ${target}`, hosts: [target], profile: BRIDGE_SCAN_PROFILE },
     timeoutMs: 15_000,
   });
-  const jobId = String(created?.id ?? "");
+  // The create response uses "task_id" (confirmed against a live call);
+  // every other endpoint (GET /scans/{id}, /start) uses plain "id" for the
+  // same value. Reading created?.id here silently returned undefined,
+  // which made every real scan throw immediately after creation and get
+  // swallowed by the caller's per-target catch -- "Completed, 0 findings"
+  // for every target, every time, with no visible error anywhere.
+  const jobId = String(created?.task_id ?? created?.id ?? "");
   if (!jobId) throw new Error("Bridge scan launch: no scan id returned.");
   const started = await bridgeFetch(cfg, `/api/v1/scans/${encodeURIComponent(jobId)}/start`, {
     method: "POST",
