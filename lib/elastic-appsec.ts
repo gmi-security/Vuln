@@ -86,6 +86,46 @@ const SUMMARY_QUERY = `FROM ${APPSEC_SCAN_STREAM}
 | SORT critical DESC, high DESC, findings DESC
 | LIMIT 100`;
 
+// One point per day, summed across every repository -- the fixes landed
+// and the critical+high backlog remaining, organization-wide. `critical`/
+// `high` take each repo's latest scan that day (a point-in-time severity
+// count, not additive); `resolved` sums every scan's delta that day (fixes
+// are events, not a snapshot).
+const AGGREGATE_TREND_QUERY = `FROM ${APPSEC_SCAN_STREAM}
+| WHERE \`gmi.appsec.scan.status\` == "completed" AND @timestamp >= NOW() - 90 days
+| EVAL day = DATE_TRUNC(1 day, @timestamp)
+| STATS critical = LATEST(\`gmi.appsec.severity.critical\`),
+    high = LATEST(\`gmi.appsec.severity.high\`),
+    resolved = SUM(\`gmi.appsec.delta.resolved.total\`)
+  BY repository = \`gmi.appsec.repository\`, day
+| STATS critical = SUM(critical), high = SUM(high), resolved = SUM(resolved) BY day
+| SORT day DESC
+| KEEP day, critical, high, resolved`;
+
+export type AppSecTrendPoint = {
+  completedAt: string | null;
+  critical: number;
+  high: number;
+  resolved: number;
+};
+
+export async function fetchAppSecTrend(): Promise<AppSecTrendPoint[]> {
+  const connection = appsecElasticConfig();
+  if (!connection) throw new DashboardError("AppSec Elastic connection is not configured.");
+
+  const result = await executeEsql(connection, AGGREGATE_TREND_QUERY);
+  const idx = Object.fromEntries(
+    ["day", "critical", "high", "resolved"].map((name) => [name, col(result, name)]),
+  ) as Record<string, number>;
+
+  return result.rows.map((r) => ({
+    completedAt: asString(r[idx.day]),
+    critical: asNumber(r[idx.critical]),
+    high: asNumber(r[idx.high]),
+    resolved: asNumber(r[idx.resolved]),
+  }));
+}
+
 export async function fetchAppSecSummary(): Promise<AppSecSummary> {
   const connection = appsecElasticConfig();
   if (!connection) throw new DashboardError("AppSec Elastic connection is not configured.");

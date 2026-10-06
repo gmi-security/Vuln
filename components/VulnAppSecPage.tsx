@@ -16,7 +16,8 @@ import {
 import VulnShell from "@/components/VulnShell";
 import { KennaStatChip, ghostButtonClass } from "@/components/ui";
 import { formatDateTime, severityBarColor } from "@/lib/format";
-import type { AppSecRepoRow, AppSecSummary } from "@/lib/elastic-appsec";
+import type { AppSecRepoRow, AppSecSummary, AppSecTrendPoint } from "@/lib/elastic-appsec";
+import AppSecTrendChart from "@/components/AppSecTrendChart";
 
 const ROW_GRID = "grid grid-cols-[1.6fr_80px_80px_90px_90px_95px_110px_150px] items-center gap-4";
 
@@ -39,6 +40,7 @@ function repoSeverityColor(row: AppSecRepoRow): string {
 export default function VulnAppSecPage() {
   const [configured, setConfigured] = useState(true);
   const [summary, setSummary] = useState<AppSecSummary | null>(null);
+  const [trend, setTrend] = useState<AppSecTrendPoint[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const loadSeq = useRef(0);
@@ -52,6 +54,7 @@ export default function VulnAppSecPage() {
       if (seq !== loadSeq.current) return;
       setConfigured(json.configured !== false);
       setSummary(json.summary ?? null);
+      setTrend(json.trend ?? null);
       setError(json.error ?? null);
     } catch {
       if (seq !== loadSeq.current) return;
@@ -113,6 +116,13 @@ export default function VulnAppSecPage() {
           <span className="text-white">{summary.licenses}</span> license findings
         </div>
       ) : null}
+
+      <div className="rounded-[24px] border border-[rgba(179,14,20,0.12)] bg-[#040404] px-5 py-5">
+        <div className="mb-3 text-xs uppercase tracking-[0.2em] text-zinc-500">
+          Fixes &amp; criticality over time -- all repositories
+        </div>
+        <AppSecTrendChart points={trend ?? []} />
+      </div>
 
       <div className="overflow-hidden rounded-[24px] border border-[rgba(179,14,20,0.12)] bg-[#040404]">
         <div className={`${ROW_GRID} border-b border-zinc-900 px-5 py-3 text-xs uppercase tracking-[0.2em] text-zinc-500`}>

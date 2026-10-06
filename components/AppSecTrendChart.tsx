@@ -1,7 +1,16 @@
 "use client";
 
 import React, { useId, useMemo, useState } from "react";
-import type { AppSecScanHistory } from "@/lib/elastic-appsec";
+
+// Structurally satisfied by both AppSecScanHistory (per-repo scan rows) and
+// AppSecTrendPoint (the cross-repo daily aggregate) -- this chart only ever
+// reads these four fields, so either feeds it without adapting.
+export type AppSecTrendInput = {
+  completedAt: string | null;
+  critical: number;
+  high: number;
+  resolved: number;
+};
 
 // Chart geometry (viewBox units -- the SVG scales to its container width).
 const W = 720;
@@ -32,14 +41,14 @@ function niceStep(rough: number): number {
   return 10 * mag;
 }
 
-// AppSecScanHistory arrives newest-first (SORT @timestamp DESC in the ES|QL
-// query); this chart reads left-to-right as time passing, so it needs the
-// chronological order flipped back before plotting.
-export default function AppSecTrendChart({ scans }: { scans: AppSecScanHistory[] }) {
+// Input arrives newest-first (both source queries SORT ... DESC); this
+// chart reads left-to-right as time passing, so it needs the chronological
+// order flipped back before plotting.
+export default function AppSecTrendChart({ points }: { points: AppSecTrendInput[] }) {
   const gradientId = useId();
   const [hover, setHover] = useState<number | null>(null);
 
-  const rows = useMemo(() => [...scans].reverse(), [scans]);
+  const rows = useMemo(() => [...points].reverse(), [points]);
   const n = rows.length;
 
   const { yMax, ticks } = useMemo(() => {
