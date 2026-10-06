@@ -247,6 +247,28 @@ export async function nessusScanStatus(
   return { status, progress };
 }
 
+export type NessusScanSchedule = {
+  enabled: boolean;
+  starttime: string | null; // Nessus format: "YYYYMMDDTHHmmss"
+  timezone: string | null;
+  rrules: string | null; // e.g. "FREQ=DAILY;INTERVAL=1"
+};
+
+// Recurrence lives in the editor payload (full edit-settings), not the plain
+// /scans/{id} detail endpoint, which only carries results.
+export async function nessusScanSchedule(nessusScanId: number): Promise<NessusScanSchedule> {
+  const config = nessusConfig();
+  if (!config) throw new Error("Nessus is not configured.");
+  const data = await api(config, "GET", `/editor/scan/${nessusScanId}`);
+  const schedule = data?.settings?.basic?.schedule ?? data?.settings?.basic ?? {};
+  return {
+    enabled: Boolean(schedule?.enabled),
+    starttime: schedule?.starttime ?? null,
+    timezone: schedule?.timezone ?? null,
+    rrules: schedule?.rrules ?? null,
+  };
+}
+
 export async function nessusScanControl(
   nessusScanId: number,
   action: "pause" | "resume" | "stop",
