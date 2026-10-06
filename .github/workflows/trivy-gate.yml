@@ -42,8 +42,45 @@ jobs:
             --timeout 15m \
             .
 
+      # SARIF has no human-readable log output, and on this repo the
+      # upload-sarif step below fails outright (see its own comment) --
+      # so without this, a blocked PR gives no clue why. Always runs
+      # (if: always()) so the findings print whether this step passed or
+      # failed, and works whether or not the SARIF upload below succeeds.
+      - name: Print vulnerability/misconfig findings to the log
+        if: always()
+        run: |
+          python3 -c "
+          import json
+          d = json.load(open('trivy-vuln-misconfig.sarif'))
+          found = False
+          for run in d.get('runs', []):
+              rules = {r['id']: r for r in run.get('tool', {}).get('driver', {}).get('rules', [])}
+              for res in run.get('results', []):
+                  found = True
+                  rule = rules.get(res.get('ruleId'), {})
+                  sev = rule.get('properties', {}).get('security-severity', '?')
+                  loc = res.get('locations', [{}])[0].get('physicalLocation', {})
+                  path = loc.get('artifactLocation', {}).get('uri', '?')
+                  line = loc.get('region', {}).get('startLine', '?')
+                  msg = res.get('message', {}).get('text', '').replace(chr(10), ' ')
+                  print(f\"::error file={path},line={line},title={res.get('ruleId')} (severity {sev})::{msg}\")
+          if not found:
+              print('No vulnerability/misconfig findings.')
+          "
+
+      # continue-on-error: this repo's GITHUB_TOKEN can't complete the
+      # code-scanning upload here (confirmed: "Resource not accessible by
+      # integration" on the workflow-runs lookup, while this same repo's
+      # GitHub-managed default-setup CodeQL analysis uploads its own SARIF
+      # fine) -- a private-repo Advanced Security entitlement gap for
+      # custom-workflow uploads specifically, not something this workflow
+      # can fix. The trivy fs --exit-code 1 above is the actual gate; losing
+      # the inline PR annotations here must not also swallow that result --
+      # the log step above is what makes a blocked PR diagnosable here.
       - name: Upload vulnerability/misconfig findings (with fix guidance) to GitHub
         if: always()
+        continue-on-error: true
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-vuln-misconfig.sarif
@@ -60,8 +97,28 @@ jobs:
             --timeout 15m \
             .
 
+      - name: Print secret findings to the log
+        if: always()
+        run: |
+          python3 -c "
+          import json
+          d = json.load(open('trivy-secrets.sarif'))
+          found = False
+          for run in d.get('runs', []):
+              for res in run.get('results', []):
+                  found = True
+                  loc = res.get('locations', [{}])[0].get('physicalLocation', {})
+                  path = loc.get('artifactLocation', {}).get('uri', '?')
+                  line = loc.get('region', {}).get('startLine', '?')
+                  msg = res.get('message', {}).get('text', '').replace(chr(10), ' ')
+                  print(f\"::error file={path},line={line},title={res.get('ruleId')}::{msg}\")
+          if not found:
+              print('No secret findings.')
+          "
+
       - name: Upload secret findings to GitHub
         if: always()
+        continue-on-error: true
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-secrets.sarif
