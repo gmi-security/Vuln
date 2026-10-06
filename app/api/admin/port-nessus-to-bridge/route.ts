@@ -1,14 +1,18 @@
 import { NextResponse } from "next/server";
-import { ensureHydrated, listCompanies, listScans, startScan } from "@/lib/store";
+import { ensureHydrated, listCompanies, listFindings, startScan } from "@/lib/store";
 import { adminTokenOk } from "@/lib/admin-auth";
 
 export const dynamic = "force-dynamic";
 
 // Token-protected admin action: for every company with at least one Nessus
-// scan on record, launches a Vulners Bridge (gmi-vuln-api) scan against the
-// union of that company's Nessus-scanned hosts. Purely additive — reads
-// existing Nessus scan data, deletes/overwrites nothing. Pass ?dryRun=1 to
+// finding on record, launches a Vulners Bridge (gmi-vuln-api) scan against
+// the union of that company's Nessus-scanned hosts. Purely additive — reads
+// existing Nessus data, deletes/overwrites nothing. Pass ?dryRun=1 to
 // preview the company/target list without launching anything.
+//
+// Targets come from Finding.asset, not Scan.targets: an imported Nessus
+// scan (vendor.imported: true) only records a hostsScanned *count*, not the
+// host list — the actual hostnames only exist on that scan's findings.
 export async function POST(request: Request) {
   if (!adminTokenOk(request)) {
     return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
@@ -27,9 +31,10 @@ export async function POST(request: Request) {
   for (const company of listCompanies()) {
     const nessusTargets = Array.from(
       new Set(
-        (await listScans({ companyId: company.id }))
-          .filter((scan) => scan.connector === "nessus")
-          .flatMap((scan) => scan.targets),
+        listFindings({ companyId: company.id })
+          .filter((f) => f.connector === "nessus")
+          .map((f) => f.asset)
+          .filter(Boolean),
       ),
     );
     if (!nessusTargets.length) continue;
