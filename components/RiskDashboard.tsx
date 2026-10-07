@@ -209,7 +209,7 @@ export default function RiskDashboard({ companyId }: { companyId?: string }) {
         <h2 className="mt-2 text-lg text-zinc-100">Top Risk</h2>
       </div>
       <div className="flex flex-wrap gap-2">
-        <button type="button" className={styles.button} disabled={refreshing} onClick={() => void refreshNow()}>{refreshing ? "Starting…" : "Refresh risk data now"}</button>
+        {!companyId && <button type="button" className={styles.button} disabled={refreshing} onClick={() => void refreshNow()}>{refreshing ? "Starting…" : "Refresh risk data now"}</button>}
         <button type="button" className={styles.button} disabled={loading} onClick={() => void reload()}>{loading ? "Loading…" : "Refresh"}</button>
       </div>
     </div>
@@ -243,7 +243,7 @@ export default function RiskDashboard({ companyId }: { companyId?: string }) {
       <div className="max-h-[560px] overflow-y-auto">
         {rows.map((row) => <RiskRow key={row.id} row={row} onChanged={() => void reload()} />)}
       </div>
-      {!rows.length && !loading && <p className={`${styles.resultNote} px-4 py-8 text-center`}>No scored findings yet -- risk scoring runs on its own schedule once CrowdStrike Spotlight data is imported, or click &quot;Refresh risk data now&quot;.</p>}
+      {!rows.length && !loading && <p className={`${styles.resultNote} px-4 py-8 text-center`}>{companyId ? "No scored findings are available for this customer yet." : "No scored findings yet. Import source data and run the risk refresh."}</p>}
     </div>
   </section>;
 }

@@ -79,7 +79,7 @@ function TicketColumn({ bucket, items, sla }: { bucket: Bucket; items: Row[]; sl
   </div>;
 }
 
-export default function PatchTicketTracker({ companyId, sla }: { companyId: string; sla: SlaSettings | null }) {
+export default function PatchTicketTracker({ companyId, sla, allowGlobalActions = true }: { companyId: string; sla: SlaSettings | null; allowGlobalActions?: boolean }) {
   const [rows, setRows] = useState<Row[]>([]);
   const [more, setMore] = useState(false);
   const [total, setTotal] = useState(0);
@@ -275,12 +275,14 @@ export default function PatchTicketTracker({ companyId, sla }: { companyId: stri
     <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
       <h2 className="text-lg text-zinc-100">Patch ticket tracker</h2>
       <div className="flex flex-wrap gap-2">
+        {allowGlobalActions && <>
         <button type="button" className={styles.button} disabled={autoCreating} onClick={() => void runAutoCreateNow()}>{autoCreating ? "Running…" : "Run auto-create now"}</button>
         <button type="button" className={styles.button} disabled={validating} onClick={() => void runValidateClosuresNow()}>{validating ? "Validating…" : "Validate closures now"}</button>
         <button type="button" className={styles.button} disabled={findingUntracked} onClick={() => void findUntrackedNow()}>{findingUntracked ? "Checking…" : "Find untracked Atlas tickets"}</button>
         <button type="button" className={styles.button} disabled={adopting} onClick={() => void adoptUntrackedNow()}>{adopting ? "Adopting…" : "Adopt untracked tickets"}</button>
         <button type="button" className={styles.button} disabled={abandoning} onClick={() => void abandonUntrackedNow()}>{abandoning ? "Abandoning…" : "Abandon closed untracked + cut replacements"}</button>
         <button type="button" className={styles.button} disabled={recutting} onClick={() => void closeAndRecutNow()}>{recutting ? "Closing…" : "Close merged parent/children + recut as new"}</button>
+        </>}
         <button type="button" className={styles.button} disabled={loading} onClick={() => void reload()}>{loading ? "Loading…" : "Refresh"}</button>
       </div>
     </div>

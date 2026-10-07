@@ -1,5 +1,4 @@
 "use client";
-import DefenderCustomerPanel from "@/components/DefenderCustomerPanel";
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
@@ -12,9 +11,6 @@ import Results from "@/components/QueryDashboardResults";
 import ConnectWiseSettings from "@/components/ConnectWiseSettings";
 import PatchTicketRegister from "@/components/PatchTicketRegister";
 import PatchTicketTracker from "@/components/PatchTicketTracker";
-import ReportingCustomer from "@/components/ReportingCustomer";
-import PatchReviewQueue from "@/components/PatchReviewQueue";
-import TopFixes from "@/components/TopFixes";
 import RiskDashboard from "@/components/RiskDashboard";
 import styles from "./QueryDashboard.module.css";
 import { OPEN_VULN_TREND } from "@/lib/elastic-query-templates";
@@ -34,11 +30,10 @@ async function post(path: string, body?: unknown) {
   });
 }
 
-export default function ElasticQueryDashboard({ initial, initialCompanyId = "" }: { initial: ElasticDashboard; initialCompanyId?:string }) {
+export default function ElasticQueryDashboard({ initial }: { initial: ElasticDashboard }) {
   const [dashboard, setDashboard] = useState(initial);
-  const [companyId, setCompanyId] = useState(initialCompanyId);
+  const companyId = ""; // Shared management has no selected customer.
   const [sla, setSla] = useState<SlaSettings | null>(null);
-  const [customerRefresh, setCustomerRefresh] = useState(0);
   const [connectionOpen, setConnectionOpen] = useState(false);
   const [endpoint, setEndpoint] = useState(initial.endpoint ?? "");
   const [apiKey, setApiKey] = useState("");
@@ -166,11 +161,10 @@ export default function ElasticQueryDashboard({ initial, initialCompanyId = "" }
   const visibleQueries = layoutIds ? applyTileOrder(dashboard.queries, layoutIds) : dashboard.queries;
   const displayedQueries = visibleQueries;
 
-  return <VulnShell variant="dashboard" eyebrow="Exposure / Overview" title="Vulnerability intelligence"
-    subtitle="Understand exposure. Prioritize the next patch. Select a customer below for its scoped reports and review queue."
+  return <VulnShell variant="dashboard" eyebrow="Organization-wide management" title="Shared query tiles"
+    subtitle="Manage shared source connections, saved queries and organization-wide jobs. These results are not a customer report."
     actions={<div className="flex flex-wrap gap-2">
       <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || Boolean(layoutIds)} onClick={() => action("refresh", async () => {
-        setCustomerRefresh(value => value + 1);
         if (dashboard.canManage && anyConnected) {
           await post("refresh"); setMessage("Refresh requested. Results will update here as queries finish.");
         }
@@ -188,16 +182,9 @@ export default function ElasticQueryDashboard({ initial, initialCompanyId = "" }
         </>}
       </>}
     </div>}>
-    <ReportingCustomer companyId={companyId} onCompanyChange={(id) => { setCompanyId(id); setLayoutIds(null); setConnectionOpen(false); setTicketsOpen(false); setDraft(null); setDeleting(null); setPreview(null); }} refreshToken={customerRefresh} />
-    {companyId && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[rgba(179,14,20,0.25)] bg-[rgba(179,14,20,0.06)] px-4 py-3">
-      <p className="text-sm text-zinc-300">180-day posture trend, SLA burndown and financial exposure, plus one-click email to the customer contact.</p>
-      <Link href={`/report/${companyId}`} target="_blank" rel="noopener noreferrer" className={`${primaryButtonClass} whitespace-nowrap`}><ExternalLink size={16} />Open executive report</Link>
-    </div>}
-    {companyId && <DefenderCustomerPanel key={`defender-${companyId}`} companyId={companyId} refreshKey={String(customerRefresh)} hideUnconfigured />}
-    {companyId && <div className="mt-6"><TopFixes key={`top-fixes-${companyId}`} companyId={companyId} refreshToken={customerRefresh} /></div>}
-    {dashboard.canManage && <div className="mt-6"><RiskDashboard /></div>}
-    {companyId && <div id="consolidation-review" className="mt-6 grid items-start gap-6 2xl:grid-cols-2"><PatchReviewQueue key={`review-${companyId}`} companyId={companyId} sla={sla} />{dashboard.canManage && <PatchTicketTracker key={`tickets-${companyId}`} companyId={companyId} sla={sla} />}</div>}
-    <div className="mt-8 mb-3"><h2 className="text-xl font-semibold text-white">Shared dashboard tiles</h2><p className="mt-1 text-sm text-zinc-400">Saved Elasticsearch and CrowdStrike results, visible to every organization member regardless of the customer selected above. Elasticsearch retained imports and CrowdStrike Falcon are separate measures; each tile shows its own data and refresh time.</p></div>
+    <Link href="/reporting" className={ghostButtonClass}>Back to customer reporting</Link>
+    {dashboard.canManage && <div className="mt-6 space-y-6"><RiskDashboard/><PatchTicketTracker companyId="" sla={sla}/></div>}
+    <div className="mt-8 mb-3"><h2 className="text-xl font-semibold text-white">Shared dashboard tiles</h2><p className="mt-1 text-sm text-zinc-400">Organization-wide saved Elasticsearch and CrowdStrike results. Only explicitly assigned tiles appear on customer reports. Elasticsearch retained imports and CrowdStrike Falcon are separate measures; each tile shows its own data and refresh time.</p></div>
     <div className={styles.connections}>
       {[{ name: "CrowdStrike", connected: dashboard.crowdstrike?.connected }, { name: "Elasticsearch", connected: dashboard.connected }].map((source) => <span key={source.name} className={styles.connection}><span className={styles.dot} style={{ background: source.connected ? "#34d399" : "#71717a" }} />{source.name} · {source.connected ? "Configured" : "Not connected"}</span>)}
       <span className={styles.tileCount}>{displayedQueries.length} saved tiles · Shared dashboard</span>

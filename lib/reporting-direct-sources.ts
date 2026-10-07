@@ -6,15 +6,42 @@ import type { PatchGroup } from "./patch-request";
 export const ATLAS_REPORTING_COMPANY_ID = "CO-147284";
 export const hasDirectReportingSources = (companyId: string) => companyId === ATLAS_REPORTING_COMPANY_ID;
 
+// Explicit, server-managed ownership of reviewed saved queries. Never infer
+// ownership from a global connection, tile title or whichever customer is open.
+export function customerReportingTileIds(companyId: string, configured = "", atlasIds = ""): string[] {
+  const assignments = new Map<string,string[]>();
+  if (atlasIds.trim()) assignments.set(ATLAS_REPORTING_COMPANY_ID,atlasIds.split(",").map(id=>id.trim()).filter(Boolean));
+  if (configured.trim()) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(configured); } catch { throw new Error("Invalid customer reporting tile assignments."); }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Invalid customer reporting tile assignments.");
+    for (const [company,ids] of Object.entries(parsed)) {
+      if (!company || !Array.isArray(ids) || ids.some(id=>typeof id !== "string" || !/^[a-zA-Z0-9-]{1,64}$/.test(id)))
+        throw new Error("Invalid customer reporting tile assignments.");
+      assignments.set(company,[...new Set(ids)]);
+    }
+  }
+  const owners = new Map<string,string>();
+  for (const [company,ids] of assignments) for (const id of ids) {
+    if (!/^[a-zA-Z0-9-]{1,64}$/.test(id) || (owners.has(id) && owners.get(id) !== company))
+      throw new Error("Each reporting tile must have one verified customer owner.");
+    owners.set(id,company);
+  }
+  return companyId ? assignments.get(companyId) ?? [] : [];
+}
+
 export function emptyReportingDashboard(canManage: boolean): ElasticDashboard {
   return { canManage, storageReady: true, connected: false, crowdstrike: { connected: false }, queries: [] };
 }
 
-export function directSourcesForCustomer(companyId: string, dashboard: ElasticDashboard, verifiedTileIds = ""): ElasticDashboard {
-  if (!hasDirectReportingSources(companyId)) return { ...dashboard, connected: false,
-    crowdstrike: { connected: false }, queries: [] };
-  const allowed = new Set(verifiedTileIds.split(",").map(id => id.trim()).filter(Boolean));
-  return { ...dashboard, queries: dashboard.queries.filter(query => allowed.has(query.id)) };
+export function directSourcesForCustomer(companyId: string, dashboard: ElasticDashboard, verifiedTileIds = "", configured = ""): ElasticDashboard {
+  const allowed = new Set(customerReportingTileIds(companyId,configured,verifiedTileIds));
+  const queries = dashboard.storageReady ? dashboard.queries.filter(query => allowed.has(query.id) &&
+    (query.source === "crowdstrike" ? dashboard.crowdstrike?.connected : dashboard.connected)) : [];
+  // No unrelated endpoint, region, status or cached result in the response.
+  return { canManage:dashboard.canManage,storageReady:dashboard.storageReady,
+    connected:queries.some(query=>query.source !== "crowdstrike"),
+    crowdstrike:{connected:queries.some(query=>query.source === "crowdstrike")},queries };
 }
 
 export function atlasFalconReviewPacket<T extends Pick<PatchGroup, "source" | "tenantId">>(group: T, verifiedTenantIds: string[]): T & { appCompanyId?: string } {
