@@ -310,9 +310,12 @@ export function createSpotlightRecordStore(db: Database) {
   }
 
   async function nextSpotlightHydrationIds(runId: string, tenantKey: string,
-    afterId: string, limit = 3200): Promise<string[]> {
+    afterId: string, limit = 6400): Promise<string[]> {
     await ensureSchema();
-    const safeLimit = Math.min(3200, Math.max(1, Math.trunc(limit) || 3200));
+    // 6400 matches lib/crowdstrike.ts's SPOTLIGHT_HYDRATION_ROUND_SIZE
+    // (concurrency 16 * 400/batch) -- see spotlight-resumable-import.ts's
+    // hydration loop for why the two must move together.
+    const safeLimit = Math.min(6400, Math.max(1, Math.trunc(limit) || 6400));
     const result = await db.query(`SELECT source_id FROM spotlight_import_ids
       WHERE run_id = $1::uuid AND tenant_key = $2 AND source_id > $3
       ORDER BY source_id LIMIT $4`, [runId, tenantKey, afterId, safeLimit]);

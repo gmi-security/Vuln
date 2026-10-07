@@ -81,7 +81,14 @@ export async function runResumableSpotlightImport(
     }
     while (run.phase === "hydrating") {
       lock.assertHeld();
-      const ids = await deps.nextIds(run.id, selection.tenantKey, run.hydrationCursor, 3200);
+      // 6400 = SPOTLIGHT_HYDRATION_CONCURRENCY (16) * the 400-id hydration
+      // batch size, both in lib/crowdstrike.ts -- this core takes no runtime
+      // dependency on that file (see the module.link test), so the two
+      // numbers aren't programmatically tied; keep them in sync by hand.
+      // A mismatch isn't incorrect, just suboptimal: too small under-uses
+      // the configured concurrency, too large just adds extra internal
+      // waves within hydrateIds rather than more concurrent ones.
+      const ids = await deps.nextIds(run.id, selection.tenantKey, run.hydrationCursor, 6400);
       if (!ids.length) break;
       const findings = await session.hydrateIds(ids);
       const expected = new Set(ids);
@@ -234,7 +241,14 @@ export async function runPartitionedSpotlightImport(
     }
     while (run.phase === "hydrating") {
       lock.assertHeld();
-      const ids = await deps.nextIds(run.id, selection.tenantKey, run.hydrationCursor, 3200);
+      // 6400 = SPOTLIGHT_HYDRATION_CONCURRENCY (16) * the 400-id hydration
+      // batch size, both in lib/crowdstrike.ts -- this core takes no runtime
+      // dependency on that file (see the module.link test), so the two
+      // numbers aren't programmatically tied; keep them in sync by hand.
+      // A mismatch isn't incorrect, just suboptimal: too small under-uses
+      // the configured concurrency, too large just adds extra internal
+      // waves within hydrateIds rather than more concurrent ones.
+      const ids = await deps.nextIds(run.id, selection.tenantKey, run.hydrationCursor, 6400);
       if (!ids.length) break;
       const findings = await session.hydrateIds(ids);
       const expected = new Set(ids);
