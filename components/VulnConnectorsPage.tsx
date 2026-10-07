@@ -1136,6 +1136,11 @@ export default function VulnConnectorsPage() {
       subtitle="Scan engines, telemetry sources, and asset inventory feeding the console. Each integration runs in demo mode until its credentials are set in the environment."
     >
       <OsintLaunchBanner />
+      <a href="/defender" className="block rounded-2xl border border-zinc-800 bg-[#090909] p-5 transition hover:border-red-800">
+        <h2 className="text-lg font-semibold text-white">Microsoft Defender · Customer connections</h2>
+        <p className="mt-2 text-sm text-zinc-300">Configure tenant credentials, test access, and sync customer vulnerabilities and devices.</p>
+        <span className="mt-3 inline-block text-sm text-red-300">Manage Defender connections →</span>
+      </a>
 
       <div className="flex items-start justify-between gap-4">
         <div className="text-[13px] uppercase tracking-[0.3em] text-[#b30e14]">
@@ -1144,7 +1149,7 @@ export default function VulnConnectorsPage() {
         <SyncAllButton />
       </div>
       <div className="grid gap-5 xl:grid-cols-2">
-        {connectors.map((connector) => (
+        {connectors.filter(connector => connector.id !== "defender").map((connector) => (
           <IntegrationCard key={connector.id} card={connector as CardData} />
         ))}
       </div>

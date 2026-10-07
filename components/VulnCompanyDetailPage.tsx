@@ -27,6 +27,7 @@ import { IconAlertTriangle, IconBolt, IconBug, IconFlame, IconRadar } from "@tab
 import VulnShell from "@/components/VulnShell";
 import NewScanModal from "@/components/NewScanModal";
 import CompensatingControlsPanel from "@/components/CompensatingControlsPanel";
+import DefenderCustomerPanel from "@/components/DefenderCustomerPanel";
 import CompositeScoreInfo from "@/components/CompositeScoreInfo";
 import RiskGauge from "@/components/RiskGauge";
 import {
@@ -635,6 +636,7 @@ export default function VulnCompanyDetailPage({
         )}
       </PanelCard>
 
+      {company ? <DefenderCustomerPanel key={company.id} companyId={company.id} hideUnconfigured /> : null}
       {company ? <CompensatingControlsPanel companyId={company.id} /> : null}
 
       {folders.map((folder) => {

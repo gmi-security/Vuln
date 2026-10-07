@@ -50,7 +50,7 @@ import { acquireSpotlightWorkerLock, nextSpotlightHydrationIds,
   failSpotlightRun, pruneSpotlightRuns, getLatestSpotlightRunState,
   beginOrResumePartitionedSpotlightRun, getPartitionedRunCheckpoint, savePartitionPage, resetPartitionCursor } from "@/lib/spotlight-record-store";
 import { recordVulnersEnrichment } from "@/lib/reporting-source-activity";
-import { defenderConfig, defenderListFindings } from "@/lib/defender";
+import { defenderStore } from "@/lib/defender-store";
 import { burpConfig, burpListIssues, type BurpFinding } from "@/lib/burp";
 import {
   nmapConfig,
@@ -5385,7 +5385,7 @@ export async function syncAllConnectors(): Promise<SyncAllEntry[]> {
         return { message: "Sync started in background." };
       },
     },
-    { connector: "Defender", ready: Boolean(defenderConfig()), run: importFromDefender },
+    { connector: "Defender", ready: process.env.DATABASE_URL ? (await defenderStore().list().catch(() => [])).length > 0 : false, run: importFromDefender },
     { connector: "Tidal", ready: Boolean(tidalConfig()), run: importFromTidal },
     {
       connector: "ConnectWise Automate",
@@ -6470,171 +6470,18 @@ export async function importFromCrowdstrikeSpotlight(
     return { error: message };
   }
 }
-export type DefenderImportResult = {
-  findingsImported: number;
-  hostsAffected: number;
-  company: string;
-};
-
-// Import Microsoft Defender device vulnerabilities as findings (the vuln
-// perspective for a Defender estate). Attaches to the DEFENDER_CUSTOMER
-// company when set, else the internal org. Findings land under a "Defender"
-// folder on a synthetic completed scan.
-export async function importFromDefender(): Promise<
-  DefenderImportResult | { error: string }
-> {
-  if (!defenderConfig()) {
-    return {
-      error:
-        "Defender is not configured. Set DEFENDER_TENANT_ID, DEFENDER_CLIENT_ID, and DEFENDER_CLIENT_SECRET.",
-    };
+// Defender uses customer-bound database generations, not the RAM-backed scanner store.
+// Sync-all queues saved connections; there is no implicit GMI or environment-tenant fallback.
+export async function importFromDefender(): Promise<{ queued: number; message: string } | { error: string }> {
+  if (!process.env.DATABASE_URL) return { error: "Defender requires database storage." };
+  const connections = await defenderStore().list();
+  if (!connections.length) return { error: "Configure a customer connection at /defender first." };
+  for (const connection of connections) {
+    await defenderStore().enqueue(connection.companyId, "sync-all");
   }
-  const s = store();
-  let items;
-  let scannedDevices: { name: string; aliases: string[] }[];
-  try {
-    ({ findings: items, scannedDevices } = await defenderListFindings());
-  } catch (err) {
-    return {
-      error: err instanceof Error ? err.message : "Failed to reach the Defender API.",
-    };
-  }
-
-  // Resolve the owning company.
-  const customer = (process.env.DEFENDER_CUSTOMER ?? "").trim();
-  let company: InternalCompany | undefined;
-  if (customer) {
-    company =
-      Array.from(s.companies.values()).find(
-        (c) => normalizeCompanyName(c.name) === normalizeCompanyName(customer),
-      ) ?? undefined;
-    if (!company) {
-      const created = createCompany({ name: customer });
-      if ("error" in created) return { error: created.error };
-      company = s.companies.get(created.id)!;
-    }
-  } else {
-    company = Array.from(s.companies.values()).find((c) => c.kind === "internal");
-    if (!company) {
-      const created = createCompany({ name: "GMI", kind: "internal" });
-      if ("error" in created) return { error: created.error };
-      company = s.companies.get(created.id)!;
-    }
-  }
-
-  const folder = ensureFolder(s, company.id, "Defender");
-  const nowIso = new Date().toISOString();
-  const scanId = nextId(s, "SCAN");
-  const scan: InternalScan = {
-    id: scanId,
-    name: "Defender Vulnerability Sync",
-    companyId: company.id,
-    companyName: company.name,
-    folderId: folder.id,
-    folderName: folder.name,
-    connector: "defender",
-    profile: "agent-sync",
-    targets: [],
-    status: "Completed",
-    createdAt: nowIso,
-    startedAt: nowIso,
-    completedAt: nowIso,
-    findingsCount: 0,
-    severityCounts: emptySeverityCounts(),
-    hostsScanned: 0,
-    requestedBy: "defender@import",
-    durationMs: 1,
-    progressFrozenAt: 100,
-    seed: hashSeed(scanId),
-    vendor: null,
-  };
-  s.scans.set(scanId, scan);
-
-  let findingsImported = 0;
-  const index = buildCorrelationIndex(s);
-  const touchedKeys = new Set<string>();
-  for (const item of items) {
-    linkIdentities(s, company.id, item.assetAliases);
-    const key = correlationKey(s, company.id, item.cve, item.asset);
-    touchedKeys.add(key);
-    const existing = index.get(key);
-    if (existing) {
-      correlateFinding(s, existing, {
-        connector: "defender", cvss: item.cvss, cvssV3: item.cvss, cvssV2: 0, vpr: 0, epss: 0,
-        exploitAvailable: false, severity: item.severity, lastSeen: nowIso,
-      });
-      continue;
-    }
-    const id = nextId(s, "VLN");
-    const created: Finding = {
-      id,
-      scanId,
-      companyId: company.id,
-      companyName: company.name,
-      connector: "defender",
-      cve: item.cve,
-      title: item.title,
-      severity: item.severity,
-      cvss: item.cvss,
-      cvssV3: item.cvss,
-      cvssV2: 0,
-      vpr: 0,
-      epss: 0,
-      asset: item.asset,
-      port: "N/A",
-      category: item.category,
-      description: item.description,
-      remediation: item.remediation,
-      status: "Open",
-      assignee: null,
-      firstSeen: nowIso,
-      lastSeen: nowIso,
-      resolvedAt: null,
-      exploitAvailable: false,
-      ...riskFields(s, {
-        cve: item.cve,
-        cvss: item.cvss,
-        epss: 0,
-        exploitAvailable: false,
-        asset: item.asset,
-        companyId: company.id,
-      }),
-    };
-    s.findings.set(id, created);
-    index.set(key, created);
-    findingsImported += 1;
-  }
-
-  // SoftwareVulnerabilitiesByMachine is a full current-state snapshot, so a
-  // device Machine.Read.All can see is fully covered by this run even when
-  // it has zero current findings -- close whatever's left over from a
-  // vulnerability Defender no longer reports there. Skipped when the
-  // machines grant is unavailable (scannedDevices is empty): with no device
-  // list, "not in `items`" could mean fixed OR could mean "we can't see
-  // this device at all", and guessing wrong would hide real risk.
-  const coveredAssetKeys = new Set<string>();
-  for (const device of scannedDevices) {
-    for (const alias of device.aliases) {
-      coveredAssetKeys.add(canonicalAssetKey(s, company.id, alias));
-    }
-  }
-  if (coveredAssetKeys.size > 0) {
-    await closeStaleFindings(s, company.id, "defender", coveredAssetKeys, touchedKeys, nowIso);
-  }
-
-  const all = Array.from(s.findings.values()).filter((f) => f.scanId === scanId);
-  scan.findingsCount = all.length;
-  const counts = emptySeverityCounts();
-  for (const f of all) counts[f.severity] += 1;
-  scan.severityCounts = counts;
-  scan.hostsScanned = new Set(all.map((f) => f.asset)).size;
-
-  await flushNow();
-  return {
-    findingsImported,
-    hostsAffected: scan.hostsScanned,
-    company: company.name,
-  };
+  const { triggerDefenderWorker } = await import("./defender-worker");
+  void triggerDefenderWorker();
+  return { queued: connections.length, message: `${connections.length} Defender customer import(s) queued.` };
 }
 
 export type NessusImportResult = {

@@ -19,7 +19,9 @@ async function load(path) {
   await module.link(async (name) => {
     if (name.startsWith(".")) return load(resolve(dirname(path), `${name}.ts`));
     if (name.startsWith("@/")) return load(resolve(ROOT, `${name.slice(2)}.ts`));
-    const values = await import(name);
+    const imported = await import(name);
+    // rrule is CommonJS; expose its actual named API to the VM test linker.
+    const values = name === "rrule" ? { ...imported.default, ...imported } : imported;
     return new SyntheticModule(Object.keys(values), function () { for (const key of Object.keys(values)) this.setExport(key, values[key]); });
   });
   return module;
