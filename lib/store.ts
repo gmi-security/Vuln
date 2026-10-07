@@ -86,6 +86,7 @@ import {
   spiderfootStartScan,
 } from "@/lib/spiderfoot";
 import { elasticVulnEnabled } from "@/lib/elastic-vuln-server";
+import { scannerElasticConfig, indexScannerFindings } from "@/lib/elastic-scanner-export";
 import { getScannedHostnamesByCompany, riskScoringDatabase, type HostRiskRow } from "@/lib/risk-scoring-store";
 import { getManagedHostnames, getDiscoveredHostnames } from "@/lib/elastic-crowdstrike-coverage";
 import {
@@ -506,6 +507,11 @@ type StoreMeta = {
   // epoch ms of the Nessus occurrence already acted on, so a restart or a
   // slow tick never launches the same offset scan twice for one occurrence.
   nessusOffsetLastTriggered: Record<string, number>;
+  // Epoch ms of the last Nessus/Vulners -> scanner-Elastic export pass (see
+  // lib/elastic-scanner-export.ts). Rate-limits the scheduler tick, not a
+  // resume cursor: every pass re-indexes every eligible finding, which is
+  // what makes the export idempotent and self-healing.
+  lastScannerElasticExportAt: number | null;
 };
 
 function defaultMeta(): StoreMeta {
@@ -522,6 +528,7 @@ function defaultMeta(): StoreMeta {
     lastSlaBreachCheckDay: null,
     nessusBackfillCorrected: false,
     autoSyncDefaultMigrated: false,
+    lastScannerElasticExportAt: null,
   };
 }
 
@@ -1006,6 +1013,33 @@ async function schedulerTick(): Promise<void> {
       }
     } catch (err) {
       console.error("[scheduler] nessus freshness check failed:", err);
+    }
+  }
+
+  // Keep the dedicated scanner Elastic index (gmi-scanner-findings by
+  // default) current with Nessus/Vulners findings. Full re-index by id every
+  // 5 minutes rather than cursor/dirty-tracking: Elasticsearch's index-by-id
+  // is already an overwrite, so this is self-healing (a lost or stale
+  // document fixes itself next pass) and picks up a status change or
+  // rescore on an existing finding for free, not just newly created ones.
+  // Findings here max in the thousands -- CrowdStrike Spotlight's millions
+  // of records live in their own dedicated tables, never in this map -- so
+  // a full scan + bulk index every 5 minutes is cheap.
+  if (scannerElasticConfig() && now - (s.meta.lastScannerElasticExportAt ?? 0) >= 300_000) {
+    s.meta.lastScannerElasticExportAt = now;
+    markDirty();
+    try {
+      const findings = Array.from(s.findings.values()).filter(
+        (f) => f.connector === "nessus" || f.connector === "vulners",
+      );
+      if (findings.length) {
+        const result = await indexScannerFindings(findings);
+        if (result.errors) {
+          console.error(`[scheduler] scanner Elastic export: ${result.errors} of ${findings.length} document(s) failed: ${result.firstError}`);
+        }
+      }
+    } catch (err) {
+      console.error("[scheduler] scanner Elastic export failed:", err);
     }
   }
 

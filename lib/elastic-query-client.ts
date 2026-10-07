@@ -65,7 +65,7 @@ export function elasticFailure(status: number, body: unknown, apiKey: string): D
   return new DashboardError(`Elastic rejected the query (HTTP ${status}). ${reason || "Check the ES|QL syntax, index access, and Elasticsearch version."}`);
 }
 
-export async function elasticJsonRequest(connection: ElasticConnection, path: string, method: "POST" | "GET" | "DELETE", body?: unknown): Promise<{ body: Record<string, unknown>; warning: boolean }> {
+export async function elasticJsonRequest(connection: ElasticConnection, path: string, method: "POST" | "GET" | "DELETE", body?: unknown, opts?: { ndjson?: string }): Promise<{ body: Record<string, unknown>; warning: boolean }> {
   const endpoint = normalizeEndpoint(connection.endpoint);
   const url = new URL(`${endpoint}${path}`);
   const resolved = await Promise.race([
@@ -73,12 +73,16 @@ export async function elasticJsonRequest(connection: ElasticConnection, path: st
     new Promise<never>((_, reject) => { const timer = setTimeout(() => reject(new DashboardError("Elastic DNS lookup timed out.")), 5000); timer.unref(); }),
   ]);
   if (!isPublicIPv4(resolved.address)) throw new DashboardError("This connection requires a public Elasticsearch HTTPS endpoint.");
-  const payload = body === undefined ? "" : JSON.stringify(body);
+  // `_bulk` takes raw NDJSON (one independently-encoded JSON value per line),
+  // never a single JSON.stringify'd body -- opts.ndjson bypasses the normal
+  // encoding for exactly that case while reusing every other hardening
+  // (DNS-pinned IPv4, timeouts, size cap, redacted errors) below unchanged.
+  const payload = opts?.ndjson ?? (body === undefined ? "" : JSON.stringify(body));
   return new Promise((resolve, reject) => {
     const req = request(url, {
       method, family: 4,
       lookup: (_hostname, _options, callback) => callback(null, resolved.address, 4),
-      headers: { Authorization: `ApiKey ${connection.apiKey}`, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) },
+      headers: { Authorization: `ApiKey ${connection.apiKey}`, "Content-Type": opts?.ndjson ? "application/x-ndjson" : "application/json", "Content-Length": Buffer.byteLength(payload) },
     }, (response) => {
       let size = 0;
       const chunks: Buffer[] = [];
