@@ -141,7 +141,13 @@ export async function indexScannerFindings(findings: Finding[]): Promise<Scanner
 
   const streamsNeeded = new Set(eligible.map((f) => scannerStreamFor(f.connector)).filter((s): s is string => Boolean(s)));
   for (const stream of streamsNeeded) await ensureScannerIndex(connection, stream);
-  const { body } = await elasticJsonRequest(connection, "/_bulk", "POST", undefined, { ndjson: scannerBulkBody(eligible) });
+  // filter_path trims Elasticsearch's full per-item ack (_index/_id/_version/
+  // _shards/status/...) down to just the one field this code reads --
+  // without it, a full-size batch (tens of thousands of findings) returns a
+  // response body in the multi-MB range and trips elasticJsonRequest's 2 MiB
+  // cap (sized for small dashboard query tiles, not bulk-write acks),
+  // reporting a false failure even though every document already indexed.
+  const { body } = await elasticJsonRequest(connection, "/_bulk?filter_path=items.*.error,errors", "POST", undefined, { ndjson: scannerBulkBody(eligible) });
   // `_bulk` returns HTTP 200 even when individual items fail -- per-item
   // errors live in the response body, not the status code.
   const items = Array.isArray(body.items) ? body.items : [];
