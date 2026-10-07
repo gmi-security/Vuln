@@ -161,6 +161,13 @@ test("indexScannerFindings PUTs the index once before bulk-indexing, tolerating 
     assert.equal(result.errors, 0);
     assert.deepEqual(calls.map(c => c.method), ["PUT", "POST"]);
     assert.ok(calls[1].ndjson.includes("FIND-1"));
+    // filter_path trims _bulk's response to just the one field this code
+    // reads -- without it, a full-size batch's response (one full ack per
+    // document) blows past elasticJsonRequest's 2 MiB cap and the export
+    // falsely reports failure even though Elasticsearch already indexed
+    // every document (confirmed live: 16,719 findings, cap sized for small
+    // dashboard query tiles).
+    assert.match(calls[1].path, /^\/_bulk\?filter_path=/);
 
     // A second export pass must not PUT again -- it's cached as ensured.
     await indexScannerFindings([finding({ id: "FIND-2" })]);
