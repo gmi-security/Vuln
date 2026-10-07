@@ -203,6 +203,13 @@ export type Scan = {
   hostsScanned: number;
   requestedBy: string;
   error?: string;
+  // Every host this scan actually covered -- hostname plus every alias
+  // (FQDN/IP) Nessus reported for it -- whether or not it currently has a
+  // finding. Absent on scans recorded before this field existed, and on
+  // every connector but Nessus. See nessusBridgeTargetsForCompany in
+  // lib/store.ts, the only reader: deriving bridge targets from Finding.asset
+  // alone misses every host Nessus scanned clean.
+  scannedHostAliases?: string[];
 };
 
 export type Finding = {
