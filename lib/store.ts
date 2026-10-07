@@ -679,6 +679,17 @@ const persistGlobal = globalThis as unknown as {
   __vulnScheduler?: ReturnType<typeof setInterval>;
   // In-flight scheduler tick, so a slow tick is never overlapped by the next.
   __vulnSchedulerTick?: Promise<void> | null;
+  // Separate from __vulnScheduler/VULN_DISABLE_SCHEDULER on purpose: that
+  // flag exists for isolated previews ("must not launch scheduled scans,
+  // syncs, or reports") and, when set on this production box, also turns off
+  // the scanner-Elastic export along with everything heavier (auto-sync-all,
+  // nessus-offset bridge scans, Defender sync, risk-refresh) -- all of which
+  // piling on at once overloaded the single Node process in production. This
+  // one export is cheap (a bulk index call against two small indices, not a
+  // live scan against external scanners) and has no reason to share that
+  // fate, so it gets its own always-on interval.
+  __vulnScannerExportScheduler?: ReturnType<typeof setInterval>;
+  __vulnScannerExportTick?: Promise<void> | null;
 };
 
 // True when persistence is fail-closed after a hydration failure. Lib callers
@@ -828,6 +839,7 @@ async function doHydrate(): Promise<void> {
   persistGlobal.__vulnHydrated = true;
   startFlusher();
   startScheduler();
+  startScannerElasticExportScheduler();
   // Kick off an initial persist in the background — the flusher covers it
   // anyway and we must not block the first request waiting for a DB write.
   // (No-op while persistence is blocked.)
@@ -892,6 +904,61 @@ function startScheduler(): void {
       }
     });
   }, 60_000);
+}
+
+// Independent of VULN_DISABLE_SCHEDULER/startScheduler on purpose -- see the
+// comment on __vulnScannerExportScheduler above. Always runs when
+// scannerElasticConfig() is set, previews included, since a plain bulk index
+// call to Elastic carries none of the "must not launch scheduled scans,
+// syncs, or reports" risk that flag was created to guard against.
+function startScannerElasticExportScheduler(): void {
+  if (persistGlobal.__vulnScannerExportScheduler) return;
+  persistGlobal.__vulnScannerExportScheduler = setInterval(() => {
+    if (persistGlobal.__vulnScannerExportTick) return; // previous tick still running
+    const run = scannerElasticExportTick().catch((err) => {
+      console.error("[scanner-export] tick failed:", err);
+    });
+    persistGlobal.__vulnScannerExportTick = run.finally(() => {
+      if (persistGlobal.__vulnScannerExportTick === run) {
+        persistGlobal.__vulnScannerExportTick = null;
+      }
+    });
+  }, 60_000);
+}
+
+// Keep the dedicated scanner Elastic indices (gmi-nessus-findings/
+// gmi-vulners-findings by default) current with Nessus/Vulners findings.
+// Full re-index by id every 5 minutes rather than cursor/dirty-tracking:
+// Elasticsearch's index-by-id is already an overwrite, so this is
+// self-healing (a lost or stale document fixes itself next pass) and picks
+// up a status change or rescore on an existing finding for free, not just
+// newly created ones. Findings here max in the thousands -- CrowdStrike
+// Spotlight's millions of records live in their own dedicated tables, never
+// in this map -- so a full scan + bulk index every 5 minutes is cheap.
+async function scannerElasticExportTick(): Promise<void> {
+  const s = store();
+  const now = Date.now();
+  if (!scannerElasticConfig() || now - (s.meta.lastScannerElasticExportAt ?? 0) < 300_000) return;
+  s.meta.lastScannerElasticExportAt = now;
+  markDirty();
+  try {
+    const findings = Array.from(s.findings.values()).filter(
+      (f) => f.connector === "nessus" || f.connector === "vulners",
+    );
+    if (findings.length) {
+      console.log(`[scanner-export] indexing ${findings.length} finding(s) into ${scannerStreams().join(", ")}`);
+      const result = await indexScannerFindings(findings);
+      if (result.errors) {
+        console.error(`[scanner-export] ${result.errors} of ${findings.length} document(s) failed: ${result.firstError}`);
+      } else {
+        console.log(`[scanner-export] indexed ${result.indexed} finding(s) OK`);
+      }
+    } else {
+      console.log("[scanner-export] no nessus/vulners findings to index yet");
+    }
+  } catch (err) {
+    console.error("[scanner-export] failed:", err);
+  }
 }
 
 async function schedulerTick(): Promise<void> {
@@ -1022,38 +1089,6 @@ async function schedulerTick(): Promise<void> {
       }
     } catch (err) {
       console.error("[scheduler] nessus freshness check failed:", err);
-    }
-  }
-
-  // Keep the dedicated scanner Elastic index (gmi-scanner-findings by
-  // default) current with Nessus/Vulners findings. Full re-index by id every
-  // 5 minutes rather than cursor/dirty-tracking: Elasticsearch's index-by-id
-  // is already an overwrite, so this is self-healing (a lost or stale
-  // document fixes itself next pass) and picks up a status change or
-  // rescore on an existing finding for free, not just newly created ones.
-  // Findings here max in the thousands -- CrowdStrike Spotlight's millions
-  // of records live in their own dedicated tables, never in this map -- so
-  // a full scan + bulk index every 5 minutes is cheap.
-  if (scannerElasticConfig() && now - (s.meta.lastScannerElasticExportAt ?? 0) >= 300_000) {
-    s.meta.lastScannerElasticExportAt = now;
-    markDirty();
-    try {
-      const findings = Array.from(s.findings.values()).filter(
-        (f) => f.connector === "nessus" || f.connector === "vulners",
-      );
-      if (findings.length) {
-        console.log(`[scheduler] scanner Elastic export: indexing ${findings.length} finding(s) into ${scannerStreams().join(", ")}`);
-        const result = await indexScannerFindings(findings);
-        if (result.errors) {
-          console.error(`[scheduler] scanner Elastic export: ${result.errors} of ${findings.length} document(s) failed: ${result.firstError}`);
-        } else {
-          console.log(`[scheduler] scanner Elastic export: indexed ${result.indexed} finding(s) OK`);
-        }
-      } else {
-        console.log("[scheduler] scanner Elastic export: no nessus/vulners findings to index yet");
-      }
-    } catch (err) {
-      console.error("[scheduler] scanner Elastic export failed:", err);
     }
   }
 
