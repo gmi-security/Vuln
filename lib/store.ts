@@ -5326,13 +5326,20 @@ export async function importFromVulnersBridge(): Promise<
       // The bridge names its GVM Target object from this string and GVM
       // rejects a duplicate target name outright ("Target exists
       // already") -- a bare constant here would collide on the very next
-      // host in this same sweep, and again on every future sweep. nowIso
-      // (this sweep's start time) plus ip makes it unique both within
-      // this pass and across every future one.
+      // host in this same sweep, and again on every future sweep. ip (this
+      // sweep's only per-target differentiator) goes FIRST, the "Vulners
+      // Bridge sync [timestamp]" label LAST: confirmed live in production,
+      // on the nessus-offset path's equivalent name, that whatever length
+      // limit the bridge/GVM enforces on this name can truncate it, and a
+      // long-enough prefix pushed the differentiating suffix past that
+      // limit, collapsing distinct targets onto the same truncated name.
+      // ip is short and a timestamp-plus-label prefix here is unlikely to
+      // run that long in practice, but there is no reason to take the risk
+      // when putting the differentiator first costs nothing.
       //
       // Bulk inventory sweep — many targets, so cap each one at ~5 minutes
       // (30 * 10s) rather than the analyst-launched path's 70-minute cap.
-      results = await runBridgeScanToCompletion(ip, `Vulners Bridge sync [${nowIso}] ${ip}`, 30);
+      results = await runBridgeScanToCompletion(ip, `${ip} [Vulners Bridge sync ${nowIso}]`, 30);
     } catch (err) {
       console.error(`[vulners-bridge] sync target ${ip} (${companyName}) failed:`, err);
       skipped += 1;
@@ -7019,14 +7026,24 @@ async function runVulnersBridgeScanAsync(
         // The bridge names its GVM Target object from this string and GVM
         // rejects a duplicate target name outright ("Target exists
         // already") -- scan.name alone is shared by every host in this
-        // loop (and by every future rerun of this same company), so it
-        // must carry something unique per host per run, not just per
-        // company. scanId is fresh every run; target makes it unique
-        // within this one run too.
+        // loop (and by every future rerun of this same company), so it must
+        // carry something unique per host per run, not just per company:
+        // scanId is fresh every run, target makes it unique within this one
+        // run too. The uniqueness-bearing part goes FIRST, descriptive
+        // scan.name LAST -- confirmed live in production that whatever
+        // length limit the bridge/GVM enforces on this name can truncate
+        // it, and scan.name (a per-company label, e.g. "GMI scan: <long
+        // company name> (1h after Nessus)") plus scanId was long enough
+        // on its own to push every target's differentiating suffix past
+        // that limit, so two different hosts with a long shared prefix
+        // (e.g. ec2-<id>.compute-1.amazonaws.com) truncated to the exact
+        // same name and collided with "Target exists already". Truncation
+        // now only ever eats the cosmetic company label, never scanId or
+        // target.
         //
         // Analyst-launched, small target list — server's own job timeout is
         // 1 hour, so poll comfortably past that (420 * 10s = 70 min).
-        results = await runBridgeScanToCompletion(target, `${scan.name} [${scanId}] ${target}`, 420);
+        results = await runBridgeScanToCompletion(target, `[${scanId}] ${target} ${scan.name}`, 420);
       } catch (err) {
         // Deliberately still skip-and-continue (one bad target shouldn't
         // abort the whole scan) but LOG it — a bare `catch { continue }`
