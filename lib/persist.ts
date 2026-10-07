@@ -158,8 +158,14 @@ function getPool(): Pool | null {
       // everything else the app does at the same time.
       max: 20,
       // Fail fast if the DB is unreachable so hydration can fall back to
-      // in-memory instead of hanging every request.
-      connectionTimeoutMillis: 8000,
+      // in-memory instead of hanging every request. 8s was too tight under
+      // the Spotlight sync's sustained concurrent DB load (a worker-lock
+      // connection held for the whole multi-hour run, plus fanned-out
+      // discovery/hydration calls): a brief stall opening a *new* physical
+      // connection to the shared DigitalOcean cluster was enough to blow
+      // this and abort an otherwise-resumable run with pg-pool's
+      // "Connection terminated due to connection timeout".
+      connectionTimeoutMillis: 15000,
       idleTimeoutMillis: 30000,
     });
     pool.on("error", (err) => {

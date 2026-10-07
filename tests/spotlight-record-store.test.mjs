@@ -467,3 +467,71 @@ test("runtime Spotlight storage uses the established application database withou
     else process.env.ELASTIC_VULN_DATABASE_URL = prior;
   }
 });
+
+test("runtime Spotlight storage retries a query once after a transient pool connection-timeout, then succeeds", async () => {
+  const prior = process.env.ELASTIC_VULN_DATABASE_URL;
+  delete process.env.ELASTIC_VULN_DATABASE_URL;
+  // beginSpotlightRun issues several real queries (ensureSchema's DDL, then
+  // the UPDATE/INSERT) -- only the very first query ever made should hit
+  // the injected timeout. Without the retry, that failure would reject
+  // beginSpotlightRun immediately and the UPDATE/INSERT below would never
+  // run; asserting it resolves (and that those later queries did run)
+  // proves the first call's failure was retried and recovered.
+  let failedOnce = false;
+  let sawInsert = false;
+  runtimeDb = { query: async sql => {
+    if (!failedOnce) {
+      failedOnce = true;
+      throw new Error("Connection terminated due to connection timeout");
+    }
+    if (String(sql).includes("INSERT INTO spotlight_import_runs")) sawInsert = true;
+    return { rows: [], rowCount: 1 };
+  } };
+  try {
+    await module.namespace.beginSpotlightRun("CO-147284");
+    assert.ok(sawInsert, "beginSpotlightRun should have completed past the retried query");
+  } finally {
+    runtimeDb = undefined;
+    if (prior === undefined) delete process.env.ELASTIC_VULN_DATABASE_URL;
+    else process.env.ELASTIC_VULN_DATABASE_URL = prior;
+  }
+});
+
+test("runtime Spotlight storage does not retry a query failure that isn't a connection timeout", async () => {
+  const prior = process.env.ELASTIC_VULN_DATABASE_URL;
+  delete process.env.ELASTIC_VULN_DATABASE_URL;
+  let attempts = 0;
+  runtimeDb = { query: async () => { attempts++; throw new Error("syntax error at or near \"SELCT\""); } };
+  try {
+    await assert.rejects(() => module.namespace.beginSpotlightRun("CO-147284"), /syntax error/i);
+    assert.equal(attempts, 1);
+  } finally {
+    runtimeDb = undefined;
+    if (prior === undefined) delete process.env.ELASTIC_VULN_DATABASE_URL;
+    else process.env.ELASTIC_VULN_DATABASE_URL = prior;
+  }
+});
+
+test("runtime Spotlight storage retries db.connect() once after a transient pool connection-timeout, then succeeds", async () => {
+  const prior = process.env.ELASTIC_VULN_DATABASE_URL;
+  delete process.env.ELASTIC_VULN_DATABASE_URL;
+  let attempts = 0;
+  const client = { query: async () => ({ rows: [{ locked: true }], rowCount: 1 }), release: () => {}, on: () => {}, off: () => {} };
+  runtimeDb = {
+    query: async () => ({ rows: [], rowCount: 0 }),
+    connect: async () => {
+      attempts++;
+      if (attempts === 1) throw new Error("Connection terminated due to connection timeout");
+      return client;
+    },
+  };
+  try {
+    const lock = await module.namespace.acquireSpotlightWorkerLock("CO-147284");
+    assert.equal(attempts, 2);
+    await lock.release();
+  } finally {
+    runtimeDb = undefined;
+    if (prior === undefined) delete process.env.ELASTIC_VULN_DATABASE_URL;
+    else process.env.ELASTIC_VULN_DATABASE_URL = prior;
+  }
+});

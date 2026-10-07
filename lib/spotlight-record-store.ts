@@ -714,6 +714,44 @@ export function createSpotlightRecordStore(db: Database) {
     pruneSpotlightRuns };
 }
 
+// The pool's own new-connection timeout (persist.ts's connectionTimeoutMillis)
+// can still fire under sustained load without the DB actually being down --
+// acquireSpotlightWorkerLock above holds one connection for an entire
+// multi-hour sync while discovery/hydration fan out more DB calls
+// concurrently, so the pool often has to open brand-new physical
+// connections, and a brief stall doing that on the shared cluster throws
+// pg-pool's "Connection terminated due to connection timeout", aborting an
+// otherwise-resumable run over a transient blip. Retry exactly once on that
+// specific error; anything else (a real outage, a query error) still fails
+// immediately, same as before.
+function isConnectionTimeoutError(err: unknown): boolean {
+  return err instanceof Error && err.message === "Connection terminated due to connection timeout";
+}
+
+function withConnectionTimeoutRetry(pool: Pool): Database {
+  const query = (async (...args: any[]) => {
+    try {
+      return await (pool.query as any)(...args);
+    } catch (err) {
+      if (!isConnectionTimeoutError(err)) throw err;
+      console.warn("[spotlight] retrying query after a transient connection timeout");
+      return (pool.query as any)(...args);
+    }
+  }) as Pool["query"];
+
+  const connect = (async (...args: any[]) => {
+    try {
+      return await (pool.connect as any)(...args);
+    } catch (err) {
+      if (!isConnectionTimeoutError(err)) throw err;
+      console.warn("[spotlight] retrying connect after a transient connection timeout");
+      return (pool.connect as any)(...args);
+    }
+  }) as Pool["connect"];
+
+  return { query, connect };
+}
+
 let runtimeStore: ReturnType<typeof createSpotlightRecordStore> | undefined;
 let runtimePool: Pool | undefined;
 
@@ -722,7 +760,7 @@ function configuredStore() {
   if (!db) throw new Error("DATABASE_URL is required for complete Spotlight record storage.");
   if (!runtimeStore || runtimePool !== db) {
     runtimePool = db;
-    runtimeStore = createSpotlightRecordStore(db);
+    runtimeStore = createSpotlightRecordStore(withConnectionTimeoutRetry(db));
   }
   return runtimeStore;
 }
