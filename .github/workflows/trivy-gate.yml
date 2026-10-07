@@ -24,6 +24,26 @@ jobs:
         with:
           persist-credentials: false
 
+      # Reports this PR's scan into the same Elastic streams (gmi-appsec-scans/
+      # gmi-appsec-findings) that the push/schedule-triggered gmi-appsec.yml
+      # feeds, so the AppSec dashboard reflects fixes as soon as a PR is open
+      # instead of only after merge + the next scheduled scan. gmi-appsec-ci
+      # only *writes* a new baseline under --baseline (used by gmi-appsec.yml
+      # on push to the default branch); without that flag it just compares
+      # this checkout against the existing baseline and reports the delta, so
+      # running it here on a PR branch cannot corrupt the baseline the real
+      # gate compares against. continue-on-error because this is reporting,
+      # not gating -- the trivy fs step below is the actual PR gate.
+      - name: Report scan to AppSec dashboard
+        continue-on-error: true
+        shell: bash
+        run: |
+          if command -v gmi-appsec-ci >/dev/null 2>&1 && curl -fsS http://127.0.0.1:8089/healthz 2>/dev/null | jq -e '.status == "ok"' >/dev/null 2>&1; then
+            gmi-appsec-ci "$GITHUB_WORKSPACE" "$GITHUB_REPOSITORY"
+          else
+            echo "gmi-appsec-ci unavailable on this runner -- skipping the Elastic report for this PR scan (push/schedule scans are unaffected)."
+          fi
+
       # SARIF (not the plain table) so GitHub renders each finding as an
       # inline annotation on the exact line in the PR's Files Changed tab --
       # with the rule's description and fix/remediation guidance attached --
