@@ -1,22 +1,14 @@
-import { NextResponse } from "next/server";
-import { ensureHydrated, importFromDefender } from "@/lib/store";
-
+import { defenderAccess, defenderBody, defenderCompany, defenderFailure, defenderJson } from "@/lib/defender-http";
+import { defenderStore } from "@/lib/defender-store";
+import { triggerDefenderWorker } from "@/lib/defender-worker";
 export const dynamic = "force-dynamic";
-
-// Import Microsoft Defender device vulnerabilities as findings.
-export async function POST() {
+export async function POST(request: Request) {
   try {
-    await ensureHydrated();
-    const result = await importFromDefender();
-    if ("error" in result) {
-      return NextResponse.json({ error: result.error }, { status: 400 });
-    }
-    return NextResponse.json({ result });
-  } catch (err) {
-    console.error("[defender/import]", err);
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Defender import failed." },
-      { status: 502 },
-    );
-  }
+    const actor = await defenderAccess(request,true);
+    const body = await defenderBody(request,1024) as { companyId?: unknown };
+    const companyId = await defenderCompany(body?.companyId);
+    const runId = await defenderStore().enqueue(companyId,actor);
+    void triggerDefenderWorker();
+    return defenderJson({ runId,queued:true },202);
+  } catch (error) { return defenderFailure(error); }
 }

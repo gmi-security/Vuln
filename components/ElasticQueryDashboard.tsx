@@ -1,4 +1,5 @@
 "use client";
+import DefenderCustomerPanel from "@/components/DefenderCustomerPanel";
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
@@ -192,6 +193,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
       <p className="text-sm text-zinc-300">180-day posture trend, SLA burndown and financial exposure, plus one-click email to the customer contact.</p>
       <Link href={`/report/${companyId}`} target="_blank" rel="noopener noreferrer" className={`${primaryButtonClass} whitespace-nowrap`}><ExternalLink size={16} />Open executive report</Link>
     </div>}
+    {companyId && <DefenderCustomerPanel key={`defender-${companyId}`} companyId={companyId} refreshKey={String(customerRefresh)} hideUnconfigured />}
     {companyId && <div className="mt-6"><TopFixes key={`top-fixes-${companyId}`} companyId={companyId} refreshToken={customerRefresh} /></div>}
     {dashboard.canManage && <div className="mt-6"><RiskDashboard /></div>}
     {companyId && <div id="consolidation-review" className="mt-6 grid items-start gap-6 2xl:grid-cols-2"><PatchReviewQueue key={`review-${companyId}`} companyId={companyId} sla={sla} />{dashboard.canManage && <PatchTicketTracker key={`tickets-${companyId}`} companyId={companyId} sla={sla} />}</div>}

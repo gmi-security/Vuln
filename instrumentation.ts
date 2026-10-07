@@ -110,4 +110,7 @@ export async function register(): Promise<void> {
   delayedStart("risk refresh scheduler", 240_000, () =>
     import("@/lib/risk-refresh-scheduler").then((m) => m.startRiskRefreshScheduler()),
   );
+  delayedStart("Defender customer import worker", 300_000, () =>
+    import("@/lib/defender-worker").then((m) => m.startDefenderWorker()),
+  );
 }
