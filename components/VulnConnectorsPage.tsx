@@ -660,7 +660,13 @@ function IntegrationCard({ card }: { card: CardData }) {
 
   async function pollCrowdstrike() {
     let finished = false;
-    for (let i = 0; i < 600; i += 1) {
+    // 20 minutes (600 * 2s) was sized for a typical sync, but a large
+    // Spotlight tenant's discovery+hydration genuinely runs for hours (seen
+    // in production: Atlas alone is ~2M findings) -- give the client loop a
+    // runway that matches the server-side sync instead of declaring a false
+    // timeout while it's still healthy. The server's own `running` flag is
+    // the real source of truth; this is just a backstop against a hung tab.
+    for (let i = 0; i < 21_600; i += 1) {
       await new Promise((r) => setTimeout(r, 2000));
       if (!aliveRef.current) return; // unmounted — stop polling
       let st: CsSyncStatus | null = null;
@@ -683,13 +689,20 @@ function IntegrationCard({ card }: { card: CardData }) {
       }
     }
     if (!aliveRef.current) return;
-    if (!finished) setSyncMsg({ ok: false, text: "Sync timed out waiting for a response. Check /api/crowdstrike/debug." });
+    if (!finished) {
+      setSyncMsg({
+        ok: false,
+        text: "Sync polling stopped waiting for a response, but it may still be running on the server -- refresh to check /api/crowdstrike/debug before retrying.",
+      });
+    }
     setSyncing(false);
   }
 
   async function pollTidal() {
     let finished = false;
-    for (let i = 0; i < 3000; i += 1) {
+    // See pollCrowdstrike above -- a large Tidal inventory can take a while
+    // too, so this backstop should be generous rather than a real deadline.
+    for (let i = 0; i < 36_000; i += 1) {
       await new Promise((r) => setTimeout(r, 1200));
       if (!aliveRef.current) return; // unmounted — stop polling
       let st: TidalSyncStatus | null = null;
@@ -714,6 +727,34 @@ function IntegrationCard({ card }: { card: CardData }) {
     if (!finished) setSyncMsg({ ok: false, text: "Sync timed out waiting for a response. Check the Tidal connector and try again." });
     setSyncing(false);
   }
+
+  // On mount: if this connector's sync is already running server-side
+  // (started before a page refresh, or from another tab), resume watching
+  // it instead of showing an idle "Sync now" next to a sync that's actually
+  // still going -- same convention as the page-level sync-all poller.
+  useEffect(() => {
+    if (!syncUrl || !(isCrowdstrike || isTidal)) return;
+    void fetch(syncUrl, { method: "GET", cache: "no-store" })
+      .then((r) => r.json())
+      .then((j) => {
+        if (!aliveRef.current) return;
+        if (isCrowdstrike) {
+          const st: CsSyncStatus | null = j.status ?? null;
+          if (!st?.running) return;
+          setCsProgress(st);
+          setSyncing(true);
+          void pollCrowdstrike();
+        } else {
+          const st: TidalSyncStatus | null = j.status ?? null;
+          if (!st?.running) return;
+          setProgress(st);
+          setSyncing(true);
+          void pollTidal();
+        }
+      })
+      .catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [syncUrl, isCrowdstrike, isTidal]);
 
   async function uploadCsv(file: File) {
     if (uploading || !uploadSpec) return;
