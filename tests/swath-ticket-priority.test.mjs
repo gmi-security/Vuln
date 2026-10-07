@@ -123,3 +123,10 @@ test("no ConnectWise connection configured means no work at all", async () => {
   assert.deepEqual(result, { checked: 0, updated: 0, errors: 0 });
   assert.equal(calls.length, 0);
 });
+
+test("Defender ticket priorities use the customer and exact saved device/CVE scope",async()=>{
+ const scope=[{cid:"CO-TEST",hostId:"defender:device-1",cve:"CVE-2026-12345"}];
+ const {mod,risk,calls}=await loadModule({ticketRows:[{id:"def-ticket",tenant_id:"CO-TEST",source:"stored-findings",device_cves:scope,cves:[scope[0].cve],ticket_priority_id:4}],swathByTenant:{"defender:CO-TEST":2}});
+ await mod.reconcileTicketPriorityToSwath();assert.equal(calls[0].priorityId,2);
+ const query=risk.calls.find(c=>c.params[0] === "defender:CO-TEST");assert.deepEqual(JSON.parse(query.params[1]),scope);assert.equal(query.params[2],"CO-TEST");assert.match(query.sql,/host_key,cve/);
+});

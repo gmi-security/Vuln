@@ -6,7 +6,7 @@ import type { DefenderSummary } from "@/lib/defender-store";
 import type { DefenderRecord, DefenderDevice } from "@/lib/defender-client";
 
 type Row = { cve: string; severity: string; cvss: number | null; devices: number; findings: number; record: DefenderRecord & DefenderDevice };
-type Results = { configured:boolean; summary: DefenderSummary | null; rows: Row[]; total: number; updatedAt: string | null;
+type Results = { platformPublished:boolean; configured:boolean; summary: DefenderSummary | null; rows: Row[]; total: number; updatedAt: string | null;
   history: { day: string; summary: DefenderSummary }[] };
 const number = (value: number) => value.toLocaleString();
 export async function defenderFetch(url: string, init?: RequestInit) {
@@ -51,7 +51,8 @@ export default function DefenderCustomerPanel({ companyId, refreshKey = "", hide
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">{["CRITICAL","HIGH","MEDIUM","LOW","NONE","UNKNOWN"].map(level =>
         <div key={level} className="border-l-2 border-[#b30e14] pl-3"><p className="text-xs text-zinc-300">{level}</p><p className="text-xl text-white">{number(summary.severity[level] || 0)}</p></div>)}</div>
       <p className="text-xs text-zinc-300">Instances count each affected device, CVE and software version. Unique CVEs count each CVE once. Scores are Microsoft CVSS, not CrowdStrike ExPRT.</p>
-      {hideUnconfigured && <p className="text-xs text-amber-200">Defender results are shown separately. Existing scanner/risk totals, executive reports and CrowdStrike patch tickets do not yet include this source.</p>}
+      <p className="text-xs text-zinc-300">{result?.platformPublished ? "This import is included in customer findings and executive reports. Risk scores and patch-review candidates update in the background." : "This completed import is waiting to be published to platform findings. Previously published platform data remains available."} Platform totals group findings by device and CVE.</p>
+      <Link className={ghostButtonClass} href={`/reporting?companyId=${encodeURIComponent(companyId)}`}>Open customer reporting and patch review</Link>
       <div className="flex flex-wrap gap-2" aria-label="Defender result views">{[["cves","CVEs by affected devices"],["findings","Findings & remediations"],["devices","Devices"]].map(([key,label]) =>
         <button key={key} type="button" aria-pressed={view === key} onClick={() => switchView(key)} className={`${ghostButtonClass} ${view === key ? "border-red-600 text-white" : ""}`}>{label}</button>)}</div>
       {cve && <div className="flex items-center gap-3 text-sm text-zinc-200">Showing {cve}<button className={ghostButtonClass} onClick={() => switchView("findings")}>Clear filter</button></div>}

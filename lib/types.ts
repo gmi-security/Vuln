@@ -102,6 +102,7 @@ export type Folder = {
 export type AssetExposure = "Internet-facing" | "Internal" | "Isolated";
 export type AssetCriticality = "Crown Jewel" | "High" | "Normal" | "Low";
 export type AssetSource =
+  | "defender"
   | "tidal"
   | "intune"
   | "crowdstrike"
@@ -134,6 +135,7 @@ export type InventoryAsset = {
   owner: string;
   tags: string[];
   source: AssetSource;
+  defenderDeviceId?: string; // Customer-scoped stable Defender identity
   externalId: string; // Tidal asset id, when sourced from Tidal
   lastSynced: string;
   openFindings: number; // derived
@@ -213,6 +215,8 @@ export type Finding = {
   // (same CVE, same asset) — populated once a second scanner corroborates it;
   // absent/one entry means only `connector` has ever seen it.
   seenBy?: ConnectorId[];
+  // Stable Defender source ownership survives correlation and restarts.
+  defender?: { deviceId: string; hostname: string; runId: string; observedAt: string; active: boolean; cvss: number | null; remediation: string; otherRemediation?: string };
   // Sources that enriched this finding without independently reporting it.
   enrichments?: { source: "vulners"; observedAt: string }[];
   cve: string;

@@ -34,9 +34,9 @@ async function post(path: string, body?: unknown) {
   });
 }
 
-export default function ElasticQueryDashboard({ initial }: { initial: ElasticDashboard }) {
+export default function ElasticQueryDashboard({ initial, initialCompanyId = "" }: { initial: ElasticDashboard; initialCompanyId?:string }) {
   const [dashboard, setDashboard] = useState(initial);
-  const [companyId, setCompanyId] = useState("");
+  const [companyId, setCompanyId] = useState(initialCompanyId);
   const [sla, setSla] = useState<SlaSettings | null>(null);
   const [customerRefresh, setCustomerRefresh] = useState(0);
   const [connectionOpen, setConnectionOpen] = useState(false);

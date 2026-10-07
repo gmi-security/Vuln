@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { applicationDatabase } from "./persist";
 import { DefenderError, openDefender, sealDefender, type DefenderCredentials, type DefenderRecord } from "./defender-client";
+import type { DefenderSnapshot, DefenderFinding } from "./defender-projection";
 
 type Database = Pick<Pool, "query" | "connect">;
 export type DefenderConnectionInput = DefenderCredentials & { companyId: string; daily: boolean };
@@ -188,7 +189,7 @@ export function createDefenderStore(db: Database) {
       // Pin one generation across totals, rows and summaries while a new import publishes.
       const saved = (await client.query(`SELECT c.current_run,r.summary,c.last_success_at FROM defender_connections c
         LEFT JOIN defender_import_runs r ON r.id=c.current_run WHERE c.company_id=$1 FOR SHARE OF c`, [companyId])).rows[0];
-      if (!saved?.current_run) return { configured:Boolean(saved), summary:null, rows:[], total:0, history:[], updatedAt:null };
+      if (!saved?.current_run) return { runId:null, configured:Boolean(saved), summary:null, rows:[], total:0, history:[], updatedAt:null };
       const id = saved.current_run;
       let rows, total;
       if (view === "devices") {
@@ -204,7 +205,7 @@ export function createDefenderStore(db: Database) {
         total = saved.summary.cves;
       }
       const history = (await client.query("SELECT day::text,summary,observed_at FROM defender_daily_history WHERE company_id=$1 ORDER BY day DESC LIMIT 90", [companyId])).rows.reverse();
-      return { configured:true, summary:saved.summary as DefenderSummary, rows, total, history, updatedAt:saved.last_success_at };
+      return { runId:id, configured:true, summary:saved.summary as DefenderSummary, rows, total, history, updatedAt:saved.last_success_at };
     });
   }
   async function prune(companyId: string) {
@@ -223,7 +224,32 @@ export function createDefenderStore(db: Database) {
     }
     await db.query("DELETE FROM defender_daily_history WHERE company_id=$1 AND day < CURRENT_DATE-365",[companyId]);
   }
-  return { schema, credentials, connection, save, list, enqueue, claim, writeDevices, writeRecords, finish, fail, schedule, results, prune };
+  async function platformSnapshot(companyId: string): Promise<DefenderSnapshot | null> {
+    return transaction(async client => {
+      // Publication/pruning cannot replace this generation until our bounded
+      // reads complete. No network requests or risk scoring inside this lock.
+      const saved = (await client.query(`SELECT c.current_run,c.last_success_at FROM defender_connections c
+        WHERE company_id=$1 FOR SHARE`,[companyId])).rows[0];
+      if (!saved?.current_run) return null;
+      const devices = (await client.query("SELECT record FROM defender_devices WHERE run_id=$1 ORDER BY device_id",[saved.current_run])).rows.map(r=>r.record);
+      const findings: DefenderFinding[] = [];
+      let afterDevice = "", afterCve = "";
+      for (;;) {
+        const page = (await client.query(`SELECT device_id AS "deviceId",cve,MAX(record->>'hostname') AS hostname,
+          (ARRAY['UNKNOWN','NONE','LOW','MEDIUM','HIGH','CRITICAL'])[MAX(CASE severity WHEN 'CRITICAL' THEN 6 WHEN 'HIGH' THEN 5 WHEN 'MEDIUM' THEN 4 WHEN 'LOW' THEN 3 WHEN 'NONE' THEN 2 ELSE 1 END)] AS severity,
+          MAX(cvss) AS cvss,MIN(record->>'firstSeen') AS "firstSeen",MAX(record->>'lastSeen') AS "lastSeen",
+          BOOL_OR(record->>'exploitability' IN ('ExploitIsPublic','ExploitIsVerified','ExploitIsInKit')) AS "exploitAvailable",
+          STRING_AGG(DISTINCT CONCAT_WS(' · ',NULLIF(record->>'softwareName',''),NULLIF(record->>'softwareVersion',''),record->>'remediation',NULLIF(record->>'remediationId','')), E'\n') AS remediation
+          FROM defender_records WHERE run_id=$1 AND (device_id,cve)>($2,$3)
+          GROUP BY device_id,cve ORDER BY device_id,cve LIMIT 2000`,[saved.current_run,afterDevice,afterCve])).rows as DefenderFinding[];
+        findings.push(...page);
+        if (page.length < 2000) break;
+        afterDevice = page[page.length-1].deviceId; afterCve = page[page.length-1].cve;
+      }
+      return { companyId,runId:saved.current_run,observedAt:new Date(saved.last_success_at).toISOString(),devices,findings };
+    });
+  }
+  return { schema, credentials, connection, save, list, enqueue, claim, writeDevices, writeRecords, finish, fail, schedule, results, prune, platformSnapshot };
 }
 let cached: { db: Pool; store: ReturnType<typeof createDefenderStore> } | undefined;
 export function defenderStore() {

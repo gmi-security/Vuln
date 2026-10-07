@@ -56,6 +56,8 @@ async function loadScheduler({ tenantRows, refreshTenantResult = { findingsScore
   const riskDb = fakeRiskDb(tenantRows);
   const computeCalls = [];
   const mod = await loader({
+    "./defender-platform": { reconcileDefenderPlatform: async()=>{} },
+    "./defender-risk": { refreshDefenderRisk: async()=>({findingsScored:0,errors:0}) },
     "./elastic-vuln-server": { elasticVulnEnabled: () => true },
     "./cve-enrichment-refresh": { refreshCveEnrichment: async () => ({ kevEntries: 0, epssUpdated: 0, activeExploitationSignals: 0, errors: 0, skipped: 0 }) },
     "./finding-risk-compute": { computeFindingRiskForTenant: async (tenantKey, companyId) => { computeCalls.push({ tenantKey, companyId }); return refreshTenantResult; } },
@@ -84,6 +86,8 @@ test("one tenant's failure does not block the others", async () => {
   const riskDb = fakeRiskDb([{ tenant_key: "CO-1", company_id: "CO-1" }, { tenant_key: "CO-2", company_id: "CO-2" }]);
   let call = 0;
   const mod = await loader({
+    "./defender-platform": { reconcileDefenderPlatform: async()=>{} },
+    "./defender-risk": { refreshDefenderRisk: async()=>({findingsScored:0,errors:0}) },
     "./elastic-vuln-server": { elasticVulnEnabled: () => true },
     "./cve-enrichment-refresh": { refreshCveEnrichment: async () => ({ kevEntries: 0, epssUpdated: 0, activeExploitationSignals: 0, errors: 0, skipped: 0 }) },
     "./finding-risk-compute": { computeFindingRiskForTenant: async () => { call++; if (call === 1) throw new Error("CrowdStrike timeout"); return { findingsScored: 5, distinctCves: 5, errors: 0 }; } },
