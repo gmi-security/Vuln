@@ -108,3 +108,83 @@ test("scannerElasticConfig falls back from SCANNER_ELASTIC_* to APPSEC_ELASTIC_*
     })) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   }
 });
+
+// A fresh, non-shared module graph per call (unlike the top-level `load`
+// above, which caches by path) -- indexScannerFindings caches "index already
+// ensured" at module scope, so each scenario below needs its own isolated
+// instance of lib/elastic-scanner-export.ts rather than reusing one already
+// evaluated against a different fake elasticJsonRequest.
+async function loadWithMockedElastic(elasticJsonRequest) {
+  const cache = new Map();
+  async function loadFresh(path) {
+    path = resolve(path);
+    if (cache.has(path)) return cache.get(path);
+    const source = await readFile(path, "utf8");
+    const js = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
+    const mod = new SourceTextModule(js, { identifier: `${path}#mocked` });
+    cache.set(path, mod);
+    await mod.link(async (specifier) => {
+      if (specifier === "./elastic-query-client") {
+        return new SyntheticModule(["elasticJsonRequest"], function () { this.setExport("elasticJsonRequest", elasticJsonRequest); });
+      }
+      if (specifier.startsWith("@/lib/")) return loadFresh(`lib/${specifier.slice(6)}.ts`);
+      if (specifier.startsWith(".")) return loadFresh(resolve(dirname(path), `${specifier}.ts`));
+      const values = await import(specifier);
+      return new SyntheticModule(Object.keys(values), function () { for (const key of Object.keys(values)) this.setExport(key, values[key]); });
+    });
+    return mod;
+  }
+  const mod = await loadFresh("lib/elastic-scanner-export.ts");
+  await mod.evaluate();
+  return mod.namespace;
+}
+
+test("indexScannerFindings PUTs the index once before bulk-indexing, tolerating an already-exists response", async () => {
+  process.env.APPSEC_ELASTIC_URL = "https://appsec.example.com";
+  process.env.APPSEC_ELASTIC_API_KEY = "appsec-key";
+  try {
+    const calls = [];
+    let putAttempts = 0;
+    const { indexScannerFindings } = await loadWithMockedElastic(async (_connection, path, method, _body, opts) => {
+      calls.push({ path, method, ndjson: opts?.ndjson });
+      if (method === "PUT") {
+        putAttempts += 1;
+        if (putAttempts === 1) throw new Error('Elastic rejected the query (HTTP 400). resource_already_exists_exception: index already exists');
+        throw new Error("PUT must only be attempted once per process -- the result should be cached after the first (tolerated) failure.");
+      }
+      assert.equal(method, "POST");
+      return { body: { items: [{ index: {} }] }, warning: false };
+    });
+    const result = await indexScannerFindings([finding({ id: "FIND-1" })]);
+    assert.equal(result.indexed, 1);
+    assert.equal(result.errors, 0);
+    assert.deepEqual(calls.map(c => c.method), ["PUT", "POST"]);
+    assert.ok(calls[1].ndjson.includes("FIND-1"));
+
+    // A second export pass must not PUT again -- it's cached as ensured.
+    await indexScannerFindings([finding({ id: "FIND-2" })]);
+    assert.deepEqual(calls.map(c => c.method), ["PUT", "POST", "POST"]);
+    assert.ok(calls[2].ndjson.includes("FIND-2"));
+  } finally {
+    delete process.env.APPSEC_ELASTIC_URL;
+    delete process.env.APPSEC_ELASTIC_API_KEY;
+  }
+});
+
+test("indexScannerFindings surfaces per-item bulk errors without throwing", async () => {
+  process.env.APPSEC_ELASTIC_URL = "https://appsec.example.com";
+  process.env.APPSEC_ELASTIC_API_KEY = "appsec-key";
+  try {
+    const { indexScannerFindings } = await loadWithMockedElastic(async (_connection, _path, method) => {
+      if (method === "PUT") return { body: {}, warning: false };
+      return { body: { items: [{ index: {} }, { index: { error: { reason: "mapper_parsing_exception" } } }] }, warning: false };
+    });
+    const result = await indexScannerFindings([finding({ id: "FIND-1" }), finding({ id: "FIND-2" })]);
+    assert.equal(result.indexed, 1);
+    assert.equal(result.errors, 1);
+    assert.equal(result.firstError, "mapper_parsing_exception");
+  } finally {
+    delete process.env.APPSEC_ELASTIC_URL;
+    delete process.env.APPSEC_ELASTIC_API_KEY;
+  }
+});

@@ -85,6 +85,33 @@ export function scannerBulkBody(findings: Finding[]): string {
   return lines.length ? lines.join("\n") + "\n" : "";
 }
 
+// Unlike the AppSec streams (gmi-appsec-scans/gmi-appsec-findings, created
+// ahead of time by whoever set those up, outside this app), nothing creates
+// gmi-scanner-findings for us -- and a plain `_bulk` "index" action doesn't
+// reliably auto-create a brand new index on every Elasticsearch deployment
+// (confirmed in production: an ES|QL query against it came back "Unknown
+// index" even with the export wired up and real findings to send). A plain
+// PUT of the index is idempotent and needs no template, unlike a data
+// stream, so this doesn't depend on anyone configuring anything in Kibana.
+// Cached per process so this doesn't repeat every 5-minute export pass
+// once it succeeds; a failed attempt (not just "already exists") retries
+// next time rather than being remembered as done.
+let scannerIndexEnsured = false;
+
+async function ensureScannerIndex(connection: ElasticConnection): Promise<void> {
+  if (scannerIndexEnsured) return;
+  try {
+    await elasticJsonRequest(connection, `/${SCANNER_FINDING_STREAM}`, "PUT", {});
+    scannerIndexEnsured = true;
+  } catch (err) {
+    if (err instanceof Error && /resource_already_exists_exception/i.test(err.message)) {
+      scannerIndexEnsured = true;
+      return;
+    }
+    throw err;
+  }
+}
+
 export type ScannerExportResult = { indexed: number; errors: number; firstError: string | null };
 
 export async function indexScannerFindings(findings: Finding[]): Promise<ScannerExportResult> {
@@ -93,6 +120,7 @@ export async function indexScannerFindings(findings: Finding[]): Promise<Scanner
   const connection = scannerElasticConfig();
   if (!connection) throw new Error("Scanner Elastic connection is not configured (set SCANNER_ELASTIC_URL/_API_KEY or APPSEC_ELASTIC_URL/_API_KEY).");
 
+  await ensureScannerIndex(connection);
   const { body } = await elasticJsonRequest(connection, "/_bulk", "POST", undefined, { ndjson: scannerBulkBody(eligible) });
   // `_bulk` returns HTTP 200 even when individual items fail -- per-item
   // errors live in the response body, not the status code.
