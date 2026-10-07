@@ -521,6 +521,13 @@ type StoreMeta = {
   // resume cursor: every pass re-indexes every eligible finding, which is
   // what makes the export idempotent and self-healing.
   lastScannerElasticExportAt: number | null;
+  // Epoch ms of the last Vulners Bridge full-inventory sweep
+  // (importFromVulnersBridge), launched from its own independent scheduler
+  // (see startVulnersBridgeScheduler) rather than from the shared sync-all
+  // job list. Deliberately separate from lastAutoSyncAt: that field gates
+  // sync-all as a whole, and reusing it here would double-count against a
+  // manually triggered sync-all that also runs this same job.
+  lastVulnersBridgeSweepAt: number | null;
 };
 
 function defaultMeta(): StoreMeta {
@@ -538,6 +545,7 @@ function defaultMeta(): StoreMeta {
     nessusBackfillCorrected: false,
     autoSyncDefaultMigrated: false,
     lastScannerElasticExportAt: null,
+    lastVulnersBridgeSweepAt: null,
   };
 }
 
@@ -692,6 +700,19 @@ const persistGlobal = globalThis as unknown as {
   // fate, so it gets its own always-on interval.
   __vulnScannerExportScheduler?: ReturnType<typeof setInterval>;
   __vulnScannerExportTick?: Promise<void> | null;
+  // Independent of VULN_DISABLE_SCHEDULER for a different reason than the
+  // scanner-export above: that flag was left on in production to hold back
+  // the genuinely risky jobs (auto-sync-all's full connector sweep, Defender
+  // sync, risk-refresh) after they piled up concurrently and overloaded the
+  // box. Vulners Bridge scanning (nessus-offset + its own full-inventory
+  // sweep) is explicitly one of those risky jobs too -- it launches real GVM
+  // scans -- so this does NOT get the "safe, always run" treatment the
+  // export got. It only exists so Vulners scanning can resume without
+  // dragging Defender/risk-refresh/every-other-connector's sync-all back on
+  // with it. See startVulnersBridgeScheduler for the throttling this relies
+  // on instead of VULN_DISABLE_SCHEDULER.
+  __vulnVulnersBridgeScheduler?: ReturnType<typeof setInterval>;
+  __vulnVulnersBridgeTick?: Promise<void> | null;
 };
 
 // True when persistence is fail-closed after a hydration failure. Lib callers
@@ -853,6 +874,7 @@ async function doHydrate(): Promise<void> {
   startFlusher();
   startScheduler();
   startScannerElasticExportScheduler();
+  startVulnersBridgeScheduler();
   // Kick off an initial persist in the background — the flusher covers it
   // anyway and we must not block the first request waiting for a DB write.
   // (No-op while persistence is blocked.)
@@ -971,6 +993,108 @@ async function scannerElasticExportTick(): Promise<void> {
     }
   } catch (err) {
     console.error("[scanner-export] failed:", err);
+  }
+}
+
+// Independent of VULN_DISABLE_SCHEDULER on purpose -- see the comment on
+// __vulnVulnersBridgeScheduler above. Unlike startScannerElasticExportScheduler,
+// this does NOT run unconditionally: Vulners Bridge scanning launches real
+// GVM scans, which is exactly the category of work VULN_DISABLE_SCHEDULER
+// exists to hold back. It leans on the same per-occurrence dedup
+// (nessusOffsetLastTriggered) and interval gate (autoSyncIntervalHours, now
+// through its own lastVulnersBridgeSweepAt instead of the shared
+// lastAutoSyncAt) that already bounded this work when it lived inside
+// schedulerTick, so resuming it here reproduces the same cadence and volume
+// as before the scheduler was disabled -- not more.
+function startVulnersBridgeScheduler(): void {
+  if (persistGlobal.__vulnVulnersBridgeScheduler) return;
+  persistGlobal.__vulnVulnersBridgeScheduler = setInterval(() => {
+    if (persistGlobal.__vulnVulnersBridgeTick) return; // previous tick still running
+    const run = vulnersBridgeTick().catch((err) => {
+      console.error("[vulners-bridge] tick failed:", err);
+    });
+    persistGlobal.__vulnVulnersBridgeTick = run.finally(() => {
+      if (persistGlobal.__vulnVulnersBridgeTick === run) {
+        persistGlobal.__vulnVulnersBridgeTick = null;
+      }
+    });
+  }, 60_000);
+}
+
+async function vulnersBridgeTick(): Promise<void> {
+  const s = store();
+  if (!vulnersBridgeConfig()) return;
+  const now = Date.now();
+  await vulnersBridgeOffsetTick(s, now);
+
+  // Full-inventory sweep: every IP in the asset inventory, not just hosts
+  // Nessus has touched -- the same job (importFromVulnersBridge) and the
+  // same interval setting (autoSyncIntervalHours) it used when it ran as
+  // one step of sync-all, just gated by its own timestamp now instead of
+  // the shared lastAutoSyncAt, and skipped while a manually triggered
+  // sync-all is already running it as one of its own steps.
+  const intervalHours = Math.min(168, Math.max(1, s.settings.schedule.autoSyncIntervalHours));
+  const intervalMs = intervalHours * 3_600_000;
+  if (syncAllStatus().running || now - (s.meta.lastVulnersBridgeSweepAt ?? 0) < intervalMs) return;
+  s.meta.lastVulnersBridgeSweepAt = now;
+  markDirty();
+  try {
+    console.log("[vulners-bridge] full-inventory sweep starting");
+    const result = await importFromVulnersBridge();
+    if ("error" in result) {
+      console.error("[vulners-bridge] full-inventory sweep failed:", result.error);
+    } else {
+      console.log(`[vulners-bridge] full-inventory sweep done: ${result.hostsScanned} host(s), ${result.findingsImported} finding(s), ${result.skipped} skipped`);
+    }
+  } catch (err) {
+    console.error("[vulners-bridge] full-inventory sweep failed:", err);
+  }
+}
+
+// Vulners Bridge "ported from Nessus" offset scans: once per occurrence, 1
+// hour after each company's own Nessus scan actually runs (per its own
+// schedule on the Nessus server, not a fixed interval this app invents), so
+// the two active scanners never hit the same hosts at the same time.
+async function vulnersBridgeOffsetTick(s: StoreShape, now: number): Promise<void> {
+  const nessusScanIdsByCompany = new Map<string, Set<number>>();
+  for (const scan of s.scans.values()) {
+    if (scan.connector !== "nessus" || !scan.vendor?.nessusScanId) continue;
+    const set = nessusScanIdsByCompany.get(scan.companyId) ?? new Set<number>();
+    set.add(scan.vendor.nessusScanId);
+    nessusScanIdsByCompany.set(scan.companyId, set);
+  }
+  for (const [companyId, scanIds] of nessusScanIdsByCompany) {
+    const company = s.companies.get(companyId);
+    if (!company) continue;
+    for (const nessusScanId of scanIds) {
+      try {
+        const schedule = await cachedNessusSchedule(nessusScanId);
+        // The occurrence whose +1h offset has already passed.
+        const occurrence = lastNessusOccurrenceBefore(schedule, now - 3_600_000);
+        if (occurrence == null) continue;
+        const key = `${companyId}:${nessusScanId}`;
+        if (s.meta.nessusOffsetLastTriggered[key] === occurrence) continue;
+        const targets = nessusBridgeTargetsForCompany(companyId);
+        if (!targets.length) continue;
+        s.meta.nessusOffsetLastTriggered[key] = occurrence;
+        markDirty();
+        const result = await startScan({
+          name: `GMI scan: ${company.name} (1h after Nessus)`,
+          connector: "vulners",
+          profile: "full-fast",
+          targets,
+          companyId,
+          requestedBy: "system@gmi.com (nessus-offset)",
+        });
+        if ("error" in result) {
+          console.error(`[vulners-bridge] nessus-offset bridge scan failed for ${company.name}:`, result.error);
+        } else {
+          console.log(`[vulners-bridge] nessus-offset bridge scan started for ${company.name}: ${result.id}`);
+        }
+      } catch (err) {
+        console.error(`[vulners-bridge] nessus-offset check failed (scan ${nessusScanId}, ${company.name}):`, err);
+      }
+    }
   }
 }
 
@@ -1140,53 +1264,6 @@ async function schedulerTick(): Promise<void> {
       }
     } catch (err) {
       console.error("[scheduler] SLA breach digest failed:", err);
-    }
-  }
-
-  // Vulners Bridge "ported from Nessus" offset scans: once per occurrence,
-  // 1 hour after each company's own Nessus scan actually runs (per its own
-  // schedule on the Nessus server, not a fixed interval this app invents),
-  // so the two active scanners never hit the same hosts at the same time.
-  if (vulnersBridgeConfig()) {
-    const nessusScanIdsByCompany = new Map<string, Set<number>>();
-    for (const scan of s.scans.values()) {
-      if (scan.connector !== "nessus" || !scan.vendor?.nessusScanId) continue;
-      const set = nessusScanIdsByCompany.get(scan.companyId) ?? new Set<number>();
-      set.add(scan.vendor.nessusScanId);
-      nessusScanIdsByCompany.set(scan.companyId, set);
-    }
-    for (const [companyId, scanIds] of nessusScanIdsByCompany) {
-      const company = s.companies.get(companyId);
-      if (!company) continue;
-      for (const nessusScanId of scanIds) {
-        try {
-          const schedule = await cachedNessusSchedule(nessusScanId);
-          // The occurrence whose +1h offset has already passed.
-          const occurrence = lastNessusOccurrenceBefore(schedule, now - 3_600_000);
-          if (occurrence == null) continue;
-          const key = `${companyId}:${nessusScanId}`;
-          if (s.meta.nessusOffsetLastTriggered[key] === occurrence) continue;
-          const targets = nessusBridgeTargetsForCompany(companyId);
-          if (!targets.length) continue;
-          s.meta.nessusOffsetLastTriggered[key] = occurrence;
-          markDirty();
-          const result = await startScan({
-            name: `GMI scan: ${company.name} (1h after Nessus)`,
-            connector: "vulners",
-            profile: "full-fast",
-            targets,
-            companyId,
-            requestedBy: "system@gmi.com (nessus-offset)",
-          });
-          if ("error" in result) {
-            console.error(`[scheduler] nessus-offset bridge scan failed for ${company.name}:`, result.error);
-          } else {
-            console.log(`[scheduler] nessus-offset bridge scan started for ${company.name}: ${result.id}`);
-          }
-        } catch (err) {
-          console.error(`[scheduler] nessus-offset check failed (scan ${nessusScanId}, ${company.name}):`, err);
-        }
-      }
     }
   }
 }
@@ -1793,11 +1870,18 @@ async function importVendorFindings(s: StoreShape, scan: InternalScan): Promise<
   // or not it currently has findings — so a now-clean host's prior findings
   // get closed instead of staying "Open" forever once remediated.
   const coveredAssetKeys = new Set<string>();
+  const coveredAliases = new Set<string>();
   for (const host of scannedHosts) {
     for (const alias of [host.hostname, ...host.assetAliases]) {
-      if (alias) coveredAssetKeys.add(canonicalAssetKey(s, scan.companyId, alias));
+      if (!alias) continue;
+      coveredAssetKeys.add(canonicalAssetKey(s, scan.companyId, alias));
+      coveredAliases.add(alias);
     }
   }
+  // Persisted for nessusBridgeTargetsForCompany -- Finding.asset alone only
+  // covers hosts with at least one finding, missing every host Nessus
+  // scanned clean.
+  scan.scannedHostAliases = Array.from(coveredAliases);
   await closeStaleFindings(s, scan.companyId, scan.connector, coveredAssetKeys, touchedKeys, completedAt);
   const all = Array.from(s.findings.values()).filter((f) => f.scanId === scan.id);
   scan.findingsCount = all.length;
@@ -7433,20 +7517,28 @@ export function listFindings(filter?: {
   return all.sort((a, b) => b.realRisk - a.realRisk || b.cvss - a.cvss);
 }
 
-// Hosts a company's Nessus connector has actually reported findings on --
-// the Vulners Bridge "port from Nessus" source of truth (used by both
+// Every host a company's Nessus connector has actually scanned -- the
+// Vulners Bridge "port from Nessus" source of truth (used by both
 // app/api/admin/port-nessus-to-bridge and the offset scheduler below).
 // Scan.targets is empty for an imported Nessus scan (it only records a
-// hostsScanned count), so this comes from Finding.asset instead.
+// hostsScanned count), so this unions two sources instead: each Nessus
+// scan's scannedHostAliases (every host that scan covered, clean or not --
+// absent on scans recorded before that field existed) plus Finding.asset
+// (covers hosts with a finding even on those older scans). Without the
+// first source, a host Nessus found completely clean never reaches the
+// bridge at all, understating coverage for companies with mostly-healthy
+// estates.
 export function nessusBridgeTargetsForCompany(companyId: string): string[] {
-  return Array.from(
-    new Set(
-      listFindings({ companyId })
-        .filter((f) => f.connector === "nessus")
-        .map((f) => f.asset)
-        .filter(Boolean),
-    ),
-  );
+  const s = store();
+  const targets = new Set<string>();
+  for (const scan of s.scans.values()) {
+    if (scan.companyId !== companyId || scan.connector !== "nessus") continue;
+    for (const alias of scan.scannedHostAliases ?? []) targets.add(alias);
+  }
+  for (const f of listFindings({ companyId })) {
+    if (f.connector === "nessus" && f.asset) targets.add(f.asset);
+  }
+  return Array.from(targets);
 }
 
 export function updateFinding(
