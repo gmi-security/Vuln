@@ -242,6 +242,49 @@ test("a partition's rejected cursor resets only that partition via resetPartitio
   assert.deepEqual(queried, ["expired", ""]);
 });
 
+test("a partition's cursor can reset more than once in one run (CrowdStrike's search context can expire repeatedly over a multi-hour walk)", async () => {
+  let checkpoint = { key: "open", queryCursor: "", discoveredCount: 0, done: false };
+  const reset = [];
+  // Each cursor CrowdStrike hands back expires before it's used -- twice in
+  // a row, matching the live failure (910,186 fetched, expired, reset,
+  // expired again). A single allowed reset used to make this throw on the
+  // second expiry instead of recovering.
+  const expiredCursors = new Set(["expired-1", "expired-2"]);
+  const snapshot = (runId) => ({ id: runId, tenantKey: "CO-147284", phase: checkpoint.done ? "hydrating" : "discovering",
+    partitions: [checkpoint], hydrationCursor: "", discoveredCount: checkpoint.discoveredCount,
+    expectedCount: checkpoint.done ? checkpoint.discoveredCount : null, hydratedCount: 0 });
+  let page = 0;
+  const deps = {
+    acquire: async () => ({ assertHeld: () => {}, release: async () => {} }),
+    begin: async () => ({ id: "run-1", tenantKey: "CO-147284", phase: "discovering",
+      partitions: [checkpoint], hydrationCursor: "", discoveredCount: 0, expectedCount: null, hydratedCount: 0 }),
+    createSession: async () => ({
+      queryPage: async cursor => {
+        if (expiredCursors.has(cursor)) throw new Error("Spotlight query 404: Search context expired, 'after' key no longer valid");
+        page += 1;
+        if (page === 1) return { ids: ["source-1"], next: "expired-1", total: null };
+        if (page === 2) return { ids: ["source-2"], next: "expired-2", total: null };
+        return { ids: [`source-${page}`], next: "", total: null };
+      },
+      hydrateIds: async ids => ids.map(sourceRecord),
+    }),
+    savePartitionPage: async (runId, _tenantKey, key, _prior, ids, next) => {
+      checkpoint = { key, queryCursor: next, discoveredCount: checkpoint.discoveredCount + ids.length, done: next === "" };
+      return snapshot(runId);
+    },
+    resetPartition: async (_runId, _tenantKey, key) => { reset.push(key); checkpoint = { ...checkpoint, queryCursor: "" }; },
+    getRunState: async (runId) => snapshot(runId),
+    nextIds: async (_id, _tenant, after) => after === "" ? ["source-1", "source-2", "source-3"] : [],
+    write: async (_id, _tenant, ids) => ids.length,
+    complete: async () => ({ findingsImported: 3, hostsAffected: 1 }),
+    fail: async () => { throw new Error("must not fail -- both expiries should self-heal via reset"); },
+    prune: async () => {},
+  };
+  const result = await runPartitionedSpotlightImport(selection, [{ key: "open", filter: "status:'open'" }], deps, () => {});
+  assert.equal(result.findingsImported, 3);
+  assert.deepEqual(reset, ["open", "open"]);
+});
+
 test("resuming skips an already-done partition and only continues the one still open", async () => {
   const queried = [];
   const deps = {

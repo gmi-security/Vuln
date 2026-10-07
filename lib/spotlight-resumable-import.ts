@@ -133,6 +133,12 @@ export async function runResumableSpotlightImport(
 // each id, so it's shared as-is between both orchestrators.
 export type SpotlightPartitionDef = { key: string; filter: string };
 
+// Each reset re-walks the partition's filter from id 0 to get a fresh cursor
+// -- wasteful but safe (already-discovered ids no-op on re-insert), so this
+// is a backstop against a persistently broken filter/response, not a bound
+// expected to bite in normal operation.
+const MAX_PARTITION_CURSOR_RESETS = 20;
+
 export type PartitionedSpotlightDependencies = {
   acquire: (tenantKey: string) => Promise<{ assertHeld: () => void; release: () => Promise<void> }>;
   createSession: (config: FalconTenant) => Promise<{
@@ -178,7 +184,7 @@ export async function runPartitionedSpotlightImport(
       const filter = filterByKey.get(state.key);
       if (!filter) throw new Error(`No filter configured for Spotlight discovery partition "${state.key}".`);
       let cursor = state.queryCursor;
-      let resetOnce = false;
+      let resets = 0;
       const seenCursors = new Set(cursor ? [cursor] : []);
       while (true) {
         lock!.assertHeld();
@@ -188,9 +194,20 @@ export async function runPartitionedSpotlightImport(
           page = await session.queryPage(priorCursor, filter);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          if (priorCursor && !resetOnce && /^Spotlight query (400|404):/.test(message)) {
+          // CrowdStrike's "after" cursor backs a short-lived search context
+          // (observed: a single retried, rate-limited page request can push
+          // past its window and come back 404 "Search context expired"
+          // instead of the 429 it was really hit for). A large tenant's walk
+          // runs for hours and crosses CrowdStrike's rate limiter many times
+          // over, so a single allowed reset isn't enough -- resetting only
+          // restarts this partition's walk (already-discovered IDs are kept,
+          // deduped by source_id on write), so repeated resets still make
+          // real forward progress rather than looping forever on a truly
+          // broken filter. Bounded anyway, so a persistently broken query
+          // still fails loudly instead of burning hours silently.
+          if (priorCursor && resets < MAX_PARTITION_CURSOR_RESETS && /^Spotlight query (400|404):/.test(message)) {
             await deps.resetPartition(run!.id, selection.tenantKey, state.key, `Saved Spotlight cursor rejected: ${message}`);
-            cursor = ""; resetOnce = true; seenCursors.clear();
+            cursor = ""; resets += 1; seenCursors.clear();
             continue;
           }
           throw error;
