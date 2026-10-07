@@ -4,6 +4,7 @@ import {
   Building2,
   CalendarClock,
   ClipboardCheck,
+  Database,
   Flame,
   GitBranch,
   PlugZap,
@@ -37,5 +38,6 @@ export const baseNavItems: VulnNavItem[] = [
   { label: "Compliance", icon: ClipboardCheck, href: "/compliance" },
   { label: "Remediation SLA", icon: Timer, href: "/sla" },
   { label: "AppSec", icon: GitBranch, href: "/appsec" },
+  { label: "Scanner Telemetry", icon: Database, href: "/scanner-telemetry" },
   { label: "Connectors", icon: PlugZap, href: "/connectors" },
 ];
