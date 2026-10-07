@@ -50,6 +50,7 @@ import { acquireSpotlightWorkerLock, nextSpotlightHydrationIds,
   failSpotlightRun, pruneSpotlightRuns, getLatestSpotlightRunState,
   beginOrResumePartitionedSpotlightRun, getPartitionedRunCheckpoint, savePartitionPage, resetPartitionCursor } from "@/lib/spotlight-record-store";
 import { recordVulnersEnrichment } from "@/lib/reporting-source-activity";
+import { planDefenderProjection, type DefenderSnapshot } from "@/lib/defender-projection";
 import { defenderStore } from "@/lib/defender-store";
 import { burpConfig, burpListIssues, type BurpFinding } from "@/lib/burp";
 import {
@@ -177,13 +178,14 @@ export function riskFields(
     exploitAvailable: boolean;
     asset: string;
     companyId: string;
+    inventory?: InternalAsset;
   },
 ) {
   const kev = isKev(input.cve);
   const ransomware = kev && isKevRansomware(input.cve);
   // Only inherit inventory context from an asset owned by the SAME customer —
   // never cross-attribute one client's asset criticality to another's finding.
-  const inventory = lookupAsset(s, input.asset, input.companyId);
+  const inventory = input.inventory?.companyId === input.companyId ? input.inventory : lookupAsset(s, input.asset, input.companyId);
   const exposure = inventory ? inventory.exposure : classifyAsset(input.asset).exposure;
   const criticality = inventory
     ? inventory.criticality
@@ -286,14 +288,19 @@ export function correlateFinding(
 // finding. resolveIdentity() (the alias fallback) is already an O(1)
 // union-find over a Map, so it's untouched.
 function buildCompanyAssetKeyIndex(s: StoreShape, companyId: string): Map<string, string> {
-  const idx = new Map<string, string>();
+  const idx = new Map<string, string>(), ambiguous = new Set<string>();
   for (const a of s.assets.values()) {
     if (a.companyId !== companyId) continue;
     const key = `asset:${a.id}`;
-    for (const candidate of [a.identifier, a.hostname, ...a.ipAddresses]) {
-      if (candidate) idx.set(candidate.trim().toLowerCase(), key);
+    for (const candidate of [a.identifier,a.hostname,...a.ipAddresses]) {
+      const normalized = candidate?.trim().toLowerCase();
+      if (!normalized || ambiguous.has(normalized)) continue;
+      if (idx.has(normalized) && idx.get(normalized) !== key) { idx.delete(normalized); ambiguous.add(normalized); }
+      else idx.set(normalized,key);
     }
   }
+  // Stable inventory identifiers take precedence over ambiguous display aliases.
+  for (const a of s.assets.values()) if (a.companyId === companyId && a.identifier) idx.set(a.identifier.trim().toLowerCase(),`asset:${a.id}`);
   return idx;
 }
 
@@ -346,6 +353,7 @@ async function closeStaleFindings(
     if (f.companyId === companyId && f.connector === connector) {
       if (
         (f.status === "Open" || f.status === "In Remediation") &&
+        !(connector !== "defender" && f.defender?.active) &&
         coveredAssetKeys.has(resolveAssetKey(s, companyId, assetIndex, f.asset)) &&
         !touchedKeys.has(correlationKey(s, companyId, f.cve, f.asset))
       ) {
@@ -475,6 +483,7 @@ function normalizeSettings(raw: unknown): Settings {
 // Bookkeeping the scheduler + alerting need to survive restarts (persisted in
 // the snapshot's meta row so a redeploy never double-runs a sync or report).
 type StoreMeta = {
+  defenderGenerations?: Record<string,string>;
   lastAutoSyncAt: number | null; // epoch ms of the last scheduler-launched sync-all
   lastAlertCheckAt: string | null; // ISO — findings first seen after this are "new"
   lastMetricsSnapshotDay: string | null; // "YYYY-MM-DD" (UTC)
@@ -2393,12 +2402,17 @@ export function lookupAsset(
 ): InternalAsset | undefined {
   const key = assetStr.trim().toLowerCase();
   if (!key) return undefined;
+  let match: InternalAsset | undefined;
+  let ambiguous = false;
   for (const a of s.assets.values()) {
     if (companyId && a.companyId !== companyId) continue;
     if (a.identifier.toLowerCase() === key) return a;
-    if (a.hostname && a.hostname.toLowerCase() === key) return a;
-    if (a.ipAddresses.some((ip) => ip.toLowerCase() === key)) return a;
+    if ((a.hostname && a.hostname.toLowerCase() === key) || a.ipAddresses.some(ip=>ip.toLowerCase() === key)) {
+      if (match && match.id !== a.id) ambiguous = true;
+      match = a;
+    }
   }
+  if (!ambiguous) return match;
   return undefined;
 }
 
@@ -6526,12 +6540,40 @@ export async function importFromCrowdstrikeSpotlight(
     return { error: message };
   }
 }
-// Defender uses customer-bound database generations, not the RAM-backed scanner store.
-// Sync-all queues saved connections; there is no implicit GMI or environment-tenant fallback.
+// Called only with a completed, pinned Defender generation. The marker is saved
+// WITH findings in the existing snapshot, so a restart retries an unpersisted projection.
+export function defenderProjectedRun(companyId: string): string | undefined {
+  return store().meta.defenderGenerations?.[companyId];
+}
+export function publishDefenderSnapshot(snapshot: DefenderSnapshot): void {
+  if (persistenceBlocked()) throw new Error("Application storage is unavailable; Defender publication deferred.");
+  const s = store(), company = s.companies.get(snapshot.companyId);
+  if (!company) throw new Error("Mapped Defender customer no longer exists.");
+  if (defenderProjectedRun(snapshot.companyId) === snapshot.runId) return;
+  const plan = planDefenderProjection(snapshot,company.name,s.findings.values(),s.assets.values(),
+    (finding,inventory)=>riskFields(s,{ ...finding,inventory }));
+  const folder = ensureFolder(s,company.id,"Microsoft Defender");
+  const scanId = `defender:${company.id}`;
+  const counts: Record<Severity,number> = { Critical:0,High:0,Medium:0,Low:0,Info:0 };
+  for (const f of plan.findings.values()) if (f.defender?.active && f.defender.runId === snapshot.runId) counts[f.severity]++;
+  s.scans.set(scanId,{ id:scanId,name:"Microsoft Defender vulnerability assessment",companyId:company.id,companyName:company.name,
+    folderId:folder.id,folderName:folder.name,connector:"defender",profile:"Imported assessment",targets:plan.targets,
+    status:"Completed",createdAt:s.scans.get(scanId)?.createdAt ?? snapshot.observedAt,startedAt:snapshot.observedAt,completedAt:snapshot.observedAt,
+    findingsCount:snapshot.findings.length,severityCounts:counts,hostsScanned:plan.targets.length,requestedBy:"Defender connector",
+    durationMs:0,progressFrozenAt:null,seed:0,vendor:null,externalRef:snapshot.runId });
+  for (const [id,asset] of plan.assets) s.assets.set(id,asset);
+  for (const [id,finding] of plan.findings) s.findings.set(id,finding);
+  s.meta.defenderGenerations = { ...s.meta.defenderGenerations,[company.id]:snapshot.runId };
+  markDirty();
+}
+
+// Sync-all uses the same server-managed configuration and background importer.
 export async function importFromDefender(): Promise<{ queued: number; message: string } | { error: string }> {
   if (!process.env.DATABASE_URL) return { error: "Defender requires database storage." };
+  const { syncDefenderEnvironment } = await import("./defender-config");
+  await syncDefenderEnvironment();
   const connections = await defenderStore().list();
-  if (!connections.length) return { error: "Configure a customer connection at /defender first." };
+  if (!connections.length) return { error: "Set the Defender customer and credentials in the server environment first." };
   for (const connection of connections) {
     await defenderStore().enqueue(connection.companyId, "sync-all");
   }

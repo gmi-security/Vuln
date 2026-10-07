@@ -66,6 +66,7 @@ export default function ConnectWiseGroupTicket({ group, requestId }: { group: Pa
     } catch (e) { if (generation.current === token) { setError(e instanceof Error ? e.message : "Verification failed. Please retry."); setMessage(""); } }
     finally { if (generation.current === token) setBusy(""); }
   }
+  const defenderOnly = group.source === "stored-findings" && group.connectors?.length === 1 && group.connectors[0] === "defender";
   const canCreate = settings?.configured && current?.reviewState === "approved" && ["prepared", "failed"].includes(current.state);
   return <section className="mt-4 rounded-xl border border-[rgba(179,14,20,0.14)] bg-[#050505] p-4" aria-label="ConnectWise ticket for this patch">
     <h4 className="text-sm font-medium text-zinc-100">ConnectWise ticket</h4>
@@ -84,7 +85,7 @@ export default function ConnectWiseGroupTicket({ group, requestId }: { group: Pa
     {current && !["prepared", "failed"].includes(current.state) && <div className="mt-4 rounded-lg border border-zinc-700 p-3" aria-live="polite">
       <p className="font-medium text-zinc-100">{patchGroupTicketState(current)}{current.ticketId ? ` · #${current.ticketId}` : ""}</p>
       <p className={styles.resultNote}>{current.company ?? "Company selection saved"} · {current.board ?? "Board selection saved"} · {current.hostCount.toLocaleString()} devices</p>
-      {current.ticketStatus && <p className={styles.resultNote}>ConnectWise status: {current.ticketStatus}. {group.source === "stored-findings" ? "Verify the fix in the source scanners and record the result in the ticket." : current.fixVerifiedState === "verified" ? `CrowdStrike confirmed no open findings for these CVEs on the scoped devices as of ${new Date(current.fixVerifiedAt!).toLocaleString()}.`
+      {current.ticketStatus && <p className={styles.resultNote}>ConnectWise status: {current.ticketStatus}. {group.source === "stored-findings" ? (defenderOnly && current.fixVerifiedAt ? `Defender verification: ${current.fixVerifiedState === "verified" ? "no remaining findings" : `${current.fixStillOpenCount} devices still affected`}, using the import from ${new Date(current.fixVerifiedAt).toLocaleString()}.` : "Sync the source scanner after patching, then verify the fix.") : current.fixVerifiedState === "verified" ? `CrowdStrike confirmed no open findings for these CVEs on the scoped devices as of ${new Date(current.fixVerifiedAt!).toLocaleString()}.`
         : current.fixVerifiedState === "still_open" ? `CrowdStrike still shows these CVEs open on ${current.fixStillOpenCount} of the scoped devices as of ${new Date(current.fixVerifiedAt!).toLocaleString()}.`
         : "CrowdStrike fix verification has not been performed."}</p>}
       {current.ticketId && <div className="mt-2">
@@ -102,6 +103,7 @@ export default function ConnectWiseGroupTicket({ group, requestId }: { group: Pa
         {current.state === "uncertain" && <button type="button" className={styles.button} disabled={Boolean(busy)} onClick={() => action("reconcile")}>Check creation outcome</button>}
         {current.ticketId && current.attachmentState === "pending" && <button type="button" className={styles.button} disabled={Boolean(busy)} onClick={() => action("retry-attachment")}>Retry CSV attachment</button>}
         {current.ticketId && <button type="button" className={styles.button} disabled={Boolean(busy)} onClick={() => action("check-status")}>Check ConnectWise status</button>}
+        {current.ticketId && defenderOnly && <button type="button" className={styles.button} disabled={Boolean(busy)} onClick={()=>void action("verify-defender")}>{busy === "verify-defender" ? "Verifying..." : "Verify fix from latest Defender import"}</button>}
         {current.ticketId && group.source !== "stored-findings" && <button type="button" className={styles.button} disabled={Boolean(busy)} onClick={verifyFix}>{busy === "verify-fix" ? "Verifying…" : "Verify fix in CrowdStrike"}</button>}
       </div>
       {current.error && <p className={styles.patchError}>{current.error}</p>}

@@ -36,8 +36,8 @@ export function buildStoredFindingGroups(company: { id: string; name: string }, 
     const label = (cves.length === 1 ? cves[0] : `${cves[0]}+${cves.length - 1}more`).replace(/[^A-Za-z0-9+-]/g, "-").slice(0, 80);
     const baseTitle = cves.length === 1 ? `${cves[0]} remediation` : `Remediation for ${cves.length} CVEs`;
     const title = ordered.length > 1000 ? `${baseTitle} · batch ${Math.floor(offset / 1000) + 1}` : baseTitle;
-    const csv = dashboardCsv({ columns: ["cve", "asset", "severity", "risk_score", "connectors", "finding_id", "remediation"].map(name => ({ name, type: "keyword" })),
-      rows: rows.map(row => [csvText(row.cve), csvText(row.asset), row.severity, row.realRisk,
+    const csv = dashboardCsv({ columns: ["cve", "asset", "hostname", "severity", "cvss", "risk_score", "connectors", "finding_id", "remediation"].map(name => ({ name, type: "keyword" })),
+      rows: rows.map(row => [csvText(row.cve), csvText(row.asset), csvText(row.defender?.hostname || row.asset), row.severity, row.cvss, row.realRisk,
         csvText((row.seenBy?.length ? row.seenBy : [row.connector]).join("; ")), csvText(row.id), csvText(row.remediation)]), truncated: false });
     const ticketBody = ["REMEDIATION REQUEST", "", `Customer: ${company.name} (${company.id})`, `Sources: ${connectors.join(", ")}`,
       `CVEs: ${cves.join(", ")}`, `Affected assets: ${hostScope.length}`, `Open findings: ${rows.length}`, "", "PROPOSED ACTION",
@@ -47,7 +47,7 @@ export function buildStoredFindingGroups(company: { id: string; name: string }, 
       remediationId, tenantId: company.id, title, action, reference: "", vendorUrl: "", link: "", published: "",
       cves, deviceCount: hostScope.length, findingCount: rows.length, hostScope,
       deviceCves: rows.map(row => ({ cid: company.id, hostId: row.asset, cve: row.cve })),
-      reviewRows: rows.map(row => ({ asset: row.asset, cve: row.cve, severity: row.severity, risk: row.realRisk,
+      reviewRows: rows.map(row => ({ asset: row.asset, hostname:row.defender?.hostname || row.asset, cve: row.cve, severity: row.severity, risk: row.realRisk,
         connectors: row.seenBy?.length ? row.seenBy : [row.connector], findingId: row.id })),
       worstSeverity: worstSeverityOf(rows),
       csv, label, ticketTitle: `${company.name}: ${title}`.slice(0, 100), ticketBody });

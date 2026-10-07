@@ -45,6 +45,7 @@ export async function riskScoringDatabase() {
       first_seen TIMESTAMPTZ NOT NULL DEFAULT now(), last_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
       UNIQUE(tenant_key, cve, host_key)
     );
+    ALTER TABLE finding_risk ADD COLUMN IF NOT EXISTS source_open BOOLEAN NOT NULL DEFAULT true;
     CREATE INDEX IF NOT EXISTS finding_risk_company_idx ON finding_risk(company_id);
     CREATE INDEX IF NOT EXISTS finding_risk_score_idx ON finding_risk(risk_score DESC);
     CREATE INDEX IF NOT EXISTS finding_risk_swath_idx ON finding_risk(effective_swath);
@@ -114,6 +115,7 @@ export type UpsertFindingRiskInput = {
   epssProbability: number | null; epssPercentile: number | null; cisaKev: boolean; knownExploit: boolean;
   activeExploitation: boolean; ransomwareAssociation: boolean; internetExposed: boolean; assetCriticality: string;
   verificationStatus?: string;
+  sourceReappeared?: boolean;
 };
 
 // Upserts one finding's computed risk, preserving any analyst Swath override
@@ -130,8 +132,8 @@ export async function upsertFindingRisk(db: Awaited<ReturnType<typeof riskScorin
   // A verified-remediated finding stays verified through a recalculation --
   // only setVerificationStatus/a fresh ticket-coverage change should move it
   // off that state, never a routine rescore overwriting it back to "detected".
-  const verificationStatus = existing?.verification_status === "verified_remediated" ? "verified_remediated" : (input.verificationStatus ?? existing?.verification_status ?? "detected");
-  const verifiedAtClause = verificationStatus === "verified_remediated" && existing?.verification_status !== "verified_remediated" ? "now()" : existing ? "finding_risk.verified_at" : "NULL";
+  const verificationStatus = existing?.verification_status === "verified_remediated" && !input.sourceReappeared ? "verified_remediated" : (input.verificationStatus ?? existing?.verification_status ?? "detected");
+  const verifiedAtClause = verificationStatus !== "verified_remediated" ? "NULL" : existing?.verification_status !== "verified_remediated" ? "now()" : "finding_risk.verified_at";
   const id = existing?.id ?? randomUUID();
   await db.query(`
     INSERT INTO finding_risk (id, tenant_key, company_id, cve, host_key, hostname, severity,
@@ -175,7 +177,7 @@ export async function upsertFindingRisk(db: Awaited<ReturnType<typeof riskScorin
 // with one multi-row upsert instead of one per finding. upsertFindingRisk
 // itself is untouched for callers that still want single-finding semantics.
 export async function upsertFindingRiskBatch(
-  db: Awaited<ReturnType<typeof riskScoringDatabase>>,
+  db: Pick<Awaited<ReturnType<typeof riskScoringDatabase>>, "query">,
   tenantKey: string,
   inputs: UpsertFindingRiskInput[],
 ): Promise<{ scored: number }> {
@@ -215,10 +217,10 @@ export async function upsertFindingRiskBatch(
     // Same stickiness rules as upsertFindingRisk: a human Swath override and
     // a verified-remediated status both survive a routine recalculation.
     const effectiveSwathForHistory = existing?.swath_override_by ? existing.effective_swath : input.effectiveSwath;
-    const verificationStatus = existing?.verification_status === "verified_remediated"
+    const verificationStatus = existing?.verification_status === "verified_remediated" && !input.sourceReappeared
       ? "verified_remediated" : (input.verificationStatus ?? existing?.verification_status ?? "detected");
     const newlyVerified = verificationStatus === "verified_remediated" && existing?.verification_status !== "verified_remediated";
-    const verifiedAt = newlyVerified ? new Date().toISOString() : (existing ? existing.verified_at : null);
+    const verifiedAt = verificationStatus !== "verified_remediated" ? null : newlyVerified ? new Date().toISOString() : (existing ? existing.verified_at : null);
     const id = existing?.id ?? randomUUID();
     rows.push({
       id, tenant_key: input.tenantKey, company_id: input.companyId, cve: input.cve, host_key: input.hostKey,
@@ -285,7 +287,7 @@ export async function recordRiskHistory(db: Awaited<ReturnType<typeof riskScorin
 export type TopRiskFilter = { companyId?: string; tenantKey?: string; swath?: number; kevOnly?: boolean; internetExposedOnly?: boolean; minScore?: number; limit?: number; offset?: number };
 
 export async function listTopRisk(db: Awaited<ReturnType<typeof riskScoringDatabase>>, filter: TopRiskFilter = {}): Promise<{ rows: FindingRiskRow[]; total: number }> {
-  const clauses: string[] = []; const params: unknown[] = [];
+  const clauses: string[] = ["(source_open OR verification_status='verified_remediated')"]; const params: unknown[] = [];
   const push = (clause: string, value: unknown) => { params.push(value); clauses.push(clause.replace("$$", `$${params.length}`)); };
   if (filter.companyId) push("company_id=$$", filter.companyId);
   if (filter.tenantKey) push("tenant_key=$$", filter.tenantKey);
@@ -322,12 +324,12 @@ export async function getRiskSummary(db: Awaited<ReturnType<typeof riskScoringDa
   const params = companyId ? [companyId] : [];
   const row = (await db.query(`
     SELECT
-      coalesce(sum(risk_score) FILTER (WHERE verification_status NOT IN ('verified_remediated')), 0)::bigint AS total_open_risk,
-      count(*) FILTER (WHERE risk_score >= 800 AND verification_status NOT IN ('verified_remediated'))::int AS critical_risk_count,
-      count(*) FILTER (WHERE effective_swath=1 AND verification_status NOT IN ('verified_remediated'))::int AS swath1_open,
-      count(*) FILTER (WHERE effective_swath=2 AND verification_status NOT IN ('verified_remediated'))::int AS swath2_open,
-      count(*) FILTER (WHERE cisa_kev AND verification_status NOT IN ('verified_remediated'))::int AS kev_open,
-      count(*) FILTER (WHERE internet_exposed AND risk_score >= 800 AND verification_status NOT IN ('verified_remediated'))::int AS internet_facing_critical_risk,
+      coalesce(sum(risk_score) FILTER (WHERE source_open AND verification_status NOT IN ('verified_remediated')), 0)::bigint AS total_open_risk,
+      count(*) FILTER (WHERE risk_score >= 800 AND source_open AND verification_status NOT IN ('verified_remediated'))::int AS critical_risk_count,
+      count(*) FILTER (WHERE effective_swath=1 AND source_open AND verification_status NOT IN ('verified_remediated'))::int AS swath1_open,
+      count(*) FILTER (WHERE effective_swath=2 AND source_open AND verification_status NOT IN ('verified_remediated'))::int AS swath2_open,
+      count(*) FILTER (WHERE cisa_kev AND source_open AND verification_status NOT IN ('verified_remediated'))::int AS kev_open,
+      count(*) FILTER (WHERE internet_exposed AND risk_score >= 800 AND source_open AND verification_status NOT IN ('verified_remediated'))::int AS internet_facing_critical_risk,
       count(*) FILTER (WHERE verification_status='verified_remediated')::int AS verified_remediations,
       count(*) FILTER (WHERE verification_status='pending_verification')::int AS awaiting_verification
     FROM finding_risk ${where}
@@ -346,12 +348,12 @@ export async function getRiskSummary(db: Awaited<ReturnType<typeof riskScoringDa
 export async function getRiskSummaryByCompany(db: Awaited<ReturnType<typeof riskScoringDatabase>>): Promise<Map<string, RiskSummary>> {
   const rows = (await db.query(`
     SELECT company_id,
-      coalesce(sum(risk_score) FILTER (WHERE verification_status NOT IN ('verified_remediated')), 0)::bigint AS total_open_risk,
-      count(*) FILTER (WHERE risk_score >= 800 AND verification_status NOT IN ('verified_remediated'))::int AS critical_risk_count,
-      count(*) FILTER (WHERE effective_swath=1 AND verification_status NOT IN ('verified_remediated'))::int AS swath1_open,
-      count(*) FILTER (WHERE effective_swath=2 AND verification_status NOT IN ('verified_remediated'))::int AS swath2_open,
-      count(*) FILTER (WHERE cisa_kev AND verification_status NOT IN ('verified_remediated'))::int AS kev_open,
-      count(*) FILTER (WHERE internet_exposed AND risk_score >= 800 AND verification_status NOT IN ('verified_remediated'))::int AS internet_facing_critical_risk,
+      coalesce(sum(risk_score) FILTER (WHERE source_open AND verification_status NOT IN ('verified_remediated')), 0)::bigint AS total_open_risk,
+      count(*) FILTER (WHERE risk_score >= 800 AND source_open AND verification_status NOT IN ('verified_remediated'))::int AS critical_risk_count,
+      count(*) FILTER (WHERE effective_swath=1 AND source_open AND verification_status NOT IN ('verified_remediated'))::int AS swath1_open,
+      count(*) FILTER (WHERE effective_swath=2 AND source_open AND verification_status NOT IN ('verified_remediated'))::int AS swath2_open,
+      count(*) FILTER (WHERE cisa_kev AND source_open AND verification_status NOT IN ('verified_remediated'))::int AS kev_open,
+      count(*) FILTER (WHERE internet_exposed AND risk_score >= 800 AND source_open AND verification_status NOT IN ('verified_remediated'))::int AS internet_facing_critical_risk,
       count(*) FILTER (WHERE verification_status='verified_remediated')::int AS verified_remediations,
       count(*) FILTER (WHERE verification_status='pending_verification')::int AS awaiting_verification
     FROM finding_risk GROUP BY company_id
@@ -375,15 +377,17 @@ export type HostRiskRow = { hostname: string; openFindings: number; worstRisk: n
 // as having near-zero coverage even though most of its inventory has real,
 // current findings. One GROUP BY per company+hostname so the coverage API
 // can merge this in without an N+1 per asset.
+// Defender coverage already comes from its shared inventory/findings projection;
+// including it here would add a second hostname-based shadow of each device.
 export async function getScannedHostnamesByCompany(db: Awaited<ReturnType<typeof riskScoringDatabase>>, companyId?: string): Promise<Map<string, HostRiskRow[]>> {
   const where = companyId ? "AND company_id=$1" : "";
   const params = companyId ? [companyId] : [];
   const rows = (await db.query(`
     SELECT company_id, hostname,
-      count(*) FILTER (WHERE verification_status NOT IN ('verified_remediated'))::int AS open_findings,
-      coalesce(max(risk_score) FILTER (WHERE verification_status NOT IN ('verified_remediated')), 0)::int AS worst_risk
+      count(*) FILTER (WHERE source_open AND verification_status NOT IN ('verified_remediated'))::int AS open_findings,
+      coalesce(max(risk_score) FILTER (WHERE source_open AND verification_status NOT IN ('verified_remediated')), 0)::int AS worst_risk
     FROM finding_risk
-    WHERE hostname IS NOT NULL AND hostname <> '' ${where}
+    WHERE hostname IS NOT NULL AND hostname <> '' AND tenant_key NOT LIKE 'defender:%' ${where}
     GROUP BY company_id, hostname
   `, params)).rows;
   const out = new Map<string, HostRiskRow[]>();
@@ -476,12 +480,12 @@ export async function recordRiskSnapshot(db: Awaited<ReturnType<typeof riskScori
   const where = scope === "global" ? "" : "WHERE company_id=$1";
   const params = scope === "global" ? [] : [scope];
   const row = (await db.query(`
-    SELECT coalesce(sum(risk_score) FILTER (WHERE verification_status NOT IN ('verified_remediated')), 0)::bigint AS total,
-      count(*) FILTER (WHERE effective_swath=1 AND verification_status NOT IN ('verified_remediated'))::int AS s1,
-      count(*) FILTER (WHERE effective_swath=2 AND verification_status NOT IN ('verified_remediated'))::int AS s2,
-      count(*) FILTER (WHERE effective_swath=3 AND verification_status NOT IN ('verified_remediated'))::int AS s3,
-      count(*) FILTER (WHERE effective_swath=4 AND verification_status NOT IN ('verified_remediated'))::int AS s4,
-      count(*) FILTER (WHERE cisa_kev AND verification_status NOT IN ('verified_remediated'))::int AS kev
+    SELECT coalesce(sum(risk_score) FILTER (WHERE source_open AND verification_status NOT IN ('verified_remediated')), 0)::bigint AS total,
+      count(*) FILTER (WHERE effective_swath=1 AND source_open AND verification_status NOT IN ('verified_remediated'))::int AS s1,
+      count(*) FILTER (WHERE effective_swath=2 AND source_open AND verification_status NOT IN ('verified_remediated'))::int AS s2,
+      count(*) FILTER (WHERE effective_swath=3 AND source_open AND verification_status NOT IN ('verified_remediated'))::int AS s3,
+      count(*) FILTER (WHERE effective_swath=4 AND source_open AND verification_status NOT IN ('verified_remediated'))::int AS s4,
+      count(*) FILTER (WHERE cisa_kev AND source_open AND verification_status NOT IN ('verified_remediated'))::int AS kev
     FROM finding_risk ${where}
   `, params)).rows[0];
   await db.query("INSERT INTO risk_snapshots (id, scope, total_open_risk, swath1_count, swath2_count, swath3_count, swath4_count, kev_open_count) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",

@@ -259,6 +259,25 @@ export async function groupTicketAction(id: string, action: unknown, actor: stri
   requestId(id); await recoverInterruptedRequests();
   const db = await patchTicketDatabase(), row = (await db.query("SELECT * FROM patch_group_ticket_requests WHERE id=$1", [id])).rows[0];
   if (!row) throw new DashboardError("Patch group request not found.", 404);
+  if (action === "verify-defender") {
+    if (!row.ticket_id) throw new DashboardError("Create the ticket before verifying its fix.");
+    const packet = row.packet as PatchGroup;
+    const { ensureHydrated,listFindings,defenderProjectedRun } = await import("./store");
+    const { defenderStore } = await import("./defender-store");
+    const { assessDefenderPatch } = await import("./defender-verification");
+    await ensureHydrated();
+    const connection = packet.appCompanyId ? await defenderStore().connection(packet.appCompanyId) : null;
+    if (!connection?.current_run || defenderProjectedRun(packet.appCompanyId!) !== connection.current_run)
+      throw new DashboardError("Wait for the completed Defender import to publish to platform findings.",409);
+    const created = (await db.query("SELECT MAX(created_at) AS at FROM patch_group_ticket_audit WHERE request_id=$1 AND action='ticket.created'",[id])).rows[0]?.at;
+    if (!created) throw new DashboardError("Ticket creation time is unavailable. Verify this request manually.",409);
+    const result = assessDefenderPatch(packet,listFindings({companyId:packet.appCompanyId}),connection.current_run,
+      new Date(connection.last_success_at).toISOString(),new Date(created).toISOString());
+    await db.query("UPDATE patch_group_ticket_requests SET fix_verified_at=$2,fix_verified_state=$3,fix_still_open_count=$4,updated_at=now() WHERE id=$1",
+      [id,result.checkedAt,result.state,result.stillOpenCount]);
+    await db.query("INSERT INTO patch_group_ticket_audit(request_id,actor,action) VALUES($1,$2,'fix.defender.verified')",[id,actor]);
+    return readGroupTicket(id);
+  }
   if (action === "retry-attachment") {
     if (!row.ticket_id) throw new DashboardError("Resolve the ticket creation outcome first.");
     background(id, () => attachCsv(id, actor));

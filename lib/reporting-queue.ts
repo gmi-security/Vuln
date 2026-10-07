@@ -7,10 +7,10 @@ import { elasticVulnEnabled } from "./elastic-vuln-server";
 const runtime = globalThis as typeof globalThis & { __reportingQueue?: { timer?: ReturnType<typeof setInterval>; working?: Promise<void> } };
 const state = runtime.__reportingQueue ??= {};
 
-export async function refreshReportingQueue(): Promise<void> {
+export async function refreshReportingQueue(force = false): Promise<void> {
   const db = await patchTicketDatabase();
   const last = (await db.query("SELECT completed_at,scope_version FROM reporting_queue_runs WHERE id=1")).rows[0];
-  if (last?.scope_version === 2 && Date.now() - new Date(last.completed_at).getTime() < 60 * 60_000) return;
+  if (!force && last?.scope_version === 2 && Date.now() - new Date(last.completed_at).getTime() < 60 * 60_000) return;
   await ensureHydrated();
   // Includes GMI's own internal estate, not just client companies — see the
   // matching note in lib/reporting-store.ts.
@@ -29,7 +29,7 @@ export async function refreshReportingQueue(): Promise<void> {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(804208)");
     const current = (await client.query("SELECT completed_at,scope_version FROM reporting_queue_runs WHERE id=1 FOR UPDATE")).rows[0];
-    if (current?.scope_version === 2 && Date.now() - new Date(current.completed_at).getTime() < 60 * 60_000) { await client.query("COMMIT"); return; }
+    if (!force && current?.scope_version === 2 && Date.now() - new Date(current.completed_at).getTime() < 60 * 60_000) { await client.query("COMMIT"); return; }
     for (const group of groups) {
       const scopeHash = createHash("sha256").update(JSON.stringify(group.deviceCves)).digest("hex");
       const prior = await client.query(`SELECT id FROM patch_group_ticket_requests

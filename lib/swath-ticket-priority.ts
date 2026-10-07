@@ -29,13 +29,13 @@ export async function reconcileTicketPriorityToSwath(): Promise<SwathPriorityRes
   if (!saved) return { checked: 0, updated: 0, errors: 0 };
   const cwDb = await patchTicketDatabase();
   const tickets = (await cwDb.query(`
-    SELECT t.id, t.tenant_id, t.cves, t.ticket_priority_id FROM patch_group_ticket_requests t
+    SELECT t.id, t.tenant_id, t.cves, t.ticket_priority_id, t.packet->>'source' AS source, t.packet->'deviceCves' AS device_cves FROM patch_group_ticket_requests t
     WHERE t.state='created' AND t.ticket_id IS NOT NULL AND t.closed=false
       AND NOT EXISTS (
         SELECT 1 FROM patch_group_ticket_audit a WHERE a.request_id=t.id AND a.action='ticket.priority.changed'
           AND a.actor NOT IN (${Array.from(AUTOMATED_ACTORS).map((_, i) => `$${i + 1}`).join(",")})
       )
-  `, Array.from(AUTOMATED_ACTORS))).rows as { id: string; tenant_id: string; cves: string[]; ticket_priority_id: number | null }[];
+  `, Array.from(AUTOMATED_ACTORS))).rows as { id: string; tenant_id: string; cves: string[]; ticket_priority_id: number | null; source?: string; device_cves?:{cid:string;hostId:string;cve:string}[] }[];
   if (!tickets.length) return { checked: 0, updated: 0, errors: 0 };
 
   const priorities = await cwPrioritiesBySort(saved.value).catch(() => []);
@@ -47,9 +47,16 @@ export async function reconcileTicketPriorityToSwath(): Promise<SwathPriorityRes
     try {
       if (!ticket.cves?.length) continue;
       const row = (await riskDb.query(
-        "SELECT min(effective_swath) AS swath FROM finding_risk WHERE tenant_key=$1 AND cve = ANY($2::text[])",
+        "SELECT min(effective_swath) AS swath FROM finding_risk WHERE tenant_key=$1 AND source_open AND cve = ANY($2::text[]) AND verification_status != 'verified_remediated'",
         [ticket.tenant_id, ticket.cves],
       )).rows[0] as { swath: number | null };
+      if (ticket.source === "stored-findings" && ticket.device_cves?.length) {
+        const defender = (await riskDb.query(`SELECT min(effective_swath) AS swath FROM finding_risk f
+          WHERE tenant_key=$1 AND source_open AND verification_status != 'verified_remediated'
+          AND (host_key,cve) IN (SELECT "hostId",cve FROM jsonb_to_recordset($2::jsonb) s(cid TEXT,"hostId" TEXT,cve TEXT) WHERE cid=$3)`,
+          [`defender:${ticket.tenant_id}`,JSON.stringify(ticket.device_cves),ticket.tenant_id])).rows[0];
+        if (defender?.swath != null) row.swath = row.swath == null ? defender.swath : Math.min(row.swath,defender.swath);
+      }
       if (row.swath == null) continue; // no risk data yet for this ticket's CVEs -- nothing to reconcile against
       const target = targetPriorityForSwath(row.swath as 1 | 2 | 3 | 4, priorities);
       if (!target || target.id === ticket.ticket_priority_id) continue;

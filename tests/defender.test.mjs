@@ -168,6 +168,10 @@ test("PostgreSQL: customer isolation, complete publication, duplicates, leases a
       assert.equal((await store.results(companyB,"cves",0)).summary,null);
       assert.equal((await store.results(companyA,"findings",0,"CVE-2026-12345")).rows.length,3);
       assert.equal((await store.results(companyA,"devices",0)).total,2);
+      const snapshot=await store.platformSnapshot(companyA);
+      assert.equal(snapshot.runId,id);assert.equal(snapshot.findings.length,3);
+      assert.equal(snapshot.devices.length,2);assert.match(snapshot.findings[0].remediation,/Browser/);
+      assert.equal(await store.platformSnapshot(companyB),null);
     });
     await t.test("tenant cannot be reassigned after baseline; failed refresh preserves current",async()=>{
       await assert.rejects(()=>store.save({...credentials,tenantId:randomUUID(),companyId:companyA,daily:true},"test"),/migration/);
@@ -191,4 +195,23 @@ test("PostgreSQL: customer isolation, complete publication, duplicates, leases a
     await db.query("DELETE FROM defender_connections WHERE company_id=ANY($1)",[[companyA,companyB]]);
     await db.end();
   }
+});
+
+test("Defender connection endpoint cannot save or test browser-supplied credentials",async()=>{
+ let syncs=0,tests=0;
+ const code=ts.transpileModule(await readFile("app/api/defender/connections/route.ts","utf8"),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText;
+ const mod=new SourceTextModule(code);
+ const deps={
+  "@/lib/defender-http":{defenderAccess:async()=>"member",defenderBody:request=>request.json(),defenderCompany:async id=>id,
+   defenderJson:body=>Response.json(body),defenderFailure:error=>Response.json({error:error.message},{status:error.status ?? 500})},
+  "@/lib/defender-client":{DefenderError:client.DefenderError,createDefenderClient:()=>({test:async()=>{tests++;return {ok:true};}})},
+  "@/lib/defender-store":{defenderStore:()=>({credentials:async()=>credentials})},
+  "@/lib/defender-config":{syncDefenderEnvironment:async()=>{syncs++;}},
+ };
+ await mod.link(name=>{const values=deps[name];return new SyntheticModule(Object.keys(values),function(){for(const k of Object.keys(values))this.setExport(k,values[k]);});});await mod.evaluate();
+ for(const body of [{action:"save",companyId:"customer",clientSecret:"fake"},{action:"test",companyId:"customer",clientSecret:"fake"}]){
+  const response=await mod.namespace.POST(new Request("https://example.test/api/defender/connections",{method:"POST",body:JSON.stringify(body)}));assert.equal(response.status,403);
+ }
+ assert.equal(syncs,0);assert.equal(tests,0);
+ const response=await mod.namespace.POST(new Request("https://example.test/api/defender/connections",{method:"POST",body:JSON.stringify({action:"test",companyId:"customer"})}));assert.equal(response.status,200);assert.equal(tests,1);
 });

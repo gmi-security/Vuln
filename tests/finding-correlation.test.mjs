@@ -12,25 +12,20 @@ import { SourceTextModule, SyntheticModule } from "node:vm";
 import test from "node:test";
 import ts from "typescript";
 
-const ROOT = resolve(".");
-const modules = new Map();
-async function load(path) {
-  path = resolve(path);
-  if (modules.has(path)) return modules.get(path);
-  const source = await readFile(path, "utf8");
-  if (modules.has(path)) return modules.get(path);
-  const code = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
-  const module = new SourceTextModule(code, { identifier: path }); modules.set(path, module);
-  await module.link(async (name) => {
-    if (name.startsWith(".")) return load(resolve(dirname(path), `${name}.ts`));
-    if (name.startsWith("@/")) return load(resolve(ROOT, `${name.slice(2)}.ts`));
-    const imported = await import(name);
-    // rrule is CommonJS; expose its actual named API to the VM test linker.
-    const values = name === "rrule" ? { ...imported.default, ...imported } : imported;
-    return new SyntheticModule(Object.keys(values), function () { for (const key of Object.keys(values)) this.setExport(key, values[key]); });
-  });
-  return module;
+const ROOT=resolve("."),modules=new Map();
+async function getModule(path) {
+ path=resolve(path);
+ if(modules.has(path))return modules.get(path);
+ const promise=(async()=>new SourceTextModule(ts.transpileModule(await readFile(path,"utf8"),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText,{identifier:path}))();
+ modules.set(path,promise);return promise;
 }
+async function linker(name,parent) {
+ if(name.startsWith("."))return getModule(resolve(dirname(parent.identifier),`${name}.ts`));
+ if(name.startsWith("@/"))return getModule(resolve(ROOT,`${name.slice(2)}.ts`));
+ const imported=await import(name),values=name === "rrule"?{...imported.default,...imported}:imported;
+ return new SyntheticModule(Object.keys(values),function(){for(const k of Object.keys(values))this.setExport(k,values[k]);});
+}
+async function load(path) { const m=await getModule(path);if(m.status === "unlinked")await m.link(linker);return m; }
 const storeModule = await load("lib/store.ts");
 await storeModule.evaluate();
 const store = storeModule.namespace;

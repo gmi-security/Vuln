@@ -7,7 +7,7 @@ import { elasticVulnEnabled } from "@/lib/elastic-vuln-server";
 
 export const dynamic = "force-dynamic";
 
-export default async function ReportingPage() {
+export default async function ReportingPage({ searchParams }: { searchParams:Promise<{companyId?:string}> }) {
   if (!elasticVulnEnabled()) notFound();
   let access;
   try { access = await dashboardAccess(); }
@@ -15,5 +15,5 @@ export default async function ReportingPage() {
     if (error instanceof DashboardError && error.status === 401) redirect("/login");
     throw error;
   }
-  return <ElasticQueryDashboard initial={await readDashboard(access.canManage)} />;
+  return <ElasticQueryDashboard initial={await readDashboard(access.canManage)} initialCompanyId={(await searchParams).companyId || ""} />;
 }

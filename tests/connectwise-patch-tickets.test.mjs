@@ -11,20 +11,20 @@ import ts from 'typescript';
 import pg from 'pg';
 
 function loader(overrides = {}) {
-  const cache = new Map();
-  async function load(path) {
-    path = resolve(path);
-    if (cache.has(path)) return cache.get(path);
-    const code = ts.transpileModule(await readFile(path, 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
-    const mod = new SourceTextModule(code, { identifier: path }); cache.set(path, mod);
-    await mod.link(async name => {
-      if (overrides[name]) { const values = overrides[name]; return new SyntheticModule(Object.keys(values), function() { for (const key of Object.keys(values)) this.setExport(key, values[key]); }); }
-      if (name.startsWith('.')) return load(resolve(dirname(path), `${name}.ts`));
-      const values = await import(name); return new SyntheticModule(Object.keys(values), function() { for (const key of Object.keys(values)) this.setExport(key, values[key]); });
-    });
-    return mod;
-  }
-  return async path => { const mod = await load(path); await mod.evaluate(); return mod.namespace; };
+ const cache=new Map();
+ async function getModule(path) {
+  path=resolve(path);if(cache.has(path))return cache.get(path);
+  const promise=(async()=>new SourceTextModule(ts.transpileModule(await readFile(path,"utf8"),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText,{identifier:path}))();
+  cache.set(path,promise);return promise;
+ }
+ const synthetic=values=>new SyntheticModule(Object.keys(values),function(){for(const k of Object.keys(values))this.setExport(k,values[k]);});
+ async function linker(name,parent) {
+  if(overrides[name])return synthetic(overrides[name]);
+  if(name.startsWith("."))return getModule(resolve(dirname(parent.identifier),`${name}.ts`));
+  if(name.startsWith("@/"))return getModule(resolve(".",`${name.slice(2)}.ts`));
+  const imported=await import(name);return synthetic(name === "rrule"?{...imported.default,...imported}:imported);
+ }
+ return async path=>{const m=await getModule(path);if(m.status === "unlinked")await m.link(linker);await m.evaluate();return m.namespace;};
 }
 const connection = { endpoint: 'https://api-na.myconnectwise.net/v4_6_release/apis/3.0', companyId: 'test-company', clientId: 'test-client', publicKey: 'test-public', privateKey: 'test-private+/=' };
 const originalSecret = process.env.NEXTAUTH_SECRET;
@@ -117,7 +117,7 @@ test('durable ticket lifecycle and duplicate protection in PostgreSQL', { skip: 
   let mode = 'ok', uploads = 0, posts = 0, ticketSequence = 1000, uploadFail = false, pausePost;
   const tickets = new Map();
   const store = await loader({
-    './elastic-dashboard-store': { dashboardDatabase: async () => db },
+    './elastic-dashboard-store': { dashboardDatabase: async () => db, verifyAgainstCrowdStrike:async()=>{throw new Error('No live CrowdStrike calls allowed in ticket tests');} },
     './connectwise-client': { ...client,
       cwOptions: async () => ({ options: [{ id: 10, name: 'Customer patching' }], more: false, page: 1 }),
       validateCWRouting: async (_c, r) => ({ company: { id: r.companyId, name: 'Actual customer' }, board: { id: r.boardId, name: 'Customer patching' } }),
