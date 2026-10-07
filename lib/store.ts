@@ -1,5 +1,5 @@
 import { DEMO_ASSETS, DEMO_PORTS, VULN_CATALOG } from "@/lib/catalog";
-import { normalizeCompanyName } from "@/lib/company-name";
+import { normalizeCompanyName, findNearDuplicateCompanyName } from "@/lib/company-name";
 import { getDemoProfile, isPlanned } from "@/lib/connectors";
 import {
   CORRELATED_CONNECTORS,
@@ -2024,16 +2024,33 @@ export function createCompany(input: {
   industry?: string;
   contactName?: string;
   contactEmail?: string;
+  // Every sync/import path that auto-creates a company on an unmatched name
+  // leaves this false (the default): a near-duplicate of an existing company
+  // (see findNearDuplicateCompanyName) is refused rather than silently
+  // created, because nobody is watching at the moment an automated job makes
+  // this call -- that's exactly how "Atlas Healthcare Partners" ended up
+  // with a second, near-empty "Atlas HealthCare" company that silently
+  // absorbed a multi-hour CrowdStrike sync instead of the real customer
+  // record. A human explicitly creating a company through the admin UI
+  // (app/api/companies/route.ts) is the one caller that passes true: they
+  // typed this exact name and submitted it, which is real signal an
+  // automated import never has.
+  allowNearDuplicate?: boolean;
 }): Company | { error: string } {
   const s = store();
   const name = input.name.trim();
   if (!name) return { error: "Company name is required." };
-  if (
-    Array.from(s.companies.values()).some(
-      (c) => normalizeCompanyName(c.name) === normalizeCompanyName(name),
-    )
-  ) {
+  const existing = Array.from(s.companies.values());
+  if (existing.some((c) => normalizeCompanyName(c.name) === normalizeCompanyName(name))) {
     return { error: "A company with that name already exists." };
+  }
+  if (!input.allowNearDuplicate) {
+    const nearDuplicate = findNearDuplicateCompanyName(name, existing);
+    if (nearDuplicate) {
+      return {
+        error: `"${name}" has no exact match, but "${nearDuplicate.name}" (${nearDuplicate.id}) looks like the same company under a different name. Refusing to auto-create a likely duplicate -- fix the configured/matched name to attach to "${nearDuplicate.name}" instead, or create it explicitly through the Companies page if these really are two different companies.`,
+      };
+    }
   }
   const id = nextId(s, "CO");
   const company: InternalCompany = {

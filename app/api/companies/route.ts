@@ -48,6 +48,10 @@ export async function POST(request: Request) {
     industry: body.industry,
     contactName: body.contactName,
     contactEmail: body.contactEmail,
+    // A human typed this exact name and submitted the form -- unlike a
+    // sync's auto-create, that's real signal of intent, so a near-duplicate
+    // warning doesn't apply here (see createCompany in lib/store.ts).
+    allowNearDuplicate: true,
   });
   if ("error" in result) {
     return NextResponse.json({ error: result.error }, { status: 400 });

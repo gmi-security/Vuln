@@ -17,6 +17,30 @@ function normalizeCompanyName(name: string): string {
     .toLowerCase();
 }
 
+// Duplicated from lib/company-name.ts for the same zero-runtime-dependency
+// reason as normalizeCompanyName above -- keep in sync if the shared version
+// changes. Catches the "Atlas Healthcare Partners" vs "Atlas HealthCare"
+// class of bug: an exact-name match alone can't tell "the only company with
+// this name" apart from "the only company with this EXACT name, but there's
+// a near-duplicate sitting right next to it" -- which is exactly how a
+// CrowdStrike Falcon tenant configured for "Atlas HealthCare" ended up
+// importing into a second, near-empty company instead of the real "Atlas
+// Healthcare Partners" record.
+function findNearDuplicateCompanyName<T extends { id: string; name: string }>(
+  targetName: string,
+  companies: T[],
+  excludeId?: string,
+): T | undefined {
+  const target = normalizeCompanyName(targetName);
+  return companies.find((c) => {
+    if (c.id === excludeId) return false;
+    const name = normalizeCompanyName(c.name);
+    if (name === target) return false;
+    const [shorter, longer] = name.length <= target.length ? [name, target] : [target, name];
+    return longer.startsWith(`${shorter} `);
+  });
+}
+
 type CompanyBinding = { id: string; name: string };
 export type SpotlightTenantSelection = {
   config: FalconTenant;
@@ -46,7 +70,14 @@ export function selectSpotlightTenant(
   if (matches.length !== 1) {
     throw new Error("CrowdStrike customer tenant must match exactly one existing company.");
   }
-  return { config: matches[0].config, companyId: matches[0].company.id, tenantKey: matches[0].company.id };
+  const matched = matches[0];
+  const nearDuplicate = findNearDuplicateCompanyName(matched.company.name, companies, matched.company.id);
+  if (nearDuplicate) {
+    throw new Error(
+      `CrowdStrike tenant "${matched.config.customerName}" matched company "${matched.company.name}" (${matched.company.id}), but "${nearDuplicate.name}" (${nearDuplicate.id}) looks like the same company under a different name. Refusing to sync until this is resolved -- merge the duplicate or fix the configured tenant name, so data doesn't land under the wrong company.`,
+    );
+  }
+  return { config: matched.config, companyId: matched.company.id, tenantKey: matched.company.id };
 }
 
 export type SpotlightImportProgress = {

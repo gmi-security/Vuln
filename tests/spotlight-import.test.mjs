@@ -35,6 +35,16 @@ test("multiple named tenants require an explicit company ID", () => {
   assert.equal(selectSpotlightTenant([primary, atlas, other], roster, "CO-147284").config.clientId, "atlas-id");
 });
 
+test("refuses to sync when a near-duplicate company sits next to the exact match (the Atlas Healthcare Partners vs Atlas HealthCare bug)", () => {
+  const roster = [...companies, { id: "CO-235337", name: "Atlas Healthcare Partners" }];
+  assert.throws(
+    () => selectSpotlightTenant([primary, atlas], roster),
+    /near-empty|looks like the same company|duplicate/i,
+  );
+  // Resolved (the duplicate is gone) -- the exact match proceeds normally again.
+  assert.equal(selectSpotlightTenant([primary, atlas], companies).companyId, "CO-147284");
+});
+
 test("Atlas import writes every source ID in bounded batches and reports progress", async () => {
   const selection = selectSpotlightTenant([primary, atlas], companies);
   const written = [], phases = [];
