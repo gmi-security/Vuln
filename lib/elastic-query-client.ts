@@ -55,14 +55,23 @@ export function openConnection(value: string): ElasticConnection {
 
 export function elasticFailure(status: number, body: unknown, apiKey: string): DashboardError {
   if (status === 401 || status === 403) return new DashboardError("Elastic rejected the API key or its index permissions.");
+  let type = "";
   let reason = "";
   if (body && typeof body === "object") {
     const error = (body as { error?: { reason?: unknown; type?: unknown } }).error;
+    if (typeof error?.type === "string") type = error.type;
     if (typeof error?.reason === "string") reason = error.reason;
   }
-  reason = reason.split(apiKey).join("[redacted]").replace(/(?:ApiKey|Bearer)\s+\S+/gi, "[redacted]")
+  // Elasticsearch's machine-readable exception name (e.g.
+  // resource_already_exists_exception) lives in `type`, separately from the
+  // human-readable `reason` sentence -- callers like ensureScannerIndex in
+  // elastic-scanner-export.ts need the former to reliably tell "index
+  // already exists" apart from every other failure, so it must survive here
+  // rather than being silently dropped.
+  const message = (type && reason ? `${type}: ${reason}` : reason)
+    .split(apiKey).join("[redacted]").replace(/(?:ApiKey|Bearer)\s+\S+/gi, "[redacted]")
     .replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 1200);
-  return new DashboardError(`Elastic rejected the query (HTTP ${status}). ${reason || "Check the ES|QL syntax, index access, and Elasticsearch version."}`);
+  return new DashboardError(`Elastic rejected the query (HTTP ${status}). ${message || "Check the ES|QL syntax, index access, and Elasticsearch version."}`);
 }
 
 export async function elasticJsonRequest(connection: ElasticConnection, path: string, method: "POST" | "GET" | "DELETE" | "PUT", body?: unknown, opts?: { ndjson?: string }): Promise<{ body: Record<string, unknown>; warning: boolean }> {

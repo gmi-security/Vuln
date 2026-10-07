@@ -195,6 +195,14 @@ test("Elastic validation details exclude API keys and authorization tokens", () 
   assert.doesNotMatch(client.elasticFailure(403, { error: { reason: "sensitive" } }, "key").message, /sensitive/);
 });
 
+test("elasticFailure keeps error.type alongside error.reason -- callers like ensureScannerIndex match on the exception name, not just the sentence", () => {
+  const error = client.elasticFailure(400, {
+    error: { type: "resource_already_exists_exception", reason: "index [gmi-nessus-findings/cmgzkoQ] already exists" },
+  }, "key");
+  assert.match(error.message, /resource_already_exists_exception/);
+  assert.match(error.message, /already exists/);
+});
+
 test("Postgres integration: persistence, source isolation, stale-result retention and edit races", { skip: !process.env.ELASTIC_TEST_DATABASE_URL }, async () => {
   const url = new URL(process.env.ELASTIC_TEST_DATABASE_URL);
   assert.ok(["127.0.0.1", "localhost"].includes(url.hostname) && url.pathname === "/elastic_test", "Use the disposable local elastic_test database.");
