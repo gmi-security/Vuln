@@ -26,7 +26,7 @@ async function load(path) {
 
 const module = await load("lib/elastic-scanner-export.ts");
 await module.evaluate();
-const { scannerFindingDoc, scannerBulkBody, isScannerExportable, scannerElasticConfig, SCANNER_FINDING_STREAM } = module.namespace;
+const { scannerFindingDoc, scannerBulkBody, isScannerExportable, scannerElasticConfig, scannerStreamFor, scannerStreams } = module.namespace;
 
 const finding = (overrides = {}) => ({
   id: "FIND-42", scanId: "SCAN-1", companyId: "CO-1", companyName: "Acme",
@@ -68,14 +68,15 @@ test("isScannerExportable accepts only nessus and vulners, not crowdstrike/zap/o
   }
 });
 
-test("scannerBulkBody emits one action+source NDJSON line pair per finding, indexing (not creating) by finding id", () => {
+test("scannerBulkBody routes each finding to its own connector's index -- nessus and vulners never share one", () => {
   const body = scannerBulkBody([finding({ id: "FIND-1" }), finding({ id: "FIND-2", connector: "vulners" })]);
   const lines = body.split("\n").filter(Boolean);
   assert.equal(lines.length, 4);
-  assert.deepEqual(JSON.parse(lines[0]), { index: { _index: SCANNER_FINDING_STREAM, _id: "FIND-1" } });
+  assert.deepEqual(JSON.parse(lines[0]), { index: { _index: scannerStreamFor("nessus"), _id: "FIND-1" } });
   assert.equal(JSON.parse(lines[1])["gmi.scanner.finding.id"], "FIND-1");
-  assert.deepEqual(JSON.parse(lines[2]), { index: { _index: SCANNER_FINDING_STREAM, _id: "FIND-2" } });
+  assert.deepEqual(JSON.parse(lines[2]), { index: { _index: scannerStreamFor("vulners"), _id: "FIND-2" } });
   assert.equal(JSON.parse(lines[3])["gmi.scanner.source"], "vulners");
+  assert.notEqual(scannerStreamFor("nessus"), scannerStreamFor("vulners"), "nessus and vulners must land in different indices");
   assert.ok(body.endsWith("\n"), "bulk NDJSON body must end with a trailing newline");
 });
 
@@ -183,6 +184,33 @@ test("indexScannerFindings surfaces per-item bulk errors without throwing", asyn
     assert.equal(result.indexed, 1);
     assert.equal(result.errors, 1);
     assert.equal(result.firstError, "mapper_parsing_exception");
+  } finally {
+    delete process.env.APPSEC_ELASTIC_URL;
+    delete process.env.APPSEC_ELASTIC_API_KEY;
+  }
+});
+
+test("indexScannerFindings PUTs each distinct connector's index exactly once for a mixed nessus+vulners batch", async () => {
+  process.env.APPSEC_ELASTIC_URL = "https://appsec.example.com";
+  process.env.APPSEC_ELASTIC_API_KEY = "appsec-key";
+  try {
+    const puts = [];
+    const { indexScannerFindings, scannerStreamFor } = await loadWithMockedElastic(async (_connection, path, method) => {
+      if (method === "PUT") { puts.push(path); return { body: {}, warning: false }; }
+      return { body: { items: [{ index: {} }, { index: {} }] }, warning: false };
+    });
+    const result = await indexScannerFindings([
+      finding({ id: "FIND-1", connector: "nessus" }),
+      finding({ id: "FIND-2", connector: "vulners" }),
+    ]);
+    assert.equal(result.indexed, 2);
+    assert.deepEqual(new Set(puts), new Set([`/${scannerStreamFor("nessus")}`, `/${scannerStreamFor("vulners")}`]));
+    assert.equal(puts.length, 2, "each distinct stream is PUT exactly once, not once per finding");
+
+    // Re-running with the same two connectors must not PUT again -- both are cached now.
+    puts.length = 0;
+    await indexScannerFindings([finding({ id: "FIND-3", connector: "nessus" }), finding({ id: "FIND-4", connector: "vulners" })]);
+    assert.equal(puts.length, 0);
   } finally {
     delete process.env.APPSEC_ELASTIC_URL;
     delete process.env.APPSEC_ELASTIC_API_KEY;

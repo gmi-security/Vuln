@@ -19,12 +19,29 @@ export function scannerElasticConfig(): ElasticConnection | null {
   return { endpoint, apiKey };
 }
 
-export const SCANNER_FINDING_STREAM = process.env.SCANNER_ELASTIC_FINDING_STREAM?.trim() || "gmi-scanner-findings";
+// Separate indices per source rather than one shared index -- each connector
+// has its own event shape/volume/retention profile in practice, and keeping
+// them apart means an index pattern, dashboard, or API key can target just
+// one without a filter clause. gmi.scanner.source (below) still tags every
+// document, so a query that genuinely wants both at once can still do
+// `FROM gmi-nessus-findings,gmi-vulners-findings`.
+const SCANNER_STREAM_BY_CONNECTOR: Record<"nessus" | "vulners", string> = {
+  nessus: process.env.SCANNER_ELASTIC_NESSUS_STREAM?.trim() || "gmi-nessus-findings",
+  vulners: process.env.SCANNER_ELASTIC_VULNERS_STREAM?.trim() || "gmi-vulners-findings",
+};
 
 const EXPORTED_CONNECTORS = new Set<Finding["connector"]>(["nessus", "vulners"]);
 
 export function isScannerExportable(finding: Finding): boolean {
   return EXPORTED_CONNECTORS.has(finding.connector);
+}
+
+export function scannerStreamFor(connector: Finding["connector"]): string | undefined {
+  return SCANNER_STREAM_BY_CONNECTOR[connector as "nessus" | "vulners"];
+}
+
+export function scannerStreams(): string[] {
+  return Object.values(SCANNER_STREAM_BY_CONNECTOR);
 }
 
 export type ScannerFindingDoc = {
@@ -79,7 +96,9 @@ export function scannerFindingDoc(f: Finding): ScannerFindingDoc {
 export function scannerBulkBody(findings: Finding[]): string {
   const lines: string[] = [];
   for (const f of findings) {
-    lines.push(JSON.stringify({ index: { _index: SCANNER_FINDING_STREAM, _id: f.id } }));
+    const stream = scannerStreamFor(f.connector);
+    if (!stream) continue; // not an exported connector -- caller should have filtered already
+    lines.push(JSON.stringify({ index: { _index: stream, _id: f.id } }));
     lines.push(JSON.stringify(scannerFindingDoc(f)));
   }
   return lines.length ? lines.join("\n") + "\n" : "";
@@ -87,25 +106,25 @@ export function scannerBulkBody(findings: Finding[]): string {
 
 // Unlike the AppSec streams (gmi-appsec-scans/gmi-appsec-findings, created
 // ahead of time by whoever set those up, outside this app), nothing creates
-// gmi-scanner-findings for us -- and a plain `_bulk` "index" action doesn't
-// reliably auto-create a brand new index on every Elasticsearch deployment
-// (confirmed in production: an ES|QL query against it came back "Unknown
-// index" even with the export wired up and real findings to send). A plain
-// PUT of the index is idempotent and needs no template, unlike a data
-// stream, so this doesn't depend on anyone configuring anything in Kibana.
-// Cached per process so this doesn't repeat every 5-minute export pass
-// once it succeeds; a failed attempt (not just "already exists") retries
-// next time rather than being remembered as done.
-let scannerIndexEnsured = false;
+// gmi-nessus-findings/gmi-vulners-findings for us -- and a plain `_bulk`
+// "index" action doesn't reliably auto-create a brand new index on every
+// Elasticsearch deployment (confirmed in production: an ES|QL query against
+// one came back "Unknown index" even with the export wired up and real
+// findings to send). A plain PUT of each index is idempotent and needs no
+// template, unlike a data stream, so this doesn't depend on anyone
+// configuring anything in Kibana. Cached per process so this doesn't repeat
+// every 5-minute export pass once it succeeds; a failed attempt (not just
+// "already exists") retries next time rather than being remembered as done.
+const scannerIndexesEnsured = new Set<string>();
 
-async function ensureScannerIndex(connection: ElasticConnection): Promise<void> {
-  if (scannerIndexEnsured) return;
+async function ensureScannerIndex(connection: ElasticConnection, stream: string): Promise<void> {
+  if (scannerIndexesEnsured.has(stream)) return;
   try {
-    await elasticJsonRequest(connection, `/${SCANNER_FINDING_STREAM}`, "PUT", {});
-    scannerIndexEnsured = true;
+    await elasticJsonRequest(connection, `/${stream}`, "PUT", {});
+    scannerIndexesEnsured.add(stream);
   } catch (err) {
     if (err instanceof Error && /resource_already_exists_exception/i.test(err.message)) {
-      scannerIndexEnsured = true;
+      scannerIndexesEnsured.add(stream);
       return;
     }
     throw err;
@@ -120,7 +139,8 @@ export async function indexScannerFindings(findings: Finding[]): Promise<Scanner
   const connection = scannerElasticConfig();
   if (!connection) throw new Error("Scanner Elastic connection is not configured (set SCANNER_ELASTIC_URL/_API_KEY or APPSEC_ELASTIC_URL/_API_KEY).");
 
-  await ensureScannerIndex(connection);
+  const streamsNeeded = new Set(eligible.map((f) => scannerStreamFor(f.connector)).filter((s): s is string => Boolean(s)));
+  for (const stream of streamsNeeded) await ensureScannerIndex(connection, stream);
   const { body } = await elasticJsonRequest(connection, "/_bulk", "POST", undefined, { ndjson: scannerBulkBody(eligible) });
   // `_bulk` returns HTTP 200 even when individual items fail -- per-item
   // errors live in the response body, not the status code.
