@@ -86,7 +86,7 @@ import {
   spiderfootStartScan,
 } from "@/lib/spiderfoot";
 import { elasticVulnEnabled } from "@/lib/elastic-vuln-server";
-import { scannerElasticConfig, indexScannerFindings } from "@/lib/elastic-scanner-export";
+import { scannerElasticConfig, indexScannerFindings, SCANNER_FINDING_STREAM } from "@/lib/elastic-scanner-export";
 import { getScannedHostnamesByCompany, riskScoringDatabase, type HostRiskRow } from "@/lib/risk-scoring-store";
 import { getManagedHostnames, getDiscoveredHostnames } from "@/lib/elastic-crowdstrike-coverage";
 import {
@@ -1033,10 +1033,15 @@ async function schedulerTick(): Promise<void> {
         (f) => f.connector === "nessus" || f.connector === "vulners",
       );
       if (findings.length) {
+        console.log(`[scheduler] scanner Elastic export: indexing ${findings.length} finding(s) into ${SCANNER_FINDING_STREAM}`);
         const result = await indexScannerFindings(findings);
         if (result.errors) {
           console.error(`[scheduler] scanner Elastic export: ${result.errors} of ${findings.length} document(s) failed: ${result.firstError}`);
+        } else {
+          console.log(`[scheduler] scanner Elastic export: indexed ${result.indexed} finding(s) OK`);
         }
+      } else {
+        console.log("[scheduler] scanner Elastic export: no nessus/vulners findings to index yet");
       }
     } catch (err) {
       console.error("[scheduler] scanner Elastic export failed:", err);

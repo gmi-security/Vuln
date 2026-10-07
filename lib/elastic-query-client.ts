@@ -65,7 +65,7 @@ export function elasticFailure(status: number, body: unknown, apiKey: string): D
   return new DashboardError(`Elastic rejected the query (HTTP ${status}). ${reason || "Check the ES|QL syntax, index access, and Elasticsearch version."}`);
 }
 
-export async function elasticJsonRequest(connection: ElasticConnection, path: string, method: "POST" | "GET" | "DELETE", body?: unknown, opts?: { ndjson?: string }): Promise<{ body: Record<string, unknown>; warning: boolean }> {
+export async function elasticJsonRequest(connection: ElasticConnection, path: string, method: "POST" | "GET" | "DELETE" | "PUT", body?: unknown, opts?: { ndjson?: string }): Promise<{ body: Record<string, unknown>; warning: boolean }> {
   const endpoint = normalizeEndpoint(connection.endpoint);
   const url = new URL(`${endpoint}${path}`);
   const resolved = await Promise.race([
