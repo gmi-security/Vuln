@@ -16,10 +16,9 @@ import { createHash } from "node:crypto";
 let pool: Pool | null = null;
 let ready: Promise<void> | null = null;
 
-// Last successfully COMMITTED content hash per vuln_store key. Empty after a
-// process boot (or dev-mode module reload), so the first save rewrites every
-// row — correct and cheap enough. Only updated after a successful commit so a
-// failed transaction retries every changed row on the next flush.
+// Last committed content hash per vuln_store key, primed by a consistent load
+// after boot and updated only after a successful write commit. A failed
+// transaction retries every changed row on the next flush.
 const lastWrittenHashes = new Map<string, string>();
 
 // --- sharding layout ---------------------------------------------------------
@@ -75,7 +74,7 @@ function itemId(item: unknown): string {
 // [] in each of its buckets) plus the meta row — so a collection that
 // shrinks or vanishes overwrites its old rows with empty arrays instead of
 // leaving stale data behind. The key set is thus constant.
-function shardSnapshot(data: Record<string, unknown>): Map<string, unknown> {
+async function shardSnapshot(data: Record<string, unknown>): Promise<Map<string, unknown>> {
   const rows = new Map<string, unknown>();
   const meta: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(data)) {
@@ -86,7 +85,13 @@ function shardSnapshot(data: Record<string, unknown>): Map<string, unknown> {
     const v = data[name];
     const items: unknown[] = Array.isArray(v) ? v : [];
     const buckets: unknown[][] = Array.from({ length: count }, () => []);
-    for (const item of items) buckets[bucketOf(itemId(item), count)].push(item);
+    let processed = 0;
+    for (const item of items) {
+      buckets[bucketOf(itemId(item), count)].push(item);
+      // Large Defender generations contain hundreds of thousands of findings.
+      // Let requests run between bounded batches of synchronous hashing work.
+      if (++processed % 2000 === 0) await new Promise<void>(resolve => setImmediate(resolve));
+    }
     for (let i = 0; i < count; i++) rows.set(bucketKey(name, i), buckets[i]);
   }
   rows.set(META_KEY, meta);
@@ -184,13 +189,18 @@ function getPool(): Pool | null {
 
 // Reject if the DB op doesn't finish in time, so a slow/unreachable DB never
 // blocks a request indefinitely.
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((_, reject) =>
-      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms),
-    ),
-  ]);
+async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function ensureTable(): Promise<void> {
@@ -300,31 +310,53 @@ export async function loadSnapshot(): Promise<unknown | null> {
   // timeout and buffers everything at once, wedging the event loop. Per-row
   // reads keep each query small and yield between rows so the server keeps
   // answering requests while hydration streams in.
-  const keysRes = await withTimeout(
-    p.query("SELECT key FROM vuln_store"),
-    15000,
-    "loadSnapshot(keys)",
-  );
-  if (keysRes.rows.length > 0) {
-    const rows: { key: string; data: unknown }[] = [];
-    for (const { key } of keysRes.rows as { key: string }[]) {
-      const row = await withTimeout(
-        p.query("SELECT data FROM vuln_store WHERE key = $1", [key]),
-        30000,
-        `loadSnapshot(${key})`,
-      );
-      if (row.rows[0]) rows.push({ key, data: row.rows[0].data });
-      // Yield so concurrent requests aren't starved during a large load.
-      await new Promise((resolve) => setImmediate(resolve));
+  const client = await p.connect();
+  let releaseError: Error | undefined;
+  try {
+    // Pin one committed generation across all shard reads. Without this a
+    // concurrent save could pair old findings with a new publication marker.
+    await withTimeout(client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"),10000,"loadSnapshot(begin)");
+    const keysRes = await withTimeout(
+      client.query("SELECT key FROM vuln_store"),
+      15000,
+      "loadSnapshot(keys)",
+    );
+    if (keysRes.rows.length > 0) {
+      const rows: { key: string; data: unknown }[] = [];
+      for (const { key } of keysRes.rows as { key: string }[]) {
+        const row = await withTimeout(
+          client.query("SELECT data FROM vuln_store WHERE key = $1", [key]),
+          30000,
+          `loadSnapshot(${key})`,
+        );
+        if (row.rows[0]) rows.push({ key, data: row.rows[0].data });
+        // Yield so concurrent requests aren't starved during a large load.
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      await withTimeout(client.query("COMMIT"),10000,"loadSnapshot(commit)");
+      // A restart should not rewrite every unchanged shard. Prime from the
+      // committed snapshot; subsequent mutations still compare content hashes.
+      lastWrittenHashes.clear();
+      for (const row of rows) {
+        lastWrittenHashes.set(row.key,sha1Hex(JSON.stringify(row.data)));
+        await new Promise<void>(resolve => setImmediate(resolve));
+      }
+      return assembleSnapshot(rows);
     }
-    return assembleSnapshot(rows);
+    const legacy = await withTimeout(
+      client.query("SELECT data FROM vuln_snapshot WHERE id = 1"),
+      120000,
+      "loadSnapshot(legacy)",
+    );
+    await withTimeout(client.query("COMMIT"),10000,"loadSnapshot(commit)");
+    lastWrittenHashes.clear();
+    return legacy.rows[0]?.data ?? null;
+  } catch (error) {
+    releaseError = error instanceof Error ? error : new Error(String(error));
+    throw error;
+  } finally {
+    client.release(releaseError);
   }
-  const legacy = await withTimeout(
-    p.query("SELECT data FROM vuln_snapshot WHERE id = 1"),
-    120000,
-    "loadSnapshot(legacy)",
-  );
-  return legacy.rows[0]?.data ?? null;
 }
 
 const UPSERT_SQL = `INSERT INTO vuln_store (key, data, updated_at)
@@ -351,29 +383,31 @@ export async function saveSnapshot(data: unknown): Promise<void> {
       ? (data as Record<string, unknown>)
       : { __raw: data };
 
-  const rows = shardSnapshot(obj);
+  const rows = await shardSnapshot(obj);
   const changed: { key: string; json: string; hash: string }[] = [];
   for (const [key, value] of rows) {
     const json = JSON.stringify(value);
     const hash = sha1Hex(json);
     if (lastWrittenHashes.get(key) !== hash) changed.push({ key, json, hash });
+    await new Promise<void>(resolve => setImmediate(resolve));
   }
   if (changed.length === 0) return;
 
   const client = await p.connect();
   try {
-    // Same 60s budget the old whole-snapshot write had, now covering the
-    // whole transaction (first post-boot save writes every row; steady state
-    // writes a few).
+    // Bound each statement/lock wait, but allow a large atomic publication to
+    // take longer than the old 60-second budget for ALL shards combined.
     await withTimeout(
       (async () => {
         await client.query("BEGIN");
+        await client.query("SET LOCAL statement_timeout = '60s'");
+        await client.query("SET LOCAL lock_timeout = '10s'");
         for (const row of changed) {
           await client.query(UPSERT_SQL, [row.key, row.json]);
         }
         await client.query("COMMIT");
       })(),
-      60000,
+      300000,
       "saveSnapshot",
     );
   } catch (err) {

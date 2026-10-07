@@ -629,7 +629,9 @@ function serializeStore(s: StoreShape) {
     compensatingControls: [...s.compensatingControls.entries()],
     identityAliases: [...s.identityAliases.entries()],
     settings: s.settings,
-    meta: s.meta,
+    // Publication markers must describe THESE collection arrays even if a
+    // connector publishes a new generation while the database write yields.
+    meta: structuredClone(s.meta),
     counter: s.counter,
   };
 }
@@ -734,16 +736,20 @@ function migrateAutoSyncDefault(s: StoreShape): void {
 // Serialize all snapshot writes through a single in-flight promise so an
 // interval tick and a flushNow() (or two mutations) can never commit out of
 // order and let a stale snapshot clobber a newer one.
-function persistSnapshot(): Promise<void> {
+function persistSnapshot(throwOnError = false): Promise<void> {
   if (
     !persistenceEnabled() ||
     persistGlobal.__vulnPersistBlocked ||
     !globalStore.__vulnStore
   ) {
+    if (throwOnError) return Promise.reject(new Error("Application storage is unavailable; snapshot was not saved."));
     return Promise.resolve();
   }
   const run = (persistGlobal.__vulnFlushing ?? Promise.resolve()).then(async () => {
-    if (!globalStore.__vulnStore || persistGlobal.__vulnPersistBlocked) return;
+    if (!globalStore.__vulnStore || persistGlobal.__vulnPersistBlocked) {
+      if (throwOnError) throw new Error("Application storage is unavailable; snapshot was not saved.");
+      return;
+    }
     // Clear the dirty flag before serializing so mutations that land during
     // the save re-mark it and get picked up by the next flush.
     persistGlobal.__vulnDirty = false;
@@ -752,12 +758,18 @@ function persistSnapshot(): Promise<void> {
     } catch (err) {
       persistGlobal.__vulnDirty = true;
       console.error("[persist] snapshot save failed:", err);
+      throw err;
     }
   });
-  persistGlobal.__vulnFlushing = run.finally(() => {
-    if (persistGlobal.__vulnFlushing === run) persistGlobal.__vulnFlushing = null;
+  // The queue tail always settles successfully so a failed strict caller does
+  // not prevent later retries. Compare the actual stored promise, not `run`:
+  // finally() creates a DIFFERENT promise. Comparing to run left the guard
+  // permanently set, disabling the six-second flusher after its first write.
+  const tracked = run.then(() => {}, () => {}).finally(() => {
+    if (persistGlobal.__vulnFlushing === tracked) persistGlobal.__vulnFlushing = null;
   });
-  return run;
+  persistGlobal.__vulnFlushing = tracked;
+  return throwOnError ? run : tracked;
 }
 
 // On graceful shutdown (DO sends SIGTERM before a redeploy/restart) drain any
@@ -824,6 +836,7 @@ async function doHydrate(): Promise<void> {
   }
   const s = store(); // seed if still uninitialized
   sanitizeSpiderfootAssets(s);
+  repairDefenderPublicationMarkers(s);
   migrateAutoSyncDefault(s);
   persistGlobal.__vulnHydrated = true;
   startFlusher();
@@ -1455,8 +1468,8 @@ export async function storeStatus(): Promise<{
 }
 
 // Force an immediate snapshot write (used right after large imports).
-export async function flushNow(): Promise<void> {
-  await persistSnapshot();
+export async function flushNow(options?: { throwOnError?: boolean }): Promise<void> {
+  await persistSnapshot(options?.throwOnError);
 }
 
 // --- deterministic RNG so demo data is stable per scan -----------------
@@ -6544,6 +6557,34 @@ export async function importFromCrowdstrikeSpotlight(
 // WITH findings in the existing snapshot, so a restart retries an unpersisted projection.
 export function defenderProjectedRun(companyId: string): string | undefined {
   return store().meta.defenderGenerations?.[companyId];
+}
+// Older interrupted/mixed snapshot reads could retain a generation marker
+// without its findings. Validate once at hydration, not on every page request,
+// so a stale marker cannot permanently suppress recovery of the source data.
+function repairDefenderPublicationMarkers(s: StoreShape): void {
+  const generations = s.meta.defenderGenerations;
+  if (!generations || Object.keys(generations).length === 0) return;
+  const counts = new Map<string,number>();
+  for (const f of s.findings.values()) {
+    if (f.defender?.active && generations[f.companyId] === f.defender.runId)
+      counts.set(f.companyId,(counts.get(f.companyId) ?? 0)+1);
+  }
+  for (const [companyId,runId] of Object.entries(generations)) {
+    const scan = s.scans.get(`defender:${companyId}`);
+    if (scan?.externalRef === runId && scan.findingsCount === (counts.get(companyId) ?? 0)) continue;
+    delete generations[companyId];
+    markDirty();
+    console.error("[defender] Stored publication is incomplete; the completed import will be republished.");
+  }
+}
+// A failed durable save must leave the completed source generation eligible
+// for reconciliation again. Keep its valid in-memory findings; retries upsert
+// the same stable device/CVE IDs instead of importing Microsoft data again.
+export function invalidateDefenderPublication(companyId: string, runId: string): void {
+  const s = store();
+  if (s.meta.defenderGenerations?.[companyId] !== runId) return;
+  delete s.meta.defenderGenerations[companyId];
+  markDirty();
 }
 export function publishDefenderSnapshot(snapshot: DefenderSnapshot): void {
   if (persistenceBlocked()) throw new Error("Application storage is unavailable; Defender publication deferred.");
