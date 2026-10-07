@@ -2,6 +2,7 @@ import { defenderAccess, defenderCompany, defenderFailure, defenderJson } from "
 import { defenderStore } from "@/lib/defender-store";
 import { DefenderError } from "@/lib/defender-client";
 import { defenderProjectedRun } from "@/lib/store";
+import { defenderPublicationPending } from "@/lib/defender-platform";
 export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   try {
@@ -14,6 +15,6 @@ export async function GET(request: Request) {
     const cve = (params.get("cve") || "").toUpperCase();
     if (cve && !/^CVE-\d{4}-\d{4,}$/.test(cve)) throw new DefenderError("Invalid CVE filter.");
     const result = await defenderStore().results(companyId,view,offset,cve);
-    return defenderJson({ ...result, platformPublished:!!result.runId && defenderProjectedRun(companyId) === result.runId });
+    return defenderJson({ ...result, platformPublished:!!result.runId && defenderProjectedRun(companyId) === result.runId && !defenderPublicationPending(companyId) });
   } catch (error) { return defenderFailure(error); }
 }

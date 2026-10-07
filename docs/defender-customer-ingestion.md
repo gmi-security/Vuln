@@ -74,6 +74,19 @@ The worker starts five minutes after server boot, then checks every minute. Dail
 
 The published-generation marker is persisted with common findings in `vuln_store`. Restart recovery replays a generation if its common snapshot was never saved. Projection reads grouped findings in keyset pages of 2,000; raw Microsoft payloads stay in PostgreSQL. The existing scanner architecture still holds normalized findings in RAM, so memory grows with distinct device/CVE counts.
 
+### Publication save recovery
+
+The October 7 publication recovery fix addresses shared snapshot timeouts being swallowed by `flushNow`, which previously allowed a misleading Defender "Published completed generation" log. It also repairs the snapshot flusher's promise guard: the guard compared two different promises and never cleared, preventing subsequent timer-driven saves and retries.
+
+- Defender publication now requires a successful durable snapshot save. Failure clears the provisional generation marker, retains the completed source import, and retries on a later worker pass. The API reports publication as pending while the save is running.
+- Hydration checks stored Defender generation markers against their assessment and active device/CVE finding counts. An incomplete projection is eligible for replay without another Microsoft export.
+- Metadata is captured with the collection arrays; all database shards are read in one repeatable-read transaction. Concurrent saves cannot pair older findings with a newer publication marker.
+- Hydration primes committed shard hashes so boot does not rewrite every unchanged shard. Snapshot hashing yields between batches and serialization yields between shards. Large atomic saves have a five-minute transaction budget, with individual statements limited to one minute and lock waits to ten seconds.
+
+Deploy through the normal main-branch pull/build/restart process. No database migration, credential change or manual Defender resync is required. Allow the existing five-minute worker startup delay, then refresh the customer page. Confirm the publication log appears without a corresponding snapshot-save failure, and verify the customer's findings and executive report remain populated after a later routine restart. Source software-instance counts may exceed platform device/CVE counts.
+
+Validation: 66 targeted checks passed with no skips, including disposable local PostgreSQL transactions, save failure/retry, concurrent hydration, generation repair, restart recovery, customer/global/asset/executive totals and reporting/patch regression coverage. The production build passed. Live publication and production performance still require verification after deployment; these checks do not establish the cause of every server slowdown.
+
 RBVM stores scores under tenant key `defender:<companyId>`, using `finding_risk`, `risk_history` and `risk_snapshots`. Customer scores and active membership publish transactionally; interrupted passes keep prior scores. `finding_risk.source_open` defaults true for existing records. Reappearing Defender findings clear a verified state but preserve analyst Swath overrides. Patch storage stays in its existing configured database.
 
 ## Validation and rollout
