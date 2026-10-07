@@ -336,6 +336,25 @@ const SPOTLIGHT_DISCOVERY_PAGE_SIZE = (() => {
   return Number.isInteger(raw) && raw > 0 && raw <= 400 ? raw : 400;
 })();
 
+// Unlike discovery, hydration (entities/vulnerabilities/v2) is a stateless
+// bulk-by-ID lookup -- no pagination cursor, so none of discovery's
+// search-context-expiry risk applies here. Raising this only means more
+// concurrent in-flight requests, each independently retried/backed-off by
+// timedFetch like any other rate-limited call, so it's a much safer lever
+// to pull for overall import speed than discovery concurrency is. Doubled
+// from the original 8 given how large a single tenant's hydration backlog
+// can get (Atlas: 2M+ records). Overridable without a redeploy to tune
+// against CrowdStrike's actual observed rate limit.
+const SPOTLIGHT_HYDRATION_CONCURRENCY = (() => {
+  const raw = Number(process.env.SPOTLIGHT_HYDRATION_CONCURRENCY);
+  return Number.isInteger(raw) && raw > 0 ? raw : 16;
+})();
+// Matches SPOTLIGHT_HYDRATION_CONCURRENCY * 400 (the hydration batch size
+// below) so a round pulled by the hydration loop (spotlight-resumable-
+// import.ts) fully saturates the concurrency limit instead of under-using
+// it -- keep the two in sync if either changes.
+export const SPOTLIGHT_HYDRATION_ROUND_SIZE = SPOTLIGHT_HYDRATION_CONCURRENCY * 400;
+
 // Discovery and hydration are separate so a large import can persist the ID
 // set before fetching full records and resume either phase independently.
 export async function createSpotlightSession(config: FalconTenant) {
@@ -377,7 +396,7 @@ export async function createSpotlightSession(config: FalconTenant) {
     if (!ids.length) return [];
     const groups: string[][] = [];
     for (let i = 0; i < ids.length; i += 400) groups.push(ids.slice(i, i + 400));
-    const results = await runWithConcurrency(groups, 8, async group => {
+    const results = await runWithConcurrency(groups, SPOTLIGHT_HYDRATION_CONCURRENCY, async group => {
       const url = new URL(`${config.baseUrl}/spotlight/entities/vulnerabilities/v2`);
       for (const id of group) url.searchParams.append("ids", id);
       const response = await request(url.toString());
