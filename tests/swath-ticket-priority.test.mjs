@@ -65,13 +65,19 @@ async function loadModule({ ticketRows, swathByTenant = {}, priorities = [{ id: 
 }
 
 test("a ticket with no human priority override gets reconciled to its worst effective Swath", async () => {
-  const { mod, calls } = await loadModule({
-    ticketRows: [{ id: "t1", tenant_id: "tenant-1", cves: ["CVE-1", "CVE-2"], ticket_priority_id: 3 }],
-    swathByTenant: { "tenant-1": 1 },
+  // tenant_id (CrowdStrike's own tenant CID) is deliberately different from
+  // app_company_id here -- finding_risk is keyed by our own companyId, never
+  // CrowdStrike's CID, so the lookup must use app_company_id or it silently
+  // matches nothing. swathByTenant is only populated for the companyId to
+  // prove tenant_id is never the one used.
+  const { mod, calls, risk } = await loadModule({
+    ticketRows: [{ id: "t1", tenant_id: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4", app_company_id: "CO-147284", cves: ["CVE-1", "CVE-2"], ticket_priority_id: 3 }],
+    swathByTenant: { "CO-147284": 1 },
   });
   const result = await mod.reconcileTicketPriorityToSwath();
   assert.deepEqual(result, { checked: 1, updated: 1, errors: 0 });
   assert.deepEqual(calls, [{ id: "t1", priorityId: 1, actor: "risk-engine" }]);
+  assert.equal(risk.calls[0].params[0], "CO-147284");
 });
 
 test("the SQL excludes any ticket a real human has ever set priority on", async () => {
@@ -86,8 +92,18 @@ test("the SQL excludes any ticket a real human has ever set priority on", async 
 
 test("a ticket with no risk data yet for its CVEs is left untouched rather than guessed at", async () => {
   const { mod, calls } = await loadModule({
-    ticketRows: [{ id: "t1", tenant_id: "tenant-1", cves: ["CVE-1"], ticket_priority_id: 3 }],
+    ticketRows: [{ id: "t1", tenant_id: "tenant-1", app_company_id: "CO-147284", cves: ["CVE-1"], ticket_priority_id: 3 }],
     swathByTenant: {}, // no entry -> min(effective_swath) is null
+  });
+  const result = await mod.reconcileTicketPriorityToSwath();
+  assert.deepEqual(result, { checked: 1, updated: 0, errors: 0 });
+  assert.equal(calls.length, 0);
+});
+
+test("a ticket with no app_company_id yet is left untouched -- there's nothing to key the lookup on", async () => {
+  const { mod, calls } = await loadModule({
+    ticketRows: [{ id: "t1", tenant_id: "tenant-1", app_company_id: null, cves: ["CVE-1"], ticket_priority_id: 3 }],
+    swathByTenant: { "tenant-1": 1 },
   });
   const result = await mod.reconcileTicketPriorityToSwath();
   assert.deepEqual(result, { checked: 1, updated: 0, errors: 0 });
@@ -96,8 +112,8 @@ test("a ticket with no risk data yet for its CVEs is left untouched rather than 
 
 test("a ticket already at the correct priority for its Swath is not re-set", async () => {
   const { mod, calls } = await loadModule({
-    ticketRows: [{ id: "t1", tenant_id: "tenant-1", cves: ["CVE-1"], ticket_priority_id: 1 }],
-    swathByTenant: { "tenant-1": 1 }, // Swath 1 -> priority id 1, already there
+    ticketRows: [{ id: "t1", tenant_id: "tenant-1", app_company_id: "CO-147284", cves: ["CVE-1"], ticket_priority_id: 1 }],
+    swathByTenant: { "CO-147284": 1 }, // Swath 1 -> priority id 1, already there
   });
   const result = await mod.reconcileTicketPriorityToSwath();
   assert.deepEqual(result, { checked: 1, updated: 0, errors: 0 });
@@ -107,10 +123,10 @@ test("a ticket already at the correct priority for its Swath is not re-set", asy
 test("one ticket's ConnectWise call failing does not block the rest", async () => {
   const { mod, calls } = await loadModule({
     ticketRows: [
-      { id: "fails", tenant_id: "tenant-1", cves: ["CVE-1"], ticket_priority_id: 4 },
-      { id: "ok", tenant_id: "tenant-1", cves: ["CVE-1"], ticket_priority_id: 4 },
+      { id: "fails", tenant_id: "tenant-1", app_company_id: "CO-147284", cves: ["CVE-1"], ticket_priority_id: 4 },
+      { id: "ok", tenant_id: "tenant-1", app_company_id: "CO-147284", cves: ["CVE-1"], ticket_priority_id: 4 },
     ],
-    swathByTenant: { "tenant-1": 1 },
+    swathByTenant: { "CO-147284": 1 },
     setPriority: async (id) => { if (id === "fails") throw new Error("ConnectWise rejected the request"); calls.push({ id }); },
   });
   const result = await mod.reconcileTicketPriorityToSwath();
@@ -126,7 +142,7 @@ test("no ConnectWise connection configured means no work at all", async () => {
 
 test("Defender ticket priorities use the customer and exact saved device/CVE scope",async()=>{
  const scope=[{cid:"CO-TEST",hostId:"defender:device-1",cve:"CVE-2026-12345"}];
- const {mod,risk,calls}=await loadModule({ticketRows:[{id:"def-ticket",tenant_id:"CO-TEST",source:"stored-findings",device_cves:scope,cves:[scope[0].cve],ticket_priority_id:4}],swathByTenant:{"defender:CO-TEST":2}});
+ const {mod,risk,calls}=await loadModule({ticketRows:[{id:"def-ticket",tenant_id:"CO-TEST",app_company_id:"CO-TEST",source:"stored-findings",device_cves:scope,cves:[scope[0].cve],ticket_priority_id:4}],swathByTenant:{"defender:CO-TEST":2}});
  await mod.reconcileTicketPriorityToSwath();assert.equal(calls[0].priorityId,2);
  const query=risk.calls.find(c=>c.params[0] === "defender:CO-TEST");assert.deepEqual(JSON.parse(query.params[1]),scope);assert.equal(query.params[2],"CO-TEST");assert.match(query.sql,/host_key,cve/);
 });

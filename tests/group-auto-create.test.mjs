@@ -1,17 +1,20 @@
 // node --experimental-vm-modules --test tests/group-auto-create.test.mjs
 //
 // Exercises autoCreateHighSeverityTickets's orchestration in isolation (a
-// fake db.query for the eligible-drafts/routing lookups, and mocked
+// fake db.query for the eligible-drafts/routing lookups, a fake
+// riskScoringDatabase for the finding_risk/Swath enrichment gate, and mocked
 // reviewGroupTicket/readGroupTicket/createGroupTicket/setGroupTicketPriority/
 // cwPrioritiesBySort so this runs without a live Postgres or ConnectWise
-// account): a Critical/High draft for a customer with a known-good routing
-// gets auto-approved and auto-created; a draft for a customer with no
-// routing yet is left alone, never guessed; a draft for a customer outside
-// the pilot scope is left alone even with a known routing; one draft failing
-// does not block the rest; no eligible drafts or no ConnectWise connection
-// means no calls at all; and a successfully created ticket gets its
-// ConnectWise priority set to match its severity (Critical -> the top
-// priority, High -> the next one down), but never at the cost of the create
+// account): a draft is only auto-approved and auto-created once finding_risk
+// actually has an enriched, urgent (Swath 1-2) row for its CVEs -- a draft
+// with no finding_risk row yet (enrichment hasn't caught up) or one that's
+// enriched but not urgent (Swath 3-4) is left for a human, regardless of
+// source or raw CrowdStrike CVSS severity; a draft for a customer with no
+// routing yet, or outside the pilot scope, is left alone, never guessed; one
+// draft failing does not block the rest; no eligible drafts or no
+// ConnectWise connection means no calls at all; and a successfully created
+// ticket gets its ConnectWise priority set to match its Swath (1 -> the top
+// priority, 2 -> the next one down), but never at the cost of the create
 // count -- missing priorities or a ticket id that never confirms just skips
 // that step silently.
 import assert from "node:assert/strict";
@@ -61,7 +64,25 @@ function fakeDb({ eligible, routings }) {
   };
 }
 
-async function loadAutoCreate({ db, savedConnection, reviewGroupTicket, readGroupTicket, createGroupTicket, setGroupTicketPriority, cwPrioritiesBySort }) {
+// swathByRowId maps a draft's id to the Swath (1-4) its finding_risk rows
+// resolve to, or null for "no finding_risk row yet" (not enriched). Looks
+// up by the id embedded in the query's own params (enrichedSwathFor's first
+// param is always app_company_id, not a row id -- so each test that needs
+// per-row answers passes a single `swath` instead; swathByRowId is for the
+// rare multi-row case).
+function fakeRiskDb(swath) {
+  const calls = [];
+  return {
+    calls,
+    query: async (sql, params) => {
+      calls.push({ sql, params });
+      const value = typeof swath === "function" ? swath(params) : swath;
+      return { rows: [{ swath: value }] };
+    },
+  };
+}
+
+async function loadAutoCreate({ db, riskDb, savedConnection, reviewGroupTicket, readGroupTicket, createGroupTicket, setGroupTicketPriority, cwPrioritiesBySort }) {
   return loader({
     "./patch-ticket-store": { patchTicketDatabase: async () => db, savedConnection: savedConnection ?? (async () => ({ revision: 7 })) },
     "./patch-group-ticket-store": {
@@ -73,42 +94,100 @@ async function loadAutoCreate({ db, savedConnection, reviewGroupTicket, readGrou
     "./ticket-status-sync": { runWithConcurrency },
     "./elastic-vuln-server": { elasticVulnEnabled: () => false },
     "./connectwise-client": { cwPrioritiesBySort: cwPrioritiesBySort ?? (async () => []) },
+    "./risk-scoring-store": { riskScoringDatabase: async () => riskDb ?? fakeRiskDb(null) },
   })("lib/group-auto-create.ts");
 }
 
-test("a Critical draft with a known routing is auto-approved and auto-created", async () => {
+test("a Swath-1 (most urgent, enriched) draft with a known routing is auto-approved and auto-created", async () => {
   const db = fakeDb({
-    eligible: [{ id: "a", app_company_id: "CO-147284" }],
+    eligible: [{ id: "a", cves: ["CVE-2024-1234"], app_company_id: "CO-147284" }],
     routings: [{ app_company_id: "CO-147284", company_id: 55, board_id: 9, team_id: null }],
   });
   const calls = { review: [], read: [], create: [] };
   const autoCreate = await loadAutoCreate({
     db,
+    riskDb: fakeRiskDb(1),
     reviewGroupTicket: async (id, action, actor) => { calls.review.push({ id, action, actor }); },
     readGroupTicket: async (id, withPacket) => { calls.read.push({ id, withPacket }); return { group: { ticketTitle: "T", ticketBody: "B" } }; },
     createGroupTicket: async (id, value, actor) => { calls.create.push({ id, value, actor }); },
   });
   const result = await autoCreate.autoCreateHighSeverityTickets();
-  assert.deepEqual(result, { checked: 1, created: 1, errors: 0 });
+  assert.deepEqual(result, { checked: 1, created: 1, errors: 0, notYetEnriched: 0 });
   assert.deepEqual(calls.review, [{ id: "a", action: "approve", actor: "auto-create" }]);
   assert.deepEqual(calls.create, [{ id: "a", value: { routing: { companyId: 55, boardId: 9 }, title: "T", body: "B", connectionRevision: 7 }, actor: "auto-create" }]);
 });
 
+test("a draft with no finding_risk row yet (enrichment hasn't caught up) is left for a human, even with a known routing", async () => {
+  const db = fakeDb({
+    eligible: [{ id: "a", cves: ["CVE-2024-1234"], app_company_id: "CO-147284" }],
+    routings: [{ app_company_id: "CO-147284", company_id: 55, board_id: 9, team_id: null }],
+  });
+  let called = false;
+  const autoCreate = await loadAutoCreate({
+    db,
+    riskDb: fakeRiskDb(null),
+    reviewGroupTicket: async () => { called = true; },
+  });
+  const result = await autoCreate.autoCreateHighSeverityTickets();
+  assert.deepEqual(result, { checked: 1, created: 0, errors: 0, notYetEnriched: 1 });
+  assert.equal(called, false);
+});
+
+test("a draft that's enriched but not urgent (Swath 3) is left for a human -- enrichment existing isn't enough on its own", async () => {
+  const db = fakeDb({
+    eligible: [{ id: "a", cves: ["CVE-2024-1234"], app_company_id: "CO-147284" }],
+    routings: [{ app_company_id: "CO-147284", company_id: 55, board_id: 9, team_id: null }],
+  });
+  let called = false;
+  const autoCreate = await loadAutoCreate({
+    db,
+    riskDb: fakeRiskDb(3),
+    reviewGroupTicket: async () => { called = true; },
+  });
+  const result = await autoCreate.autoCreateHighSeverityTickets();
+  // Enriched (a finding_risk row exists), just not urgent -- not the same
+  // bucket as "not yet enriched at all".
+  assert.deepEqual(result, { checked: 1, created: 0, errors: 0, notYetEnriched: 0 });
+  assert.equal(called, false);
+});
+
+test("the enrichment lookup is keyed by the app's own companyId, not CrowdStrike's tenant CID", async () => {
+  // This is the exact bug the gate was rewritten to avoid: finding_risk's
+  // tenant_key is always our own companyId (lib/store.ts's cidToCompany
+  // comment), never CrowdStrike's own tenant CID -- a CrowdStrike-sourced
+  // group's patch_group_ticket_requests.tenant_id column holds that CID, so
+  // the lookup must use app_company_id instead or it silently matches
+  // nothing for every CrowdStrike-sourced group, forever.
+  const db = fakeDb({
+    eligible: [{ id: "a", cves: ["CVE-2024-1234"], app_company_id: "CO-147284" }],
+    routings: [{ app_company_id: "CO-147284", company_id: 55, board_id: 9, team_id: null }],
+  });
+  const riskDb = fakeRiskDb(1);
+  await (await loadAutoCreate({
+    db, riskDb,
+    reviewGroupTicket: async () => {},
+    readGroupTicket: async () => ({ group: { ticketTitle: "T", ticketBody: "B" } }),
+    createGroupTicket: async () => {},
+  })).autoCreateHighSeverityTickets();
+  assert.equal(riskDb.calls.length, 1);
+  assert.deepEqual(riskDb.calls[0].params, ["CO-147284", ["CVE-2024-1234"]]);
+});
+
 test("a draft for a customer with no known routing yet is left alone -- never guessed", async () => {
-  const db = fakeDb({ eligible: [{ id: "a", app_company_id: "CO-147284" }], routings: [] });
+  const db = fakeDb({ eligible: [{ id: "a", cves: ["CVE-1"], app_company_id: "CO-147284" }], routings: [] });
   let called = false;
   const autoCreate = await loadAutoCreate({
     db,
     reviewGroupTicket: async () => { called = true; },
   });
   const result = await autoCreate.autoCreateHighSeverityTickets();
-  assert.deepEqual(result, { checked: 1, created: 0, errors: 0 });
+  assert.deepEqual(result, { checked: 1, created: 0, errors: 0, notYetEnriched: 0 });
   assert.equal(called, false);
 });
 
 test("a draft for a customer outside the pilot scope is left alone even with a known routing", async () => {
   const db = fakeDb({
-    eligible: [{ id: "a", app_company_id: "CO-999999" }],
+    eligible: [{ id: "a", cves: ["CVE-1"], app_company_id: "CO-999999" }],
     routings: [{ app_company_id: "CO-999999", company_id: 55, board_id: 9, team_id: null }],
   });
   let called = false;
@@ -117,37 +196,38 @@ test("a draft for a customer outside the pilot scope is left alone even with a k
     reviewGroupTicket: async () => { called = true; },
   });
   const result = await autoCreate.autoCreateHighSeverityTickets();
-  assert.deepEqual(result, { checked: 1, created: 0, errors: 0 });
+  assert.deepEqual(result, { checked: 1, created: 0, errors: 0, notYetEnriched: 0 });
   assert.equal(called, false);
 });
 
 test("one draft failing does not block the others", async () => {
   const db = fakeDb({
-    eligible: [{ id: "a", app_company_id: "CO-147284" }, { id: "b", app_company_id: "CO-147284" }],
+    eligible: [{ id: "a", cves: ["CVE-1"], app_company_id: "CO-147284" }, { id: "b", cves: ["CVE-2"], app_company_id: "CO-147284" }],
     routings: [{ app_company_id: "CO-147284", company_id: 55, board_id: 9, team_id: null }],
   });
   const autoCreate = await loadAutoCreate({
     db,
+    riskDb: fakeRiskDb(1),
     reviewGroupTicket: async () => {},
     readGroupTicket: async () => ({ group: { ticketTitle: "T", ticketBody: "B" } }),
     createGroupTicket: async (id) => { if (id === "a") throw new Error("ConnectWise rejected the request"); },
   });
   const result = await autoCreate.autoCreateHighSeverityTickets();
-  assert.deepEqual(result, { checked: 2, created: 1, errors: 1 });
+  assert.deepEqual(result, { checked: 2, created: 1, errors: 1, notYetEnriched: 0 });
 });
 
 test("no eligible drafts means no ConnectWise-bound calls at all", async () => {
   const db = fakeDb({ eligible: [], routings: [] });
   const autoCreate = await loadAutoCreate({ db });
   const result = await autoCreate.autoCreateHighSeverityTickets();
-  assert.deepEqual(result, { checked: 0, created: 0, errors: 0 });
+  assert.deepEqual(result, { checked: 0, created: 0, errors: 0, notYetEnriched: 0 });
 });
 
 test("no ConnectWise connection configured means no db calls at all", async () => {
   const db = fakeDb({ eligible: [], routings: [] });
   const autoCreate = await loadAutoCreate({ db, savedConnection: async () => { throw new Error("not configured"); } });
   const result = await autoCreate.autoCreateHighSeverityTickets();
-  assert.deepEqual(result, { checked: 0, created: 0, errors: 0 });
+  assert.deepEqual(result, { checked: 0, created: 0, errors: 0, notYetEnriched: 0 });
   assert.equal(db.calls.length, 0);
 });
 
@@ -160,14 +240,15 @@ function readGroupTicketDualMode({ ticketId, state }) {
     withPacket ? { group: { ticketTitle: "T", ticketBody: "B" } } : { request: { ticketId, state } };
 }
 
-test("a Critical ticket gets ConnectWise's top priority set immediately after creation", async () => {
+test("a Swath-1 ticket gets ConnectWise's top priority set immediately after creation", async () => {
   const db = fakeDb({
-    eligible: [{ id: "a", app_company_id: "CO-147284", worst_severity: "Critical" }],
+    eligible: [{ id: "a", cves: ["CVE-1"], app_company_id: "CO-147284" }],
     routings: [{ app_company_id: "CO-147284", company_id: 55, board_id: 9, team_id: null }],
   });
   const priorityCalls = [];
   const autoCreate = await loadAutoCreate({
     db,
+    riskDb: fakeRiskDb(1),
     reviewGroupTicket: async () => {},
     readGroupTicket: readGroupTicketDualMode({ ticketId: 999, state: "created" }),
     createGroupTicket: async () => {},
@@ -175,18 +256,19 @@ test("a Critical ticket gets ConnectWise's top priority set immediately after cr
     cwPrioritiesBySort: async () => [{ id: 1, name: "Urgent" }, { id: 2, name: "High" }, { id: 3, name: "Medium" }],
   });
   const result = await autoCreate.autoCreateHighSeverityTickets();
-  assert.deepEqual(result, { checked: 1, created: 1, errors: 0 });
+  assert.deepEqual(result, { checked: 1, created: 1, errors: 0, notYetEnriched: 0 });
   assert.deepEqual(priorityCalls, [{ id: "a", priorityId: 1, actor: "auto-create" }]);
 });
 
-test("a High ticket gets the next priority down, not the top one", async () => {
+test("a Swath-2 ticket gets the next priority down, not the top one", async () => {
   const db = fakeDb({
-    eligible: [{ id: "a", app_company_id: "CO-147284", worst_severity: "High" }],
+    eligible: [{ id: "a", cves: ["CVE-1"], app_company_id: "CO-147284" }],
     routings: [{ app_company_id: "CO-147284", company_id: 55, board_id: 9, team_id: null }],
   });
   const priorityCalls = [];
   const autoCreate = await loadAutoCreate({
     db,
+    riskDb: fakeRiskDb(2),
     reviewGroupTicket: async () => {},
     readGroupTicket: readGroupTicketDualMode({ ticketId: 999, state: "created" }),
     createGroupTicket: async () => {},
@@ -194,18 +276,19 @@ test("a High ticket gets the next priority down, not the top one", async () => {
     cwPrioritiesBySort: async () => [{ id: 1, name: "Urgent" }, { id: 2, name: "High" }, { id: 3, name: "Medium" }],
   });
   const result = await autoCreate.autoCreateHighSeverityTickets();
-  assert.deepEqual(result, { checked: 1, created: 1, errors: 0 });
+  assert.deepEqual(result, { checked: 1, created: 1, errors: 0, notYetEnriched: 0 });
   assert.deepEqual(priorityCalls, [{ id: "a", priorityId: 2, actor: "auto-create" }]);
 });
 
-test("a High ticket clamps to the only priority available when the board has just one", async () => {
+test("a Swath-2 ticket clamps to the only priority available when the board has just one", async () => {
   const db = fakeDb({
-    eligible: [{ id: "a", app_company_id: "CO-147284", worst_severity: "High" }],
+    eligible: [{ id: "a", cves: ["CVE-1"], app_company_id: "CO-147284" }],
     routings: [{ app_company_id: "CO-147284", company_id: 55, board_id: 9, team_id: null }],
   });
   const priorityCalls = [];
   const autoCreate = await loadAutoCreate({
     db,
+    riskDb: fakeRiskDb(2),
     reviewGroupTicket: async () => {},
     readGroupTicket: readGroupTicketDualMode({ ticketId: 999, state: "created" }),
     createGroupTicket: async () => {},
@@ -213,18 +296,19 @@ test("a High ticket clamps to the only priority available when the board has jus
     cwPrioritiesBySort: async () => [{ id: 1, name: "Only" }],
   });
   const result = await autoCreate.autoCreateHighSeverityTickets();
-  assert.deepEqual(result, { checked: 1, created: 1, errors: 0 });
+  assert.deepEqual(result, { checked: 1, created: 1, errors: 0, notYetEnriched: 0 });
   assert.deepEqual(priorityCalls, [{ id: "a", priorityId: 1, actor: "auto-create" }]);
 });
 
 test("no ConnectWise priorities available never blocks the ticket from counting as created", async () => {
   const db = fakeDb({
-    eligible: [{ id: "a", app_company_id: "CO-147284", worst_severity: "Critical" }],
+    eligible: [{ id: "a", cves: ["CVE-1"], app_company_id: "CO-147284" }],
     routings: [{ app_company_id: "CO-147284", company_id: 55, board_id: 9, team_id: null }],
   });
   let priorityCalled = false;
   const autoCreate = await loadAutoCreate({
     db,
+    riskDb: fakeRiskDb(1),
     reviewGroupTicket: async () => {},
     readGroupTicket: readGroupTicketDualMode({ ticketId: 999, state: "created" }),
     createGroupTicket: async () => {},
@@ -232,7 +316,7 @@ test("no ConnectWise priorities available never blocks the ticket from counting 
     cwPrioritiesBySort: async () => { throw new Error("ConnectWise unreachable"); },
   });
   const result = await autoCreate.autoCreateHighSeverityTickets();
-  assert.deepEqual(result, { checked: 1, created: 1, errors: 0 });
+  assert.deepEqual(result, { checked: 1, created: 1, errors: 0, notYetEnriched: 0 });
   assert.equal(priorityCalled, false);
   const update = db.calls.find((c) => c.sql.includes("SET last_error"));
   assert.deepEqual(update.params, ["a", "Ticket created, but couldn't fetch ConnectWise priorities to assert Critical: ConnectWise unreachable. The next priority backfill pass will retry."]);
@@ -240,12 +324,13 @@ test("no ConnectWise priorities available never blocks the ticket from counting 
 
 test("a ticket id that never confirms leaves priority unset without failing the create count", async () => {
   const db = fakeDb({
-    eligible: [{ id: "a", app_company_id: "CO-147284", worst_severity: "Critical" }],
+    eligible: [{ id: "a", cves: ["CVE-1"], app_company_id: "CO-147284" }],
     routings: [{ app_company_id: "CO-147284", company_id: 55, board_id: 9, team_id: null }],
   });
   let priorityCalled = false;
   const autoCreate = await loadAutoCreate({
     db,
+    riskDb: fakeRiskDb(1),
     reviewGroupTicket: async () => {},
     readGroupTicket: readGroupTicketDualMode({ ticketId: null, state: "failed" }),
     createGroupTicket: async () => {},
@@ -253,29 +338,25 @@ test("a ticket id that never confirms leaves priority unset without failing the 
     cwPrioritiesBySort: async () => [{ id: 1, name: "Urgent" }],
   });
   const result = await autoCreate.autoCreateHighSeverityTickets();
-  assert.deepEqual(result, { checked: 1, created: 1, errors: 0 });
+  assert.deepEqual(result, { checked: 1, created: 1, errors: 0, notYetEnriched: 0 });
   assert.equal(priorityCalled, false);
   const update = db.calls.find((c) => c.sql.includes("SET last_error"));
   assert.match(update.params[1], /didn't appear within 60s to assert Critical priority/);
 });
 
-test("a stored-findings draft whose raw severity is only Medium but whose max_risk crosses the threshold still gets Critical priority", async () => {
-  // worst_severity here is deliberately NOT Critical/High -- this row is
-  // only in the eligible set at all because the real SQL's WHERE clause
-  // (not exercised by this fake db, which returns `eligible` unfiltered)
-  // widened to `OR (max_risk >= 80 AND source='stored-findings')`. What this
-  // test actually covers is the part that IS exercised after the row
-  // arrives: a KEV/actively-exploited finding (max_risk >= 80) on a
-  // stored-findings (scanner-sourced) draft must assert the same top
-  // ConnectWise priority a genuinely Critical-severity row would, not fall
-  // through to "High" just because its raw CVSS severity reads lower.
+test("a CrowdStrike-sourced draft with no raw CVSS Critical/High severity still auto-creates once finding_risk shows Swath 1 -- source no longer matters", async () => {
+  // The old gate trusted CrowdStrike's raw worst_severity unconditionally and
+  // never looked at real enrichment for it at all. The new gate treats every
+  // source identically: what matters is finding_risk's effective_swath, not
+  // where the group came from or what its raw CVSS severity says.
   const db = fakeDb({
-    eligible: [{ id: "a", app_company_id: "CO-147284", worst_severity: "Medium", max_risk: 85, source: "stored-findings" }],
+    eligible: [{ id: "a", cves: ["CVE-1"], app_company_id: "CO-147284" }],
     routings: [{ app_company_id: "CO-147284", company_id: 55, board_id: 9, team_id: null }],
   });
   const priorityCalls = [];
   const autoCreate = await loadAutoCreate({
     db,
+    riskDb: fakeRiskDb(1),
     reviewGroupTicket: async () => {},
     readGroupTicket: readGroupTicketDualMode({ ticketId: 999, state: "created" }),
     createGroupTicket: async () => {},
@@ -283,61 +364,18 @@ test("a stored-findings draft whose raw severity is only Medium but whose max_ri
     cwPrioritiesBySort: async () => [{ id: 1, name: "Urgent" }, { id: 2, name: "High" }, { id: 3, name: "Medium" }],
   });
   const result = await autoCreate.autoCreateHighSeverityTickets();
-  assert.deepEqual(result, { checked: 1, created: 1, errors: 0 });
+  assert.deepEqual(result, { checked: 1, created: 1, errors: 0, notYetEnriched: 0 });
   assert.deepEqual(priorityCalls, [{ id: "a", priorityId: 1, actor: "auto-create" }]);
-});
-
-test("a CrowdStrike-sourced draft's max_risk never upgrades its priority, even past the threshold -- that scale isn't calibrated against it", async () => {
-  // CrowdStrike-sourced max_risk comes from vulnerabilityRiskFromFields's
-  // uncapped additive score (lib/crowdstrike-dashboard.ts), not
-  // Finding.realRisk -- the two are not comparable, and this threshold is
-  // only calibrated against the latter. A High-severity CrowdStrike row
-  // with max_risk 85 (easily reached on that scale) must still get the
-  // "next slot down" High priority, never the top Critical slot.
-  const db = fakeDb({
-    eligible: [{ id: "a", app_company_id: "CO-147284", worst_severity: "High", max_risk: 85, source: "crowdstrike" }],
-    routings: [{ app_company_id: "CO-147284", company_id: 55, board_id: 9, team_id: null }],
-  });
-  const priorityCalls = [];
-  const autoCreate = await loadAutoCreate({
-    db,
-    reviewGroupTicket: async () => {},
-    readGroupTicket: readGroupTicketDualMode({ ticketId: 999, state: "created" }),
-    createGroupTicket: async () => {},
-    setGroupTicketPriority: async (id, priorityId, actor) => { priorityCalls.push({ id, priorityId, actor }); },
-    cwPrioritiesBySort: async () => [{ id: 1, name: "Urgent" }, { id: 2, name: "High" }, { id: 3, name: "Medium" }],
-  });
-  const result = await autoCreate.autoCreateHighSeverityTickets();
-  assert.deepEqual(result, { checked: 1, created: 1, errors: 0 });
-  assert.deepEqual(priorityCalls, [{ id: "a", priorityId: 2, actor: "auto-create" }]);
-});
-
-test("a draft with no risk score and a non-Critical severity gets High priority, not Critical by default", async () => {
-  const db = fakeDb({
-    eligible: [{ id: "a", app_company_id: "CO-147284", worst_severity: "High", max_risk: null }],
-    routings: [{ app_company_id: "CO-147284", company_id: 55, board_id: 9, team_id: null }],
-  });
-  const priorityCalls = [];
-  const autoCreate = await loadAutoCreate({
-    db,
-    reviewGroupTicket: async () => {},
-    readGroupTicket: readGroupTicketDualMode({ ticketId: 999, state: "created" }),
-    createGroupTicket: async () => {},
-    setGroupTicketPriority: async (id, priorityId, actor) => { priorityCalls.push({ id, priorityId, actor }); },
-    cwPrioritiesBySort: async () => [{ id: 1, name: "Urgent" }, { id: 2, name: "High" }, { id: 3, name: "Medium" }],
-  });
-  const result = await autoCreate.autoCreateHighSeverityTickets();
-  assert.deepEqual(result, { checked: 1, created: 1, errors: 0 });
-  assert.deepEqual(priorityCalls, [{ id: "a", priorityId: 2, actor: "auto-create" }]);
 });
 
 test("a priority-setting failure after ticket creation is recorded on the row instead of vanishing silently", async () => {
   const db = fakeDb({
-    eligible: [{ id: "a", app_company_id: "CO-147284", worst_severity: "Critical" }],
+    eligible: [{ id: "a", cves: ["CVE-1"], app_company_id: "CO-147284" }],
     routings: [{ app_company_id: "CO-147284", company_id: 55, board_id: 9, team_id: null }],
   });
   const autoCreate = await loadAutoCreate({
     db,
+    riskDb: fakeRiskDb(1),
     reviewGroupTicket: async () => {},
     readGroupTicket: readGroupTicketDualMode({ ticketId: 999, state: "created" }),
     createGroupTicket: async () => {},
@@ -347,7 +385,7 @@ test("a priority-setting failure after ticket creation is recorded on the row in
   const result = await autoCreate.autoCreateHighSeverityTickets();
   // The ticket itself was created successfully -- a priority failure must
   // never turn that into an "error" the way a failed creation would.
-  assert.deepEqual(result, { checked: 1, created: 1, errors: 0 });
+  assert.deepEqual(result, { checked: 1, created: 1, errors: 0, notYetEnriched: 0 });
   const update = db.calls.find((c) => c.sql.includes("SET last_error"));
   assert.deepEqual(update.params, ["a", "Ticket created, but asserting Critical priority failed: ConnectWise rejected the request"]);
 });

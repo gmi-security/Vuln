@@ -29,13 +29,13 @@ export async function reconcileTicketPriorityToSwath(): Promise<SwathPriorityRes
   if (!saved) return { checked: 0, updated: 0, errors: 0 };
   const cwDb = await patchTicketDatabase();
   const tickets = (await cwDb.query(`
-    SELECT t.id, t.tenant_id, t.cves, t.ticket_priority_id, t.packet->>'source' AS source, t.packet->'deviceCves' AS device_cves FROM patch_group_ticket_requests t
+    SELECT t.id, t.tenant_id, t.packet->>'appCompanyId' AS app_company_id, t.cves, t.ticket_priority_id, t.packet->>'source' AS source, t.packet->'deviceCves' AS device_cves FROM patch_group_ticket_requests t
     WHERE t.state='created' AND t.ticket_id IS NOT NULL AND t.closed=false
       AND NOT EXISTS (
         SELECT 1 FROM patch_group_ticket_audit a WHERE a.request_id=t.id AND a.action='ticket.priority.changed'
           AND a.actor NOT IN (${Array.from(AUTOMATED_ACTORS).map((_, i) => `$${i + 1}`).join(",")})
       )
-  `, Array.from(AUTOMATED_ACTORS))).rows as { id: string; tenant_id: string; cves: string[]; ticket_priority_id: number | null; source?: string; device_cves?:{cid:string;hostId:string;cve:string}[] }[];
+  `, Array.from(AUTOMATED_ACTORS))).rows as { id: string; tenant_id: string; app_company_id: string | null; cves: string[]; ticket_priority_id: number | null; source?: string; device_cves?:{cid:string;hostId:string;cve:string}[] }[];
   if (!tickets.length) return { checked: 0, updated: 0, errors: 0 };
 
   const priorities = await cwPrioritiesBySort(saved.value).catch(() => []);
@@ -45,10 +45,19 @@ export async function reconcileTicketPriorityToSwath(): Promise<SwathPriorityRes
   let updated = 0, errors = 0;
   for (const ticket of tickets) {
     try {
-      if (!ticket.cves?.length) continue;
+      if (!ticket.cves?.length || !ticket.app_company_id) continue;
+      // finding_risk.tenant_key is our own companyId, not CrowdStrike's
+      // tenant CID (lib/store.ts's cidToCompany comment: "no stored
+      // CrowdStrike cid -> companyId mapping anywhere in this app --
+      // finding_risk's tenant_key is already our own companyId"). Using
+      // ticket.tenant_id here (CrowdStrike's CID for CrowdStrike-sourced
+      // tickets) used to silently match zero finding_risk rows for every
+      // such ticket, so this reconciliation never actually ran for them.
+      // app_company_id is correct for both sources -- stored-findings
+      // tickets already use companyId as their tenant_id too.
       const row = (await riskDb.query(
         "SELECT min(effective_swath) AS swath FROM finding_risk WHERE tenant_key=$1 AND source_open AND cve = ANY($2::text[]) AND verification_status != 'verified_remediated'",
-        [ticket.tenant_id, ticket.cves],
+        [ticket.app_company_id, ticket.cves],
       )).rows[0] as { swath: number | null };
       if (ticket.source === "stored-findings" && ticket.device_cves?.length) {
         const defender = (await riskDb.query(`SELECT min(effective_swath) AS swath FROM finding_risk f
