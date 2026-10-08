@@ -95,6 +95,13 @@ export async function fetchMispActiveExploitation(cves: string[]): Promise<Map<s
 // Malware -- OpenCTI's way of saying "this vulnerability is tied to known
 // threat activity," a broader signal than MISP's per-CVE sightings.
 // https://docs.opencti.io/latest/deployment/integrations/ -- GraphQL API
+//
+// OpenCTI's Filter input takes `key` as a *list* of field names ([String!]!),
+// not a single string -- passing a bare string there is a GraphQL input-type
+// mismatch and the whole query comes back as a top-level `errors` entry
+// (which is exactly what the "errors array" handling below is for; it was
+// never silently eaten, but the fix is still to send the shape OpenCTI's
+// schema actually expects).
 export async function fetchOpenCtiActiveExploitation(cves: string[]): Promise<Map<string, ActiveExploitationSignal>> {
   const out = new Map<string, ActiveExploitationSignal>();
   const conn = envPair("OPENCTI_URL", "OPENCTI_API_KEY");
@@ -112,7 +119,7 @@ export async function fetchOpenCtiActiveExploitation(cves: string[]): Promise<Ma
       const res = await fetch(`${conn.url}/graphql`, {
         method: "POST",
         headers: { Authorization: `Bearer ${conn.key}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ query, variables: { search: { mode: "and", filters: [{ key: "name", values: [cve] }], filterGroups: [] } } }),
+        body: JSON.stringify({ query, variables: { search: { mode: "and", filters: [{ key: ["name"], values: [cve], operator: "eq", mode: "or" }], filterGroups: [] } } }),
         cache: "no-store", signal: AbortSignal.timeout(THREAT_INTEL_TIMEOUT_MS),
       });
       if (!res.ok) { failures++; sample ??= `HTTP ${res.status}`; return; }
