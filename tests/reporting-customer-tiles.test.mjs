@@ -14,7 +14,7 @@ async function harness() {
   ]};
   const synthetic=values=>new SyntheticModule(Object.keys(values),function(){for(const [k,v] of Object.entries(values))this.setExport(k,v);});
   const store=synthetic({ensureHydrated:async()=>{},getCompany:id=>["ATLAS","OTHER","FOOTPRINT"].includes(id)?{id,isDemo:false}:null});
-  const tiles=synthetic({readDashboard:async()=>{calls.push(["read"]);return dashboard;},triggerRefresh:(force,ids)=>calls.push(["refresh",force,ids])});
+  const tiles=synthetic({readDashboard:async(canManage,companyId)=>{calls.push(["read",companyId]);return dashboard;},triggerRefresh:(force,ids)=>calls.push(["refresh",force,ids])});
   async function load(path) {
     path=resolve(path);
     if(path === resolve("lib/store.ts"))return store;
@@ -33,11 +33,11 @@ async function harness() {
     restore:()=>{for(const key of ["REPORTING_CUSTOMER_TILE_IDS","ATLAS_REPORTING_TILE_IDS"]){if(previous[key]===undefined)delete process.env[key];else process.env[key]=previous[key];}}};
 }
 
-test("Footprint and unselected reports do not even load the shared result cache",async t=>{
+test("Customer reads are scoped and unselected reports do not load any results",async t=>{
   const h=await harness();t.after(h.restore);
   assert.deepEqual((await h.helper.readCustomerTiles("FOOTPRINT",true)).queries,[]);
   assert.deepEqual((await h.helper.readCustomerTiles("",true)).queries,[]);
-  assert.deepEqual(h.calls,[]);
+  assert.deepEqual(h.calls,[["read","FOOTPRINT"]]);
   await assert.rejects(h.helper.readCustomerTiles("MISSING",true),/Customer not found/);
 });
 

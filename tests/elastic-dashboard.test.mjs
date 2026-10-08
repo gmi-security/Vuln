@@ -212,6 +212,9 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
   let response = numeric;
   let fail = false;
   let hold = null;
+  overrides.set("./dashboard-customer", {validateDashboardCustomer:async id=>{
+    if (!["CO-A","CO-B"].includes(id)) throw new contract.DashboardError("Customer not found.",404);
+  }});
   overrides.set("./persist", { applicationDatabase: () => null });
   overrides.set("./elastic-vuln-server", { elasticVulnEnabled: () => true });
   const fakeQuery = async () => {
@@ -554,6 +557,49 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
     await waitFor(async () => (await db.query("SELECT status FROM elastic_dashboard_jobs WHERE id = $1", [stalePatch.jobId])).rows[0].status === "failed");
     await assert.rejects(() => jobs.readDashboardJob(stalePatch.jobId, "stale-patch-member"), /connection changed/);
     assert.equal((await db.query("SELECT result FROM elastic_dashboard_jobs WHERE id = $1", [stalePatch.jobId])).rows[0].result, null);
+    // Persist customer ownership without altering existing cached data or history.
+    await waitFor(() => !globalThis.__elasticDashboard.ticking);
+    await db.query("UPDATE elastic_dashboard_queries SET next_attempt = now() + interval '1 day'");
+    const existingId = "extra";
+    await db.query("INSERT INTO dashboard_daily_history (query_id,connection_revision,signature,day,value) VALUES ($1,1,'test','2026-10-01',42)",[existingId]);
+    const beforeAssign=(await db.query("SELECT definition,result,refreshed_at FROM elastic_dashboard_queries WHERE id=$1",[existingId])).rows[0];
+    const historyBefore=(await db.query("SELECT * FROM dashboard_daily_history WHERE query_id=$1",[existingId])).rows;
+    await store.assignDashboardTile(existingId,"CO-A","member");
+    const afterAssign=(await db.query("SELECT definition,result,refreshed_at FROM elastic_dashboard_queries WHERE id=$1",[existingId])).rows[0];
+    assert.deepEqual(afterAssign,{...beforeAssign,definition:{...beforeAssign.definition,companyId:"CO-A"}});
+    assert.deepEqual((await db.query("SELECT * FROM dashboard_daily_history WHERE query_id=$1",[existingId])).rows,historyBefore);
+    assert.equal((await store.readDashboard(true,"CO-A")).queries.length,1);
+    assert.equal((await store.readDashboard(true,"CO-B")).queries.length,0);
+    assert.ok((await store.readDashboard(true)).queries.some(q=>q.id===existingId));
+    await assert.rejects(()=>store.assignDashboardTile(existingId,"CO-B","member"),/another customer/);
+    await assert.rejects(()=>store.assignDashboardTile(existingId,"MISSING","member"),/Customer not found/);
+    await assert.rejects(()=>store.addDashboardTile({...beforeAssign.definition,id:existingId},"member","CO-B"),/does not belong/);
+    await assert.rejects(()=>store.deleteDashboardTile(existingId,"member","CO-B"),/does not belong/);
+    await assert.rejects(()=>store.reorderDashboardTiles({ids:[existingId]},"member","CO-B"),/tiles changed/);
+    // Omitted company on an older client's edit keeps the saved assignment.
+    const olderDefinition={...beforeAssign.definition}; delete olderDefinition.companyId;
+    await store.addDashboardTile({...olderDefinition,id:existingId,title:"Customer-owned edit"},"member");
+    await waitFor(()=>!globalThis.__elasticDashboard.ticking);
+    assert.equal((await store.readDashboard(true,"CO-A")).queries[0].companyId,"CO-A");
+    const created=await store.addDashboardTile({...contract.DEFAULT_COVERAGE,id:"customer-new",companyId:"CO-A"},"member","CO-B");
+    assert.equal(created.query.companyId,"CO-B","selected report customer controls ownership");
+    await waitFor(()=>!globalThis.__elasticDashboard.ticking);
+    assert.ok((await store.readDashboard(true,"CO-B")).queries.some(q=>q.id==="customer-new"));
+    assert.ok(!(await store.readDashboard(true,"CO-A")).queries.some(q=>q.id==="customer-new"));
+    await store.saveQuery({...contract.DEFAULT_COVERAGE,id:"customer-new",title:"Queued edit"},"older-save-client");
+    assert.equal((await store.readDashboard(true,"CO-B")).queries[0].companyId,"CO-B");
+    await store.reorderDashboardTiles({ids:["customer-new"]},"member","CO-B");
+    // A refresh already in flight cannot publish after an ownership update.
+    let finishAssignmentRefresh;
+    hold=new Promise(resolve=>{finishAssignmentRefresh=resolve;});
+    await db.query("UPDATE elastic_dashboard_queries SET next_attempt='2000-01-01',attempted_at='2000-01-01' WHERE id='priority-chart'");
+    store.triggerRefresh(true,["priority-chart"]);
+    await waitFor(()=>hold===null);
+    const beforeRace=(await db.query("SELECT result FROM elastic_dashboard_queries WHERE id='priority-chart'")).rows[0].result;
+    await store.assignDashboardTile("priority-chart","CO-A","member");
+    finishAssignmentRefresh(numeric);
+    await waitFor(()=>!globalThis.__elasticDashboard.ticking);
+    assert.deepEqual((await db.query("SELECT result FROM elastic_dashboard_queries WHERE id='priority-chart'")).rows[0].result,beforeRace);
     // Startup installs exactly one daily snapshot tile and preserves user edits/deletion.
     await waitFor(() => !globalThis.__elasticDashboard.ticking);
     const dailyModule = await load("lib/dashboard-daily-trend.ts"); await dailyModule.evaluate();

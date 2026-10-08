@@ -11,8 +11,8 @@ export async function readCustomerTiles(companyId: string, canManage: boolean) {
   if (!company || company.isDemo) throw new DashboardError("Customer not found.",404);
   const configured = process.env.REPORTING_CUSTOMER_TILE_IDS ?? "", atlasIds = process.env.ATLAS_REPORTING_TILE_IDS ?? "";
   try {
-    if (!customerReportingTileIds(companyId,configured,atlasIds).length) return emptyReportingDashboard(canManage);
-    return directSourcesForCustomer(companyId,await readDashboard(canManage),atlasIds,configured);
+    customerReportingTileIds(companyId,configured,atlasIds);
+    return directSourcesForCustomer(companyId,await readDashboard(canManage,companyId),atlasIds,configured);
   } catch (error) {
     if (error instanceof DashboardError) throw error;
     throw new DashboardError("Customer tile assignments need to be checked in the server configuration.",503);

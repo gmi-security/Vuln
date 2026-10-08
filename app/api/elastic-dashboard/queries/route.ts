@@ -4,6 +4,6 @@ export const dynamic = "force-dynamic";
 export async function POST(request: Request) {
   try {
     const { actor } = await dashboardAccess(request, true);
-    return dashboardJson(await addDashboardTile(await dashboardBody(request), actor), 201);
+    return dashboardJson(await addDashboardTile(await dashboardBody(request), actor, new URL(request.url).searchParams.get("companyId") || undefined), 201);
   } catch (error) { return dashboardFailure(error); }
 }
