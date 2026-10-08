@@ -19,6 +19,7 @@ import {
   nessusServerStatus,
 } from "@/lib/nessus";
 import { lastNessusOccurrenceBefore, nextNessusOccurrenceAfter } from "@/lib/nessus-schedule";
+import { slaDaysFor } from "@/lib/vuln-sla";
 import {
   classifyAsset,
   computeRealRisk,
@@ -1913,14 +1914,6 @@ function exposureOf(open: Finding[]): number {
   return Math.round(100 * (1 - Math.exp(-raw / 900)));
 }
 
-const COMPOSITE_SLA_DAYS: Record<Severity, number> = {
-  Critical: 7,
-  High: 30,
-  Medium: 90,
-  Low: 180,
-  Info: 365,
-};
-
 function compositeBand(
   score: number,
 ): "Low" | "Guarded" | "Elevated" | "High" | "Critical" {
@@ -1938,18 +1931,24 @@ function compositeBand(
 function computeComposite(
   open: Finding[],
   coverage: { known: number; scanned: number } | null,
+  sla: SlaSettings,
 ) {
   const now = Date.now();
   const exposure = exposureOf(open); // 0-100 severity×exploit×EPSS load
   const kevPressure = open.length
     ? Math.round((open.filter((f) => f.kev).length / open.length) * 100)
     : 0;
-  const breached = open.filter(
+  // Info findings carry no SLA clock (see findingSlaInfo) -- excluded from
+  // both the numerator and denominator here, same as everywhere else this
+  // composite now uses the org's real, configurable Settings > SLA via
+  // slaDaysFor instead of a second hardcoded copy of the same thresholds.
+  const slaScoped = open.filter((f) => f.severity !== "Info");
+  const breached = slaScoped.filter(
     (f) =>
       (now - new Date(f.firstSeen).getTime()) / 86_400_000 >
-      COMPOSITE_SLA_DAYS[f.severity],
+      slaDaysFor(f.severity, sla),
   ).length;
-  const slaBreach = open.length ? Math.round((breached / open.length) * 100) : 0;
+  const slaBreach = slaScoped.length ? Math.round((breached / slaScoped.length) * 100) : 0;
 
   const hasCoverage = coverage && coverage.known > 0;
   const coverageGap = hasCoverage
@@ -2030,6 +2029,7 @@ function rollupFromLists(
   findings: Finding[],
   assets: InternalAsset[],
   folderCount: number,
+  sla: SlaSettings,
 ) {
   // Two stories per customer: vulnerability posture (CVE-based scan findings)
   // and attack-surface exposure (OSINT). The security-posture rollup is
@@ -2043,6 +2043,7 @@ function rollupFromLists(
   const composite = computeComposite(
     open,
     inventoryAssets > 0 ? coverageFromLists(assets, open) : null,
+    sla,
   );
   return {
     folderCount,
@@ -2077,7 +2078,7 @@ function companyRollup(s: StoreShape, companyId: string) {
   for (const a of s.assets.values()) if (a.companyId === companyId) assets.push(a);
   let folderCount = 0;
   for (const f of s.folders.values()) if (f.companyId === companyId) folderCount += 1;
-  return rollupFromLists(scans, findings, assets, folderCount);
+  return rollupFromLists(scans, findings, assets, folderCount, s.settings.sla);
 }
 
 // Bulk path for listCompanies(): companyRollup() re-scans the whole store
@@ -2117,6 +2118,7 @@ function buildAllCompanyRollups(s: StoreShape): Map<string, ReturnType<typeof ro
         findingsBy.get(c.id) ?? [],
         assetsBy.get(c.id) ?? [],
         folderCountBy.get(c.id) ?? 0,
+        s.settings.sla,
       ),
     );
   }
@@ -3892,8 +3894,9 @@ export function computeRemediationSla(): RemediationSlaResult {
     let within = 0, due = 0, breach = 0;
     let worst: Severity | null = null;
     for (const f of list.filter(isOpen)) {
+      if (f.severity === "Info") continue; // no SLA clock -- see findingSlaInfo
       const age = (now - new Date(f.firstSeen).getTime()) / DAY;
-      const sla = SLA_DAYS[f.severity];
+      const sla = slaDaysFor(f.severity, s.settings.sla);
       if (age > sla) {
         breach += 1;
         if (!worst || SEV_RANK[f.severity] > SEV_RANK[worst]) worst = f.severity;
@@ -3949,9 +3952,11 @@ export function computeRemediationSla(): RemediationSlaResult {
       resolved30: oResolved30,
     },
     burndown,
-    slaPolicy: (Object.keys(SLA_DAYS) as Severity[]).map((severity) => ({
+    // Info has no SLA clock (see findingSlaInfo) so it's never one of these
+    // policy rows -- s.settings.sla's own keys (SlaSeverity) already exclude it.
+    slaPolicy: (Object.keys(s.settings.sla) as SlaSeverity[]).map((severity) => ({
       severity,
-      days: SLA_DAYS[severity],
+      days: s.settings.sla[severity],
     })),
     clients,
   };
@@ -7587,14 +7592,6 @@ const SEVERITY_WEIGHT: Record<Severity, number> = {
   Info: 0,
 };
 
-const SLA_DAYS: Record<Severity, number> = {
-  Critical: 7,
-  High: 30,
-  Medium: 90,
-  Low: 180,
-  Info: 365,
-};
-
 function isOpen(f: Finding): boolean {
   return f.status === "Open" || f.status === "In Remediation";
 }
@@ -7647,8 +7644,9 @@ export function computeMetrics(filter?: { companyId?: string }): QuantifyMetrics
     { label: "SLA breached", count: 0, breach: true },
   ];
   for (const f of open) {
+    if (f.severity === "Info") continue; // no SLA clock -- see findingSlaInfo
     const ageDays = (now - new Date(f.firstSeen).getTime()) / 86_400_000;
-    const sla = SLA_DAYS[f.severity];
+    const sla = slaDaysFor(f.severity, s.settings.sla);
     if (ageDays > sla) buckets[2].count += 1;
     else if (ageDays > sla - 7) buckets[1].count += 1;
     else buckets[0].count += 1;
@@ -7807,7 +7805,7 @@ export function computeMetrics(filter?: { companyId?: string }): QuantifyMetrics
     meanTimeToRemediateDays,
     companyBreakdown,
     kevOpen: open.filter((f) => f.kev).length,
-    composite: computeComposite(open, globalCoverage),
+    composite: computeComposite(open, globalCoverage, s.settings.sla),
     riskPriorityCounts,
     topRisks,
   };
