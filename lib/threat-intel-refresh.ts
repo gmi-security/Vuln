@@ -62,6 +62,7 @@ export async function fetchMispActiveExploitation(cves: string[]): Promise<Map<s
   const out = new Map<string, ActiveExploitationSignal>();
   const conn = envPair("MISP_URL", "MISP_API_KEY");
   if (!conn || !cves.length) return out;
+  let failures = 0, sample: string | null = null;
   await runWithConcurrency(cves, THREAT_INTEL_CONCURRENCY, async (cve) => {
     try {
       const res = await fetch(`${conn.url}/attributes/restSearch`, {
@@ -70,15 +71,22 @@ export async function fetchMispActiveExploitation(cves: string[]): Promise<Map<s
         body: JSON.stringify({ value: cve, type: "vulnerability" }),
         cache: "no-store", signal: AbortSignal.timeout(THREAT_INTEL_TIMEOUT_MS),
       });
-      if (!res.ok) return;
+      if (!res.ok) { failures++; sample ??= `HTTP ${res.status}`; return; }
       const json = (await res.json()) as { response?: { Attribute?: { id?: string; sighting_count?: string | number; Sighting?: unknown[] }[] } };
       const attributes = json.response?.Attribute ?? [];
       const sighted = attributes.some((a) => Number(a.sighting_count ?? 0) > 0 || (Array.isArray(a.Sighting) && a.Sighting.length > 0));
       if (attributes.length) out.set(cve, { active: sighted, source: "misp", detail: sighted ? `${attributes.length} MISP attribute(s), sighted` : `${attributes.length} MISP attribute(s), no sightings` });
-    } catch {
-      // best-effort per CVE -- one lookup failing must not block the rest
+    } catch (err) {
+      // best-effort per CVE -- one lookup failing must not block the rest, but
+      // every failure used to vanish completely silently -- indistinguishable
+      // from a legitimate "no hit" result. See the aggregate log line below.
+      failures++; sample ??= err instanceof Error ? err.message : String(err);
     }
   });
+  // One summary line per pass, not per CVE -- a down/misconfigured instance
+  // fails every lookup the same way, so logging each one adds noise without
+  // adding information. Never logs conn.key.
+  console.error(`[threat-intel] misp: queried ${cves.length}, ${out.size} had data, ${failures} failed${sample ? ` (e.g. ${sample})` : ""}`);
   return out;
 }
 
@@ -98,6 +106,7 @@ export async function fetchOpenCtiActiveExploitation(cves: string[]): Promise<Ma
       } }
     }
   }`;
+  let failures = 0, sample: string | null = null;
   await runWithConcurrency(cves, THREAT_INTEL_CONCURRENCY, async (cve) => {
     try {
       const res = await fetch(`${conn.url}/graphql`, {
@@ -106,15 +115,17 @@ export async function fetchOpenCtiActiveExploitation(cves: string[]): Promise<Ma
         body: JSON.stringify({ query, variables: { search: { mode: "and", filters: [{ key: "name", values: [cve] }], filterGroups: [] } } }),
         cache: "no-store", signal: AbortSignal.timeout(THREAT_INTEL_TIMEOUT_MS),
       });
-      if (!res.ok) return;
-      const json = (await res.json()) as { data?: { vulnerabilities?: { edges?: { node?: { stixCoreRelationships?: { edges?: unknown[] } } }[] } } };
+      if (!res.ok) { failures++; sample ??= `HTTP ${res.status}`; return; }
+      const json = (await res.json()) as { data?: { vulnerabilities?: { edges?: { node?: { stixCoreRelationships?: { edges?: unknown[] } } }[] } }; errors?: { message?: string }[] };
+      if (json.errors?.length) { failures++; sample ??= json.errors[0]?.message ?? "GraphQL error"; return; }
       const nodes = json.data?.vulnerabilities?.edges ?? [];
       const linked = nodes.some((e) => (e.node?.stixCoreRelationships?.edges?.length ?? 0) > 0);
       if (nodes.length) out.set(cve, { active: linked, source: "opencti", detail: linked ? "Linked to a known threat actor/campaign/malware in OpenCTI" : "Tracked in OpenCTI, no threat-activity link found" });
-    } catch {
-      // best-effort per CVE
+    } catch (err) {
+      failures++; sample ??= err instanceof Error ? err.message : String(err);
     }
   });
+  console.error(`[threat-intel] opencti: queried ${cves.length}, ${out.size} had data, ${failures} failed${sample ? ` (e.g. ${sample})` : ""}`);
   return out;
 }
 
@@ -130,6 +141,7 @@ export async function fetchIntelOwlActiveExploitation(cves: string[]): Promise<M
   const out = new Map<string, ActiveExploitationSignal>();
   const conn = envPair("INTELOWL_URL", "INTELOWL_API_KEY");
   if (!conn || !cves.length) return out;
+  let failures = 0, sample: string | null = null;
   await runWithConcurrency(cves, THREAT_INTEL_CONCURRENCY, async (cve) => {
     try {
       const res = await fetch(`${conn.url}/api/analyze_observable`, {
@@ -138,15 +150,16 @@ export async function fetchIntelOwlActiveExploitation(cves: string[]): Promise<M
         body: JSON.stringify({ observable_name: cve, observable_classification: "generic", tlp: "AMBER" }),
         cache: "no-store", signal: AbortSignal.timeout(THREAT_INTEL_TIMEOUT_MS),
       });
-      if (!res.ok) return;
+      if (!res.ok) { failures++; sample ??= `HTTP ${res.status}`; return; }
       const json = (await res.json()) as { reports?: { report?: { evaluation?: string; exploited?: boolean } }[] };
       const reports = json.reports ?? [];
       const flagged = reports.some((r) => r.report?.exploited === true || r.report?.evaluation === "malicious");
       if (reports.length) out.set(cve, { active: flagged, source: "intelowl", detail: flagged ? "IntelOwl analyzer flagged active exploitation" : `${reports.length} IntelOwl report(s), none flagged` });
-    } catch {
-      // best-effort per CVE
+    } catch (err) {
+      failures++; sample ??= err instanceof Error ? err.message : String(err);
     }
   });
+  console.error(`[threat-intel] intelowl: queried ${cves.length}, ${out.size} had data, ${failures} failed${sample ? ` (e.g. ${sample})` : ""}`);
   return out;
 }
 
