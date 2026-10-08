@@ -85,21 +85,31 @@ function cwAuth() {
   return { endpoint, headers: { Authorization: `Basic ${auth}`, clientId: process.env.CW_CLIENT_ID, Accept: "application/json", "Content-Type": "application/json" } };
 }
 
-async function cwGet(auth, path) {
-  const res = await fetch(`${auth.endpoint}${path}`, { headers: auth.headers });
-  if (!res.ok) throw new Error(`ConnectWise GET ${path} -> HTTP ${res.status}`);
-  return res.json();
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// ConnectWise's rate limit; 429/5xx are retried with backoff (respecting
+// Retry-After when it sends one) since a big backlog run WILL hit this --
+// everything else (4xx validation errors etc.) fails immediately, same as
+// before, since retrying those just wastes the same budget on the same error.
+const MAX_ATTEMPTS = 5;
+async function cwFetch(auth, path, method, body) {
+  for (let attempt = 1; ; attempt++) {
+    const res = await fetch(`${auth.endpoint}${path}`, {
+      method, headers: auth.headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
+    if (res.ok) return method === "GET" || body !== undefined ? res.json() : undefined;
+    if ((res.status === 429 || res.status >= 500) && attempt < MAX_ATTEMPTS) {
+      const retryAfter = Number(res.headers.get("retry-after"));
+      const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : Math.min(30_000, 1000 * 2 ** attempt);
+      console.log(`  ... HTTP ${res.status} on ${method} ${path}, retrying in ${Math.round(waitMs / 1000)}s (attempt ${attempt}/${MAX_ATTEMPTS})`);
+      await sleep(waitMs);
+      continue;
+    }
+    throw new Error(`ConnectWise ${method} ${path} -> HTTP ${res.status}: ${await res.text().catch(() => "")}`);
+  }
 }
-async function cwPatch(auth, path, body) {
-  const res = await fetch(`${auth.endpoint}${path}`, { method: "PATCH", headers: auth.headers, body: JSON.stringify(body) });
-  if (!res.ok) throw new Error(`ConnectWise PATCH ${path} -> HTTP ${res.status}: ${await res.text().catch(() => "")}`);
-  return res.json();
-}
-async function cwPost(auth, path, body) {
-  const res = await fetch(`${auth.endpoint}${path}`, { method: "POST", headers: auth.headers, body: JSON.stringify(body) });
-  if (!res.ok) throw new Error(`ConnectWise POST ${path} -> HTTP ${res.status}: ${await res.text().catch(() => "")}`);
-  return res.json();
-}
+const cwGet = (auth, path) => cwFetch(auth, path, "GET");
+const cwPatch = (auth, path, body) => cwFetch(auth, path, "PATCH", body);
+const cwPost = (auth, path, body) => cwFetch(auth, path, "POST", body);
 
 // Mirrors lib/connectwise-client.ts's cwDefaultClosedStatus, standalone.
 async function closedStatusForBoard(auth, boardId) {
@@ -142,6 +152,7 @@ async function main() {
     } catch (err) {
       console.log(`  #${c.ticket_id}: FAILED -- ${err instanceof Error ? err.message : err}`);
     }
+    await sleep(300); // light pacing between tickets so a big batch doesn't front-load into a burst
   }
 }
 
