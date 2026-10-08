@@ -32,7 +32,8 @@ async function load(path) {
     }
     if (specifier.startsWith("@/lib/")) return load(`${specifier.slice(2)}.ts`);
     if (specifier.startsWith(".")) return load(resolve(dirname(path), `${specifier}.ts`));
-    const values = await import(specifier);
+    const imported = await import(specifier);
+    const values = specifier === "rrule" ? { ...imported.default,...imported } : imported;
     return new SyntheticModule(Object.keys(values), function () { for (const key of Object.keys(values)) this.setExport(key, values[key]); });
   });
   return module;
@@ -269,6 +270,16 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
     await assert.rejects(() => store.saveConnection({ endpoint: "https://other.example.com", apiKey: "" }, "admin-other"));
     await store.saveQuery({ ...contract.DEFAULT_COVERAGE, id: "extra", title: "Extra query" }, "admin-extra");
     assert.equal((await store.readDashboard(true)).queries.length, 2);
+    // A customer refresh must not run another customer's overdue tile.
+    await waitFor(() => !globalThis.__elasticDashboard.ticking);
+    await db.query("UPDATE elastic_dashboard_queries SET next_attempt = '2000-01-01', attempted_at = '2000-01-01'");
+    store.triggerRefresh(true,["extra"]);
+    await waitFor(() => !globalThis.__elasticDashboard.ticking);
+    const scopedAttempts = (await db.query("SELECT id, attempted_at FROM elastic_dashboard_queries ORDER BY id")).rows;
+    assert.equal(scopedAttempts.find(row=>row.id === "asset-coverage").attempted_at.toISOString(),"2000-01-01T00:00:00.000Z");
+    assert.ok(scopedAttempts.find(row=>row.id === "extra").attempted_at.getUTCFullYear() > 2000);
+    store.triggerRefresh(true,[]);
+    assert.ok(!globalThis.__elasticDashboard.ticking,"empty customer scope cannot fall back to a global refresh");
     const old = (await store.readDashboard(true)).queries.find((q) => q.id === "extra");
     fail = true;
     await db.query("UPDATE elastic_dashboard_queries SET next_attempt = now() - interval '1 hour', attempted_at = now() - interval '1 hour'");

@@ -380,14 +380,15 @@ export async function saveQuery(value: unknown, actor: string, job?: { id: strin
   } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
 }
 
-async function refreshQueries(force = false): Promise<void> {
+async function refreshQueries(force = false, ids?: string[]): Promise<void> {
   if (!elasticVulnEnabled()) return;
   const db = await database();
   const due = await db.query(`SELECT id, definition, revision FROM elastic_dashboard_queries
     WHERE deleted_at IS NULL AND ((definition->>'enabled')::boolean = true OR refresh_requested = true OR $1)
+    AND ($2::text[] IS NULL OR id = ANY($2::text[]))
     AND (refresh_lease_until IS NULL OR refresh_lease_until <= now())
     AND (next_attempt <= now() OR ($1 AND (attempted_at IS NULL OR attempted_at < now() - interval '30 seconds')))
-    ORDER BY next_attempt LIMIT 24`, [force]);
+    ORDER BY next_attempt LIMIT 24`, [force,ids ?? null]);
   for (const row of due.rows) {
     // Leave pending tiles due while previews occupy the execution slots.
     if (state.running >= 2) break;
@@ -449,9 +450,14 @@ async function refreshQueries(force = false): Promise<void> {
   }
 }
 
-export function triggerRefresh(force = false): void {
-  if (state.ticking) return;
-  state.ticking = refreshQueries(force).catch(() => {
+export function triggerRefresh(force = false, ids?: string[]): void {
+  if (ids?.length === 0) return;
+  if (state.ticking) {
+    // Preserve the customer's requested scope while another pass completes.
+    if (ids) void state.ticking.then(()=>triggerRefresh(force,ids));
+    return;
+  }
+  state.ticking = refreshQueries(force,ids).catch(() => {
     // No credentials, query text, or result content in process logs.
     console.error("[elastic-dashboard] Refresh could not complete.");
   }).finally(() => { state.ticking = undefined; });
