@@ -7,22 +7,38 @@ import { ATLAS_REPORTING_COMPANY_ID } from "./reporting-direct-sources";
 import { cwPrioritiesBySort, type CWOption } from "./connectwise-client";
 import { targetPriorityFor } from "./group-ticket-priority";
 
-// Critical/High severity remediations, OR any remediation touching a
-// real-risk-critical (KEV-listed, actively-exploited, or otherwise >= 80
-// composite score -- see lib/threat.ts's riskPriority buckets) finding
-// regardless of raw CVSS severity, skip the human review queue and go
-// straight to a ConnectWise ticket -- always through the consolidated group
-// format, never the single-CVE path. This only fires for a customer once a
-// human has manually created at least one ticket for them: that's what
-// teaches patch_customer_routing which ConnectWise company/board/team is
-// correct (see the routing-learning step in runCreation, patch-group-ticket-
-// store.ts). No mapping yet means no guess -- the draft is left for a human,
-// same as before. Anything below both thresholds is never touched here.
+// Critical/High severity remediations, OR any stored-findings (scanner-
+// sourced) remediation touching a real-risk-critical (KEV-listed, actively-
+// exploited, or otherwise >= 80 composite score -- see lib/threat.ts's
+// riskPriority buckets) finding regardless of raw CVSS severity, skip the
+// human review queue and go straight to a ConnectWise ticket -- always
+// through the consolidated group format, never the single-CVE path. This
+// only fires for a customer once a human has manually created at least one
+// ticket for them: that's what teaches patch_customer_routing which
+// ConnectWise company/board/team is correct (see the routing-learning step
+// in runCreation, patch-group-ticket-store.ts). No mapping yet means no
+// guess -- the draft is left for a human, same as before. Anything below
+// both thresholds is never touched here.
+//
+// The risk-score trigger is deliberately restricted to stored-findings:
+// max_risk is populated from two incompatible scales depending on source --
+// Finding.realRisk (lib/threat.ts's bounded 0-100 multiplicative score, what
+// RISK_AUTO_CREATE_THRESHOLD is actually calibrated against) for
+// stored-findings, but CrowdStrike-sourced groups carry an unrelated,
+// uncapped ADDITIVE score (lib/crowdstrike-dashboard.ts's
+// vulnerabilityRiskFromFields, max ~115) that crosses 80 far more easily --
+// a realistic High-severity (not Critical) KEV-listed finding with CVSS 7.2
+// scores ~84 on that scale alone. Applying the same threshold to it would
+// auto-create and Critical-prioritize tickets well below the intended bar
+// for the one real customer this runs against. Fix the CrowdStrike score's
+// own calibration (or compute a real computeRealRisk-equivalent for it)
+// before ever including it here.
 const ACTOR = "auto-create";
 // Matches lib/threat.ts's Critical riskPriority bucket exactly -- a group
 // whose worst CVSS severity alone reads Medium/Low can still land here if
 // one of its findings is KEV-listed or actively exploited on a
 // critical/exposed asset, which is exactly the case raw severity misses.
+// Only meaningful for stored-findings rows -- see the comment above.
 const RISK_AUTO_CREATE_THRESHOLD = 80;
 // Pilot scope: only this customer, by explicit request, while auto-create is
 // validated. Expand PILOT_COMPANY_IDS once it's proven out.
@@ -64,15 +80,16 @@ export async function autoCreateHighSeverityTickets(): Promise<Counts> {
   // older duplicate at the same moment this auto-creates it.
   const rows = (await db.query(`
     WITH ranked AS (
-      SELECT id, packet->>'appCompanyId' AS app_company_id, worst_severity, max_risk, ROW_NUMBER() OVER (
+      SELECT id, packet->>'appCompanyId' AS app_company_id, worst_severity, max_risk,
+        packet->>'source' AS source, ROW_NUMBER() OVER (
         PARTITION BY remediation_id, tenant_id, packet->>'appCompanyId' ORDER BY prepared_at DESC
       ) AS rn
       FROM patch_group_ticket_requests
       WHERE state='prepared' AND review_state='pending'
-        AND (worst_severity IN ('Critical','High') OR max_risk >= $1)
+        AND (worst_severity IN ('Critical','High') OR (max_risk >= $1 AND packet->>'source'='stored-findings'))
     )
-    SELECT id, app_company_id, worst_severity, max_risk FROM ranked WHERE rn = 1
-  `, [RISK_AUTO_CREATE_THRESHOLD])).rows as { id: string; app_company_id: string | null; worst_severity: string | null; max_risk: number | null }[];
+    SELECT id, app_company_id, worst_severity, max_risk, source FROM ranked WHERE rn = 1
+  `, [RISK_AUTO_CREATE_THRESHOLD])).rows as { id: string; app_company_id: string | null; worst_severity: string | null; max_risk: number | null; source: string | null }[];
   if (!rows.length) return { checked: 0, created: 0, errors: 0 };
   const routings = (await db.query("SELECT app_company_id, company_id, board_id, team_id FROM patch_customer_routing"))
     .rows as { app_company_id: string; company_id: number; board_id: number; team_id: number | null }[];
@@ -106,14 +123,19 @@ export async function autoCreateHighSeverityTickets(): Promise<Counts> {
       created++;
       // The ticket should assert its own severity immediately, not wait
       // days for SLA escalation to notice. Critical -> the top priority;
-      // High -> the next one down. A row that only qualified via max_risk
-      // (its raw CVSS severity could be Medium or lower) is treated as
-      // Critical here too -- a KEV-listed or actively-exploited finding on a
-      // critical/exposed asset deserves the top slot regardless of what its
-      // CVSS alone says. Never lets a priority-setting problem undo an
-      // otherwise-successful ticket creation.
-      const effectiveSeverity: "Critical" | "High" =
-        row.worst_severity === "Critical" || (row.max_risk ?? 0) >= RISK_AUTO_CREATE_THRESHOLD ? "Critical" : "High";
+      // High -> the next one down. A stored-findings row whose raw CVSS
+      // severity reads Medium or lower but whose max_risk crosses the
+      // threshold is treated as Critical here too -- a KEV-listed or
+      // actively-exploited finding on a critical/exposed asset deserves the
+      // top slot regardless of what its CVSS alone says. Gated to
+      // stored-findings for the same reason the SQL gate above is: a
+      // CrowdStrike-sourced row's max_risk is on a different, uncapped scale
+      // that crosses this threshold far more easily and would otherwise
+      // over-prioritize merely-High-severity CrowdStrike tickets. Never lets
+      // a priority-setting problem undo an otherwise-successful ticket
+      // creation.
+      const riskQualifies = row.source === "stored-findings" && (row.max_risk ?? 0) >= RISK_AUTO_CREATE_THRESHOLD;
+      const effectiveSeverity: "Critical" | "High" = row.worst_severity === "Critical" || riskQualifies ? "Critical" : "High";
       const target = targetPriorityFor(effectiveSeverity, priorities);
       if (target) {
         const ticketId = await waitForTicketId(row.id);

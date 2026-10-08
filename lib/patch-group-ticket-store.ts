@@ -45,7 +45,19 @@ export async function persistPreparedGroups(consolidation: PatchConsolidation, a
         WHERE remediation_id=$1 AND tenant_id=$2 AND scope_hash=$3 AND cves=$4::jsonb
         AND state='prepared' AND review_state IN ('pending','approved') ORDER BY prepared_at DESC LIMIT 1`,
         [group.remediationId, group.tenantId, scopeHash, JSON.stringify(group.cves)])).rows[0];
-      if (existing) { ids[index] = existing.id; continue; }
+      if (existing) {
+        // The matching row already covers this exact scope, so it's reused
+        // rather than inserting a near-duplicate -- but worst_severity/
+        // max_risk are NOT static: the same scope's underlying findings can
+        // get rescored (a CVE added to CISA KEV, an EPSS jump) without their
+        // asset/CVE identity changing at all. Refresh both here so a still-
+        // pending draft's risk picture stays current and group-auto-create's
+        // gate isn't evaluating stale numbers from whenever this row first
+        // got inserted.
+        await client.query(`UPDATE patch_group_ticket_requests SET worst_severity=$2,max_risk=$3,updated_at=now() WHERE id=$1`,
+          [existing.id, group.worstSeverity, group.maxRisk]);
+        ids[index] = existing.id; continue;
+      }
       // An analyst's explicit customer selection at build time always wins.
       // Only fall back to the legacy Atlas tenant-CID allowlist for groups
       // built with no customer selected (e.g. an org-wide, unscoped query).

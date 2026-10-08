@@ -35,7 +35,19 @@ export async function refreshReportingQueue(force = false): Promise<void> {
       const prior = await client.query(`SELECT id FROM patch_group_ticket_requests
         WHERE remediation_id=$1 AND tenant_id=$2 AND scope_hash=$3 AND packet->>'source'='stored-findings' LIMIT 1`,
         [group.remediationId, group.tenantId, scopeHash]);
-      if (prior.rowCount) continue;
+      if (prior.rowCount) {
+        // Same scope already has a draft -- reused rather than inserting a
+        // near-duplicate, but worst_severity/max_risk are NOT static (a
+        // finding can get rescored by a later KEV/EPSS refresh without its
+        // asset/CVE identity changing), so a still-pending draft's risk
+        // picture is refreshed here too. Scoped to state='prepared' AND
+        // review_state='pending' -- no reason to touch a row that's already
+        // been approved/created/dismissed.
+        await client.query(`UPDATE patch_group_ticket_requests SET worst_severity=$2,max_risk=$3,updated_at=now()
+          WHERE id=$1 AND state='prepared' AND review_state='pending'`,
+          [prior.rows[0].id, group.worstSeverity, group.maxRisk]);
+        continue;
+      }
       const id = randomUUID();
       // worst_severity/max_risk were missing from this INSERT entirely until
       // now -- every stored-findings (scanner-sourced) draft landed with
