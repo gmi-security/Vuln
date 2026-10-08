@@ -46,12 +46,21 @@ const PILOT_COMPANY_IDS = new Set([ATLAS_REPORTING_COMPANY_ID]);
 // Paused 2026-09-29 while Atlas asked to hold new tickets until Automate
 // caught up; unpaused the same day 4:22pm on Jim/Mark's direction -- client
 // visibility into open vulns creates an obligation to ticket them, patching
-// readiness doesn't change that. Gates both entry points (the 15-minute
-// scheduler and "Run auto-create now"), not the autoCreateHighSeverityTickets
-// logic itself, so flipping this is the only thing that changes. Priority
-// backfill and closure-validation were never gated by this -- neither of
-// those creates a new ticket.
-export const ATLAS_AUTO_CREATE_PAUSED = false;
+// readiness doesn't change that.
+//
+// Re-paused 2026-10-08: auto-create was firing on raw CrowdStrike CVSS
+// severity alone (worst_severity IN ('Critical','High')) with no check that
+// the finding had actually been through risk-refresh-scheduler's KEV/EPSS/
+// threat-intel enrichment pass -- see finding_risk / risk-scoring-store.ts.
+// That produced real ConnectWise tickets for findings nobody had verified
+// were actually high-risk, not just high-CVSS. Holding new auto-creates
+// until the gate checks finding_risk instead of (or in addition to) raw
+// severity. Gates both entry points (the 15-minute scheduler and "Run
+// auto-create now"), not the autoCreateHighSeverityTickets logic itself, so
+// flipping this is the only thing that changes. Priority backfill and
+// closure-validation were never gated by this -- neither of those creates a
+// new ticket, so they keep running normally.
+export const ATLAS_AUTO_CREATE_PAUSED = true;
 
 type Counts = { checked: number; created: number; errors: number };
 
