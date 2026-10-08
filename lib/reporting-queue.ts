@@ -37,10 +37,15 @@ export async function refreshReportingQueue(force = false): Promise<void> {
         [group.remediationId, group.tenantId, scopeHash]);
       if (prior.rowCount) continue;
       const id = randomUUID();
+      // worst_severity/max_risk were missing from this INSERT entirely until
+      // now -- every stored-findings (scanner-sourced) draft landed with
+      // both NULL, so group-auto-create.ts's gate (which reads these two
+      // columns) could never fire on scanner data, regardless of how severe
+      // or actively-exploited the underlying findings actually were.
       await client.query(`INSERT INTO patch_group_ticket_requests
-        (id,cves,remediation_id,tenant_id,prepared_by,prepared_at,crowdstrike_revision,packet,host_count,finding_count,scope_hash)
-        VALUES($1,$2::jsonb,$3,$4,'automatic reporting',now(),0,$5::jsonb,$6,$7,$8)`,
-        [id, JSON.stringify(group.cves), group.remediationId, group.tenantId, JSON.stringify(group), group.deviceCount, group.findingCount, scopeHash]);
+        (id,cves,remediation_id,tenant_id,prepared_by,prepared_at,crowdstrike_revision,packet,host_count,finding_count,scope_hash,worst_severity,max_risk)
+        VALUES($1,$2::jsonb,$3,$4,'automatic reporting',now(),0,$5::jsonb,$6,$7,$8,$9,$10)`,
+        [id, JSON.stringify(group.cves), group.remediationId, group.tenantId, JSON.stringify(group), group.deviceCount, group.findingCount, scopeHash, group.worstSeverity, group.maxRisk]);
       await client.query("INSERT INTO patch_group_ticket_audit(request_id,actor,action) VALUES($1,'automatic reporting','group.prepared')", [id]);
     }
     await client.query(`INSERT INTO reporting_queue_runs(id,completed_at,scope_version) VALUES(1,now(),2)

@@ -50,6 +50,7 @@ export function buildStoredFindingGroups(company: { id: string; name: string }, 
       reviewRows: rows.map(row => ({ asset: row.asset, hostname:row.defender?.hostname || row.asset, cve: row.cve, severity: row.severity, risk: row.realRisk,
         connectors: row.seenBy?.length ? row.seenBy : [row.connector], findingId: row.id })),
       worstSeverity: worstSeverityOf(rows),
+      maxRisk: Math.max(0, ...rows.map(row => row.realRisk)),
       csv, label, ticketTitle: `${company.name}: ${title}`.slice(0, 100), ticketBody });
     }
     return parts;

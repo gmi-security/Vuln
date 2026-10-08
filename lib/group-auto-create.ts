@@ -7,15 +7,23 @@ import { ATLAS_REPORTING_COMPANY_ID } from "./reporting-direct-sources";
 import { cwPrioritiesBySort, type CWOption } from "./connectwise-client";
 import { targetPriorityFor } from "./group-ticket-priority";
 
-// Critical/High severity remediations skip the human review queue and go
+// Critical/High severity remediations, OR any remediation touching a
+// real-risk-critical (KEV-listed, actively-exploited, or otherwise >= 80
+// composite score -- see lib/threat.ts's riskPriority buckets) finding
+// regardless of raw CVSS severity, skip the human review queue and go
 // straight to a ConnectWise ticket -- always through the consolidated group
 // format, never the single-CVE path. This only fires for a customer once a
 // human has manually created at least one ticket for them: that's what
 // teaches patch_customer_routing which ConnectWise company/board/team is
 // correct (see the routing-learning step in runCreation, patch-group-ticket-
 // store.ts). No mapping yet means no guess -- the draft is left for a human,
-// same as before. Low/Medium/Low-confidence severity is never touched here.
+// same as before. Anything below both thresholds is never touched here.
 const ACTOR = "auto-create";
+// Matches lib/threat.ts's Critical riskPriority bucket exactly -- a group
+// whose worst CVSS severity alone reads Medium/Low can still land here if
+// one of its findings is KEV-listed or actively exploited on a
+// critical/exposed asset, which is exactly the case raw severity misses.
+const RISK_AUTO_CREATE_THRESHOLD = 80;
 // Pilot scope: only this customer, by explicit request, while auto-create is
 // validated. Expand PILOT_COMPANY_IDS once it's proven out.
 const PILOT_COMPANY_IDS = new Set([ATLAS_REPORTING_COMPANY_ID]);
@@ -56,14 +64,15 @@ export async function autoCreateHighSeverityTickets(): Promise<Counts> {
   // older duplicate at the same moment this auto-creates it.
   const rows = (await db.query(`
     WITH ranked AS (
-      SELECT id, packet->>'appCompanyId' AS app_company_id, worst_severity, ROW_NUMBER() OVER (
+      SELECT id, packet->>'appCompanyId' AS app_company_id, worst_severity, max_risk, ROW_NUMBER() OVER (
         PARTITION BY remediation_id, tenant_id, packet->>'appCompanyId' ORDER BY prepared_at DESC
       ) AS rn
       FROM patch_group_ticket_requests
-      WHERE state='prepared' AND review_state='pending' AND worst_severity IN ('Critical','High')
+      WHERE state='prepared' AND review_state='pending'
+        AND (worst_severity IN ('Critical','High') OR max_risk >= $1)
     )
-    SELECT id, app_company_id, worst_severity FROM ranked WHERE rn = 1
-  `)).rows as { id: string; app_company_id: string | null; worst_severity: "Critical" | "High" }[];
+    SELECT id, app_company_id, worst_severity, max_risk FROM ranked WHERE rn = 1
+  `, [RISK_AUTO_CREATE_THRESHOLD])).rows as { id: string; app_company_id: string | null; worst_severity: string | null; max_risk: number | null }[];
   if (!rows.length) return { checked: 0, created: 0, errors: 0 };
   const routings = (await db.query("SELECT app_company_id, company_id, board_id, team_id FROM patch_customer_routing"))
     .rows as { app_company_id: string; company_id: number; board_id: number; team_id: number | null }[];
@@ -97,9 +106,15 @@ export async function autoCreateHighSeverityTickets(): Promise<Counts> {
       created++;
       // The ticket should assert its own severity immediately, not wait
       // days for SLA escalation to notice. Critical -> the top priority;
-      // High -> the next one down. Never lets a priority-setting problem
-      // undo an otherwise-successful ticket creation.
-      const target = targetPriorityFor(row.worst_severity, priorities);
+      // High -> the next one down. A row that only qualified via max_risk
+      // (its raw CVSS severity could be Medium or lower) is treated as
+      // Critical here too -- a KEV-listed or actively-exploited finding on a
+      // critical/exposed asset deserves the top slot regardless of what its
+      // CVSS alone says. Never lets a priority-setting problem undo an
+      // otherwise-successful ticket creation.
+      const effectiveSeverity: "Critical" | "High" =
+        row.worst_severity === "Critical" || (row.max_risk ?? 0) >= RISK_AUTO_CREATE_THRESHOLD ? "Critical" : "High";
+      const target = targetPriorityFor(effectiveSeverity, priorities);
       if (target) {
         const ticketId = await waitForTicketId(row.id);
         if (ticketId) {
@@ -112,15 +127,15 @@ export async function autoCreateHighSeverityTickets(): Promise<Counts> {
           await setGroupTicketPriority(row.id, target.id, ACTOR).catch(async (err) => {
             const message = err instanceof Error ? err.message : String(err);
             await db.query("UPDATE patch_group_ticket_requests SET last_error=$2,updated_at=now() WHERE id=$1",
-              [row.id, `Ticket created, but asserting ${row.worst_severity} priority failed: ${message}`]).catch(() => {});
+              [row.id, `Ticket created, but asserting ${effectiveSeverity} priority failed: ${message}`]).catch(() => {});
           });
         } else {
           await db.query("UPDATE patch_group_ticket_requests SET last_error=$2,updated_at=now() WHERE id=$1",
-            [row.id, `Ticket created, but its ticket_id didn't appear within 60s to assert ${row.worst_severity} priority. The next priority backfill pass will retry.`]).catch(() => {});
+            [row.id, `Ticket created, but its ticket_id didn't appear within 60s to assert ${effectiveSeverity} priority. The next priority backfill pass will retry.`]).catch(() => {});
         }
       } else if (prioritiesFetchError) {
         await db.query("UPDATE patch_group_ticket_requests SET last_error=$2,updated_at=now() WHERE id=$1",
-          [row.id, `Ticket created, but couldn't fetch ConnectWise priorities to assert ${row.worst_severity}: ${prioritiesFetchError}. The next priority backfill pass will retry.`]).catch(() => {});
+          [row.id, `Ticket created, but couldn't fetch ConnectWise priorities to assert ${effectiveSeverity}: ${prioritiesFetchError}. The next priority backfill pass will retry.`]).catch(() => {});
       }
     } catch {
       errors++; // one draft failing (routing went stale, connection changed) must not block the rest

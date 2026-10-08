@@ -77,6 +77,13 @@ export type PatchGroup = {
   deviceCves: { cid: string; hostId: string; cve: string }[];
   reviewRows?: { asset: string; cve: string; severity?: string; risk?: number; connectors?: string[]; findingId?: string; hostname?: string; ip?: string; os?: string; criticality?: string; exposure?: string }[];
   worstSeverity: string | null;
+  // Highest real-risk score (0-100) among this group's rows -- the same
+  // composite CVSS x threat(KEV/ransomware/exploit/EPSS) x environment score
+  // lib/threat.ts computes per finding (see riskPriority's buckets: Critical
+  // >= 80). Lets ticket-cutting react to an actively-exploited or KEV-listed
+  // CVE on a critical/exposed asset even when its raw CVSS severity alone
+  // reads Medium -- see group-auto-create.ts, the one real consumer so far.
+  maxRisk: number;
   label: string; ticketTitle: string; ticketBody: string;
 };
 export type PatchConsolidation = {
@@ -268,6 +275,7 @@ export function buildPatchConsolidation(cves: string[], records: PatchFinding[],
       reviewRows: groupRows.map((r) => ({ asset: r.hostname || r.hostId, cve: r.cve, severity: r.severity, risk: r.risk, findingId: r.findingId,
         hostname: r.hostname, ip: r.ip, os: r.os, criticality: r.hostCriticality, exposure: r.exposure, connectors: ["CrowdStrike"] })),
       worstSeverity: worstSeverityOf(groupRows),
+      maxRisk: Math.max(0, ...groupRows.map((r) => r.risk)),
       // The analyst's explicit customer selection at build time, when given —
       // this is what lets the prepared draft land in the right customer's
       // review queue without inferring ownership from the CrowdStrike tenant.

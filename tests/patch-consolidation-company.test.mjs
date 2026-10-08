@@ -93,3 +93,13 @@ test("buildPatchConsolidation omits appCompanyId when no customer was selected",
   assert.ok(consolidation.groups.length > 0);
   for (const group of consolidation.groups) assert.equal("appCompanyId" in group, false);
 });
+
+test("buildPatchConsolidation's maxRisk is the highest GMI risk score among a group's devices", () => {
+  const records = [
+    finding({ id: "f1", hostId: "host-1", hostname: "host-1.corp", risk: 35 }),
+    finding({ id: "f2", hostId: "host-2", hostname: "host-2.corp", risk: 88 }),
+  ];
+  const consolidation = patchRequest.buildPatchConsolidation(["CVE-2026-1000"], records, "us-1", "start", "end");
+  assert.ok(consolidation.groups.length > 0);
+  for (const group of consolidation.groups) assert.equal(group.maxRisk, 88);
+});

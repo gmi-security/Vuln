@@ -259,6 +259,52 @@ test("a ticket id that never confirms leaves priority unset without failing the 
   assert.match(update.params[1], /didn't appear within 60s to assert Critical priority/);
 });
 
+test("a draft whose raw severity is only Medium but whose max_risk crosses the threshold still gets Critical priority", async () => {
+  // worst_severity here is deliberately NOT Critical/High -- this row is
+  // only in the eligible set at all because the real SQL's WHERE clause
+  // (not exercised by this fake db, which returns `eligible` unfiltered)
+  // widened to `OR max_risk >= 80`. What this test actually covers is the
+  // part that IS exercised after the row arrives: a KEV/actively-exploited
+  // finding (max_risk >= 80) must assert the same top ConnectWise priority
+  // a genuinely Critical-severity row would, not fall through to "High"
+  // just because its raw CVSS severity reads lower.
+  const db = fakeDb({
+    eligible: [{ id: "a", app_company_id: "CO-147284", worst_severity: "Medium", max_risk: 85 }],
+    routings: [{ app_company_id: "CO-147284", company_id: 55, board_id: 9, team_id: null }],
+  });
+  const priorityCalls = [];
+  const autoCreate = await loadAutoCreate({
+    db,
+    reviewGroupTicket: async () => {},
+    readGroupTicket: readGroupTicketDualMode({ ticketId: 999, state: "created" }),
+    createGroupTicket: async () => {},
+    setGroupTicketPriority: async (id, priorityId, actor) => { priorityCalls.push({ id, priorityId, actor }); },
+    cwPrioritiesBySort: async () => [{ id: 1, name: "Urgent" }, { id: 2, name: "High" }, { id: 3, name: "Medium" }],
+  });
+  const result = await autoCreate.autoCreateHighSeverityTickets();
+  assert.deepEqual(result, { checked: 1, created: 1, errors: 0 });
+  assert.deepEqual(priorityCalls, [{ id: "a", priorityId: 1, actor: "auto-create" }]);
+});
+
+test("a draft with no risk score and a non-Critical severity gets High priority, not Critical by default", async () => {
+  const db = fakeDb({
+    eligible: [{ id: "a", app_company_id: "CO-147284", worst_severity: "High", max_risk: null }],
+    routings: [{ app_company_id: "CO-147284", company_id: 55, board_id: 9, team_id: null }],
+  });
+  const priorityCalls = [];
+  const autoCreate = await loadAutoCreate({
+    db,
+    reviewGroupTicket: async () => {},
+    readGroupTicket: readGroupTicketDualMode({ ticketId: 999, state: "created" }),
+    createGroupTicket: async () => {},
+    setGroupTicketPriority: async (id, priorityId, actor) => { priorityCalls.push({ id, priorityId, actor }); },
+    cwPrioritiesBySort: async () => [{ id: 1, name: "Urgent" }, { id: 2, name: "High" }, { id: 3, name: "Medium" }],
+  });
+  const result = await autoCreate.autoCreateHighSeverityTickets();
+  assert.deepEqual(result, { checked: 1, created: 1, errors: 0 });
+  assert.deepEqual(priorityCalls, [{ id: "a", priorityId: 2, actor: "auto-create" }]);
+});
+
 test("a priority-setting failure after ticket creation is recorded on the row instead of vanishing silently", async () => {
   const db = fakeDb({
     eligible: [{ id: "a", app_company_id: "CO-147284", worst_severity: "Critical" }],
