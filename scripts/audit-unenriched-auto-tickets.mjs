@@ -53,11 +53,11 @@ async function findCandidates() {
   // want every auto-create ticket.requested audit entry regardless of what
   // happened to its priority afterward.
   const { rows: tickets } = await dashboardPool.query(`
-    SELECT t.id, t.ticket_id, t.cves, t.created_at, t.updated_at
+    SELECT t.id, t.ticket_id, t.cves, t.prepared_at, t.updated_at
     FROM patch_group_ticket_requests t
     WHERE t.packet->>'appCompanyId' = $1 AND t.state = 'created' AND t.ticket_id IS NOT NULL AND t.closed = false
       AND EXISTS (SELECT 1 FROM patch_group_ticket_audit a WHERE a.request_id = t.id AND a.actor = 'auto-create' AND a.action = 'ticket.created')
-    ORDER BY t.created_at ASC
+    ORDER BY t.prepared_at ASC
   `, [PILOT_COMPANY_ID]);
   if (!tickets.length) return [];
 
@@ -113,7 +113,7 @@ async function main() {
   const candidates = await findCandidates();
   console.log(`${candidates.length} open auto-created ticket(s) for ${PILOT_COMPANY_ID} would NOT qualify under the new enrichment gate:\n`);
   for (const c of candidates) {
-    console.log(`  #${c.ticket_id}  created ${new Date(c.created_at).toISOString()}  ${c.reason}  cves=${c.cves.join(",")}`);
+    console.log(`  #${c.ticket_id}  prepared ${new Date(c.prepared_at).toISOString()}  ${c.reason}  cves=${c.cves.join(",")}`);
   }
   if (!candidates.length) { console.log("Nothing to do."); return; }
   if (!DO_CLOSE) {
