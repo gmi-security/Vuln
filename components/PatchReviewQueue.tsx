@@ -99,7 +99,7 @@ export default function PatchReviewQueue({ companyId, sla }: { companyId: string
     <div className="flex flex-wrap items-start justify-between gap-3"><div>
       <p className="text-xs uppercase tracking-[0.25em] text-red-500">Consolidation</p>
       <h2 className="mt-2 text-xl font-semibold text-white">Review queue</h2>
-      <p className="mt-2 max-w-2xl text-sm text-zinc-400">Awaiting review is ranked by devices affected — the biggest-impact remediation for this customer sits at the top. Approving the next one prepares its ticket; sending still requires the ConnectWise form.</p>
+      <p className="mt-2 max-w-2xl text-sm text-zinc-400">Awaiting review is ranked by real risk first (KEV-listed and actively-exploited findings surface regardless of devices affected), then by devices affected. Approving the next one prepares its ticket; sending still requires the ConnectWise form.</p>
     </div><button type="button" className={styles.button} disabled={Boolean(busy)} onClick={() => void load()}>Refresh</button></div>
     <div className="mt-4 flex flex-wrap items-center gap-2 text-sm">
       {([["all", `All (${counts.total})`], ["pending", `Awaiting review (${counts.pending})`], ["approved", `Approved (${counts.approved})`], ["dismissed", "Dismissed"]] as const).map(([key, label]) =>
@@ -123,7 +123,11 @@ export default function PatchReviewQueue({ companyId, sla }: { companyId: string
       return <div key={row.id} className={`flex gap-3 rounded-lg border border-zinc-800 border-l-4 bg-zinc-950 p-3 transition-colors hover:border-zinc-600 ${REVIEW_STATE_STRIPE[row.reviewState] ?? "border-l-zinc-700"}`}>
         <ImpactChip hostCount={row.hostCount} pending={pending} />
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-medium text-zinc-100">{isNext && <span className="mr-2 rounded-full border border-[rgba(179,14,20,0.4)] bg-[rgba(179,14,20,0.12)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#ff8f96]">Next</span>}{row.remediationTitle || "Recommended remediation"}</p>
+          <p className="truncate text-sm font-medium text-zinc-100">
+            {isNext && <span className="mr-2 rounded-full border border-[rgba(179,14,20,0.4)] bg-[rgba(179,14,20,0.12)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#ff8f96]">Next</span>}
+            {row.maxRisk !== null && row.maxRisk >= 80 && <span title="Real risk score >= 80 -- KEV-listed, actively exploited, or otherwise critical regardless of raw CVSS severity" className="mr-2 rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300">Risk {row.maxRisk}</span>}
+            {row.remediationTitle || "Recommended remediation"}
+          </p>
           <p className="mt-1 truncate text-xs text-zinc-400" title={row.cves.join(", ")}>{shownCves.join(", ")}{moreCves > 0 && ` +${moreCves} more`}</p>
           <div className="mt-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-xs text-zinc-500">
             <span className="truncate">{row.companyName ?? (row.source === "stored-findings" ? "Unassigned" : `CrowdStrike tenant ${row.tenantId}`)}</span>

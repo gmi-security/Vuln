@@ -67,6 +67,21 @@ test('already ticketed asset and CVE are excluded', () => {
   assert.equal(groups[0].findingCount, 1);
 });
 
+test('maxRisk is the highest realRisk among the group\'s findings, not an average or the first row\'s', () => {
+  const groups = buildStoredFindingGroups(company, [
+    finding('one', 'nessus', undefined, { realRisk: 35 }),
+    finding('two', 'vulners', undefined, { realRisk: 91 }),
+    finding('three', 'crowdstrike', undefined, { realRisk: 60 }),
+  ]);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].maxRisk, 91);
+});
+
+test('maxRisk is 0 for an empty group rather than -Infinity', () => {
+  const groups = buildStoredFindingGroups(company, [finding('one', 'nessus', undefined, { realRisk: 0 })]);
+  assert.equal(groups[0].maxRisk, 0);
+});
+
 test('automatic patch drafts exclude OSINT and non-CVE service findings', () => {
   const groups = buildStoredFindingGroups(company, [
     finding('v', 'nessus'),

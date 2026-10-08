@@ -49,7 +49,8 @@ export async function patchTicketDatabase() {
     closed BOOLEAN NOT NULL DEFAULT false, attachment_state TEXT NOT NULL DEFAULT 'not_started',
     attachment_started TIMESTAMPTZ, document_id INT, last_error TEXT,
     fix_verified_at TIMESTAMPTZ, fix_verified_state TEXT, fix_still_open_count INT,
-    ticket_priority_id INT, ticket_priority_name TEXT, ticket_sla_escalations INT NOT NULL DEFAULT 0, worst_severity TEXT
+    ticket_priority_id INT, ticket_priority_name TEXT, ticket_sla_escalations INT NOT NULL DEFAULT 0, worst_severity TEXT,
+    max_risk INT
   );
   ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS fix_verified_at TIMESTAMPTZ;
   ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS fix_verified_state TEXT;
@@ -58,6 +59,7 @@ export async function patchTicketDatabase() {
   ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS ticket_priority_name TEXT;
   ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS ticket_sla_escalations INT NOT NULL DEFAULT 0;
   ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS worst_severity TEXT;
+  ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS max_risk INT;
   ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS review_state TEXT NOT NULL DEFAULT 'pending';
   ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS reviewed_by TEXT;
   ALTER TABLE patch_group_ticket_requests ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;
