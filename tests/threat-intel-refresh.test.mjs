@@ -130,3 +130,40 @@ test("a non-ok HTTP response is treated as no signal, not a thrown error", async
     assert.equal(result.size, 0);
   }));
 });
+
+function withCapturedErrors(fn) {
+  const real = console.error;
+  const lines = [];
+  console.error = (...args) => { lines.push(args.join(" ")); };
+  return fn(lines).finally(() => { console.error = real; });
+}
+
+test("a non-ok HTTP response and a thrown error both surface in the aggregate failure log, not silently", async () => {
+  await withEnv({ MISP_URL: "https://misp.example", MISP_API_KEY: "key" }, () => withFetch(async () => ({ ok: false, status: 503 }), () =>
+    withCapturedErrors(async (lines) => {
+      const mod = await loader()("lib/threat-intel-refresh.ts");
+      await mod.fetchMispActiveExploitation(["CVE-2026-1111"]);
+      assert.ok(lines.some((l) => l.includes("[threat-intel] misp") && l.includes("1 failed") && l.includes("HTTP 503")));
+    })));
+});
+
+test("a 200 OK GraphQL response carrying an errors array is treated as a failure, not an empty-result success", async () => {
+  await withEnv({ OPENCTI_URL: "https://opencti.example", OPENCTI_API_KEY: "key" }, () => withFetch(async () => ({
+    ok: true, json: async () => ({ errors: [{ message: "Cannot query field \"vulnerabilities\" on type \"Query\"" }] }),
+  }), () => withCapturedErrors(async (lines) => {
+    const mod = await loader()("lib/threat-intel-refresh.ts");
+    const result = await mod.fetchOpenCtiActiveExploitation(["CVE-2026-1111"]);
+    assert.equal(result.size, 0);
+    assert.ok(lines.some((l) => l.includes("[threat-intel] opencti") && l.includes("1 failed") && l.includes("Cannot query field")));
+  })));
+});
+
+test("a fully successful pass logs zero failures", async () => {
+  await withEnv({ MISP_URL: "https://misp.example", MISP_API_KEY: "key" }, () => withFetch(async () => ({
+    ok: true, json: async () => ({ response: { Attribute: [{ id: "1", sighting_count: "0" }] } }),
+  }), () => withCapturedErrors(async (lines) => {
+    const mod = await loader()("lib/threat-intel-refresh.ts");
+    await mod.fetchMispActiveExploitation(["CVE-2026-1111"]);
+    assert.ok(lines.some((l) => l.includes("[threat-intel] misp: queried 1, 1 had data, 0 failed")));
+  })));
+});
