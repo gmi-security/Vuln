@@ -10,18 +10,21 @@ Existing customer summaries, Defender source detail, risk panels, top fixes, pat
 
 ## Saved connector tile assignments
 
-Customer reports display saved Elasticsearch/Falcon tiles only after an operator verifies their data population and assigns the tile IDs. A globally configured source is not proof of customer ownership. Ordinary report reads use saved results; only the explicit connector refresh action executes those customer's assigned queries.
+Use the existing customer picker on `/reporting`. The inline **Add tile** and **Edit** form save to that selected company automatically. There is no second customer selector. Switching customers closes the form; any save already submitted retains the customer it was submitted for.
 
-- Existing `ATLAS_REPORTING_TILE_IDS` remains supported for Atlas (`CO-147284`).
-- `REPORTING_CUSTOMER_TILE_IDS` optionally supplies a JSON object from company IDs to arrays of verified saved tile IDs. An explicit array overrides the legacy Atlas list for that customer, including an empty array.
-- Example using placeholder tile IDs: `REPORTING_CUSTOMER_TILE_IDS='{"CO-147284":["verified-atlas-tile"],"CO-OTHER":["verified-other-tile"]}'`.
-- A tile can belong to only one customer. Malformed or ambiguous configuration fails closed. Missing assignments produce no custom connector tiles; they never fall back to the shared dashboard.
-- Audit the query, its index/tenant restrictions, credentials and cached result before assigning it. A tile title is not ownership evidence. Re-audit the assignment whenever its query population or source connection changes. Arbitrary ES|QL/FQL is not automatically rewritten to add customer filters.
-- Defender panels use the existing customer-bound Defender connection and source records, independently of these saved-query assignments. Imported scanner findings remain in the existing customer report sections.
+The association is persisted as `definition.companyId` in the existing `elastic_dashboard_queries` JSONB record, atomically with the query definition. No new database table, schema migration, environment edit or restart is needed to assign subsequent tiles. Customer report reads filter by ownership in SQL before loading cached results. Refresh, editing, deletion and tile ordering carry the selected customer; cross-customer tile edits/deletes/order requests are rejected. Shared management remains available with existing member permissions.
 
-There is no database migration and no automatic assignment of existing tiles. Unassigned definitions/results/history are preserved in shared management. Atlas saved tiles will be absent from customer reports until their IDs are explicitly configured. Source configuration and credential roles are unchanged.
+### Preserve existing tiles
 
-Falcon ticket routing continues to use the existing verified `ATLAS_CROWDSTRIKE_TENANT_IDS` mapping; it is not modified by this PR.
+Deployment does not delete, recreate or automatically assign any existing tile. In the selected customer's report, choose **Add existing tile**, pick an unassigned tile, and save it to that customer. This updates only ownership and revision metadata: the ID, query, cached result, successful timestamp and daily history remain intact. Titles/source labels are listed for unassigned tiles; their cached data is not loaded into the report before attachment. Already assigned tiles cannot be attached to another customer with this action. All definitions remain visible in shared management.
+
+Audit the query population before attaching a tile. The customer association controls where results display; it does not rewrite arbitrary ES|QL/FQL or select new source credentials. New queries still use the existing shared source connections. Defender panels continue to use their customer-bound connection independently.
+
+### Legacy environment compatibility
+
+`ATLAS_REPORTING_TILE_IDS` and `REPORTING_CUSTOMER_TILE_IDS` are supported only for older definitions without a saved `companyId` property. Existing assignments remain visible; the next normal save persists the resolved customer to the definition. A database assignment (including explicit null for an unassigned tile) takes precedence over legacy settings. No new assignments require environment configuration. Invalid/ambiguous legacy configuration still fails closed.
+
+Unassigned new tiles created in shared management remain unassigned until attached from a customer report. Older clients that omit `companyId` when editing an existing tile preserve its ownership. Existing automatic source refresh and ticket routing are unchanged; Falcon routing still uses the verified `ATLAS_CROWDSTRIKE_TENANT_IDS` mapping.
 
 ## Read-only inventory
 
@@ -50,16 +53,16 @@ Inspect each saved Elasticsearch query's index and tenant predicate, and each Fa
 
 1. On `/reporting`, no customer selected means no summary, tile, review draft, or ticket result in the visible page or initial page payload.
 2. Choose GCON, then Openworks. Each choice shows only its own `CO-*` app findings, source activity, scans, assets, review drafts, and tickets. Neither receives Atlas saved tiles.
-3. Choose Atlas with verified tile assignments configured. Its existing app report loads; assigned Elasticsearch **and** Falcon tiles retain prior IDs/results and show their own timestamps. A failure in the app report does not hide cached source tiles, and a source failure does not hide the app report.
+3. Choose Atlas with existing tiles attached or legacy assignments configured. Its existing app report loads; assigned Elasticsearch **and** Falcon tiles retain prior IDs/results and show their own timestamps. A failure in the app report does not hide cached source tiles, and a source failure does not hide the app report.
 4. Atlas's queue includes app-generated drafts and new Falcon drafts. Once verified tenant IDs are configured, count historical Falcon drafts by state and compare to the pre-release inventory. Review details list affected assets/findings. Ticket tracking is beside the queue. No ticket is sent by loading the page.
 5. Compare “Open remediation findings” with the company and executive reports using the same status/class filters. OSINT exposure is separate; source observation counts may overlap. A failed scan is not rendered as a clean scan, and absent history is not rendered as a zero trend.
 6. Check an OSINT-only, a multi-connector, a no-scan, and a large customer. Verify focus links, small-screen tables, queue pagination, and no stale customer data during rapid switching.
 
 ## Current local verification
 
-Validated this change with 37 targeted automated checks covering customer assignments, tenant scope, customer report models/review/source activity/metrics, and dashboard persistence/refresh. The persistence suite used a disposable local PostgreSQL database; scoped refresh left another customer's overdue tile untouched. `npm run build` passed.
+Validated database-backed assignments with 23 targeted automated checks across dashboard persistence, customer reads and ownership resolution. The PostgreSQL integration covers preserving every saved result/history row on attachment, scoped create/read/reorder, rejected cross-customer edits/deletes/attachments, older-client edits retaining ownership, and a refresh/assignment race. Production build and TypeScript passed.
 
-A local Playwright browser check against the production build used synthetic source responses: no selection, Atlas, Footprint/Defender, multiple sources, no sources, delayed responses during customer switching, customer CSV/refresh/risk/ticket requests, and 390px mobile layout. No unscoped dashboard request occurred. These checks do not constitute production configuration validation.
+A local Playwright check against the production build used synthetic data: create/edit/attach/reorder using the selected customer, preserved existing results, discarded unsaved forms when switching customers, delayed responses, scoped CSV/refresh/risk/tickets, no global dashboard requests, and 390px mobile layout. Production assignments and source query populations were not changed or verified.
 
 To run the broader suite, use `node --experimental-vm-modules --test-isolation=none --test tests/*.test.mjs` and `npm run build`. The in-process test flag avoids a Windows sandbox child-process restriction. `npm run lint` currently fails before examining source because this repository has ESLint 9 but no `eslint.config.*`; address that project tooling issue separately.
 

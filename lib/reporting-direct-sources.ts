@@ -30,18 +30,31 @@ export function customerReportingTileIds(companyId: string, configured = "", atl
   return companyId ? assignments.get(companyId) ?? [] : [];
 }
 
+// Persisted ownership wins over legacy environment assignments, including null.
+export function reportingTileCompanyId(query: { id:string; companyId?:string | null }, configured = "", atlasIds = ""): string | null {
+  if (query.companyId !== undefined) return query.companyId;
+  const companies = new Set([ATLAS_REPORTING_COMPANY_ID]);
+  if (configured.trim()) {
+    customerReportingTileIds("",configured,atlasIds); // Validate before reading keys.
+    Object.keys(JSON.parse(configured)).forEach(company=>companies.add(company));
+  }
+  for (const company of companies) if (customerReportingTileIds(company,configured,atlasIds).includes(query.id)) return company;
+  return null;
+}
+
 export function emptyReportingDashboard(canManage: boolean): ElasticDashboard {
   return { canManage, storageReady: true, connected: false, crowdstrike: { connected: false }, queries: [] };
 }
 
 export function directSourcesForCustomer(companyId: string, dashboard: ElasticDashboard, verifiedTileIds = "", configured = ""): ElasticDashboard {
-  const allowed = new Set(customerReportingTileIds(companyId,configured,verifiedTileIds));
-  const queries = dashboard.storageReady ? dashboard.queries.filter(query => allowed.has(query.id) &&
+  customerReportingTileIds(companyId,configured,verifiedTileIds);
+  const queries = dashboard.storageReady ? dashboard.queries.filter(query => !!companyId && reportingTileCompanyId(query,configured,verifiedTileIds) === companyId &&
     (query.source === "crowdstrike" ? dashboard.crowdstrike?.connected : dashboard.connected)) : [];
   // No unrelated endpoint, region, status or cached result in the response.
   return { canManage:dashboard.canManage,storageReady:dashboard.storageReady,
     connected:queries.some(query=>query.source !== "crowdstrike"),
-    crowdstrike:{connected:queries.some(query=>query.source === "crowdstrike")},queries };
+    crowdstrike:{connected:queries.some(query=>query.source === "crowdstrike")},queries,
+    ...(dashboard.canManage ? {availableSources:dashboard.availableSources,unassignedTiles:dashboard.unassignedTiles} : {}) };
 }
 
 export function atlasFalconReviewPacket<T extends Pick<PatchGroup, "source" | "tenantId">>(group: T, verifiedTenantIds: string[]): T & { appCompanyId?: string } {

@@ -5,7 +5,7 @@ export const dynamic = "force-dynamic";
 export async function DELETE(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
     const { actor } = await dashboardAccess(request, true);
-    await deleteDashboardTile((await context.params).id, actor);
+    await deleteDashboardTile((await context.params).id, actor, new URL(request.url).searchParams.get("companyId") || undefined);
     return dashboardJson({ deleted: true });
   } catch (error) { return dashboardFailure(error); }
 }

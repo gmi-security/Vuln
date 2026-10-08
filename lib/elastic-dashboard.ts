@@ -27,6 +27,7 @@ export type QueryInput = { query: string; source?: DashboardSource; crowdstrike?
 export type QueryDefinition = QueryInput & {
   id: string;
   title: string;
+  companyId?: string | null;
   description?: string;
   query: string;
   display: "auto" | "metrics" | "table" | "bar" | "line" | "doughnut";
@@ -47,6 +48,8 @@ export type ElasticDashboard = {
   endpoint?: string;
   crowdstrike?: { connected: boolean; region?: string };
   queries: DashboardQuery[];
+  availableSources?: { elastic: boolean; crowdstrike: boolean };
+  unassignedTiles?: { id: string; title: string; source: DashboardSource }[];
 };
 
 export function querySource(value: { source?: unknown }): DashboardSource {
@@ -122,11 +125,15 @@ export function parseDefinition(value: unknown, id: string): QueryDefinition {
   }
   if (typeof body.refreshMinutes !== "number" || ![5, 15, 30, 60, 1440].includes(body.refreshMinutes)) throw new DashboardError("Choose a refresh interval: 5, 15, 30, 60 minutes, or daily.");
   if (typeof body.enabled !== "boolean") throw new DashboardError("Invalid refresh setting.");
+  if (body.companyId !== undefined && body.companyId !== null &&
+      (typeof body.companyId !== "string" || !body.companyId.trim() || body.companyId.length > 100))
+    throw new DashboardError("Choose an existing customer.");
   const input = parseQueryInput(body);
   if (input.crowdstrike?.view === "patch-worklist" && !["auto", "table"].includes(String(body.display))) throw new DashboardError("Use Table for a patch worklist.");
   if (input.crowdstrike?.view === "severity-counts" && !["auto", "metrics", "table"].includes(String(body.display))) throw new DashboardError("Use Number cards or Table for severity counts.");
   if (["cve-devices", "exprt-cves"].includes(input.crowdstrike?.view ?? "") && !["auto", "table"].includes(String(body.display))) throw new DashboardError("Use Table for affected devices by CVE.");
-  return { id, title: body.title.trim(), ...input, display: body.display as QueryDefinition["display"],
+  return { id, title: body.title.trim(), ...input,
+    ...(body.companyId !== undefined ? { companyId: body.companyId as string | null } : {}), display: body.display as QueryDefinition["display"],
     ...(typeof body.description === "string" && body.description.trim() ? { description: body.description.trim() } : {}),
     refreshMinutes: body.refreshMinutes, enabled: body.enabled, ...(chart ? { chart } : {}) };
 }

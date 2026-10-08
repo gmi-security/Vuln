@@ -1,3 +1,5 @@
+import { validateDashboardCustomer } from "./dashboard-customer";
+import { customerReportingTileIds, reportingTileCompanyId } from "./reporting-direct-sources";
 import { Pool, type PoolClient } from "pg";
 import { randomUUID, createHash } from "node:crypto";
 import { applicationDatabase } from "./persist";
@@ -96,7 +98,7 @@ function emptyQuery(): DashboardQuery {
   return { ...DEFAULT_COVERAGE, result: null, refreshedAt: null, attemptedAt: null, error: null };
 }
 
-export async function readDashboard(canManage: boolean): Promise<ElasticDashboard> {
+export async function readDashboard(canManage: boolean, companyId?: string): Promise<ElasticDashboard> {
   try {
     const db = await database();
     const saved = await connection().catch((error) => {
@@ -108,12 +110,21 @@ export async function readDashboard(canManage: boolean): Promise<ElasticDashboar
       if (error instanceof DashboardError) return null;
       throw error;
     });
-    const rows = await db.query("SELECT * FROM elastic_dashboard_queries WHERE deleted_at IS NULL ORDER BY display_order NULLS LAST, id = 'asset-coverage' DESC, id");
+    const configured = process.env.REPORTING_CUSTOMER_TILE_IDS ?? "", atlasIds = process.env.ATLAS_REPORTING_TILE_IDS ?? "";
+    const legacyIds = companyId ? customerReportingTileIds(companyId,configured,atlasIds) : [];
+    const rows = await db.query(`SELECT * FROM elastic_dashboard_queries WHERE deleted_at IS NULL
+      AND ($1::text IS NULL OR definition->>'companyId' = $1 OR
+        (NOT (definition ? 'companyId') AND id = ANY($2::text[])))
+      ORDER BY display_order NULLS LAST, id = 'asset-coverage' DESC, id`,[companyId ?? null,legacyIds]);
+    const definitions = companyId && canManage ? (await db.query("SELECT id, definition FROM elastic_dashboard_queries WHERE deleted_at IS NULL AND definition->>'companyId' IS NULL")).rows : [];
+    const unassignedTiles = definitions.filter(row=>!reportingTileCompanyId({...row.definition,id:row.id},configured,atlasIds))
+      .map(row=>({id:row.id,title:row.definition.title,source:querySource(row.definition)}));
     return {
       canManage, storageReady: true, connected: Boolean(saved),
       ...(canManage && saved ? { endpoint: (saved.value as ElasticConnection).endpoint } : {}),
       crowdstrike: { connected: Boolean(falcon), ...(canManage && falcon ? { region: (falcon.value as CrowdStrikeConnection).region } : {}) },
-      queries: rows.rows.map((row) => ({ ...row.definition, result: row.result,
+      ...(companyId && canManage ? {availableSources:{elastic:Boolean(saved),crowdstrike:Boolean(falcon)},unassignedTiles} : {}),
+      queries: rows.rows.map((row) => ({ ...row.definition, companyId:reportingTileCompanyId({...row.definition,id:row.id},configured,atlasIds), result: row.result,
         refreshedAt: row.refreshed_at?.toISOString() ?? null,
         attemptedAt: row.attempted_at?.toISOString() ?? null, error: row.last_error })),
     };
@@ -261,10 +272,11 @@ export async function verifyAgainstCrowdStrike(cves: string[], hostScope: string
 
 // Save settings first. Remote validation and execution belong to the refresh
 // worker, so adding a tile never waits for Elastic/CrowdStrike or the job queue.
-export async function addDashboardTile(value: unknown, actor: string): Promise<{ saved: true; query: DashboardQuery }> {
+export async function addDashboardTile(value: unknown, actor: string, customerScope?: string): Promise<{ saved: true; query: DashboardQuery }> {
   const body = value as Record<string, unknown>;
   const id = typeof body?.id === "string" ? body.id : randomUUID();
-  const definition = parseDefinition(body, id), source = querySource(definition);
+  const definition = parseDefinition(customerScope ? {...body,companyId:customerScope} : body, id), source = querySource(definition);
+  if (definition.companyId) await validateDashboardCustomer(definition.companyId);
   const db = await database(), client = await db.connect();
   let tile: DashboardQuery;
   try {
@@ -274,6 +286,11 @@ export async function addDashboardTile(value: unknown, actor: string): Promise<{
       await client.query("SELECT source FROM dashboard_source_connections WHERE source = $1", [source]);
     if (!connected.rowCount) throw new DashboardError(`Connect ${DASHBOARD_CONNECTORS[source].label} first.`, 409);
     const previous = (await client.query("SELECT definition, result, refreshed_at, deleted_at FROM elastic_dashboard_queries WHERE id = $1", [id])).rows[0];
+    const previousCompany = previous ? reportingTileCompanyId({ ...previous.definition,id },process.env.REPORTING_CUSTOMER_TILE_IDS,process.env.ATLAS_REPORTING_TILE_IDS) : null;
+    if (customerScope && previous && previousCompany !== customerScope) throw new DashboardError("This tile does not belong to the selected customer.",409);
+    // Older clients omit ownership; never silently unassign an existing tile.
+    if (definition.companyId === undefined) definition.companyId = previousCompany;
+    if (previous && definition.companyId !== previousCompany) throw new DashboardError("Use the customer report to attach an unassigned tile.",409);
     if (previous?.deleted_at) throw new DashboardError("This tile was deleted. Add a new tile instead.", 409);
     const count = await client.query("SELECT count(*)::int AS count FROM elastic_dashboard_queries WHERE id <> $1 AND deleted_at IS NULL", [id]);
     if (count.rows[0].count >= 24) throw new DashboardError("This dashboard supports up to 24 saved queries.");
@@ -293,11 +310,31 @@ export async function addDashboardTile(value: unknown, actor: string): Promise<{
     await client.query("COMMIT");
     tile = { ...definition, result, refreshedAt, attemptedAt: null, error: null };
   } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
-  triggerRefresh();
+  triggerRefresh(false,customerScope ? [id] : undefined);
   return { saved: true, query: tile };
 }
 
-export async function reorderDashboardTiles(value: unknown, actor: string): Promise<void> {
+export async function assignDashboardTile(id: string, companyId: string, actor: string) {
+  await validateDashboardCustomer(companyId);
+  if (!/^[a-zA-Z0-9-]{1,64}$/.test(id)) throw new DashboardError("Invalid tile ID.");
+  const db = await database(), client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(804201)");
+    const row = (await client.query("SELECT definition FROM elastic_dashboard_queries WHERE id = $1 AND deleted_at IS NULL",[id])).rows[0];
+    if (!row) throw new DashboardError("Tile not found.",404);
+    const owner = reportingTileCompanyId({...row.definition,id},process.env.REPORTING_CUSTOMER_TILE_IDS,process.env.ATLAS_REPORTING_TILE_IDS);
+    if (owner && owner !== companyId) throw new DashboardError("This tile already belongs to another customer.",409);
+    await client.query(`UPDATE elastic_dashboard_queries SET definition = jsonb_set(definition,'{companyId}',to_jsonb($2::text)),
+      revision = revision + 1, refresh_lease_until = NULL WHERE id = $1`,[id,companyId]);
+    await client.query("INSERT INTO elastic_dashboard_audit (actor, action, query_id) VALUES ($1,$2,$3)",[actor,`query.customer.assigned:${companyId}`,id]);
+    await client.query("COMMIT");
+    return {saved:true};
+  } catch(error) {await client.query("ROLLBACK");throw error;} finally {client.release();}
+}
+
+export async function reorderDashboardTiles(value: unknown, actor: string, customerScope?: string): Promise<void> {
+  if (customerScope) await validateDashboardCustomer(customerScope);
   const ids = (value as { ids?: unknown } | null)?.ids;
   if (!Array.isArray(ids) || ids.length > 24 || ids.some((id) => typeof id !== "string" || !/^[a-zA-Z0-9-]{1,64}$/.test(id)) || new Set(ids).size !== ids.length) {
     throw new DashboardError("Supply each tile ID once in the desired order.");
@@ -306,8 +343,8 @@ export async function reorderDashboardTiles(value: unknown, actor: string): Prom
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(804201)");
-    const active = await client.query("SELECT id FROM elastic_dashboard_queries WHERE deleted_at IS NULL");
-    const expected = new Set(active.rows.map((row) => row.id));
+    const active = await client.query("SELECT id, definition FROM elastic_dashboard_queries WHERE deleted_at IS NULL");
+    const expected = new Set(active.rows.filter(row=>!customerScope || reportingTileCompanyId({...row.definition,id:row.id},process.env.REPORTING_CUSTOMER_TILE_IDS,process.env.ATLAS_REPORTING_TILE_IDS) === customerScope).map(row=>row.id));
     if (ids.length !== expected.size || ids.some((id) => !expected.has(id))) {
       throw new DashboardError("The tiles changed while you were arranging them. Refresh the dashboard and try again.", 409);
     }
@@ -319,12 +356,17 @@ export async function reorderDashboardTiles(value: unknown, actor: string): Prom
   } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
 }
 
-export async function deleteDashboardTile(id: string, actor: string): Promise<void> {
+export async function deleteDashboardTile(id: string, actor: string, customerScope?: string): Promise<void> {
   if (!/^[a-zA-Z0-9-]{1,64}$/.test(id)) throw new DashboardError("Invalid tile ID.");
   const db = await database(), client = await db.connect();
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(804201)");
+    if (customerScope) {
+      const row = (await client.query("SELECT definition FROM elastic_dashboard_queries WHERE id = $1 AND deleted_at IS NULL",[id])).rows[0];
+      if (!row || reportingTileCompanyId({...row.definition,id},process.env.REPORTING_CUSTOMER_TILE_IDS,process.env.ATLAS_REPORTING_TILE_IDS) !== customerScope)
+        throw new DashboardError("This tile does not belong to the selected customer.",409);
+    }
     // Keep a tombstone so stale forms/jobs and the default seed cannot recreate it.
     const removed = await client.query(`UPDATE elastic_dashboard_queries SET deleted_at = now(),
       revision = revision + 1, refresh_requested = false, refresh_lease_until = NULL,
@@ -343,6 +385,7 @@ export async function saveQuery(value: unknown, actor: string, job?: { id: strin
   const body = value as Record<string, unknown>;
   const id = typeof body?.id === "string" ? body.id : randomUUID();
   const definition = parseDefinition(body, id);
+  if (definition.companyId) await validateDashboardCustomer(definition.companyId);
   const source = querySource(definition), saved = await connection(source);
   if (!saved) throw new DashboardError(`Connect ${DASHBOARD_CONNECTORS[source].label} first.`, 409);
   if (!job) throttlePreview(actor);
@@ -355,7 +398,10 @@ export async function saveQuery(value: unknown, actor: string, job?: { id: strin
     const current = source === "elastic" ? await client.query("SELECT revision FROM elastic_dashboard_connection WHERE id = 1") :
       await client.query("SELECT revision FROM dashboard_source_connections WHERE source = $1", [source]);
     if (current.rows[0]?.revision !== saved.revision) throw new DashboardError("The connection changed. Preview and save again.", 409);
-    const existing = (await client.query("SELECT deleted_at FROM elastic_dashboard_queries WHERE id = $1", [id])).rows[0];
+    const existing = (await client.query("SELECT definition, deleted_at FROM elastic_dashboard_queries WHERE id = $1", [id])).rows[0];
+    const owner = existing ? reportingTileCompanyId({...existing.definition,id},process.env.REPORTING_CUSTOMER_TILE_IDS,process.env.ATLAS_REPORTING_TILE_IDS) : null;
+    if (definition.companyId === undefined) definition.companyId = owner;
+    if (existing && definition.companyId !== owner) throw new DashboardError("The tile customer changed. Reload and save again.",409);
     if (existing?.deleted_at) throw new DashboardError("This tile was deleted. Add a new tile instead.", 409);
     if (job) {
       const activeJob = await client.query("SELECT id FROM elastic_dashboard_jobs WHERE id = $1 AND status = 'running' AND started_at > now() - interval '7 minutes'", [job.id]);

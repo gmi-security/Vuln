@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { ArrowDown, ArrowUp, Download, ExternalLink, GripVertical, LayoutGrid, Pencil, Plus, RadioTower, RefreshCw, Settings2, Trash2 } from "lucide-react";
 import { applyTileOrder, moveTileIds } from "@/lib/dashboard-layout";
@@ -30,9 +30,19 @@ async function post(path: string, body?: unknown) {
   });
 }
 
-export default function ElasticQueryDashboard({ initial }: { initial: ElasticDashboard }) {
+function CustomerTileFrame({ actions, children }: { actions?:ReactNode; children:ReactNode; [key:string]:unknown }) {
+  return <section aria-label="Customer connector tiles" className="space-y-4">
+    <div className="flex flex-wrap items-center justify-between gap-3"><h2 className="text-xl font-semibold text-white">Connector tiles</h2>{actions}</div>{children}
+  </section>;
+}
+
+export default function ElasticQueryDashboard({ initial, companyId = "" }: { initial: ElasticDashboard; companyId?:string }) {
   const [dashboard, setDashboard] = useState(initial);
-  const companyId = ""; // Shared management has no selected customer.
+  const customerPath = `customer-tiles?companyId=${encodeURIComponent(companyId)}`;
+  const scopedPath = (path:string) => companyId ? `${path}?companyId=${encodeURIComponent(companyId)}` : path;
+  const Frame = companyId ? CustomerTileFrame : VulnShell;
+  const [existingOpen,setExistingOpen] = useState(false);
+  const [existingId,setExistingId] = useState("");
   const [sla, setSla] = useState<SlaSettings | null>(null);
   const [connectionOpen, setConnectionOpen] = useState(false);
   const [endpoint, setEndpoint] = useState(initial.endpoint ?? "");
@@ -63,13 +73,13 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
     reloadInFlight.current = true;
     try {
       const version = dashboardVersion.current;
-      const data = await dashboardRequest<ElasticDashboard>("");
+      const data = await dashboardRequest<ElasticDashboard>(companyId ? customerPath : "");
       if (version !== dashboardVersion.current) return;
       if (!data.storageReady) throw new Error("Dashboard storage is unavailable. Previously loaded results are still shown.");
       setDashboard(data); setLoadError("");
       setNow(Date.now());
     } finally { reloadInFlight.current = false; }
-  }, []);
+  }, [companyId,customerPath]);
   const pending = dashboard.queries.some((query) => !query.result && !query.error);
   useEffect(() => {
     void reload().catch((err) => setLoadError(err.message));
@@ -113,9 +123,9 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
   }
   function edit(query?: DashboardQuery) {
     setDraft(query ? { id: query.id, title: query.title, query: query.query, display: query.display,
-      description: query.description,
+      description: query.description, companyId: query.companyId,
       source: query.source, crowdstrike: query.crowdstrike,
-      refreshMinutes: query.refreshMinutes, enabled: query.enabled, chart: query.chart } : dashboard.crowdstrike?.connected ? crowdStrikeDraft() : newDraft());
+      refreshMinutes: query.refreshMinutes, enabled: query.enabled, chart: query.chart } : (dashboard.availableSources?.crowdstrike ?? dashboard.crowdstrike?.connected) ? crowdStrikeDraft() : newDraft());
     setPreview(query?.result ?? null); setError(""); setMessage("");
   }
   function moveTile(from: string, to: string) {
@@ -130,10 +140,10 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
     setDashboard((current) => ({ ...current, queries: applyTileOrder(current.queries, ids) }));
     void action("reorder", async () => {
       try {
-        const result = await post("order", { ids });
+        const result = await post(scopedPath("order"), { ids });
         if (!result.saved) throw new Error("The server did not confirm the tile order. Refresh to check it.");
         setLayoutIds(null);
-        setMessage("Tile order saved for everyone.");
+        setMessage(companyId ? "Tile order saved for this customer." : "Tile order saved for everyone.");
       } catch (error) {
         setDashboard((current) => ({ ...current, queries: applyTileOrder(current.queries, previous) }));
         throw error;
@@ -156,17 +166,19 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
       display: ["patch-worklist", "cve-devices", "exprt-cves"].includes(crowdstrike.view ?? "") ? "table" : crowdstrike.view === "severity-counts" ? "metrics" : crowdstrike.history ? "line" : "auto" });
     setPreview(null);
   }
-  const anyConnected = dashboard.connected || dashboard.crowdstrike?.connected;
-  const sourceConnected = (source?: DashboardSource) => source === "crowdstrike" ? dashboard.crowdstrike?.connected : dashboard.connected;
+  const sourceConnected = (source?: DashboardSource) => source === "crowdstrike"
+    ? (dashboard.availableSources?.crowdstrike ?? dashboard.crowdstrike?.connected)
+    : (dashboard.availableSources?.elastic ?? dashboard.connected);
+  const anyConnected = sourceConnected("elastic") || sourceConnected("crowdstrike");
   const visibleQueries = layoutIds ? applyTileOrder(dashboard.queries, layoutIds) : dashboard.queries;
   const displayedQueries = visibleQueries;
 
-  return <VulnShell variant="dashboard" eyebrow="Organization-wide management" title="Shared query tiles"
+  return <Frame variant="dashboard" eyebrow="Organization-wide management" title="Shared query tiles"
     subtitle="Manage shared source connections, saved queries and organization-wide jobs. These results are not a customer report."
     actions={<div className="flex flex-wrap gap-2">
       <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || Boolean(layoutIds)} onClick={() => action("refresh", async () => {
         if (dashboard.canManage && anyConnected) {
-          await post("refresh"); setMessage("Refresh requested. Results will update here as queries finish.");
+          await post(companyId ? customerPath : "refresh"); setMessage("Refresh requested. Results will update here as queries finish.");
         }
         await reload();
       })}><RefreshCw size={16} className={busy === "refresh" ? "animate-spin" : ""} />Refresh</button>
@@ -176,19 +188,35 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
           <button type="button" className={primaryButtonClass} disabled={Boolean(busy)} onClick={saveLayout}>{busy === "reorder" ? "Saving layout…" : "Save layout"}</button>
         </> : <>
           <button type="button" className={ghostButtonClass} disabled={Boolean(busy) || dashboard.queries.length < 2 || Boolean(draft)} onClick={() => { setLayoutIds(dashboard.queries.map((query) => query.id)); setConnectionOpen(false); setDeleting(null); setMessage(""); setError(""); }}><LayoutGrid size={16} />Arrange tiles</button>
-          <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => setConnectionOpen((open) => !open)}><Settings2 size={16} />Connections</button>
-          <button type="button" className={ghostButtonClass} onClick={() => setTicketsOpen(open => !open)}>All patch tickets</button>
+          {!companyId && <><button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => setConnectionOpen((open) => !open)}><Settings2 size={16} />Connections</button>
+          <button type="button" className={ghostButtonClass} onClick={() => setTicketsOpen(open => !open)}>All patch tickets</button></>}
+          {companyId && !!dashboard.unassignedTiles?.length && <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={()=>setExistingOpen(value=>!value)}>Add existing tile</button>}
           <button type="button" className={primaryButtonClass} disabled={!anyConnected || Boolean(busy)} onClick={() => edit()}><Plus size={16} />Add tile</button>
         </>}
       </>}
     </div>}>
-    <Link href="/reporting" className={ghostButtonClass}>Back to customer reporting</Link>
+    {!companyId && <><Link href="/reporting" className={ghostButtonClass}>Back to customer reporting</Link>
     {dashboard.canManage && <div className="mt-6 space-y-6"><RiskDashboard/><PatchTicketTracker companyId="" sla={sla}/></div>}
     <div className="mt-8 mb-3"><h2 className="text-xl font-semibold text-white">Shared dashboard tiles</h2><p className="mt-1 text-sm text-zinc-400">Organization-wide saved Elasticsearch and CrowdStrike results. Only explicitly assigned tiles appear on customer reports. Elasticsearch retained imports and CrowdStrike Falcon are separate measures; each tile shows its own data and refresh time.</p></div>
-    <div className={styles.connections}>
+    </>}
+    {!companyId && <div className={styles.connections}>
       {[{ name: "CrowdStrike", connected: dashboard.crowdstrike?.connected }, { name: "Elasticsearch", connected: dashboard.connected }].map((source) => <span key={source.name} className={styles.connection}><span className={styles.dot} style={{ background: source.connected ? "#34d399" : "#71717a" }} />{source.name} · {source.connected ? "Configured" : "Not connected"}</span>)}
       <span className={styles.tileCount}>{displayedQueries.length} saved tiles · Shared dashboard</span>
     </div>
+    }
+    {companyId && <p className="text-sm text-zinc-300">Tiles added here are saved to the customer selected above. Queries use shared source connections and must return only this customer's data.</p>}
+    {companyId && existingOpen && <div className="space-y-3 rounded-xl border border-zinc-700 p-4">
+      <label className="block text-sm text-zinc-300">Existing unassigned tile
+        <select className={`${selectClass} mt-2 block`} value={existingId} onChange={event=>setExistingId(event.target.value)}>
+          <option value="">Choose a tile</option>{dashboard.unassignedTiles?.map(tile=><option key={tile.id} value={tile.id}>{tile.title} ({tile.source})</option>)}
+        </select>
+      </label>
+      <p className="text-sm text-zinc-300">Add this tile only if its query and saved results belong to the selected customer. Its query, results and history will be preserved.</p>
+      <button className={primaryButtonClass} disabled={!existingId || Boolean(busy)} onClick={()=>action("assign",async()=>{
+        await post(customerPath,{action:"assign",id:existingId}); dashboardVersion.current++; await reload();
+        setExistingId("");setExistingOpen(false);setMessage("Existing tile saved to this customer. Results and history preserved.");
+      })}>Save existing tile to this customer</button>
+    </div>}
     {error && <p role="alert" className="rounded-xl border border-red-900 bg-red-950/20 p-4 text-sm text-red-300">{error}</p>}
     {loadError && !error && <p role="alert" className="rounded-xl border border-amber-900 bg-amber-950/20 p-4 text-sm text-amber-300">{loadError}</p>}
     {message && <p role="status" className="rounded-xl border border-emerald-900 bg-emerald-950/20 p-4 text-sm text-emerald-300">{message}</p>}
@@ -197,7 +225,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
     }}>Stop waiting for preview</button>}
     {!anyConnected && <div role="status" className="rounded-2xl border border-amber-600/30 bg-amber-950/20 p-4 text-sm text-amber-200">
       {dashboard.storageReady ? "Awaiting the data connection. No live results are available yet." : "Dashboard storage is not available yet."}
-      <p className="mt-2">{dashboard.canManage ? "Open Connection to connect CrowdStrike or Elasticsearch." : "Sign in as an organization member to connect a source and manage saved queries."}</p>
+      <p className="mt-2">{companyId ? "Manage source connections in shared tile management." : dashboard.canManage ? "Open Connection to connect CrowdStrike or Elasticsearch." : "Sign in as an organization member to connect a source and manage saved queries."}</p>
     </div>}
 
     {dashboard.canManage && connectionOpen && <PanelCard eyebrow="Connections" description="Choose the source to connect. Credentials stay encrypted on the server.">
@@ -246,19 +274,19 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
 
     {dashboard.canManage && draft && <PanelCard eyebrow={draft.id ? "Edit tile" : "Add tile"} description="Add the tile immediately. Its results load on the dashboard. Preview is optional.">
       <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void action("save", async () => {
-        const response = await post("queries", draft);
+        const response = await post(scopedPath("queries"), companyId ? {...draft,companyId} : draft);
         if (!response.saved || !response.query?.id) throw new Error("The server did not confirm the saved tile. Your form has been kept; check the dashboard before retrying.");
         const tile: DashboardQuery = response.query;
         dashboardVersion.current++;
         setDashboard((current) => ({ ...current, queries: current.queries.some((query) => query.id === tile.id)
           ? current.queries.map((query) => query.id === tile.id ? tile : query) : [...current.queries, tile] }));
-        setDraft(null); setPreview(null); setMessage("Tile saved to the dashboard. Results load in the background.");
+        setDraft(null); setPreview(null); setMessage(companyId ? "Tile saved to this customer. Results load in the background." : "Tile saved to the dashboard. Results load in the background.");
       }); }}>
         <fieldset disabled={Boolean(busy)} className="space-y-4">
         <label className="block text-sm text-zinc-300">Source
           <select className={`${selectClass} mt-2 block`} value={draft.source ?? "elastic"} onChange={(event) => {
             const replacement = event.target.value === "crowdstrike" ? crowdStrikeDraft() : newDraft();
-            setDraft({ ...replacement, id: draft.id, title: draft.title }); setPreview(null);
+            setDraft({ ...replacement, id: draft.id, title: draft.title, companyId:draft.companyId }); setPreview(null);
           }}>
             <option value="elastic">Elasticsearch · ES|QL</option><option value="crowdstrike">CrowdStrike · FQL</option>
           </select>
@@ -379,7 +407,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
           <button className={primaryButtonClass} disabled={Boolean(busy) || !sourceConnected(draft.source) || (isChartDisplay(draft.display) && (!draft.chart?.category || !draft.chart?.value))}>{busy === "save" ? "Saving tile…" : draft.id ? "Save changes" : "Add to dashboard"}</button>
           <button type="button" className={ghostButtonClass} disabled={Boolean(busy)} onClick={() => { setDraft(null); setPreview(null); }}>Cancel</button>
         </div>
-        {preview && <div className="border-t border-zinc-800 pt-4"><p className="mb-3 text-sm text-zinc-400">Preview</p><Results result={preview} display={draft.display} chart={draft.chart} preparePatch={dashboard.canManage && dashboard.crowdstrike?.connected} companyId={companyId} />{preview.note && <p className="mt-3 text-xs text-zinc-500">{preview.note}</p>}</div>}
+        {preview && <div className="border-t border-zinc-800 pt-4"><p className="mb-3 text-sm text-zinc-400">Preview</p><Results result={preview} display={draft.display} chart={draft.chart} preparePatch={dashboard.canManage && draft.source === "crowdstrike" && sourceConnected("crowdstrike")} companyId={companyId || draft.companyId || ""} />{preview.note && <p className="mt-3 text-xs text-zinc-500">{preview.note}</p>}</div>}
         </fieldset>
       </form>
     </PanelCard>}
@@ -411,7 +439,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
         <div className={styles.tileActions}>
           {query.result && <button type="button" className={ghostButtonClass} onClick={() => {
             const url = URL.createObjectURL(new Blob([dashboardCsv(query.result!)], { type: "text/csv;charset=utf-8" }));
-            const link = document.createElement("a"); link.href = url; link.download = `${query.title.replace(/[^a-z0-9-]/gi, "-").slice(0, 80) || "dashboard-tile"}.csv`;
+            const link = document.createElement("a"); link.href = url; link.download = `${companyId ? `${companyId}-` : ""}${query.title.replace(/[^a-z0-9-]/gi, "-").slice(0, 80) || "dashboard-tile"}.csv`;
             link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
           }}><Download size={14} />CSV</button>}
           {dashboard.canManage && !layoutIds && <>
@@ -422,10 +450,10 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
       </header>
       <div className={styles.tileContent}>
         {deleting === query.id && <div role="alert" className="mb-4 rounded-xl border border-red-900 p-4 text-sm text-zinc-300">
-          <p>Delete this shared dashboard tile and its saved history? Source findings are unaffected.</p>
+          <p>Delete this tile and its saved history? Source findings are unaffected.</p>
           <div className="mt-3 flex gap-2">
             <button type="button" className={primaryButtonClass} disabled={Boolean(busy)} onClick={() => action("delete", async () => {
-              const data = await dashboardRequest(`queries/${encodeURIComponent(query.id)}`, { method: "DELETE" });
+              const data = await dashboardRequest(scopedPath(`queries/${encodeURIComponent(query.id)}`), { method: "DELETE" });
               if (!data.deleted) throw new Error("The server did not confirm deletion. Check the dashboard before retrying.");
               dashboardVersion.current++;
               setDashboard((current) => ({ ...current, queries: current.queries.filter((tile) => tile.id !== query.id) }));
@@ -437,7 +465,7 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
         </div>}
         {query.error && <p className="mb-4 text-sm text-amber-300">{query.error} {query.result ? "Showing the last successful result." : "No successful result yet."}</p>}
         {stale && !query.error && <p className="mb-4 text-sm text-amber-300">These results are older than two refresh intervals.</p>}
-        {query.result ? <Results result={query.result} display={query.display} chart={query.chart} preparePatch={dashboard.canManage && dashboard.crowdstrike?.connected} companyId={companyId} /> : !query.error && <p role="status" className="flex items-center gap-2 py-5 text-zinc-400"><RefreshCw size={16} className="animate-spin" />Loading results in the background…</p>}
+        {query.result ? <Results result={query.result} display={query.display} chart={query.chart} preparePatch={dashboard.canManage && query.source === "crowdstrike" && dashboard.crowdstrike?.connected} companyId={companyId || query.companyId || ""} /> : !query.error && <p role="status" className="flex items-center gap-2 py-5 text-zinc-400"><RefreshCw size={16} className="animate-spin" />Loading results in the background…</p>}
         {(query.description || query.result?.note || (query.id === "asset-coverage" && query.source !== "crowdstrike")) && <details className={styles.resultDetails}>
           <summary>Result details</summary>
           {query.description && <p>{query.description}</p>}
@@ -450,5 +478,5 @@ export default function ElasticQueryDashboard({ initial }: { initial: ElasticDas
     })}
     </div>
 
-  </VulnShell>;
+  </Frame>;
 }

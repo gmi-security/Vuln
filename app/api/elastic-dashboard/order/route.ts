@@ -5,7 +5,7 @@ export const dynamic = "force-dynamic";
 export async function POST(request: Request) {
   try {
     const { actor } = await dashboardAccess(request, true);
-    await reorderDashboardTiles(await dashboardBody(request), actor);
+    await reorderDashboardTiles(await dashboardBody(request), actor, new URL(request.url).searchParams.get("companyId") || undefined);
     return dashboardJson({ saved: true });
   } catch (error) { return dashboardFailure(error); }
 }

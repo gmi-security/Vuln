@@ -64,3 +64,11 @@ test('disconnected or unavailable sources never turn into fallback global tiles'
   const unavailable=directSourcesForCustomer('CO-147284',{...dashboard,storageReady:false},'cve-count');
   assert.equal(unavailable.storageReady,false);assert.deepEqual(unavailable.queries,[]);
 });
+
+
+test('database assignments work without environment configuration and override legacy mappings',()=>{
+  const assigned={...dashboard,queries:[{...dashboard.queries[0],companyId:'CO-FOOTPRINT'},{...dashboard.queries[1],companyId:null}]};
+  assert.deepEqual(directSourcesForCustomer('CO-FOOTPRINT',assigned).queries.map(q=>q.id),['cve-count']);
+  assert.deepEqual(directSourcesForCustomer('CO-147284',assigned,'cve-count,falcon-open').queries,[]);
+  assert.deepEqual(directSourcesForCustomer('',assigned).queries,[]);
+});
