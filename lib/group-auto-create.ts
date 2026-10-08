@@ -5,41 +5,45 @@ import { elasticVulnEnabled } from "./elastic-vuln-server";
 import { DashboardError } from "./elastic-dashboard";
 import { ATLAS_REPORTING_COMPANY_ID } from "./reporting-direct-sources";
 import { cwPrioritiesBySort, type CWOption } from "./connectwise-client";
-import { targetPriorityFor } from "./group-ticket-priority";
+import { targetPriorityForSwath } from "./group-ticket-priority";
+import { riskScoringDatabase } from "./risk-scoring-store";
 
-// Critical/High severity remediations, OR any stored-findings (scanner-
-// sourced) remediation touching a real-risk-critical (KEV-listed, actively-
-// exploited, or otherwise >= 80 composite score -- see lib/threat.ts's
-// riskPriority buckets) finding regardless of raw CVSS severity, skip the
-// human review queue and go straight to a ConnectWise ticket -- always
-// through the consolidated group format, never the single-CVE path. This
-// only fires for a customer once a human has manually created at least one
-// ticket for them: that's what teaches patch_customer_routing which
-// ConnectWise company/board/team is correct (see the routing-learning step
-// in runCreation, patch-group-ticket-store.ts). No mapping yet means no
-// guess -- the draft is left for a human, same as before. Anything below
-// both thresholds is never touched here.
+// A remediation only skips the human review queue and goes straight to a
+// ConnectWise ticket once it has an actual finding_risk row -- i.e. it has
+// been through risk-refresh-scheduler's CISA KEV/EPSS/MISP/OpenCTI/IntelOwl
+// enrichment pass and real-risk scoring (lib/finding-risk-compute.ts), not
+// just CrowdStrike's own raw CVSS severity. This used to gate on
+// worst_severity IN ('Critical','High') alone -- CrowdStrike assigns that
+// the moment a CVE is discovered, before enrichment has ever run on it, so
+// a brand-new, never-assessed Critical-by-CVSS finding would auto-create a
+// real ConnectWise ticket with no KEV/EPSS/threat-intel signal behind it at
+// all. Gating on finding_risk's effective_swath instead means: no row yet
+// (enrichment hasn't caught up for this tenant/CVE) -> leave it for a
+// human, same as an unmapped customer always has been -- "no data yet"
+// means no guess, not a default yes.
 //
-// The risk-score trigger is deliberately restricted to stored-findings:
-// max_risk is populated from two incompatible scales depending on source --
-// Finding.realRisk (lib/threat.ts's bounded 0-100 multiplicative score, what
-// RISK_AUTO_CREATE_THRESHOLD is actually calibrated against) for
-// stored-findings, but CrowdStrike-sourced groups carry an unrelated,
-// uncapped ADDITIVE score (lib/crowdstrike-dashboard.ts's
-// vulnerabilityRiskFromFields, max ~115) that crosses 80 far more easily --
-// a realistic High-severity (not Critical) KEV-listed finding with CVSS 7.2
-// scores ~84 on that scale alone. Applying the same threshold to it would
-// auto-create and Critical-prioritize tickets well below the intended bar
-// for the one real customer this runs against. Fix the CrowdStrike score's
-// own calibration (or compute a real computeRealRisk-equivalent for it)
-// before ever including it here.
+// This also fixes the two-incompatible-scales problem the old max_risk
+// gate had: CrowdStrike-sourced groups and stored-findings-sourced groups
+// used to be scored on different, non-comparable scales (max_risk was
+// Finding.realRisk's bounded 0-100 score for one and an unrelated uncapped
+// additive score for the other), so only stored-findings could safely use
+// the risk-based path. finding_risk's effective_swath (lib/risk-scoring.ts)
+// is the one composite scale every source already gets scored on by the
+// same risk-refresh pass, so this gate -- and the resulting ticket
+// priority below -- now applies identically regardless of source.
+//
+// This only fires for a customer once a human has manually created at
+// least one ticket for them: that's what teaches patch_customer_routing
+// which ConnectWise company/board/team is correct (see the
+// routing-learning step in runCreation, patch-group-ticket-store.ts).
 const ACTOR = "auto-create";
-// Matches lib/threat.ts's Critical riskPriority bucket exactly -- a group
-// whose worst CVSS severity alone reads Medium/Low can still land here if
-// one of its findings is KEV-listed or actively exploited on a
-// critical/exposed asset, which is exactly the case raw severity misses.
-// Only meaningful for stored-findings rows -- see the comment above.
-const RISK_AUTO_CREATE_THRESHOLD = 80;
+// Swath 1-2: the two most urgent RBVM tiers (effective_swath>=800 or >=600
+// composite score -- see risk-scoring.ts's DEFAULT_SWATH_THRESHOLDS).
+// calculateSwath already folds CISA KEV / active-exploitation / ransomware
+// association into an emergency elevation even when the raw composite score
+// alone wouldn't clear threshold, so no separate KEV/CVSS check is needed
+// on top of this -- Swath already is that check.
+const ELIGIBLE_SWATH = 2;
 // Pilot scope: only this customer, by explicit request, while auto-create is
 // validated. Expand PILOT_COMPANY_IDS once it's proven out.
 const PILOT_COMPANY_IDS = new Set([ATLAS_REPORTING_COMPANY_ID]);
@@ -62,7 +66,7 @@ const PILOT_COMPANY_IDS = new Set([ATLAS_REPORTING_COMPANY_ID]);
 // new ticket, so they keep running normally.
 export const ATLAS_AUTO_CREATE_PAUSED = true;
 
-type Counts = { checked: number; created: number; errors: number };
+type Counts = { checked: number; created: number; errors: number; notYetEnriched: number };
 
 // Ticket creation is async (runCreation runs in the background); this polls
 // the draft's own row for a confirmed ticket_id before setting priority,
@@ -79,27 +83,55 @@ async function waitForTicketId(id: string, timeoutMs = 60_000): Promise<number |
   return null;
 }
 
+// finding_risk is keyed by (tenant_key=our own companyId, cve, host_key) --
+// NOT by CrowdStrike's own tenant CID, which is what this table's own
+// tenant_id column holds for CrowdStrike-sourced groups (see the comment on
+// cidToCompany in lib/store.ts: "no stored CrowdStrike cid -> companyId
+// mapping anywhere in this app -- finding_risk's tenant_key is already our
+// own companyId, not CrowdStrike's cid"). Joining on tenant_id here would
+// silently match zero rows for every CrowdStrike-sourced group and block
+// them forever -- app_company_id is the only correct key for this lookup,
+// for either source, since stored-findings groups already use companyId as
+// their tenant_id too.
+//
+// Null means "no finding_risk row yet for any of these CVEs" -- enrichment
+// hasn't caught up, not "definitely low risk" -- the caller must treat that
+// as ineligible, the same as an unmapped customer.
+async function enrichedSwathFor(appCompanyId: string, cves: string[]): Promise<number | null> {
+  if (!cves?.length) return null;
+  const riskDb = await riskScoringDatabase();
+  const row = (await riskDb.query(
+    `SELECT min(effective_swath) AS swath FROM finding_risk
+     WHERE tenant_key=$1 AND cve = ANY($2::text[]) AND source_open AND verification_status != 'verified_remediated'`,
+    [appCompanyId, cves],
+  )).rows[0] as { swath: number | null };
+  return row.swath;
+}
+
 export async function autoCreateHighSeverityTickets(): Promise<Counts> {
   const saved = await savedConnection().catch(() => null);
-  if (!saved) return { checked: 0, created: 0, errors: 0 };
+  if (!saved) return { checked: 0, created: 0, errors: 0, notYetEnriched: 0 };
   const db = await patchTicketDatabase();
   // Only the newest pending draft per remediation+tenant(+customer) -- the
   // same ranking group-draft-dedup.ts uses to decide what's stale. Without
   // this, a slower dedup sweep tick could still be racing to dismiss an
-  // older duplicate at the same moment this auto-creates it.
+  // older duplicate at the same moment this auto-creates it. Scoped to the
+  // pilot customer(s) in SQL now (previously filtered in JS below) so a
+  // tenant outside the pilot never even gets pulled into app code --
+  // whether a candidate is actually enrichment-eligible is decided per-row
+  // further down, since that requires a lookup against a different database.
   const rows = (await db.query(`
     WITH ranked AS (
-      SELECT id, packet->>'appCompanyId' AS app_company_id, worst_severity, max_risk,
-        packet->>'source' AS source, ROW_NUMBER() OVER (
+      SELECT id, cves, packet->>'appCompanyId' AS app_company_id,
+        ROW_NUMBER() OVER (
         PARTITION BY remediation_id, tenant_id, packet->>'appCompanyId' ORDER BY prepared_at DESC
       ) AS rn
       FROM patch_group_ticket_requests
-      WHERE state='prepared' AND review_state='pending'
-        AND (worst_severity IN ('Critical','High') OR (max_risk >= $1 AND packet->>'source'='stored-findings'))
+      WHERE state='prepared' AND review_state='pending' AND packet->>'appCompanyId' = ANY($1::text[])
     )
-    SELECT id, app_company_id, worst_severity, max_risk, source FROM ranked WHERE rn = 1
-  `, [RISK_AUTO_CREATE_THRESHOLD])).rows as { id: string; app_company_id: string | null; worst_severity: string | null; max_risk: number | null; source: string | null }[];
-  if (!rows.length) return { checked: 0, created: 0, errors: 0 };
+    SELECT id, cves, app_company_id FROM ranked WHERE rn = 1
+  `, [Array.from(PILOT_COMPANY_IDS)])).rows as { id: string; cves: string[]; app_company_id: string | null }[];
+  if (!rows.length) return { checked: 0, created: 0, errors: 0, notYetEnriched: 0 };
   const routings = (await db.query("SELECT app_company_id, company_id, board_id, team_id FROM patch_customer_routing"))
     .rows as { app_company_id: string; company_id: number; board_id: number; team_id: number | null }[];
   const routingByCompany = new Map(routings.map((r) => [r.app_company_id, r]));
@@ -116,11 +148,13 @@ export async function autoCreateHighSeverityTickets(): Promise<Counts> {
   } catch (err) {
     prioritiesFetchError = err instanceof Error ? err.message : String(err);
   }
-  let created = 0, errors = 0;
+  let created = 0, errors = 0, notYetEnriched = 0;
   await runWithConcurrency(rows, 3, async (row) => {
-    if (!row.app_company_id || !PILOT_COMPANY_IDS.has(row.app_company_id)) return; // outside the pilot scope
+    if (!row.app_company_id || !PILOT_COMPANY_IDS.has(row.app_company_id)) return; // defensive; SQL above already scopes to the pilot
     const routing = routingByCompany.get(row.app_company_id);
     if (!routing) return; // no known-good routing for this customer yet -- leave it for a human
+    const swath = await enrichedSwathFor(row.app_company_id, row.cves).catch(() => null);
+    if (swath == null || swath > ELIGIBLE_SWATH) { if (swath == null) notYetEnriched++; return; } // not enriched yet, or enriched but not urgent -- leave it for a human
     try {
       await reviewGroupTicket(row.id, "approve", ACTOR);
       const read = await readGroupTicket(row.id, true);
@@ -131,21 +165,12 @@ export async function autoCreateHighSeverityTickets(): Promise<Counts> {
       }, ACTOR);
       created++;
       // The ticket should assert its own severity immediately, not wait
-      // days for SLA escalation to notice. Critical -> the top priority;
-      // High -> the next one down. A stored-findings row whose raw CVSS
-      // severity reads Medium or lower but whose max_risk crosses the
-      // threshold is treated as Critical here too -- a KEV-listed or
-      // actively-exploited finding on a critical/exposed asset deserves the
-      // top slot regardless of what its CVSS alone says. Gated to
-      // stored-findings for the same reason the SQL gate above is: a
-      // CrowdStrike-sourced row's max_risk is on a different, uncapped scale
-      // that crosses this threshold far more easily and would otherwise
-      // over-prioritize merely-High-severity CrowdStrike tickets. Never lets
-      // a priority-setting problem undo an otherwise-successful ticket
-      // creation.
-      const riskQualifies = row.source === "stored-findings" && (row.max_risk ?? 0) >= RISK_AUTO_CREATE_THRESHOLD;
-      const effectiveSeverity: "Critical" | "High" = row.worst_severity === "Critical" || riskQualifies ? "Critical" : "High";
-      const target = targetPriorityFor(effectiveSeverity, priorities);
+      // days for SLA escalation to notice -- Swath 1 (the most urgent RBVM
+      // tier, the same one driving the gate above) gets the top priority,
+      // Swath 2 the next one down. Never lets a priority-setting problem
+      // undo an otherwise-successful ticket creation.
+      const effectiveSeverity: "Critical" | "High" = swath === 1 ? "Critical" : "High";
+      const target = targetPriorityForSwath(swath as 1 | 2, priorities);
       if (target) {
         const ticketId = await waitForTicketId(row.id);
         if (ticketId) {
@@ -172,7 +197,8 @@ export async function autoCreateHighSeverityTickets(): Promise<Counts> {
       errors++; // one draft failing (routing went stale, connection changed) must not block the rest
     }
   });
-  return { checked: rows.length, created, errors };
+  console.error(`[group-auto-create] checked=${rows.length} created=${created} notYetEnriched=${notYetEnriched} errors=${errors}`);
+  return { checked: rows.length, created, errors, notYetEnriched };
 }
 
 const runtime = globalThis as typeof globalThis & { __groupAutoCreate?: { timer?: ReturnType<typeof setInterval>; working?: Promise<void> } };
