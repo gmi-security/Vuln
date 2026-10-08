@@ -83,6 +83,13 @@ function Burndown({ data }: { data: { date: string; open: number; resolved: numb
 
 export default function VulnSlaPage() {
   const [data, setData] = useState<SlaResult | null>(null);
+  // Drill-down target for the per-client table below -- selecting a client
+  // doesn't refetch anything (the org-wide /api/sla response already
+  // carries every client's row), it just reveals that client's section.
+  // This is the first step toward relocating the ConnectWise ticket-cutting
+  // review queue here: it'll mount in that conditional section once it's
+  // moved from /reporting.
+  const [companyId, setCompanyId] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -98,6 +105,7 @@ export default function VulnSlaPage() {
   }, [load]);
 
   const o = data?.overall;
+  const selected = data?.clients.find((c) => c.companyId === companyId) ?? null;
 
   return (
     <VulnShell
@@ -164,7 +172,10 @@ export default function VulnSlaPage() {
       </div>
 
       <div className="rounded-2xl border border-[rgba(179,14,20,0.14)] bg-[#050505] p-5">
-        <div className="mb-4 text-sm font-semibold text-white">Per-client SLA health</div>
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <div className="text-sm font-semibold text-white">Per-client SLA health</div>
+          <div className="text-xs text-zinc-500">Click a client to drill in</div>
+        </div>
         <div className="overflow-x-auto">
           <div className="min-w-[720px]">
             <div className="grid grid-cols-[1.4fr_120px_1fr_90px_90px_90px] gap-3 border-b border-zinc-900 pb-2 text-xs uppercase tracking-[0.16em] text-zinc-500">
@@ -176,7 +187,13 @@ export default function VulnSlaPage() {
               <div className="text-right">Resolved 30d</div>
             </div>
             {(data?.clients ?? []).map((c) => (
-              <div key={c.companyId} className="relative grid grid-cols-[1.4fr_120px_1fr_90px_90px_90px] items-center gap-3 border-b border-zinc-900/60 py-3 pl-3 text-sm">
+              <button
+                key={c.companyId}
+                type="button"
+                aria-pressed={c.companyId === companyId}
+                onClick={() => setCompanyId((current) => (current === c.companyId ? "" : c.companyId))}
+                className={`relative grid w-full grid-cols-[1.4fr_120px_1fr_90px_90px_90px] items-center gap-3 border-b border-zinc-900/60 py-3 pl-3 text-left text-sm transition-colors hover:bg-zinc-900/40 ${c.companyId === companyId ? "bg-[rgba(179,14,20,0.08)]" : ""}`}
+              >
                 <div
                   className="absolute inset-y-0 left-0 w-[3px]"
                   style={{ background: complianceColor(c.slaCompliance) }}
@@ -199,7 +216,7 @@ export default function VulnSlaPage() {
                 <div className={`text-right font-semibold ${c.breached ? "text-[#ff4d57]" : "text-zinc-500"}`}>{c.breached || "—"}</div>
                 <div className="text-right text-zinc-300">{c.mttrDays === null ? "—" : `${c.mttrDays}d`}</div>
                 <div className="text-right text-zinc-300">{c.resolved30 || "—"}</div>
-              </div>
+              </button>
             ))}
             {data && data.clients.length === 0 ? (
               <div className="py-6 text-center text-sm text-zinc-500">No findings yet.</div>
@@ -207,6 +224,22 @@ export default function VulnSlaPage() {
           </div>
         </div>
       </div>
+
+      {selected && (
+        <section aria-label="Client remediation detail" className="rounded-2xl border border-[rgba(179,14,20,0.22)] bg-[#080808] p-5 sm:p-7">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="text-xs uppercase tracking-[0.25em] text-red-500">Remediation</p>
+              <h2 className="mt-2 text-xl font-semibold text-white">{selected.companyName}</h2>
+              <p className="mt-2 max-w-2xl text-sm text-zinc-400">
+                {selected.breached} breached · {selected.dueSoon} due soon · {selected.withinSla} within SLA.
+              </p>
+            </div>
+            <button type="button" className={ghostButtonClass} onClick={() => setCompanyId("")}>Close</button>
+          </div>
+          <p className="mt-5 text-sm text-zinc-500">The ConnectWise ticket review queue for this client will move here.</p>
+        </section>
+      )}
     </VulnShell>
   );
 }
