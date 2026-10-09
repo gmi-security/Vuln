@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { SourceTextModule, SyntheticModule } from 'node:vm';
 import test from 'node:test';
@@ -7,19 +7,22 @@ import ts from 'typescript';
 
 async function loadModule(entry, overrides={}) {
   const cache=new Map();
-  async function load(path) {
+  function load(path) {
     path=resolve(path);if(cache.has(path))return cache.get(path);
-    const source=await readFile(path,'utf8');if(cache.has(path))return cache.get(path);
+    const source=readFileSync(path,'utf8');
     const mod=new SourceTextModule(ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText,{identifier:path});cache.set(path,mod);
-    await mod.link(async name=>{
-      if(overrides[name])return synthetic(overrides[name]);
-      if(name.startsWith('.'))return load(resolve(dirname(path),`${name}.ts`));
-      if(name.startsWith('@/'))return load(resolve(`${name.slice(2)}.ts`));
-      return synthetic(await import(name));
-    });return mod;
+    return mod;
   }
   function synthetic(values){return new SyntheticModule(Object.keys(values),function(){for(const key of Object.keys(values))this.setExport(key,values[key]);});}
-  const mod=await load(entry);await mod.evaluate();return mod.namespace;
+  // Link the graph once. Recursively linking each dependency can return a cached
+  // module while a sibling is still linking it, causing intermittent VM failures.
+  const mod=load(entry);
+  await mod.link(async(name,parent)=>{
+    if(overrides[name]){const key=`override:${name}`;if(!cache.has(key))cache.set(key,synthetic(overrides[name]));return cache.get(key);}
+    if(name.startsWith('.'))return load(resolve(dirname(parent.identifier),`${name}.ts`));
+    if(name.startsWith('@/'))return load(resolve(`${name.slice(2)}.ts`));
+    return synthetic(await import(name));
+  });await mod.evaluate();return mod.namespace;
 }
 const company={id:'CO-A',name:'Customer A'};
 const cve='CVE-2026-1234',when='2026-10-09T12:00:00Z';

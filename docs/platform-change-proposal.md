@@ -138,7 +138,8 @@ Acceptance requires customer isolation across shared CVEs; correct deduplication
 - Sixth local checkpoint: Connectors now has a read-only customer status view behind the existing disabled Vuln2.0 UI flag, with one reused customer selector, scoped navigation, explicit inactive review states and a separate link to unchanged shared tools. No registry mutation or activation endpoint was added. See the sixth checkpoint below.
 - Seventh local checkpoint: a versioned saved-source read contract and Defender adapter now return customer-scoped summary counts and paginated CVEs without hydration, source API calls or publication. Restored-source parity, import/prune concurrency, zero-versus-missing data and freshness were checked. The adapter has no production caller. See the seventh checkpoint below.
 - Eighth local checkpoint: the saved-source contract now supports completed CrowdStrike Spotlight imports, including source CVSS severity, suppression qualifiers, unknown inventory/revision evidence and verified generation counts where available. PostgreSQL fixture checks passed. A restored Atlas read hit the 15-second aggregate limit, so the raw reader is an offline reference implementation and is not suitable for page requests. See the eighth checkpoint below.
-- Next bounded step: build an explicit, disabled Spotlight summary projection that is produced once per completed source generation, with atomic publication, replay-safe generation keys and parity checks against the reference reader. Measure its storage and page latency on the private restore before wiring any caller. Define cross-source authority and deduplication comparisons before connecting either adapter to live reporting. Keep actual routing and workers on the legacy paths. Operator review/import wiring, activation policy, production index rollout, real ConnectWise test-destination confirmation, threat-evidence semantics and storage cutover remain separate release gates; do not grant new member configuration rights.
+- Ninth local checkpoint: a separate saved Spotlight summary builder and reader now pass full restored-source parity against the independent batch audit, including all CVE rows. Building the retained Atlas generation took 85 seconds once; summary/page reads took 21–27 ms and the summary tables/indexes used 3.3 MiB. The slow whole-generation SQL reference remains unwired. No worker, page or production migration calls the new builder/reader. See the ninth checkpoint below.
+- Next bounded step: add disabled, dedicated summary-worker execution with durable job status, bounded retries and restart/replay checks against completed imports. Establish summary retention before enabling recurring builds. Then validate gated customer reads and cross-source authority/deduplication before routing live reporting. Keep actual routing and workers on the legacy paths. Operator review/import wiring, activation policy, production index rollout, real ConnectWise test-destination confirmation, threat-evidence semantics and storage cutover remain separate release gates; do not grant new member configuration rights.
 - Develop on `Vuln2.0` in bounded commits and deliver UI/backend changes through separately reviewed releases, without a separate staging environment. Keep the six-section layout and shared panel in this combined plan; do not combine a visual rollout with an irreversible storage cutover.
 - Review reference: the standalone file `GMI Vuln Ticket Workflow.html` accompanies the readable proposal in Downloads. It is a workflow demonstration, not an implementation dependency.
 
@@ -348,6 +349,49 @@ Its CVSS distribution was 81,724 critical / 1,516,955 high / 491,992 medium / 21
 The final SQL implementation extracts each raw record through `jsonb_to_record` and groups explicit device/CVE identities instead of repeated composite `COUNT(DISTINCT ...)` expressions. It passes the real PostgreSQL fixtures, but the full-generation aggregate still exceeded the diagnostic 120-second cap. Full aggregate-to-batch parity therefore remains **unverified**. Do not promote this reader or infer page-readiness from the successful fixture tests. Use the batched baseline to validate the next summary-builder checkpoint, and retain the production readers until that performance and parity gate passes.
 
 The private fixture database was removed by the successful test run, and the recovery PostgreSQL cluster was stopped after the final audit. No source tables, indexes, imports, saved tiles, permissions, production workers or live routes were changed. This checkpoint is local to `Vuln2.0`; no push or deployment occurred.
+
+### Ninth checkpoint: saved Spotlight summaries with full-source parity
+
+The new path computes a summary once for each completed source generation and serves small stored results. It does not use the slow full-generation SQL aggregate from checkpoint eight. `lib/spotlight-summary-model.ts` implements bounded accumulation, `lib/spotlight-summary-store.ts` implements build/publication/read services, and `docs/sql/spotlight-source-summaries.sql` is an explicit additive migration. There is no schema initializer, singleton, API route, scheduler or production caller. The service requires an injected application database pool; customer authorization must remain with the eventual caller.
+
+| New table | Purpose |
+| --- | --- |
+| `spotlight_summary_generations` | Immutable completed summaries keyed by customer, original import ID and model version. Retains original import completion time, source-row count, count-verification evidence, build time and builder identity. |
+| `spotlight_summary_cves` | One small row per CVE with source CVSS severity, nullable CVSS, affected-device count and source-instance count. Indexed for severity, affected devices and deterministic CVE ordering. |
+| `spotlight_summary_current` | One pointer per customer to a fully published summary. Foreign keys prevent pointers or CVE rows without their summary header. |
+
+Original Spotlight records, import pointers, credentials and ticket records are not rewritten. Summaries have no cascading foreign key to source imports, so pruning an older source generation cannot remove a retained summary. This is useful history, but summary retention still needs an explicit policy before scheduled production builds are enabled. Rollback SQL removes only these new tables after consumers are switched off.
+
+**Build and publication behavior:** a database advisory lock permits one summary build at a time across workers. The builder pins one complete source generation in a read-only repeatable-read transaction, checks source ownership and expected/hydrated counts where recorded, and reads 2,000 narrow records per batch. It counts all retained records, including explicit exclusions, and verifies the final scanned count. Raw descriptions, hostnames, remediation payloads and credentials are not loaded or copied. Device/CVE sets live only during the build; they are not persisted as another full finding store.
+
+The builder uses a five-minute deadline checked between batches, 15-second statement limits, and explicit caps of five million source rows, three million distinct device/CVE pairs, 100,000 devices and 100,000 CVEs. Exceeding a cap fails the build instead of truncating totals. A dedicated worker, rather than a page request or existing web-process hydration, is required before operational wiring; the injected pool needs at least two connections.
+
+After scanning, a short write transaction locks the customer's source pointer and rechecks it. If another import completed during the build, the older build is discarded as superseded. Otherwise the summary header, all CVE rows and current pointer commit together. A failed insert or interrupted transaction leaves the previous summary visible. Replaying the current generation/model version returns the saved result without another raw scan. No new source generation is published by this code.
+
+**Read behavior:** the reader accesses only import metadata and the three summary tables. It validates the small saved CVE aggregates against the stored totals and returns at most 100 CVEs. It never selects from `spotlight_import_records`. Before the first build it returns `summary-pending` with null totals. When a newer source import exists, it serves the previous complete summary with an explicit pending projection state and the original observation time. A completed empty generation legitimately replaces counts with zero. Failed newer import attempts, unknown inventory/revision information and suppression/exclusion qualifiers stay visible. Inconsistent saved totals fail closed.
+
+**Measured on the private October 9 restore:**
+
+| Measurement | Result |
+| --- | --- |
+| Retained Atlas records scanned | 2,119,658 |
+| Eligible open CVE instances / device-CVE pairs | 2,112,296 / 2,094,134 |
+| Unique CVEs / affected devices | 11,710 / 1,439 |
+| Count and row parity | All totals, both severity distributions and all 11,710 saved CVE rows exactly matched the separately implemented batch audit. First, middle, final and beyond-end pagination also matched. |
+| One-time build | 84,957 ms |
+| Summary plus first 100 CVEs | 24.5, 22.8, 26.6, 20.9 and 21.6 ms in repeated reads after building |
+| Replay of the same import | 20 ms; no raw-record read or duplicate summary rows |
+| CVE table / indexes | 1,327,104 / 2,080,768 bytes |
+| All three summary tables and indexes | 3,473,408 bytes, approximately 3.31 MiB |
+| Standalone build-and-validation process peak | Approximately 350 MiB RSS; not a web-process memory measurement |
+
+These are restored-copy measurements, not a production latency guarantee or a live Falcon accuracy audit. The saved-summary path now has complete parity against the independent retained-source baseline; the earlier monolithic SQL reference still lacks full-data parity and remains unused. The source itself can contain incomplete assessment coverage, stale imports, or unknown inventory; those limitations are not solved by faster reads.
+
+If an Atlas-sized summary were retained once daily at this measured size, 365 generations would be roughly 1.18 GiB before backups, database bloat and growth in CVEs. This is a sizing illustration, not the chosen retention policy. No scheduled retention or deletion is implemented in this checkpoint.
+
+Validation: six accumulator unit tests and eight real PostgreSQL scenarios cover units, suppression, caps, corruption, missing versus empty data, explicit migration, replay, customer isolation, no raw page reads, worker serialization, failed-publication rollback, concurrent readers, source supersession and source pruning. The full 71-test customer/reporting/source suite and the production build passed. An intermittent existing CVE test-loader race was fixed by linking its VM module graph once; no CVE application behavior changed. The standalone full-source validator created only the three summary tables in the private restored database, compared them to a private aggregate-only baseline, measured them and removed them afterward. Its synthetic fixture database was also removed, and the private recovery cluster was stopped.
+
+Remaining gates: durable job scheduling/status/retries, dedicated-worker resource allocation, retention, production migration approval, authorization wiring, UI treatment of pending summaries, published-platform lifecycle/risk comparisons and cross-source authority. Existing pages, saved tiles, source workers, permissions and production storage continue unchanged. This checkpoint is local to `Vuln2.0`; nothing was pushed or deployed.
 
 ## How the system works today
 

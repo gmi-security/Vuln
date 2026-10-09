@@ -2,7 +2,7 @@
 // Normal reader retains its 15s limit; this harness gives the aggregate 120s to
 // measure its full cost and independently checks it in 2,000-record batches.
 import assert from 'node:assert/strict';
-import { realpath } from 'node:fs/promises';
+import { realpath, writeFile } from 'node:fs/promises';
 import pg from 'pg';
 import { loadSpotlightSourceReader } from '../scripts/source-read-model-loader.mjs';
 const socket=await realpath(process.argv[2]||'.');
@@ -12,6 +12,7 @@ const pool=new pg.Pool({host:socket,port:55483,user:'codex',database:'recovery_a
 const create=await loadSpotlightSourceReader();
 const ranks=['UNKNOWN','NONE','LOW','MEDIUM','HIGH','CRITICAL'];
 const zeros=()=>Object.fromEntries(ranks.map(s=>[s,0]));
+const baselines=[];
 try {
   const check=(await pool.query("SELECT current_setting('data_directory') AS data,current_setting('listen_addresses') AS listen")).rows[0];
   assert.ok(check.data.startsWith('/home/codex/vuln-recovery/')&&!check.listen);
@@ -88,10 +89,17 @@ try {
         inventoryDevices:null,unknownSuppressionInstances:unknownSuppression,excludedSuppressedInstances:suppressed,excludedNonCveInstances:nonCve,
         severity:{sourceInstances:severity,uniqueCves:cveSeverity}};
       if(result) {assert.deepEqual(result.summary,summary);assert.deepEqual(result.cves.rows,cves.slice(0,100));}
+      baselines.push({companyId:company.tenant_key,runId:pointer.run_id,sourceRows:scanned,summary,cves});
       await client.query('COMMIT');
       console.log(JSON.stringify({phase:result?'parity-passed':'batch-baseline-only',company:company.tenant_key,scanned,summary,timings,
         batchAuditMs:Math.round(performance.now()-started),peakRssMiB:Math.round(process.resourceUsage().maxRSS/1024),
         normalReaderLimitSeconds:15,diagnosticOnlyLimitSeconds:120}));
     } catch(error) {await client.query('ROLLBACK').catch(()=>{});throw error;} finally {client.release();}
+  }
+  if(process.argv.includes('--save-baseline')) {
+    const directory=await realpath('.');
+    assert.ok(directory.startsWith('/home/codex/vuln-recovery/'));
+    await writeFile(`${directory}/spotlight-summary-baseline.json`,JSON.stringify(baselines),{mode:0o600});
+    console.log('Saved private aggregate baseline; no host identities or raw records exported.');
   }
 } finally {await pool.end();}

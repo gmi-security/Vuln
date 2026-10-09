@@ -37,6 +37,7 @@ export type CustomerSourceRead = {
   companyId: string;
   source: "defender" | "crowdstrike";
   scope: "saved-source-generation";
+  projection?: { state: "ready" | "pending"; currentImportId: string; builtAt: string | null; modelVersion: number };
   definition: {
     instanceUnit: "device-cve-software-version" | "spotlight-finding";
     severityBasis: "source-cvss";
@@ -45,7 +46,7 @@ export type CustomerSourceRead = {
   // No credentials, tenant identifiers, vendor payloads or import error messages.
   latestAttempt: { status: "queued" | "running" | "succeeded" | "failed"; startedAt: string; finishedAt: string | null } | null;
 } & ({
-  state: "not-installed" | "not-configured" | "no-completed-import" | "inconsistent";
+  state: "not-installed" | "not-configured" | "no-completed-import" | "summary-pending" | "inconsistent";
   generation: null;
   summary: null;
   cves: null;
