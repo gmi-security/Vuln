@@ -7,11 +7,14 @@ const socket=await realpath(process.argv[2]||'.');
 assert.ok(socket.startsWith('/home/codex/vuln-recovery/')&&socket.endsWith('/socket'));
 const options={host:socket,port:55483,user:'codex',connectionTimeoutMillis:5000,statement_timeout:15000,query_timeout:20000};
 const suffix=randomUUID().replaceAll('-',''),sourceName=`vuln2_shadow_source_test_${suffix}`,targetName=`vuln2_shadow_test_${suffix}`;
-const admin=new pg.Client({...options,database:'postgres'}),created=[];let source,target,restored,observer,checks=0;
+const admin=new pg.Client({...options,database:'postgres'}),created=[];let source,target,restored,observer,writer,checks=0;
 const ok=message=>{checks++;console.log(`PASS ${message}`);};
 const readValidation=process.argv.includes('--with-shadow-reads')?await import('./defender-shadow-read-validation.mjs'):null;
 const cveValidation=process.argv.includes('--with-shadow-cve')?await import('./defender-shadow-cve-validation.mjs'):null;
 const adapterValidation=process.argv.includes('--with-customer-cve')?await import('./shadow-customer-cve-validation.mjs'):null;
+const publicationValidation=process.argv.includes('--with-publication')?await import('./defender-shadow-publication-validation.mjs'):null;
+assert.ok(!publicationValidation||![readValidation,cveValidation,adapterValidation,process.argv.includes('--with-restored-defender')].some(Boolean),
+  'Run publication fixtures separately: earlier mutation-based readers do not model immutable generations');
 const run=randomUUID(),first={id:'F-1',companyId:'CO-A',cve:'CVE-2026-1234',asset:'asset-1',connector:'defender',
   title:'Fixture vulnerability',
   status:'Risk Accepted',assignee:'operator',firstSeen:'2026-01-01',lastSeen:'2026-09-01',resolvedAt:null,
@@ -26,9 +29,10 @@ try{
   source.on('error',()=>{});target.on('error',()=>{});
   await source.connect();await target.connect();await target.query(await readFile('docs/sql/defender-platform-shadow.sql','utf8'));
   if(cveValidation||adapterValidation)await target.query(await readFile('docs/sql/defender-shadow-cve.sql','utf8'));
-  if(readValidation){
+  if(readValidation||publicationValidation){
     await target.query(await readFile('docs/sql/defender-shadow-reads.sql','utf8'));
     observer=new pg.Client({...options,database:targetName});observer.on('error',()=>{});await observer.connect();
+    if(publicationValidation){writer=new pg.Client({...options,database:targetName});writer.on('error',()=>{});await writer.connect();}
   }
   await source.query(`CREATE TABLE vuln_store(key text PRIMARY KEY,data jsonb,updated_at timestamptz DEFAULT now());
     CREATE TABLE defender_connections(company_id text,revision int,current_run uuid);
@@ -107,6 +111,10 @@ try{
     console.log(JSON.stringify({phase:'customer-cve-adapter',...await adapterValidation.verifyCustomerCveAdapter(source,target,projection,[...fixtures,foreign])}));
     ok('disabled adapter composes scoped shadow findings, separate enrichment storage and existing ticket references/exclusions');
   }
+  if(publicationValidation){
+    console.log(JSON.stringify({phase:'shadow-publication',...await publicationValidation.verifyPublication(source,target,observer,writer,first)}));
+    ok('immutable generations, complete saved reads, atomic publication, rollback, concurrent readers/writers and append-only history');
+  }
   if(process.argv.includes('--with-restored-defender')){
     restored=new pg.Client({...options,database:'recovery_application'});restored.on('error',()=>{});await restored.connect();
     const result=await build(restored,target,'CO-230784',{afterBatch:({count,batches,elapsedMs})=>{if(batches<=3||batches%20===0)console.log(JSON.stringify({phase:'shadow-roundtrip',count,elapsedMs}));}});
@@ -142,7 +150,7 @@ try{
     location:error.stack?.split('\n').filter(line=>/^\s+at /.test(line)).slice(0,8)}));
   process.exitCode=1;
 } finally {
-  await restored?.end();await source?.end();await observer?.end();await target?.end();
+  await restored?.end();await source?.end();await writer?.end();await observer?.end();await target?.end();
   for(const name of created.reverse()){
     if(process.exitCode&&process.argv.includes('--keep-failed-shadow')&&name===targetName){console.log(`PRIVATE_FAILED_TARGET=${name}`);continue;}
     await admin.query(`DROP DATABASE ${name}`);
