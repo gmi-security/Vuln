@@ -37,8 +37,8 @@ function CustomerTiles({ companyId, canManage }: { companyId:string; canManage:b
   return <ElasticQueryDashboard initial={{...dashboard,canManage}} companyId={companyId}/>;
 }
 
-export default function CustomerReportingPage({ initialCompanyId="", canManage, layout="reporting", initialView="overview", savedSourceReads=false }: {
-  initialCompanyId?:string; canManage:boolean; layout?:"reporting" | "remediation"; initialView?:RemediationView; savedSourceReads?:boolean;
+export default function CustomerReportingPage({ initialCompanyId="", canManage, layout="reporting", initialView="overview", savedSourceReads=false, shadowCveReads=false }: {
+  initialCompanyId?:string; canManage:boolean; layout?:"reporting" | "remediation"; initialView?:RemediationView; savedSourceReads?:boolean; shadowCveReads?:boolean;
 }) {
   const [companyId,setCompanyId]=useState(initialCompanyId);
   const [view,setView]=useState<RemediationView>(initialView);
@@ -85,7 +85,7 @@ export default function CustomerReportingPage({ initialCompanyId="", canManage, 
     setView(next);
     window.history.pushState(null,"",remediationHref(companyId,next));
   }
-  return <CustomerCveProvider key={remediation ? companyId : "legacy"} enabled={remediation} companyId={companyId} canManage={canManage}><VulnShell variant="dashboard" eyebrow={remediation ? "Customer operations" : "Customer reporting"}
+  return <CustomerCveProvider key={remediation ? companyId : "legacy"} enabled={remediation} companyId={companyId} canManage={canManage} compareEnabled={remediation && shadowCveReads}><VulnShell variant="dashboard" eyebrow={remediation ? "Customer operations" : "Customer reporting"}
     title={remediation ? "Remediation" : "Vulnerability reporting"}
     subtitle={remediation ? "Understand exposure, prioritize fixes and track patch tickets for the selected customer." : "Select a customer to view its connected sources, findings and patch review."}
     navigation={remediation ? <nav aria-label="Main navigation" className="mb-7 flex flex-wrap items-center gap-5 text-sm text-zinc-300">

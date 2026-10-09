@@ -1,6 +1,6 @@
 # Disabled customer CVE adapter
 
-`lib/db/shadow-customer-cve.mjs` combines the verified Defender shadow reader with saved enrichment and ticket context. It has no application route, production caller, environment initializer, schema initializer, vendor client or ticket writer. It remains an offline comparison adapter.
+`lib/db/shadow-customer-cve.mjs` combines the verified Defender shadow reader with saved enrichment and ticket context. It is now consumed by the disabled authenticated comparison endpoint described in `shadow-cve-preview.md`. The adapter itself has no environment/schema initializer, vendor client or ticket writer. It has not been deployed or enabled in production.
 
 ## Connections and flow
 

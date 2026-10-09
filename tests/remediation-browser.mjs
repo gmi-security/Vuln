@@ -20,8 +20,11 @@ const reserve=createServer().listen(0,'127.0.0.1');await once(reserve,'listening
 const base=`http://127.0.0.1:${port}`,secret=randomBytes(32).toString('hex');
 const env=Object.fromEntries(Object.entries(process.env).filter(([key])=>/^(PATH|PATHEXT|SYSTEMROOT|WINDIR|TEMP|TMP|COMSPEC|USERPROFILE|APPDATA|LOCALAPPDATA)$/i.test(key)));
 const savedReads=process.env.VULN_TEST_SAVED_SOURCES==='true';
+const shadowReads=process.env.VULN_TEST_SHADOW_CVE==='true';
+let comparisonState='available',delayComparison=false,releaseComparison;
 Object.assign(env,{NODE_ENV:'production',NEXTAUTH_URL:base,NEXTAUTH_SECRET:secret,VULN_DISABLE_SCHEDULER:'true',ELASTIC_VULN_ENABLED:'true',VULN_REMEDIATION_UI:'true'});
 if(savedReads)env.VULN_SAVED_SOURCE_READS='true';
+if(shadowReads)env.VULN_SHADOW_CVE_READS='true';
 const server=spawn(process.execPath,['node_modules/next/dist/bin/next','start','-H','127.0.0.1','-p',String(port)],{env,windowsHide:true,stdio:['ignore','pipe','pipe']});
 let serverOutput='';server.stdout.on('data',v=>serverOutput+=v);server.stderr.on('data',v=>serverOutput+=v);
 let browser;
@@ -51,6 +54,11 @@ try{
   const context=await browser.newContext({viewport:{width:1440,height:1000},acceptDownloads:true});
   const token=await encode({secret,token:{name:'Fixture member',orgMember:true,orgRole:'MEMBER'},maxAge:300});
   await context.addCookies([{name:'next-auth.session-token',value:token,url:base}]);
+  const endpoint=base+'/api/elastic-dashboard/customer-cve-comparison?companyId=CO-TEST-A&cve=CVE-2026-1234';
+  assert.equal((await fetch(endpoint)).status,401);
+  const gated=await context.request.get(endpoint);assert.equal(gated.status(),shadowReads?409:404);
+  assert.match(gated.headers()['cache-control'],/no-store/);
+  assert.equal((await context.request.post(endpoint,{data:{}})).status(),405);
   const page=await context.newPage();page.setDefaultTimeout(10000);page.on('pageerror',error=>errors.push(error.message));
   await page.route('**/*',async route=>{
     const req=route.request(),url=new URL(req.url());
@@ -77,6 +85,16 @@ try{
     if(p==='risk/summary')return json({totalOpenRisk:1,criticalRiskCount:0,swath1Open:0,swath2Open:1,kevOpen:1,internetFacingCriticalRisk:0,verifiedRemediations:0,awaitingVerification:0});
     if(p==='risk/top')return json({rows:[{id:'risk-1',cve,companyId,hostname:'fixture-host',severity:'High',riskScore:720,effectiveSwath:2,calculatedSwath:2,reasons:[],cisaKev:true,epssProbability:0.9,verificationStatus:'detected',lastSeen:when}],total:1});
     if(p==='customer-threat-intelligence')return failIntel?json({error:'Fixture refresh unavailable'},503):json({companyId,available:true,total:1,rows:[{cve,cisa_kev:true,epss_probability:0.9,active_exploitation:true,active_exploitation_source:'MISP',active_exploitation_detail:'Synthetic retained signal',updated_at:when}]});
+    if(p==='customer-cve-comparison'){
+      assert.equal(req.method(),'GET');
+      const result={...detail(companyId),scope:'published-defender-cohort',enrichmentState:comparisonState==='no-enrichment'?'unavailable':'available',
+        enrichment:comparisonState==='no-enrichment'?null:{cvss_score:9.8,epss_probability:0.8,cisa_kev:true,active_exploitation:true,active_exploitation_source:'MISP',active_exploitation_detail:'Saved comparison signal',updated_at:when},
+        tickets:[{id:'comparison-reference',ticket_id:444,ticket_url:'https://tickets.invalid/444',state:'created',review_state:'approved',closed:false}],moreTickets:false};
+      if(delayComparison){delayComparison=false;await new Promise(resolve=>releaseComparison=resolve);}
+      if(companyId===companies[1].id)return json({error:'No verified Defender comparison is configured for this customer.'},409);
+      if(comparisonState==='not-ready')return json({error:'Verified version-2 customer projection required'},409);
+      return json(result);
+    }
     if(p==='customer-cve'){
       if(req.method()==='GET'){
         if(delayDetail && companyId===companies[0].id){delayDetail=false;await new Promise(r=>releaseDetail=r);}
@@ -98,6 +116,7 @@ try{
   const tile=page.getByRole('region',{name:'Fixture table',exact:true});
   const opener=tile.getByRole('button',{name:`View ${cve} details`});await opener.click();
   const panel=page.getByRole('dialog',{name:cve,exact:true});await panel.getByText(`${companies[0].id}-device`,{exact:true}).waitFor();
+  assert.equal(await panel.getByRole('button',{name:'Compare database read',exact:true}).count(),shadowReads?1:0);
   assert.equal(await panel.getByRole('button',{name:'Close',exact:true}).evaluate(e=>e===document.activeElement),true);
   await page.keyboard.press('Escape');await panel.waitFor({state:'hidden'});
   assert.equal(await opener.evaluate(e=>e===document.activeElement),true);
@@ -172,6 +191,46 @@ try{
     await page.screenshot({path:join(artifacts,'saved-source-mobile.png'),fullPage:true});
     await page.setViewportSize({width:1440,height:1000});await page.screenshot({path:join(artifacts,'saved-source-desktop.png'),fullPage:true});
     pass('saved result cards fit mobile and CVE rows scroll inside the panel');
+  }
+  if(shadowReads){
+    await page.setViewportSize({width:1440,height:1000});
+    await page.goto(base+`/remediation?companyId=${companies[0].id}&view=overview`);
+    const open=async()=>{await page.getByRole('region',{name:'Fixture table',exact:true}).getByRole('button',{name:`View ${cve} details`,exact:true}).click();await panel.getByRole('button',{name:'Prepare patch request',exact:true}).waitFor();};
+    await open();const writes=calls.filter(call=>call.method==='POST').length;
+    await panel.getByRole('button',{name:'Compare database read',exact:true}).click();
+    await panel.getByRole('link',{name:'Ticket #444',exact:true}).waitFor();
+    assert.match(await panel.getByRole('note').innerText(),/Defender findings only/);
+    assert.match(await panel.innerText(),/MISP.*Saved comparison signal/);
+    assert.equal(await panel.getByRole('button',{name:/Prepare patch request|Download host CSV|Create ticket/}).count(),0);
+    pass('comparison shows scoped evidence, threat enrichment and saved ticket links without write controls');
+    comparisonState='no-enrichment';await panel.getByRole('button',{name:'Return to current data'}).click();
+    await panel.getByRole('button',{name:'Compare database read'}).click();
+    await panel.getByText('Threat enrichment storage is unavailable.',{exact:true}).waitFor();
+    comparisonState='not-ready';await panel.getByRole('button',{name:'Return to current data'}).click();
+    await panel.getByRole('button',{name:'Compare database read'}).click();
+    await panel.getByRole('alert').filter({hasText:'Verified version-2'}).waitFor();assert.equal(await panel.getByRole('table').count(),0);
+    pass('missing enrichment and unready projection are distinct; comparison failures do not display old evidence');
+    comparisonState='available';await panel.getByRole('button',{name:'Return to current data'}).click();
+    await panel.getByRole('button',{name:'Prepare patch request',exact:true}).waitFor();
+    delayComparison=true;await panel.getByRole('button',{name:'Compare database read'}).click();
+    for(let i=0;i<100&&!releaseComparison;i++)await delay(20);assert.ok(releaseComparison);
+    await panel.getByRole('button',{name:'Return to current data'}).click();releaseComparison();releaseComparison=null;
+    await panel.getByRole('button',{name:'Prepare patch request',exact:true}).waitFor();await delay(100);
+    assert.equal(await panel.getByRole('link',{name:'Ticket #444'}).count(),0);
+    pass('late comparison responses cannot replace the current-data view');
+    delayComparison=true;await panel.getByRole('button',{name:'Compare database read'}).click();
+    for(let i=0;i<100&&!releaseComparison;i++)await delay(20);assert.ok(releaseComparison);
+    await panel.getByRole('button',{name:'Close',exact:true}).click();await page.getByLabel('Customer',{exact:true}).selectOption(companies[1].id);
+    releaseComparison();releaseComparison=null;await open();await panel.getByRole('button',{name:'Compare database read'}).click();
+    await panel.getByRole('alert').filter({hasText:'No verified Defender comparison'}).waitFor();
+    assert.equal(await panel.getByRole('link',{name:'Ticket #444'}).count(),0);
+    assert.equal(calls.filter(call=>call.method==='POST').length,writes);
+    await page.screenshot({path:join(artifacts,'shadow-cve-unsupported.png'),fullPage:true});
+    await panel.getByRole('button',{name:'Close',exact:true}).click();await page.getByLabel('Customer',{exact:true}).selectOption(companies[0].id);await open();
+    await panel.getByRole('button',{name:'Compare database read'}).click();await panel.getByRole('link',{name:'Ticket #444'}).waitFor();
+    await page.setViewportSize({width:390,height:844});const box=await panel.boundingBox();assert.ok(box.width<=390&&box.x>=0);
+    await page.screenshot({path:join(artifacts,'shadow-cve-mobile.png'),fullPage:true});
+    pass('customer switching rejects previous results, unsupported customers stay explicit, and comparison fits mobile');
   }
   assert.deepEqual(unexpected,[]);assert.deepEqual(errors,[]);
   await writeFile(join(artifacts,'result.json'),JSON.stringify({checks,passed:true,syntheticData:true,realTicketsSent:0,unexpected,errors},null,2));

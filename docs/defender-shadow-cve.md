@@ -1,6 +1,6 @@
 # CVE details and patch inputs from the Defender shadow
 
-This is an offline compatibility boundary. It is not connected to application pages, ticket persistence, source APIs or a production database initializer.
+This compatibility boundary is now used by the disabled read-only comparison endpoint and shared panel described in `shadow-cve-preview.md`. It is not connected to ticket persistence, source APIs or a production database initializer, and has not been deployed or enabled in production.
 
 ## Read contract
 
@@ -43,4 +43,4 @@ The existing private PostgreSQL runner accepts `--with-shadow-cve` and optionall
 
 The restored-data test selects up to two highest-count CVEs per saved severity plus one CVE with older open evidence, reads complete source records only for those CVEs, and compares detail and preparation output. This is a sampled CVE/patch comparison, not exhaustive proof for all CVEs or end-to-end tickets. The base projection still checks full record reconstruction for the entire restored cohort. Aggregate measurements and remaining release gates are recorded in the platform proposal.
 
-Future integration must retain route authentication/customer validation, append shared threat enrichment and existing ticket references, and reconcile all customer providers before substituting this cohort reader for the current service. None of those boundaries is bypassed here.
+The gated comparison integration retains authentication/customer validation and appends saved threat enrichment and existing ticket references. It must still reconcile all customer providers before substituting this cohort reader for the current service; comparison mode preserves the explicit cohort limit.
