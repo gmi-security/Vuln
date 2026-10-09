@@ -57,6 +57,8 @@ test('Defender explicit IDs and conflicting saved tenant remain visible', () => 
   const candidate = build(data, { DEFENDER_TENANT_ID: 'new', DEFENDER_CLIENT_ID: 'id', DEFENDER_CLIENT_SECRET: 'secret', DEFENDER_CUSTOMER: 'CO-A' })
     .candidates.find(c => c.evidence === 'environment-match');
   assert.equal(candidate.companyId, 'CO-A'); assert.ok(candidate.review.includes('saved-environment-tenant-conflict'));
+  assert.ok(build(data, { DEFENDER_TENANT_ID: 'new', DEFENDER_CLIENT_ID: 'id', DEFENDER_CLIENT_SECRET: 'secret', DEFENDER_CUSTOMER: 'CO-A' })
+    .candidates.find(c => c.evidence === 'saved-binding').review.includes('saved-environment-tenant-conflict'));
 });
 test('same Defender tenant assigned to different customers is flagged', () => {
   const data = fixture(); data.defender.push({ companyId: 'CO-A', tenantId: 'shared', revision: 1 });
@@ -80,6 +82,8 @@ test('Spotlight pointer is historical evidence with no tenant or connection perm
   const candidate = build(data).candidates[0];
   assert.equal(candidate.connectionRef, null); assert.equal(candidate.tenantId, null);
   assert.equal(candidate.scope, 'historical-only'); assert.equal(candidate.capabilities.length, 0);
+  data.spotlight[0].runId = 'next-daily-generation';
+  assert.equal(build(data).candidates[0].id, candidate.id, 'Daily refresh keeps the same registry evidence identity');
 });
 test('shared scanners and enrichment are never copied to every customer', () => {
   const result = build(fixture(), { SPIDERFOOT_URL: 'https://scanner', MISP_URL: 'https://misp', MISP_API_KEY: 'secret', INTUNE_TENANT_ID: 't', INTUNE_CLIENT_ID: 'id', INTUNE_CLIENT_SECRET: 'secret' });

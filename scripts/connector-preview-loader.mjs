@@ -7,9 +7,9 @@ import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 import * as crypto from 'node:crypto';
 
-export async function loadConnectorPreview() {
+async function loadConnectorModule(entry) {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-  const allowed = new Set(['customer-connector-preview', 'connectors', 'company-name', 'reporting-direct-sources']
+  const allowed = new Set(['customer-connector-preview', 'customer-connector-drafts', 'connectors', 'company-name', 'reporting-direct-sources']
     .map(name => resolve(root, `lib/${name}.ts`)));
   const cache = new Map();
   async function load(file) {
@@ -29,7 +29,14 @@ export async function loadConnectorPreview() {
     });
     return mod;
   }
-  const mod = await load(resolve(root, 'lib/customer-connector-preview.ts'));
+  const mod = await load(resolve(root, `lib/${entry}.ts`));
   await mod.evaluate();
-  return mod.namespace.buildConnectorPreview;
+  return mod.namespace;
+}
+
+export async function loadConnectorPreview() {
+  return (await loadConnectorModule('customer-connector-preview')).buildConnectorPreview;
+}
+export async function loadConnectorDraftStore() {
+  return (await loadConnectorModule('customer-connector-drafts')).createConnectorDraftStore;
 }

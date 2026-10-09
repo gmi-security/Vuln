@@ -47,7 +47,10 @@ export function buildConnectorPreview(metadata: ConnectorMetadata, env: Partial<
   function add(input: Omit<ConnectorCandidate, "id" | "state" | "enabled" | "authority">) {
     const review = [...input.review];
     if (input.companyId && !known.has(input.companyId)) review.push("unknown-or-demo-customer");
-    const id = digest([input.provider, input.connectionRef, input.evidence, input.tileId, input.runId]);
+    // Current generation changes are evidence updates, not a new registry entry
+    // for every daily import. Historical pointers have one identity per customer.
+    const id = digest([input.provider, input.connectionRef, input.evidence, input.tileId,
+      input.evidence === "completed-import" ? input.companyId : input.runId]);
     if (candidates.some(c => c.id === id)) throw new Error("Duplicate connector evidence; review cannot continue.");
     candidates.push({ ...input, review, id, state: "pending-review", enabled: false, authority: "unassigned" });
   }
@@ -167,6 +170,9 @@ export function buildConnectorPreview(metadata: ConnectorMetadata, env: Partial<
   });
 
   for (const candidate of candidates) {
+    if (candidate.provider === "defender" && candidate.evidence === "saved-binding" && candidates.some(other =>
+      other.provider === "defender" && other.evidence === "environment-match" && other.companyId === candidate.companyId &&
+      other.tenantId && other.tenantId !== candidate.tenantId)) candidate.review.push("saved-environment-tenant-conflict");
     if (candidate.tenantId && candidate.companyId && candidates.some(other =>
       other.provider === candidate.provider && other.tenantId === candidate.tenantId &&
       other.companyId && other.companyId !== candidate.companyId)) candidate.review.push("vendor-tenant-has-multiple-customers");
