@@ -21,5 +21,6 @@ export default async function RemediationPage({ searchParams }: {
   const params = await searchParams;
   return <CustomerReportingPage canManage={access.canManage}
     initialCompanyId={params.companyId || ""} layout="remediation"
+    savedSourceReads={process.env.VULN_SAVED_SOURCE_READS === "true"}
     initialView={remediationView(params.view)} />;
 }

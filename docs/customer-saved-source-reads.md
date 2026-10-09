@@ -1,0 +1,45 @@
+# Customer saved-source read preview
+
+This is a disabled Vuln2.0 read preview. It connects the verified saved-source services to Overview and Prioritize without replacing the existing report, risk model, source workers or ticket service. It adds no saved/default query tiles and does not activate connector registry proposals.
+
+## Gates and scope
+
+The page requires the existing dashboard access plus `VULN_REMEDIATION_UI=true`. The new preview also requires `VULN_SAVED_SOURCE_READS=true` and an explicit `VULN_SAVED_SOURCE_READ_CUSTOMERS` JSON object, for example:
+
+```json
+{"CO-EXAMPLE-A":["defender"],"CO-EXAMPLE-B":["crowdstrike"]}
+```
+
+This map is a temporary, server-controlled read-preview allowlist, not a new connector configuration system or proof of vendor tenant ownership. Do not populate production assignments until that scope is reviewed. Missing configuration exposes no saved sources. Unknown providers, duplicate providers, malformed IDs or malformed JSON fail closed. A request cannot select an unlisted source for a customer. Both sources can be reviewed separately for the same customer; their totals are never added together. The map contains no credentials and creates no database records.
+
+There is no additional customer selector. The existing selector is reused; in preview mode its setup list comes from saved company metadata without hydrating the platform findings store. Original reporting and the existing source/risk/ticket panels continue to use their current services. Turning the new flag off restores the prior page composition and setup path. `/reporting` is unchanged regardless of this flag.
+
+## Request path
+
+`GET /api/elastic-dashboard/customer-saved-sources` uses existing organization-member authentication and private/no-store responses. It has no mutation handler.
+
+- `?setup=1`: bounded saved company metadata, excluding demo companies. It does not collect connector credentials or findings.
+- `?companyId=...`: confirms an existing non-demo customer and returns that customer's allowlisted source names.
+- `?companyId=...&source=defender|crowdstrike&offset=0`: validates scope, returns one saved source result and at most 50 CVEs. Offset is bounded to one million; a malformed offset is rejected.
+
+The application database pool is reused without schema initialization. Company metadata follows the existing `vuln_store` meta/bucket precedence and `vuln_snapshot` fallback. CrowdStrike uses `spotlight_summary_*` plus import metadata; it never runs the slow full-generation reference aggregate. Defender uses completed `defender_import_runs` summaries and `defender_cves`. Neither saved-source request starts an import, summary build, cleanup, vendor call, platform publication or ticket request.
+
+The shared company metadata extraction was factored out of the existing connector collector. That collector retains its behavior; the new helper avoids reading even the connector metadata when only company identity is needed. Invalid saved company data fails instead of falling back to an unrelated customer.
+
+## What the user sees
+
+Overview shows separate source summary panels. Prioritize adds a scrollable CVE table, ordered by source CVSS severity and affected devices, with previous/next pagination. These are source results, not GMI risk ranks. Counts distinguish source instances, device/CVE findings, unique CVEs and affected devices. Defender instances include software version; Spotlight instances retain their own finding definition and suppression qualifiers.
+
+Every CVE uses the existing shared customer CVE panel and Prepare patch request flow. Opening details rechecks available customer evidence through the existing service; a saved list is not authorization to create a ticket and its count is not a frozen host export. No scoring rules, ticket routing, customer permissions or automatic delivery behavior change here.
+
+Each panel displays import completion time, explicitly distinct from endpoint assessment time. The preview uses a 36-hour import-freshness window. Stale or unverifiable time, changed Defender connection revision, newer Spotlight summary pending, and latest-import failure/running states remain visible. Before the first complete result, counts are unavailable rather than zero. Corrupt totals are withheld. A failed refresh can retain the last successful result for that same customer/page with an error; changing customers unmounts old source panels and ignores late responses.
+
+Refresh reads stored results only. It does not request upstream collection or rebuild an expensive summary. A completed empty import can legitimately display zero counts. A newer import awaiting summarization shows the previous completed generation with a pending explanation.
+
+## Verification and limits
+
+The service and route tests cover configuration rejection, authentication/feature gates before database access, explicit source selection, page bounds, demo/unknown customers and response-scope mismatch. Real PostgreSQL metadata tests cover storage precedence, read-only enforcement and avoiding credential/finding reads. Existing adapter parity tests remain the basis for the saved counts.
+
+Browser fixtures exercise the real built UI, both with the preview disabled and enabled, including source CVE pagination, the shared patch panel, stale/pending/error states, late previous-customer responses and mobile layout. Fixture ticket delivery is intercepted; no real ticket is sent. The browser suite supports an installed Playwright module and optional `PLAYWRIGHT_CHANNEL` for a locally installed test browser.
+
+This does not establish full-page performance: legacy reporting and prioritization sections still run alongside the preview. Remaining work includes authoritative connector bindings, cross-source overlap/deduplication, published-platform lifecycle/risk parity, and then a separately reviewed replacement of legacy reads. Worker/retention operation, actual tenant scope verification and end-to-end production rollout remain separate gates.

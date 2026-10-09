@@ -17,6 +17,7 @@ import type { SlaSettings } from "@/lib/types";
 import styles from "./QueryDashboard.module.css";
 import CustomerCveProvider from "./CustomerCveProvider";
 import CustomerThreatIntelligence from "./CustomerThreatIntelligence";
+import CustomerSavedSources from "./CustomerSavedSources";
 import { baseNavItems, remediationNavItems } from "@/lib/navigation";
 import { customerConnectorsHref, remediationHref, remediationView, remediationViews, type RemediationView } from "@/lib/remediation-view";
 
@@ -36,14 +37,15 @@ function CustomerTiles({ companyId, canManage }: { companyId:string; canManage:b
   return <ElasticQueryDashboard initial={{...dashboard,canManage}} companyId={companyId}/>;
 }
 
-export default function CustomerReportingPage({ initialCompanyId="", canManage, layout="reporting", initialView="overview" }: {
-  initialCompanyId?:string; canManage:boolean; layout?:"reporting" | "remediation"; initialView?:RemediationView;
+export default function CustomerReportingPage({ initialCompanyId="", canManage, layout="reporting", initialView="overview", savedSourceReads=false }: {
+  initialCompanyId?:string; canManage:boolean; layout?:"reporting" | "remediation"; initialView?:RemediationView; savedSourceReads?:boolean;
 }) {
   const [companyId,setCompanyId]=useState(initialCompanyId);
   const [view,setView]=useState<RemediationView>(initialView);
   const [refresh,setRefresh]=useState(0);
   const [sla,setSla]=useState<SlaSettings | null>(null);
   const remediation = layout === "remediation";
+  const savedReads = remediation && savedSourceReads;
   const overview = !remediation || view === "overview";
   const prioritize = !remediation || view === "prioritize";
   const tickets = !remediation || view === "tickets";
@@ -102,12 +104,14 @@ export default function CustomerReportingPage({ initialCompanyId="", canManage, 
         {value === "overview" ? "Overview" : value === "prioritize" ? "Prioritize" : "Tickets"}
       </button>)}
     </nav>}
-    <ReportingCustomer companyId={companyId} onCompanyChange={selectCustomer} refreshToken={refresh} showReport={overview}/>
+    <ReportingCustomer companyId={companyId} onCompanyChange={selectCustomer} refreshToken={refresh} showReport={overview}
+      setupPath={savedReads ? "customer-saved-sources?setup=1" : "reporting"}/>
     {!companyId && <p className="mt-6 text-sm text-zinc-300">Choose a customer to view its connector data. No shared customer results are shown until a customer is selected.</p>}
     {/* Remount every customer-bound child immediately. Late results and open
         exports/ticket dialogs from the previous customer cannot be reused. */}
     {companyId && <div key={`${companyId}:${refresh}:${remediation ? view : "reporting"}`} className="mt-6 space-y-6">
       {overview && <DefenderCustomerPanel companyId={companyId} hideUnconfigured/>}
+      {savedReads && (overview || prioritize) && <CustomerSavedSources companyId={companyId} showCves={prioritize}/>}
       {overview && <CustomerTiles companyId={companyId} canManage={canManage}/>}
         {prioritize && <TopFixes companyId={companyId} reviewHref={remediation ? remediationHref(companyId,"tickets") : undefined}/>}
       {remediation && prioritize && <CustomerThreatIntelligence companyId={companyId}/>}

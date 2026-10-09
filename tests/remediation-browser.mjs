@@ -19,7 +19,9 @@ const {chromium}=await import(process.env.PLAYWRIGHT_MODULE ? pathToFileURL(proc
 const reserve=createServer().listen(0,'127.0.0.1');await once(reserve,'listening');const port=reserve.address().port;await new Promise(r=>reserve.close(r));
 const base=`http://127.0.0.1:${port}`,secret=randomBytes(32).toString('hex');
 const env=Object.fromEntries(Object.entries(process.env).filter(([key])=>/^(PATH|PATHEXT|SYSTEMROOT|WINDIR|TEMP|TMP|COMSPEC|USERPROFILE|APPDATA|LOCALAPPDATA)$/i.test(key)));
+const savedReads=process.env.VULN_TEST_SAVED_SOURCES==='true';
 Object.assign(env,{NODE_ENV:'production',NEXTAUTH_URL:base,NEXTAUTH_SECRET:secret,VULN_DISABLE_SCHEDULER:'true',ELASTIC_VULN_ENABLED:'true',VULN_REMEDIATION_UI:'true'});
+if(savedReads)env.VULN_SAVED_SOURCE_READS='true';
 const server=spawn(process.execPath,['node_modules/next/dist/bin/next','start','-H','127.0.0.1','-p',String(port)],{env,windowsHide:true,stdio:['ignore','pipe','pipe']});
 let serverOutput='';server.stdout.on('data',v=>serverOutput+=v);server.stderr.on('data',v=>serverOutput+=v);
 let browser;
@@ -30,13 +32,22 @@ const summary=(companyId)=>({id,cves:[cve],hostCount:2,findingCount:2,remediatio
 const group=(companyId)=>({manualOnly:true,source:'stored-findings',appCompanyId:companyId,companyName:companyId===companies[0].id?'Fixture A':'Fixture B',connectors:['defender'],title:'Install recommended patch',action:'Install recommended update',tenantId:companyId,remediationId:'manual:fixture',cves:[cve],deviceCount:2,findingCount:2,hostScope:[],deviceCves:[],maxRisk:72,worstSeverity:'High',label:cve,csv:`cve,hostname,cvss,remediation\r\n${cve},${companyId}-device,8.1,Install recommended update\r\n`,ticketTitle:`${companyId}: ${cve}`,ticketBody:`Customer: ${companyId}\nCVE: ${cve}\nRecommended remediation: Install recommended update\nCVSS: 8.1\nSee attached CSV for devices.`});
 const detail=companyId=>({companyId,cve,companyName:companyId===companies[0].id?'Fixture A':'Fixture B',observedAt:when,sourceObservations:{platform:when,crowdstrike:null},findingCount:2,deviceCount:2,hosts:[{host:`${companyId}-device`,source:'defender',severity:'High',cvss:8.1}],enrichment:{cvss_score:8.1,epss_probability:0.9,cisa_kev:true,active_exploitation:true,active_exploitation_source:'MISP',active_exploitation_detail:'Synthetic retained signal',updated_at:when},tickets:[],moreTickets:false});
 let approved=false,created=false,failPrepare=false,failIntel=false,delayDetail=false,releaseDetail;
+let sourceState='available',failSource=false,delaySource=false,releaseSource;
+function savedResult(companyId,source,offset){
+  const state=sourceState==='pending'?'summary-pending':'available';
+  return {companyId,source,state,version:1,scope:'saved-source-generation',
+    generation:state==='available'?{id:'fixture',completedAt:when,freshness:sourceState==='stale'?'stale':'within-window',revisionMatches:sourceState!=='stale'}:null,
+    latestAttempt:sourceState==='stale'?{status:'failed'}:null,projection:sourceState==='stale'?{state:'pending'}:undefined,
+    summary:state==='available'?{sourceInstances:1234,deviceCveFindings:1200,uniqueCves:51,affectedDevices:34,unknownSuppressionInstances:0,excludedNonCveInstances:0}:null,
+    cves:state==='available'?{offset,limit:50,total:51,rows:[{cve:offset?'CVE-2026-9999':cve,severity:'HIGH',cvss:8.1,affectedDevices:34}]}:null};
+}
 const calls=[],unexpected=[],errors=[];let checks=0;
 function pass(message){checks++;console.log('PASS '+message);}
 try{
   let ready=false;
   for(let i=0;i<100;i++){try{if((await fetch(base+'/login')).ok){ready=true;break;}}catch{}await delay(100);}
   assert.ok(ready,serverOutput);
-  browser=await chromium.launch({headless:true});
+  browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_CHANNEL?{channel:process.env.PLAYWRIGHT_CHANNEL}:{})});
   const context=await browser.newContext({viewport:{width:1440,height:1000},acceptDownloads:true});
   const token=await encode({secret,token:{name:'Fixture member',orgMember:true,orgRole:'MEMBER'},maxAge:300});
   await context.addCookies([{name:'next-auth.session-token',value:token,url:base}]);
@@ -53,6 +64,14 @@ try{
     if(p==='/api/elastic-vulnerabilities/status')return json({enabled:true,remediationEnabled:true});
     if(p==='/api/defender/results')return json({configured:false});
     if(p==='reporting')return json(url.searchParams.has('companyId')?{report:{company:{id:companyId}},model:{company:{id:'empty-fixture'}}}:{companies});
+    if(p==='customer-saved-sources'){
+      if(url.searchParams.get('setup')==='1')return json({companies});
+      const source=url.searchParams.get('source');
+      if(!source)return json({companyId,sources:[companyId===companies[0].id?'defender':'crowdstrike']});
+      const result=savedResult(companyId,source,Number(url.searchParams.get('offset')||0));
+      if(delaySource && companyId===companies[0].id){delaySource=false;await new Promise(r=>releaseSource=r);}
+      return failSource?json({error:'Fixture saved read failed'},400):json(result);
+    }
     if(p==='customer-tiles')return json({canManage:true,storageReady:true,connected:true,crowdstrike:{connected:true},availableSources:{elastic:true,crowdstrike:true},queries:['table','bar'].map(display=>({id:display,title:`Fixture ${display}`,companyId,source:'crowdstrike',query:'fixture',display,chart:{category:'cve',value:'devices'},enabled:false,refreshMinutes:1440,refreshedAt:when,attemptedAt:when,error:null,result:{columns:[{name:'cve',type:'keyword'},{name:'devices',type:'long'}],rows:[[cve,2]],truncated:false}}))});
     if(p==='patch-group-tickets')return json({requests:[summary(companyId)],more:false,total:1});
     if(p==='risk/summary')return json({totalOpenRisk:1,criticalRiskCount:0,swath1Open:0,swath2Open:1,kevOpen:1,internetFacingCriticalRisk:0,verifiedRemediations:0,awaitingVerification:0});
@@ -112,13 +131,48 @@ try{
   pass('Prioritize threat and Tickets CVE links share the flow; failed enrichment refresh keeps its last result');
 
   delayDetail=true;await page.getByRole('button',{name:`View ${cve} details`}).first().click();await panel.getByText('Loading saved customer evidence…').waitFor();
-  await page.keyboard.press('Escape');await page.getByRole('region',{name:'Customer report',exact:true}).getByRole('combobox').selectOption(companies[1].id);
+  await page.keyboard.press('Escape');await page.getByLabel('Customer',{exact:true}).selectOption(companies[1].id);
   await page.getByRole('button',{name:`View ${cve} details`}).first().click();await panel.getByText(`${companies[1].id}-device`,{exact:true}).waitFor();
   releaseDetail();await delay(150);assert.doesNotMatch(await panel.innerText(),/CO-TEST-A-device/);
   await page.setViewportSize({width:390,height:844});const box=await panel.boundingBox();assert.ok(box.width<=390 && box.x>=0);
   await page.keyboard.press('Tab');assert.equal(await panel.evaluate(e=>e.contains(document.activeElement)),true);
   await page.screenshot({path:join(artifacts,'shared-cve-mobile-fixture.png')});
   pass('late previous-customer response is ignored; mobile panel fits and keeps keyboard focus');
+  if(savedReads){
+    await page.keyboard.press('Escape');await page.setViewportSize({width:1440,height:1000});
+    await page.goto(base+`/remediation?companyId=${companies[0].id}&view=prioritize`);
+    const saved=page.getByRole('region',{name:'Microsoft Defender saved results'});
+    await saved.getByRole('button',{name:cve,exact:true}).waitFor();
+    assert.equal(await page.getByLabel('Customer',{exact:true}).count(),1);
+    await saved.getByRole('button',{name:cve,exact:true}).click();
+    await panel.getByRole('button',{name:'Prepare patch request',exact:true}).waitFor();
+    await page.keyboard.press('Escape');
+    await saved.getByRole('button',{name:'Next CVEs'}).click();await saved.getByRole('button',{name:'CVE-2026-9999',exact:true}).waitFor();
+    assert.equal(await saved.getByRole('button',{name:'Next CVEs'}).isDisabled(),true);
+    await saved.getByRole('button',{name:'Previous CVEs'}).click();await saved.getByRole('button',{name:cve,exact:true}).waitFor();
+    pass('saved CVE pagination and shared patch panel work with one customer selector');
+    sourceState='stale';await saved.getByRole('button',{name:'Refresh saved results'}).click();
+    await saved.getByText('These results are older than 36 hours.',{exact:true}).waitFor();
+    await saved.getByText('A newer import is waiting for its summary.',{exact:false}).waitFor();
+    await saved.getByText('The latest import failed.',{exact:false}).waitFor();
+    failSource=true;await saved.getByRole('button',{name:'Refresh saved results'}).click();
+    await saved.getByRole('alert').filter({hasText:'Previously loaded results'}).waitFor();
+    assert.equal(await saved.getByRole('button',{name:cve,exact:true}).count(),1);failSource=false;
+    pass('stale, pending summary, changed connection and failed refresh retain honest completed results');
+    delaySource=true;sourceState='available';await saved.getByRole('button',{name:'Refresh saved results'}).click();
+    for(let i=0;i<100&&!releaseSource;i++)await delay(20);assert.ok(releaseSource);
+    sourceState='pending';await page.getByLabel('Customer',{exact:true}).selectOption(companies[1].id);
+    const falcon=page.getByRole('region',{name:'CrowdStrike Spotlight saved results'});
+    await falcon.getByText('The import is complete.',{exact:false}).waitFor();releaseSource();await delay(100);
+    assert.equal(await saved.count(),0);assert.equal(await falcon.locator('dd').count(),0);
+    assert.equal(await falcon.getByRole('button',{name:cve,exact:true}).count(),0);
+    pass('pending data is not displayed as zero and late previous-customer results cannot reappear');
+    sourceState='available';await falcon.getByRole('button',{name:'Refresh saved results'}).click();await falcon.getByRole('button',{name:cve,exact:true}).waitFor();
+    await page.setViewportSize({width:390,height:844});const box=await falcon.boundingBox();assert.ok(box.width<=390&&box.x>=0);
+    await page.screenshot({path:join(artifacts,'saved-source-mobile.png'),fullPage:true});
+    await page.setViewportSize({width:1440,height:1000});await page.screenshot({path:join(artifacts,'saved-source-desktop.png'),fullPage:true});
+    pass('saved result cards fit mobile and CVE rows scroll inside the panel');
+  }
   assert.deepEqual(unexpected,[]);assert.deepEqual(errors,[]);
   await writeFile(join(artifacts,'result.json'),JSON.stringify({checks,passed:true,syntheticData:true,realTicketsSent:0,unexpected,errors},null,2));
   console.log(JSON.stringify({checks,passed:true,artifacts,realTicketsSent:0}));

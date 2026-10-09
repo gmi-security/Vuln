@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { realpath } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
-import { readApplicationConnectorMetadata, readDashboardConnectorMetadata } from '../lib/db/connector-metadata.mjs';
+import { readApplicationConnectorMetadata, readDashboardConnectorMetadata, readSavedApplicationCompanies } from '../lib/db/connector-metadata.mjs';
 import { loadConnectorPreview } from '../scripts/connector-preview-loader.mjs';
 
 const socket = await realpath(process.argv[2] || '.');
@@ -46,6 +46,10 @@ try {
   await db.query("INSERT INTO spotlight_import_runs VALUES($1,'completed')", [generation]);
   await db.query("INSERT INTO spotlight_import_current VALUES('CO-B',$1)", [generation]);
   app = await readApplicationConnectorMetadata(db); dashboard = await readDashboardConnectorMetadata(db);
+  assert.deepEqual(await readSavedApplicationCompanies({query:(sql,args)=>{
+    assert.doesNotMatch(sql,/defender_|spotlight_|elastic_|SELECT data FROM/);
+    return db.query(sql,args);
+  }}),app.companies);
   assert.deepEqual(app.companies.map(c => c.id), ['CO-A', 'CO-B']); assert.equal(app.defender[0].revision, 4);
   assert.equal(app.spotlight[0].companyId, 'CO-B'); assert.equal(app.spotlight[0].runId, generation);
   assert.equal(dashboard.tiles.length, 3);
@@ -76,12 +80,15 @@ try {
 
   await db.query("UPDATE vuln_store SET data=$1 WHERE key='meta'", [{ companies: [['META', { id: 'META', name: 'Meta owner' }]] }]);
   assert.equal((await readApplicationConnectorMetadata(db)).companies[0].id, 'META');
+  assert.equal((await readSavedApplicationCompanies(db))[0].id,'META');
   await db.query("UPDATE vuln_store SET data='{}' WHERE key='meta'; UPDATE vuln_store SET data='{}' WHERE key='companies:0'");
   await assert.rejects(() => readApplicationConnectorMetadata(db), /Invalid company snapshot bucket/);
+  await assert.rejects(() => readSavedApplicationCompanies(db), /Invalid company snapshot bucket/);
   await db.query("UPDATE vuln_store SET data=$1 WHERE key='companies:0'", [JSON.stringify([['WRONG', { id: 'CO-A', name: 'Alpha' }]])]);
   await assert.rejects(() => readApplicationConnectorMetadata(db), /Invalid saved company metadata/);
   await db.query('DELETE FROM vuln_store');
   assert.equal((await readApplicationConnectorMetadata(db)).companies[0].id, 'OLD');
+  assert.equal((await readSavedApplicationCompanies(db))[0].id,'OLD');
   ok('snapshot precedence matches legacy loader; malformed shards fail instead of falling back');
 
   await db.query('ALTER TABLE elastic_dashboard_queries DROP COLUMN deleted_at');
