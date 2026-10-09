@@ -1,6 +1,8 @@
 "use client";
 
 import Link from "next/link";
+import CveText, {cveIdentifier} from "../CveText";
+import {useCustomerCve} from "../customer-cve-context";
 import type { CustomerReportingModel } from "@/lib/reporting-customer-model";
 import styles from "../QueryDashboard.module.css";
 
@@ -20,6 +22,7 @@ function Metric({ name, value, note }: { name: string; value: string; note: stri
 function FindingTable({ rows, title, companyId, total, kind = "vuln" }: {
   rows: CustomerReportingModel["priorityRows"]; title: string; companyId: string; total: number; kind?: "vuln" | "osint" | "pentest" | "all";
 }) {
+  const openCve=useCustomerCve();
   const listHref = `/findings?company=${encodeURIComponent(companyId)}&kind=${kind}`;
   return <section className="rounded-xl border border-zinc-800 bg-[#090909] p-5" aria-label={title}>
     <div className="mb-4 flex flex-wrap items-end justify-between gap-3"><div><h3 className="text-lg font-semibold text-white">{title}</h3>
@@ -27,7 +30,7 @@ function FindingTable({ rows, title, companyId, total, kind = "vuln" }: {
       <Link className="text-sm text-red-300 underline underline-offset-4" href={listHref}>View all findings</Link></div>
     {rows.length ? <div className={styles.tableScroll} role="region" tabIndex={0} aria-label={`${title} table`}><table className={styles.table}>
       <thead><tr><th>Finding</th><th>Asset</th><th>Severity</th><th>Source</th><th>Status</th><th>Risk</th><th>Last seen</th></tr></thead>
-      <tbody>{rows.map(row => <tr key={row.id}><td><Link className="text-zinc-100 underline underline-offset-2" href={`${listHref}&focus=${encodeURIComponent(row.id)}`}>{row.cve || row.title}</Link><span className="block max-w-xs truncate text-xs text-zinc-500">{row.title}</span></td>
+      <tbody>{rows.map(row => <tr key={row.id}><td>{openCve && cveIdentifier(row.cve) ? <CveText text={row.cve}/> : <Link className="text-zinc-100 underline underline-offset-2" href={`${listHref}&focus=${encodeURIComponent(row.id)}`}>{row.cve || row.title}</Link>}<span className="block max-w-xs truncate text-xs text-zinc-500">{row.title}</span></td>
         <td>{row.asset}</td><td>{row.severity}</td><td>{row.connectors.map(label).join(", ")}</td><td>{row.status}</td>
         <td className="tabular-nums">{format(row.realRisk)}</td><td>{observed(row.lastSeen)}</td></tr>)}</tbody>
     </table></div> : <p className="text-sm text-zinc-400">No findings in this section.</p>}

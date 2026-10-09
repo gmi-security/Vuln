@@ -175,14 +175,18 @@ export async function createGroupTicket(id: string, value: unknown, actor: strin
     if (["creating", "uncertain", "created"].includes(row.state)) { await client.query("COMMIT"); return readGroupTicket(id); }
     if (row.review_state !== "approved") throw new DashboardError("Approve this consolidation in the review queue before sending a ticket.", 409);
     const packet = row.packet as PatchGroup;
+    if(packet.manualOnly && actor === "auto-create") throw new DashboardError("This draft requires explicit manual sending.",409);
     if (packet.source !== "stored-findings") {
       const cs = (await client.query("SELECT revision FROM dashboard_source_connections WHERE source='crowdstrike' FOR SHARE")).rows[0];
       if (cs?.revision !== row.crowdstrike_revision) throw new DashboardError("CrowdStrike connection changed. Prepare a fresh consolidation before sending.", 409);
     }
     const cw = (await client.query("SELECT revision FROM patch_connectwise_connection WHERE id=1 FOR SHARE")).rows[0];
     if (cw?.revision !== saved.revision || body.connectionRevision !== saved.revision) throw new DashboardError("ConnectWise connection changed. Reload its options before sending.", 409);
-    const existing = (await client.query(`SELECT id,ticket_id FROM patch_group_ticket_requests WHERE cw_target=$1 AND remediation_id=$2 AND tenant_id=$3 AND company_id=$4 AND scope_hash=$5
-      AND state IN ('creating','uncertain','created') AND closed=false AND id<>$6 LIMIT 1`, [saved.target, row.remediation_id, row.tenant_id, routing.companyId, row.scope_hash, id])).rows[0];
+    // Manual drafts use a separate review identity so background draft cleanup
+    // cannot supersede them, but the same patch/scope must still deduplicate at send.
+    const baseRemediation = packet.manualOnly ? row.remediation_id.replace(/^manual:/, "") : row.remediation_id;
+    const existing = (await client.query(`SELECT id,ticket_id FROM patch_group_ticket_requests WHERE cw_target=$1 AND remediation_id=ANY($2::text[]) AND tenant_id=$3 AND company_id=$4 AND scope_hash=$5
+      AND state IN ('creating','uncertain','created') AND closed=false AND id<>$6 LIMIT 1`, [saved.target, [baseRemediation, `manual:${baseRemediation}`], row.tenant_id, routing.companyId, row.scope_hash, id])).rows[0];
     if (existing) throw new DashboardError(`This patch and device scope already has ${existing.ticket_id ? `ticket #${existing.ticket_id}` : "a ticket request in progress"}. Open its saved request below.`, 409);
     await client.query(`UPDATE patch_group_ticket_requests SET state='creating',created_by=$2,cw_target=$3,cw_revision=$4,company_id=$5,routing=$6::jsonb,title=$7,body=$8,
       started_at=now(),updated_at=now(),last_error=NULL WHERE id=$1`, [id, actor, saved.target, saved.revision, routing.companyId, JSON.stringify(routing), body.title.trim(), body.body.trim()]);

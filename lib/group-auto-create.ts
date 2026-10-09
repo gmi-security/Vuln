@@ -128,6 +128,7 @@ export async function autoCreateHighSeverityTickets(): Promise<Counts> {
       ) AS rn
       FROM patch_group_ticket_requests
       WHERE state='prepared' AND review_state='pending' AND packet->>'appCompanyId' = ANY($1::text[])
+        AND COALESCE(packet->>'manualOnly','false') <> 'true'
     )
     SELECT id, cves, app_company_id FROM ranked WHERE rn = 1
   `, [Array.from(PILOT_COMPANY_IDS)])).rows as { id: string; cves: string[]; app_company_id: string | null }[];
@@ -156,9 +157,10 @@ export async function autoCreateHighSeverityTickets(): Promise<Counts> {
     const swath = await enrichedSwathFor(row.app_company_id, row.cves).catch(() => null);
     if (swath == null || swath > ELIGIBLE_SWATH) { if (swath == null) notYetEnriched++; return; } // not enriched yet, or enriched but not urgent -- leave it for a human
     try {
-      await reviewGroupTicket(row.id, "approve", ACTOR);
       const read = await readGroupTicket(row.id, true);
       if (!read.group) throw new DashboardError("Prepared consolidation is missing its packet.");
+      if (read.group.manualOnly) return;
+      await reviewGroupTicket(row.id, "approve", ACTOR);
       await createGroupTicket(row.id, {
         routing: { companyId: routing.company_id, boardId: routing.board_id, ...(routing.team_id ? { teamId: routing.team_id } : {}) },
         title: read.group.ticketTitle, body: read.group.ticketBody, connectionRevision: saved.revision,

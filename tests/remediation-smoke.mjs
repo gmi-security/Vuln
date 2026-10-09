@@ -39,6 +39,15 @@ for (const enabled of [false, true]) {
     const headers = { cookie: `next-auth.session-token=${token}` };
     assert.equal((await fetch(`${base}/remediation`, { redirect: 'manual' })).status, 307);
     assert.equal((await fetch(`${base}/api/elastic-vulnerabilities/status`)).status, 401);
+    for(const endpoint of ['customer-cve','customer-threat-intelligence']) {
+      assert.equal((await fetch(`${base}/api/elastic-dashboard/${endpoint}`)).status,401);
+      const scoped=await fetch(`${base}/api/elastic-dashboard/${endpoint}?companyId=&cve=CVE-2026-1234`,{headers});
+      assert.equal(scoped.status,enabled?400:404);
+    }
+    // Cross-origin mutation cannot prepare a draft, even with a valid member session.
+    assert.equal((await fetch(`${base}/api/elastic-dashboard/customer-cve`,{method:'POST',
+      headers:{...headers,origin:'https://other.invalid','content-type':'application/json'},
+      body:JSON.stringify({companyId:'CO-230784',cve:'CVE-2026-1234'})})).status,403);
     assert.deepEqual(await (await fetch(`${base}/api/elastic-vulnerabilities/status`, { headers })).json(),
       { enabled: true, ...(enabled ? { remediationEnabled: true } : {}) });
     // The existing reporting route remains reachable in both modes.
@@ -56,6 +65,7 @@ for (const enabled of [false, true]) {
         assert.match(html, /Remediation views/);
         assert.equal(html.includes('aria-label="Patching posture'), view === 'prioritize');
         assert.equal(html.includes('id="consolidation-review"'), view === 'tickets');
+        assert.equal(html.includes('aria-label="Threat Intelligence"'),view === 'prioritize');
         assert.equal(html.includes("Loading this customer&#x27;s saved tiles"), view === 'overview');
       }
     }

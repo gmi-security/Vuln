@@ -15,6 +15,8 @@ import { dashboardRequest } from "@/lib/dashboard-browser-client";
 import type { ElasticDashboard } from "@/lib/elastic-dashboard";
 import type { SlaSettings } from "@/lib/types";
 import styles from "./QueryDashboard.module.css";
+import CustomerCveProvider from "./CustomerCveProvider";
+import CustomerThreatIntelligence from "./CustomerThreatIntelligence";
 import { baseNavItems, remediationNavItems } from "@/lib/navigation";
 import { remediationHref, remediationView, remediationViews, type RemediationView } from "@/lib/remediation-view";
 
@@ -81,7 +83,7 @@ export default function CustomerReportingPage({ initialCompanyId="", canManage, 
     setView(next);
     window.history.pushState(null,"",remediationHref(companyId,next));
   }
-  return <VulnShell variant="dashboard" eyebrow={remediation ? "Customer operations" : "Customer reporting"}
+  return <CustomerCveProvider key={remediation ? companyId : "legacy"} enabled={remediation} companyId={companyId} canManage={canManage}><VulnShell variant="dashboard" eyebrow={remediation ? "Customer operations" : "Customer reporting"}
     title={remediation ? "Remediation" : "Vulnerability reporting"}
     subtitle={remediation ? "Understand exposure, prioritize fixes and track patch tickets for the selected customer." : "Select a customer to view its connected sources, findings and patch review."}
     navigation={remediation ? <nav aria-label="Main navigation" className="mb-7 flex flex-wrap items-center gap-5 text-sm text-zinc-300">
@@ -107,7 +109,8 @@ export default function CustomerReportingPage({ initialCompanyId="", canManage, 
     {companyId && <div key={`${companyId}:${refresh}:${remediation ? view : "reporting"}`} className="mt-6 space-y-6">
       {overview && <DefenderCustomerPanel companyId={companyId} hideUnconfigured/>}
       {overview && <CustomerTiles companyId={companyId} canManage={canManage}/>}
-      {prioritize && <TopFixes companyId={companyId}/>}
+        {prioritize && <TopFixes companyId={companyId} reviewHref={remediation ? remediationHref(companyId,"tickets") : undefined}/>}
+      {remediation && prioritize && <CustomerThreatIntelligence companyId={companyId}/>}
       {prioritize && canManage && <RiskDashboard companyId={companyId}/>}
       {tickets && <div id="consolidation-review" className="grid items-start gap-6 2xl:grid-cols-2">
         <PatchReviewQueue companyId={companyId} sla={sla}/>
@@ -121,5 +124,5 @@ export default function CustomerReportingPage({ initialCompanyId="", canManage, 
         {baseNavItems.filter(item=>!remediationNavItems.some(main=>main.href===item.href)).map(item=><Link key={item.href} href={item.href} className="hover:text-white">{item.label}</Link>)}
       </nav>
     </details>}
-  </VulnShell>;
+  </VulnShell></CustomerCveProvider>;
 }

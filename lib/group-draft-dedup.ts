@@ -20,6 +20,7 @@ export async function sweepSupersededGroupDrafts(): Promise<{ dismissed: number 
       ) AS rn
       FROM patch_group_ticket_requests
       WHERE state='prepared' AND review_state='pending'
+        AND COALESCE(packet->>'manualOnly','false') <> 'true'
     )
     UPDATE patch_group_ticket_requests SET review_state='dismissed', reviewed_by=$1, reviewed_at=now(), updated_at=now()
     WHERE id IN (SELECT id FROM ranked WHERE rn > 1)
