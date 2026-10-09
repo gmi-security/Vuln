@@ -11,6 +11,7 @@ const admin=new pg.Client({...options,database:'postgres'}),created=[];let sourc
 const ok=message=>{checks++;console.log(`PASS ${message}`);};
 const readValidation=process.argv.includes('--with-shadow-reads')?await import('./defender-shadow-read-validation.mjs'):null;
 const cveValidation=process.argv.includes('--with-shadow-cve')?await import('./defender-shadow-cve-validation.mjs'):null;
+const adapterValidation=process.argv.includes('--with-customer-cve')?await import('./shadow-customer-cve-validation.mjs'):null;
 const run=randomUUID(),first={id:'F-1',companyId:'CO-A',cve:'CVE-2026-1234',asset:'asset-1',connector:'defender',
   title:'Fixture vulnerability',
   status:'Risk Accepted',assignee:'operator',firstSeen:'2026-01-01',lastSeen:'2026-09-01',resolvedAt:null,
@@ -24,7 +25,7 @@ try{
   source=new pg.Client({...options,database:sourceName});target=new pg.Client({...options,database:targetName});
   source.on('error',()=>{});target.on('error',()=>{});
   await source.connect();await target.connect();await target.query(await readFile('docs/sql/defender-platform-shadow.sql','utf8'));
-  if(cveValidation)await target.query(await readFile('docs/sql/defender-shadow-cve.sql','utf8'));
+  if(cveValidation||adapterValidation)await target.query(await readFile('docs/sql/defender-shadow-cve.sql','utf8'));
   if(readValidation){
     await target.query(await readFile('docs/sql/defender-shadow-reads.sql','utf8'));
     observer=new pg.Client({...options,database:targetName});observer.on('error',()=>{});await observer.connect();
@@ -97,6 +98,14 @@ try{
     await target.query("UPDATE defender_shadow_findings SET detail=jsonb_set(detail,'{oversized}',to_jsonb(repeat('x',33554432))) WHERE company_id=$1 AND projection_id=$2 AND issue_key='CVE-2026-9877'",['CO-A',projection.projectionId]);
     await assert.rejects(()=>readDefenderShadowCve(target,{companyId:'CO-A',projectionId:projection.projectionId,cve:'CVE-2026-9877'}),e=>e.status===413);
     ok('CVE detail and complete patch packet parity, mixed-case keys, correlated evidence, exclusions, CSV escaping, missing remediation and payload cap');
+  }
+  if(adapterValidation){
+    const fixtures=Array.from({length:6},(_,i)=>({...first,id:`ADAPTER-${i}`,asset:`asset-${i}`,status:'Open',
+      cve:i%2?'cve-2026-1234':'CVE-2026-1234',realRisk:42+i,
+      defender:{...first.defender,deviceId:`device-${i}`,runId:run}}));
+    await setRows([...fixtures,foreign]);const projection=await build(source,target,'CO-A');
+    console.log(JSON.stringify({phase:'customer-cve-adapter',...await adapterValidation.verifyCustomerCveAdapter(source,target,projection,[...fixtures,foreign])}));
+    ok('disabled adapter composes scoped shadow findings, separate enrichment storage and existing ticket references/exclusions');
   }
   if(process.argv.includes('--with-restored-defender')){
     restored=new pg.Client({...options,database:'recovery_application'});restored.on('error',()=>{});await restored.connect();
