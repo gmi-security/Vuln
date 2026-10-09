@@ -18,6 +18,7 @@ import styles from "./QueryDashboard.module.css";
 import CustomerCveProvider from "./CustomerCveProvider";
 import CustomerThreatIntelligence from "./CustomerThreatIntelligence";
 import CustomerSavedSources from "./CustomerSavedSources";
+import CustomerPlatformComparison from "./CustomerPlatformComparison";
 import { baseNavItems, remediationNavItems } from "@/lib/navigation";
 import { customerConnectorsHref, remediationHref, remediationView, remediationViews, type RemediationView } from "@/lib/remediation-view";
 
@@ -110,6 +111,7 @@ export default function CustomerReportingPage({ initialCompanyId="", canManage, 
     {/* Remount every customer-bound child immediately. Late results and open
         exports/ticket dialogs from the previous customer cannot be reused. */}
     {companyId && <div key={`${companyId}:${refresh}:${remediation ? view : "reporting"}`} className="mt-6 space-y-6">
+      {remediation && shadowCveReads && (overview || prioritize) && <CustomerPlatformComparison companyId={companyId}/>}
       {overview && <DefenderCustomerPanel companyId={companyId} hideUnconfigured/>}
       {savedReads && (overview || prioritize) && <CustomerSavedSources companyId={companyId} showCves={prioritize}/>}
       {overview && <CustomerTiles companyId={companyId} canManage={canManage}/>}

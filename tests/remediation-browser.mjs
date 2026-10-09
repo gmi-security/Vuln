@@ -13,6 +13,7 @@ import { createServer } from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { encode } from 'next-auth/jwt';
+import {publishedComparisonFixture} from './shadow-platform-browser.mjs';
 
 for(const file of ['.env','.env.local','.env.production','.env.production.local'])assert.equal(existsSync(file),false,'Use a checkout without app configuration');
 const {chromium}=await import(process.env.PLAYWRIGHT_MODULE ? pathToFileURL(process.env.PLAYWRIGHT_MODULE).href : 'playwright');
@@ -45,6 +46,7 @@ function savedResult(companyId,source,offset){
     cves:state==='available'?{offset,limit:50,total:51,rows:[{cve:offset?'CVE-2026-9999':cve,severity:'HIGH',cvss:8.1,affectedDevices:34}]}:null};
 }
 const calls=[],unexpected=[],errors=[];let checks=0;
+const published=publishedComparisonFixture({companies,cve,when,id,calls});
 function pass(message){checks++;console.log('PASS '+message);}
 try{
   let ready=false;
@@ -67,6 +69,7 @@ try{
     const p=url.pathname.replace('/api/elastic-dashboard/',''),companyId=url.searchParams.get('companyId')||companies[0].id;
     const body=req.method()==='POST'?req.postDataJSON():null;calls.push({path:p,companyId:url.searchParams.get('companyId'),method:req.method(),body});
     const json=(data,status=200)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(data)});
+    if(p==='customer-platform-comparison')return published.handle({req,url,json});
     if(p==='/api/auth/session')return json({user:{name:'Fixture member'},expires:'2099-01-01T00:00:00Z'});
     if(p==='/api/settings')return json({settings:{sla:null}});
     if(p==='/api/elastic-vulnerabilities/status')return json({enabled:true,remediationEnabled:true});
@@ -87,7 +90,7 @@ try{
     if(p==='customer-threat-intelligence')return failIntel?json({error:'Fixture refresh unavailable'},503):json({companyId,available:true,total:1,rows:[{cve,cisa_kev:true,epss_probability:0.9,active_exploitation:true,active_exploitation_source:'MISP',active_exploitation_detail:'Synthetic retained signal',updated_at:when}]});
     if(p==='customer-cve-comparison'){
       assert.equal(req.method(),'GET');
-      const result={...detail(companyId),scope:'published-defender-cohort',enrichmentState:comparisonState==='no-enrichment'?'unavailable':'available',
+      const result={...detail(companyId),projectionId:published.detailProjection,scope:'published-defender-cohort',enrichmentState:comparisonState==='no-enrichment'?'unavailable':'available',
         enrichment:comparisonState==='no-enrichment'?null:{cvss_score:9.8,epss_probability:0.8,cisa_kev:true,active_exploitation:true,active_exploitation_source:'MISP',active_exploitation_detail:'Saved comparison signal',updated_at:when},
         tickets:[{id:'comparison-reference',ticket_id:444,ticket_url:'https://tickets.invalid/444',state:'created',review_state:'approved',closed:false}],moreTickets:false};
       if(delayComparison){delayComparison=false;await new Promise(resolve=>releaseComparison=resolve);}
@@ -231,7 +234,10 @@ try{
     await page.setViewportSize({width:390,height:844});const box=await panel.boundingBox();assert.ok(box.width<=390&&box.x>=0);
     await page.screenshot({path:join(artifacts,'shadow-cve-mobile.png'),fullPage:true});
     pass('customer switching rejects previous results, unsupported customers stay explicit, and comparison fits mobile');
+    await panel.getByRole('button',{name:'Close',exact:true}).click();
+    await published.run({page,panel,base,pass,artifacts});
   }
+  if(!shadowReads){assert.equal(await page.getByRole('button',{name:'Compare published data',exact:true}).count(),0);assert.equal(published.requests.length,0);pass('disabled comparison adds no button or page requests');}
   assert.deepEqual(unexpected,[]);assert.deepEqual(errors,[]);
   await writeFile(join(artifacts,'result.json'),JSON.stringify({checks,passed:true,syntheticData:true,realTicketsSent:0,unexpected,errors},null,2));
   console.log(JSON.stringify({checks,passed:true,artifacts,realTicketsSent:0}));

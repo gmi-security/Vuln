@@ -1,13 +1,13 @@
 "use client";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { CustomerCveContext } from "./customer-cve-context";
+import { CustomerCveContext, type CveComparisonSelection } from "./customer-cve-context";
 import { dashboardRequest } from "@/lib/dashboard-browser-client";
 import type { readCustomerCve, prepareCustomerCve } from "@/lib/customer-cve-service";
 import type { PatchGroup } from "@/lib/patch-request";
 import ConnectWiseGroupTicket from "./ConnectWiseGroupTicket";
 import styles from "./QueryDashboard.module.css";
 
-type Detail=Awaited<ReturnType<typeof readCustomerCve>> & {scope?:"published-defender-cohort";enrichmentState?:"available"|"unavailable"|"not-recorded"};
+type Detail=Awaited<ReturnType<typeof readCustomerCve>> & {scope?:"published-defender-cohort";projectionId?:string;enrichmentState?:"available"|"unavailable"|"not-recorded"};
 type Packet=Awaited<ReturnType<typeof prepareCustomerCve>>;
 function download(group:PatchGroup) {
   const url=URL.createObjectURL(new Blob([group.csv],{type:"text/csv;charset=utf-8"}));
@@ -32,9 +32,9 @@ function Draft({entry,companyId}:{entry:Packet["groups"][number];companyId:strin
     <ConnectWiseGroupTicket key={`${entry.id}:${approved}`} group={entry.group} requestId={entry.id} customerScope={companyId}/>
   </section>;
 }
-function Panel({companyId,cve,canManage,compareEnabled,close}:{companyId:string;cve:string;canManage:boolean;compareEnabled:boolean;close:()=>void}) {
+function Panel({companyId,cve,canManage,compareEnabled,selection,close}:{companyId:string;cve:string;canManage:boolean;compareEnabled:boolean;selection?:CveComparisonSelection;close:()=>void}) {
   const dialog=useRef<HTMLDialogElement>(null), live=useRef(true), generation=useRef(0);
-  const [comparison,setComparison]=useState(false);
+  const [comparison,setComparison]=useState(!!selection);
   const [detail,setDetail]=useState<Detail|null>(null),[packet,setPacket]=useState<Packet|null>(null),[error,setError]=useState(""),[busy,setBusy]=useState(false);
   useEffect(()=>{
     let active=true;live.current=true;dialog.current?.showModal();
@@ -44,11 +44,12 @@ function Panel({companyId,cve,canManage,compareEnabled,close}:{companyId:string;
     dashboardRequest<Detail>(`${endpoint}?companyId=${encodeURIComponent(companyId)}&cve=${encodeURIComponent(cve)}`)
       .then(data=>{if(active&&version===generation.current){
         if(data.companyId!==companyId||data.cve!==cve||(comparison&&data.scope!=="published-defender-cohort"))throw new Error("CVE response did not match the selected customer and view.");
+        if(selection && data.projectionId!==selection.projectionId)throw new Error("Publication changed. Close this panel and refresh the comparison.");
         setDetail(data);
       }})
       .catch(error=>{if(active&&version===generation.current)setError(error.message);});
     return()=>{active=false;live.current=false;};
-  },[companyId,cve,comparison]);
+  },[companyId,cve,comparison,selection]);
   function switchMode(){generation.current++;setDetail(null);setPacket(null);setError("");setBusy(false);setComparison(value=>!value);}
   async function prepare() {
     if(comparison)return;
@@ -63,7 +64,7 @@ function Panel({companyId,cve,canManage,compareEnabled,close}:{companyId:string;
     className="fixed inset-y-0 left-auto right-0 m-0 h-dvh max-h-dvh w-full max-w-2xl overflow-y-auto border-l border-zinc-700 bg-[#090909] p-6 text-zinc-100 backdrop:bg-black/70">
     <div className="flex items-start justify-between gap-4"><div><p className="text-sm text-zinc-300">{detail?.companyName ?? companyId}</p><h2 id="customer-cve-title" className="mt-1 text-2xl font-semibold">{cve}</h2></div>
       <button autoFocus className={styles.button} onClick={()=>dialog.current?.close()}>Close</button></div>
-    {compareEnabled && <button className={`${styles.button} mt-4`} onClick={switchMode}>{comparison?"Return to current data":"Compare database read"}</button>}
+    {compareEnabled && !selection && <button className={`${styles.button} mt-4`} onClick={switchMode}>{comparison?"Return to current data":"Compare database read"}</button>}
     {comparison && <p role="note" className="mt-4 rounded-xl border border-amber-700 p-3 text-sm text-amber-100">Read-only comparison: published Defender findings only. This may not include every connector for this customer. Patch preparation and sending are unavailable in this view.</p>}
     {error && <p role="alert" className={`${styles.patchError} my-4`}>{error}</p>}
     {!detail && !error && <p role="status" className="mt-5">Loading saved customer evidence…</p>}
@@ -94,9 +95,9 @@ function Panel({companyId,cve,canManage,compareEnabled,close}:{companyId:string;
   </dialog>;
 }
 export default function CustomerCveProvider({enabled,companyId,canManage,compareEnabled=false,children}:{enabled:boolean;companyId:string;canManage:boolean;compareEnabled?:boolean;children:ReactNode}) {
-  const [cve,setCve]=useState<string|null>(null);
+  const [selected,setSelected]=useState<{cve:string;options?:CveComparisonSelection}|null>(null);
   if(!enabled)return children;
-  return <CustomerCveContext.Provider value={companyId ? value=>setCve(value.toUpperCase()) : null}>
-    {children}{companyId && cve && <Panel key={`${companyId}:${cve}`} companyId={companyId} cve={cve} canManage={canManage} compareEnabled={compareEnabled} close={()=>setCve(null)}/>}
+  return <CustomerCveContext.Provider value={companyId ? (value,options)=>{if(options&&!compareEnabled)return;setSelected({cve:value.toUpperCase(),options});} : null}>
+    {children}{companyId && selected && <Panel key={`${companyId}:${selected.cve}:${selected.options?.projectionId ?? "current"}`} companyId={companyId} cve={selected.cve} selection={selected.options} canManage={canManage} compareEnabled={compareEnabled} close={()=>setSelected(null)}/>}
   </CustomerCveContext.Provider>;
 }
