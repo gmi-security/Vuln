@@ -31,7 +31,7 @@ export async function savedReference(source,companyId){
   }catch(error){await source.query('ROLLBACK');throw error;}
 }
 
-export async function verifyShadowReads(client,result,records,{failure=false,observer=null}={}){
+export async function verifyShadowReads(client,result,records,{failure=false,observer=null,reader=readDefenderShadow,afterBuild}={}){
   const request={companyId:result.companyId,projectionId:result.projectionId};
   assert.equal((await readDefenderShadow(client,request)).state,'not-ready');
   if(failure){
@@ -44,8 +44,9 @@ export async function verifyShadowReads(client,result,records,{failure=false,obs
   }
   const built=await buildDefenderShadowReads(client,result.companyId,result.projectionId);
   assert.equal((await buildDefenderShadowReads(client,result.companyId,result.projectionId)).alreadyBuilt,true);
+  await afterBuild?.();
   const timings=[];let response;
-  for(let i=0;i<3;i++){const start=performance.now();response=await readDefenderShadow(client,request);timings.push(Math.round((performance.now()-start)*10)/10);}
+  for(let i=0;i<3;i++){const start=performance.now();response=await reader(client,request);timings.push(Math.round((performance.now()-start)*10)/10);}
   const expected=model.namespace.buildCustomerReportingModel({id:result.companyId,name:'Private comparison'},records,[],[],[]);
   const metrics=expected.metrics.vulnerabilities,s=response.summary;
   assert.equal(s.records,records.length);for(const key of ['critical','high','kev','exploitable','cveOpen','bySeverity'])assert.deepEqual(s[key],metrics[key]);
@@ -57,7 +58,7 @@ export async function verifyShadowReads(client,result,records,{failure=false,obs
     const wanted=sorted.filter(f=>status==='all'||(status==='open'?isOpen(f):f.status===status));
     let cursor=null,offset=0;
     do{
-      const start=performance.now();const page=await readDefenderShadow(client,{...request,view:'findings',status,limit:100,cursor});
+      const start=performance.now();const page=await reader(client,{...request,view:'findings',status,limit:100,cursor});
       if(pageTimes.length<6)pageTimes.push(Math.round((performance.now()-start)*10)/10);
       assert.equal(page.page.total,wanted.length);
       assert.deepEqual(page.page.rows.map(r=>r.id),wanted.slice(offset,offset+100).map(r=>r.id));
@@ -80,7 +81,7 @@ export async function verifyShadowReads(client,result,records,{failure=false,obs
   const cves=[...groups.values()].map(({devices,...g})=>({...g,affectedDevices:devices.size})).sort((a,b)=>ranks.indexOf(b.severity)-ranks.indexOf(a.severity)||b.affectedDevices-a.affectedDevices||(a.cve<b.cve?-1:a.cve>b.cve?1:0));
   assert.equal(s.uniqueOpenCves,cves.length);assert.equal(s.affectedDeviceIds,devices.size);assert.equal(s.affectedAssetKeys,assets.size);
   let cursor=null,offset=0;const cveTimes=[];
-  do{const start=performance.now();const page=await readDefenderShadow(client,{...request,view:'cves',limit:100,cursor});
+  do{const start=performance.now();const page=await reader(client,{...request,view:'cves',limit:100,cursor});
     if(cveTimes.length<3)cveTimes.push(Math.round((performance.now()-start)*10)/10);
     assert.deepEqual(page.page.rows,cves.slice(offset,offset+100));assert.equal(page.page.total,cves.length);
     offset+=page.page.rows.length;cursor=page.page.nextCursor;
