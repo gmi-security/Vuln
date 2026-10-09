@@ -143,7 +143,8 @@ Acceptance requires customer isolation across shared CVEs; correct deduplication
 - Eleventh local checkpoint: derived-summary retention now has a read-only preview and an explicit bounded apply service. It protects current/source-current summaries, the newest three generations, active jobs and consistent in-flight saved reads. Eight real PostgreSQL scenarios pass; no production cleanup or recurring caller was added. See the eleventh checkpoint below for proposed retention defaults and limits.
 - Twelfth local checkpoint: a disabled, authenticated saved-source preview now connects Overview and Prioritize to the Defender/Spotlight readers with explicit customer/source scope, honest pending/stale states, bounded CVE pages and the shared patch panel. It is additive validation, not replacement of the current report or risk services. See the twelfth checkpoint below.
 - Thirteenth local checkpoint: an offline endpoint source-selection model now checks reviewed customer scope, mirror origins, overlapping primaries, adapter availability and source freshness evidence. It cannot activate bindings or produce summed platform totals. Six fixtures using actual legacy projection/reporting code document why source counts can differ from platform open totals. See the thirteenth checkpoint below.
-- Next bounded step: produce a bounded read-only comparison on the private restore, tying retained source generations to the published platform snapshot and classifying differences in device/CVE grouping, workflow status, closure evidence and assessment policy. Verify compatible units before drawing numerical parity conclusions. Preserve existing live reporting until that gate and trusted binding review/activation are complete. Retention settings approval and recurring cleanup/monitoring wiring remain required before production worker activation. Operator review/import wiring, production index rollout, real ConnectWise test-destination confirmation, threat-evidence semantics and storage cutover remain separate release gates; do not grant new member configuration rights.
+- Fourteenth local checkpoint: a bounded read-only restore audit matched every current Defender device/CVE pair to the published generation, explained 2,970 retained older open findings, and measured the separate Atlas legacy-platform and completed Spotlight populations. The audit ran in 14 seconds without hydrating the application or changing SQL data. See the fourteenth checkpoint below; this does not establish full cross-source or risk parity.
+- Next bounded step: implement an offline, versioned Defender platform-finding migration contract and shadow projection, seeded from published platform records rather than rebuilding only the current source import. Preserve stable finding IDs, workflow state, retained older open findings, resolved history and saved assessments; validate customer/count/status/assessment parity in the isolated database before wiring any page. Keep Atlas source summaries separate until an explicit identity/lifecycle reconciliation maps the legacy CrowdStrike findings to retained Spotlight evidence. Trusted binding review/activation, retention settings approval and recurring cleanup/monitoring wiring remain required before production activation. Operator review/import wiring, production index rollout, real ConnectWise test-destination confirmation, threat-evidence semantics and storage cutover remain separate release gates; do not grant new member configuration rights.
 - Develop on `Vuln2.0` in bounded commits and deliver UI/backend changes through separately reviewed releases, without a separate staging environment. Keep the six-section layout and shared panel in this combined plan; do not combine a visual rollout with an irreversible storage cutover.
 - Review reference: the standalone file `GMI Vuln Ticket Workflow.html` accompanies the readable proposal in Downloads. It is a workflow demonstration, not an implementation dependency.
 
@@ -471,6 +472,39 @@ Reviewing the existing code identified material differences that must survive a 
 Six new fixtures execute `planDefenderProjection` and `buildReportingMetrics` directly to reproduce those differences and verify distinct Defender identities sharing a hostname/IP. Nine decision-model tests verify reviewed single-source proposals, correct and invalid mirror cases, duplicate/overlapping sources, review invalidation, separate domains, unsupported adapters, stale/unavailable data, known configuration mismatch and customer isolation. All 95 unit/regression tests, the standalone TypeScript compilation and the application build passed. No runtime store singleton or vendor API is used by the new semantic fixtures.
 
 This checkpoint supplies executable decision rules and code-backed semantic examples, not live tenant verification or a full restored-source-to-platform numerical reconciliation. No reviewed draft is activated; no collector asserts actual scope verification yet. Existing source fingerprints still require runtime secret/revision reconciliation. No database migration, server access, production data update, scoring change, UI change, push or deployment occurred in this checkpoint. Work remains local to `Vuln2.0`.
+
+### Fourteenth checkpoint: retained source versus published platform evidence
+
+`scripts/audit-restored-source-platform.mjs` reads only the private restored October 9 backup through a verified Unix socket, with a repeatable-read/read-only transaction. It does not load application configuration, initialize schemas, hydrate the store or call vendors. It validates the 64-bucket findings layout, extracts narrow fields, caps source/platform records and query duration, and writes aggregate results to a private file. `scripts/source-platform-comparison.mjs` supplies the offline classifications; five tests cover grouping, workflow, missing/duplicate/stale evidence, closure evidence, assessment differences and reporting domains. The six existing tests against actual legacy projection/reporting functions also passed. No runtime application file changed, so a new application build or browser run was unnecessary for this checkpoint.
+
+The final audit scanned 510,945 saved platform records in 14,013 ms. Source pointers and platform records came from the same database snapshot. The snapshot metadata was last saved October 9 at 09:26:32 UTC. The report is retained privately at `source-platform-5i4ua42t/comparison.json` under the recovery directory. These are backup observations, not current live counts. `docs/source-platform-comparison.md` records the comparison, limits and rerun procedure. The private PostgreSQL cluster was stopped afterward.
+
+| Footprint / Defender measure | Measured count or result |
+| --- | --- |
+| Current retained software-instance rows | 286,068 |
+| Current distinct device/CVE pairs | 212,921 |
+| Same pairs found in published platform records | 212,921; zero missing or duplicate pairs |
+| Publication generation and connection revision | Match the retained completed import; completed October 8 at 18:39:42 UTC |
+| Current-pair workflow and assessment | All Open and active; zero severity/CVSS differences under the existing projection's null/unknown mapping |
+| Older records absent from current source | 75,957: 72,987 Resolved and 2,970 Open |
+| Why the 2,970 remain open | All retain active evidence from an older generation; saved device heartbeats precede the findings' prior observations, so the existing projection has no newer heartbeat supporting closure |
+| Total platform open findings | 215,891 = 212,921 current pairs + 2,970 retained older open findings |
+| Current-source versus platform unique open CVEs | 10,215 versus 10,229 |
+| Device units | 585 current-source affected device IDs; 588 platform open endpoint asset keys; 2,348 source inventory devices. Asset keys are not independently verified cross-source device identities. |
+
+This verifies current Defender pair membership, generation, workflow observations and severity/CVSS correspondence. It does not recalculate risk, prove host assessment freshness, validate every historical closure, compare ticket contents or justify deleting older records. Rebuilding from current Defender rows alone would lose the 2,970 open findings and 72,987 resolved records in this backup. Their lifecycle state must be migrated explicitly.
+
+| Atlas population | Measured count |
+| --- | --- |
+| Saved platform CrowdStrike endpoint findings | 80,000 Open; 4,450 distinct CVEs; 142 asset keys |
+| Saved platform SpiderFoot exposures | 302, separate from remediation findings |
+| Completed Spotlight source rows | 2,119,658; completed October 1 at 13:29:08 UTC |
+| Eligible Spotlight open instances / device-CVE pairs | 2,112,296 / 2,094,134 |
+| Spotlight distinct CVEs / affected device IDs | 11,710 / 1,439 |
+
+The Atlas source counts reuse the earlier independent full-source audit only after verifying the same customer-owned completed generation is still current. Code inspection of `importFromCrowdstrikeSpotlight` in `lib/store.ts` confirms that this import writes the dedicated source tables and deliberately leaves the in-memory/platform findings unchanged. Those populations therefore are not a demonstrated one-to-one publication. The exact historical reason for 80,000 platform records was not established, and no new import cap is inferred from that number. Do not label the numerical difference as newly lost data, add the two datasets, claim risk parity or silently replace historical report totals. Both upstream freshness and stable identity/lifecycle mapping need explicit treatment at cutover.
+
+All changes remain local to `Vuln2.0`; no push, merge, production database/configuration change, process restart or ticket action occurred.
 
 ## How the system works today
 
