@@ -2,7 +2,8 @@ import { DashboardError } from "./elastic-dashboard";
 import { buildCustomerInsights } from "./reporting-insights";
 import { buildCustomerReportingModel } from "./reporting-customer-model";
 import { loadMetricsHistory } from "./persist";
-import { computeExecReport, ensureHydrated, getCompany, listAssets, listCompanies, listFindings, listScans } from "./store";
+import { computeExecReport, ensureHydrated, listAssets, listCompanies, listFindings, listScans } from "./store";
+import { resolveCustomerScope } from "./customer-scope";
 
 // Includes GMI's own internal estate (kind "internal") alongside client
 // companies — GMI scans and tickets its own infrastructure through this same
@@ -17,9 +18,7 @@ export async function reportingSetup() {
 
 export async function reportingCustomer(appCompanyId: string) {
   if (typeof appCompanyId !== "string" || !appCompanyId || appCompanyId.length > 100) throw new DashboardError("Choose a customer.", 400);
-  await ensureHydrated();
-  const company = getCompany(appCompanyId);
-  if (!company || company.isDemo) throw new DashboardError("Customer not found.", 404);
+  const { company } = await resolveCustomerScope(appCompanyId);
   const report = computeExecReport(company.id);
   if (!report) throw new DashboardError("Customer report is unavailable.", 404);
   const findings = listFindings({ companyId: company.id });

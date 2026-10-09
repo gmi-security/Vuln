@@ -5,7 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import localFont from "next/font/local";
 import { PanelLeftClose, PanelLeftOpen, ShieldCheck, SlidersHorizontal } from "lucide-react";
-import { baseNavItems, type VulnNavItem } from "@/lib/navigation";
+import { baseNavItems, remediationNavItems, type VulnNavItem } from "@/lib/navigation";
 import type { Connector } from "@/lib/types";
 
 // Appended after the shared nav list: console-level configuration screens.
@@ -39,10 +39,11 @@ export default function VulnSidebar({
   const pathname = usePathname();
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [elasticEnabled, setElasticEnabled] = useState(false);
+  const [remediationEnabled, setRemediationEnabled] = useState(false);
   const [syncAll, setSyncAll] = useState<{ running: boolean; startedAt: number } | null>(null);
   const navItems: VulnNavItem[] = [
-    ...baseNavItems,
-    ...(elasticEnabled ? [{ label: "Reporting", icon: ShieldCheck, href: "/reporting" }] : []),
+    ...(remediationEnabled ? remediationNavItems : baseNavItems),
+    ...(elasticEnabled && !remediationEnabled ? [{ label: "Reporting", icon: ShieldCheck, href: "/reporting" }] : []),
     ...settingsNavItems,
   ];
 
@@ -66,7 +67,10 @@ export default function VulnSidebar({
     void pollSyncAll();
     fetch("/api/elastic-vulnerabilities/status", { cache: "no-store" })
       .then((response) => response.ok ? response.json() : null)
-      .then((data) => alive && setElasticEnabled(data?.enabled === true))
+      .then((data) => { if (alive) {
+        setElasticEnabled(data?.enabled === true);
+        setRemediationEnabled(data?.remediationEnabled === true);
+      } })
       .catch(() => {});
     const connectorsId = setInterval(pollConnectors, 20_000);
     const syncAllId = setInterval(pollSyncAll, 5_000);

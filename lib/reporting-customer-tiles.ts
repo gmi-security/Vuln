@@ -1,14 +1,11 @@
 import { DashboardError } from "./elastic-dashboard";
 import { readDashboard, triggerRefresh } from "./elastic-dashboard-store";
 import { customerReportingTileIds, directSourcesForCustomer, emptyReportingDashboard } from "./reporting-direct-sources";
-import { ensureHydrated, getCompany } from "./store";
+import { resolveCustomerScope } from "./customer-scope";
 
 export async function readCustomerTiles(companyId: string, canManage: boolean) {
   if (!companyId) return emptyReportingDashboard(canManage);
-  if (companyId.length > 100) throw new DashboardError("Choose an existing customer.",400);
-  await ensureHydrated();
-  const company = getCompany(companyId);
-  if (!company || company.isDemo) throw new DashboardError("Customer not found.",404);
+  await resolveCustomerScope(companyId);
   const configured = process.env.REPORTING_CUSTOMER_TILE_IDS ?? "", atlasIds = process.env.ATLAS_REPORTING_TILE_IDS ?? "";
   try {
     customerReportingTileIds(companyId,configured,atlasIds);
