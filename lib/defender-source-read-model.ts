@@ -32,6 +32,7 @@ export function createDefenderSourceReader(db: Pick<Pool, "connect">) {
     const { companyId, now, staleAfterMs, offset, limit } = validateSourceRead(request);
     const client = await db.connect();
     const base = { version: 1 as const, companyId, source: "defender" as const,
+      definition: { instanceUnit: "device-cve-software-version" as const, severityBasis: "source-cvss" as const, suppression: "not-recorded" as const },
       scope: "saved-source-generation" as const, latestAttempt: null as CustomerSourceRead["latestAttempt"] };
     function unavailable(state: "not-installed" | "not-configured" | "no-completed-import" | "inconsistent"): CustomerSourceRead {
       return { ...base, state, generation: null, summary: null, cves: null };
@@ -101,8 +102,9 @@ export function createDefenderSourceReader(db: Pick<Pool, "connect">) {
               if (connectionRevision < 1 || importRevision < 1) throw new Error();
               result = { ...base, state: "available", generation: { id: saved.run_id, completedAt,
                 connectionRevision, importRevision, revisionMatches: connectionRevision === importRevision,
-                clock: "import-completion", ...importFreshness(completedAt, now, staleAfterMs) },
+                clock: "import-completion", countVerification: "summary-reconciled", ...importFreshness(completedAt, now, staleAfterMs) },
                 summary: { sourceInstances, deviceCveFindings, uniqueCves, affectedDevices, inventoryDevices,
+                  unknownSuppressionInstances: null, excludedSuppressedInstances: null, excludedNonCveInstances: 0,
                   severity: { sourceInstances: instanceSeverity, uniqueCves: cveSeverity } },
                 cves: { rows: cves, total: uniqueCves, offset, limit } };
             } catch { result = unavailable("inconsistent"); }

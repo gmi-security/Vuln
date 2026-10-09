@@ -15,14 +15,15 @@ export type CustomerSourceReadRequest = {
 };
 export type SourceGeneration = {
   id: string;
-  connectionRevision: number;
-  importRevision: number;
-  revisionMatches: boolean;
+  connectionRevision: number | null;
+  importRevision: number | null;
+  revisionMatches: boolean | null;
   completedAt: string;
   freshness: "within-window" | "stale" | "unknown";
   ageMs: number | null;
   // Completion does not establish when every endpoint was assessed.
   clock: "import-completion";
+  countVerification: "summary-reconciled" | "import-count-reconciled" | "completion-marker-only";
 };
 export type SourceCveRow = {
   cve: string;
@@ -34,8 +35,13 @@ export type SourceCveRow = {
 export type CustomerSourceRead = {
   version: 1;
   companyId: string;
-  source: "defender";
+  source: "defender" | "crowdstrike";
   scope: "saved-source-generation";
+  definition: {
+    instanceUnit: "device-cve-software-version" | "spotlight-finding";
+    severityBasis: "source-cvss";
+    suppression: "not-recorded" | "exclude-confirmed-suppressed";
+  };
   // No credentials, tenant identifiers, vendor payloads or import error messages.
   latestAttempt: { status: "queued" | "running" | "succeeded" | "failed"; startedAt: string; finishedAt: string | null } | null;
 } & ({
@@ -51,7 +57,11 @@ export type CustomerSourceRead = {
     deviceCveFindings: number;
     uniqueCves: number;
     affectedDevices: number;
-    inventoryDevices: number;
+    inventoryDevices: number | null;
+    // Coverage qualifiers for the included CVE findings; unsupported measurements are null.
+    unknownSuppressionInstances: number | null;
+    excludedSuppressedInstances: number | null;
+    excludedNonCveInstances: number;
     severity: { sourceInstances: SeverityCounts; uniqueCves: SeverityCounts };
   };
   cves: { rows: SourceCveRow[]; total: number; offset: number; limit: number };
