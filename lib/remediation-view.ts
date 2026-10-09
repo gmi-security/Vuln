@@ -15,3 +15,10 @@ export function remediationHref(companyId: string, view: RemediationView = "over
   const query = params.toString();
   return `/remediation${query ? `?${query}` : ""}`;
 }
+
+export function customerConnectorsHref(companyId: string, shared = false) {
+  const params = new URLSearchParams();
+  if (companyId) params.set("companyId", companyId);
+  if (shared) params.set("view", "shared");
+  return `/connectors${params.size ? `?${params}` : ""}`;
+}

@@ -17,6 +17,11 @@ type Draft = {
   revision: number; enabled: false; reviewed_by: string | null; reviewed_at: Date | string | null;
 };
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+export function connectorDraftEvidence(candidate: ConnectorCandidate, candidates: ConnectorCandidate[]) {
+  const sourceEvidence = candidate.evidence === "saved-tile" ? candidates.filter(c =>
+    c.evidence === "shared-configuration" && c.connectionRef === candidate.connectionRef && c.provider === candidate.provider) : [];
+  return { sourceEvidence, candidateHash: hash({ candidate, sourceEvidence }) };
+}
 const digestPattern = /^[a-f0-9]{64}$/;
 const assert = (condition: unknown, message: string): void => { if (!condition) throw new Error(message); };
 function short(value: unknown, max = 256): value is string {
@@ -113,9 +118,7 @@ export function createConnectorDraftStore(db: Pick<Pool, "connect" | "query">) {
         current.delete(candidate.id);
         // A saved query depends on a separately stored connection revision.
         // Credential/tenant changes there must invalidate the tile's review too.
-        const sourceEvidence = candidate.evidence === "saved-tile" ? preview.candidates.filter(c =>
-          c.evidence === "shared-configuration" && c.connectionRef === candidate.connectionRef && c.provider === candidate.provider) : [];
-        const candidateHash = hash({ candidate, sourceEvidence });
+        const { sourceEvidence, candidateHash } = connectorDraftEvidence(candidate, preview.candidates);
         if (!before) {
           const initial = proposal({ companyId: candidate.companyId, tenantId: candidate.tenantId, datasets: [], targets: [], authority: "unassigned" });
           const after = (await client.query(`INSERT INTO customer_connector_drafts(id,candidate,candidate_hash,proposal,last_seen_import,source_evidence)

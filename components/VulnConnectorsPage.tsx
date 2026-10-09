@@ -1114,7 +1114,7 @@ function byStatusThenName(a: { status: string; name: string }, b: { status: stri
   );
 }
 
-export default function VulnConnectorsPage() {
+export default function VulnConnectorsPage({ customerHref }: { customerHref?: string } = {}) {
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [integrations, setIntegrations] = useState<CardData[]>([]);
 
@@ -1133,8 +1133,10 @@ export default function VulnConnectorsPage() {
     <VulnShell
       eyebrow="Connectors"
       title="Connectors & integrations"
+      actions={customerHref ? <a className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-100" href={customerHref}>Back to customer connectors</a> : undefined}
       subtitle="Scan engines, telemetry sources, and asset inventory feeding the console. Each integration runs in demo mode until its credentials are set in the environment."
     >
+      {customerHref && <p className="rounded-xl border border-amber-900 bg-amber-950/20 p-4 text-sm text-amber-100">Shared tools: these existing actions can affect multiple customers. The customer selection does not scope these controls.</p>}
       <OsintLaunchBanner />
       <a href="/defender" className="block rounded-2xl border border-zinc-800 bg-[#090909] p-5 transition hover:border-red-800">
         <h2 className="text-lg font-semibold text-white">Microsoft Defender · Customer connections</h2>

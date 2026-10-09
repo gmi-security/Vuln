@@ -18,7 +18,7 @@ import styles from "./QueryDashboard.module.css";
 import CustomerCveProvider from "./CustomerCveProvider";
 import CustomerThreatIntelligence from "./CustomerThreatIntelligence";
 import { baseNavItems, remediationNavItems } from "@/lib/navigation";
-import { remediationHref, remediationView, remediationViews, type RemediationView } from "@/lib/remediation-view";
+import { customerConnectorsHref, remediationHref, remediationView, remediationViews, type RemediationView } from "@/lib/remediation-view";
 
 function CustomerTiles({ companyId, canManage }: { companyId:string; canManage:boolean }) {
   const [dashboard,setDashboard] = useState<ElasticDashboard | null>(null);
@@ -88,7 +88,7 @@ export default function CustomerReportingPage({ initialCompanyId="", canManage, 
     subtitle={remediation ? "Understand exposure, prioritize fixes and track patch tickets for the selected customer." : "Select a customer to view its connected sources, findings and patch review."}
     navigation={remediation ? <nav aria-label="Main navigation" className="mb-7 flex flex-wrap items-center gap-5 text-sm text-zinc-300">
       <Link href="/" className="text-lg font-semibold tracking-widest text-[#b30e14]">GMI VULN</Link>
-      {remediationNavItems.map(item=><Link key={item.href} href={item.href === "/remediation" ? remediationHref(companyId) : item.href} aria-current={item.href === "/remediation" ? "page" : undefined}
+      {remediationNavItems.map(item=><Link key={item.href} href={item.href === "/remediation" ? remediationHref(companyId) : item.href === "/connectors" ? customerConnectorsHref(companyId) : item.href} aria-current={item.href === "/remediation" ? "page" : undefined}
         className={item.href === "/remediation" ? "border-b border-red-600 pb-1 text-white" : "hover:text-white"}>{item.label}</Link>)}
       <Link href="/settings" className="hover:text-white">Settings</Link>
     </nav> : undefined}

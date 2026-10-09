@@ -1,6 +1,6 @@
 # Customer connector registry: preview and disabled drafts
 
-The Vuln2.0 registry now has a read-only preview and transactional storage for disabled draft proposals. No production service or page uses the new tables yet. It does not migrate credentials, change customer access, activate bindings or switch readers/workers to a new source.
+The Vuln2.0 registry now has a read-only preview, transactional storage for disabled draft proposals, and a gated customer status view. It has not been deployed. It does not migrate credentials, change customer access, activate bindings or switch findings readers/workers to a new source.
 
 ## What is collected
 
@@ -73,6 +73,18 @@ Review requires supported authority and an explicitly recorded vendor tenant, El
 
 No existing member/admin capabilities are changed: there is currently no UI or API through which accounts can mutate these drafts. Future wiring must use existing permissions and server-generated actor identity. Reviewed proposals cannot be treated as active sources; PostgreSQL currently enforces `enabled=false`. Roll back code by retaining unused draft/audit tables, not by dropping review history.
 
+## Customer status view
+
+Under the disabled-by-default `VULN_REMEDIATION_UI` flag, `/connectors?companyId=...` shows saved configuration and inactive review proposals for that customer. It uses the same selector component as reporting, retains customer context when navigating to/from Remediation, and exposes no configuration or approval controls. Without the flag, the original Connectors page remains in place.
+
+The read-only endpoint is `GET /api/elastic-dashboard/customer-connectors?companyId=...`; `?setup=1` returns only the persisted non-demo customer list. Both use the existing dashboard organization-member access check and UI flag. Missing customer selection never returns every customer's connector records. The service does not call the registry write methods or create missing tables.
+
+The response omits raw vendor tenant values, credential references, target/dataset lists and audit notes. It distinguishes an absent registry migration from a failed database query and recognizes source/connection changes that invalidate an old review. Checking status does not save the changed evidence. The displayed check time is the metadata read time, not the last successful vendor import or a live connectivity test.
+
+`Shared connector tools` opens `/connectors?view=shared` with a clear global-action notice. Those existing tools retain their existing behavior and permissions; the selected customer does not scope their actions. A return link restores the customer view. Treat these tools as operational controls, separate from inactive registry proposals.
+
+Customer switching cancels and isolates earlier requests. Same-customer refresh failures retain prior results with a stale warning. The view never automatically syncs, scans or probes live connector health.
+
 ## Validation and next implementation
 
 ```sh
@@ -83,4 +95,6 @@ node --experimental-vm-modules --test tests/customer-connector-preview.test.mjs
 
 `tests/connector-drafts-postgres.mjs PRIVATE_RESTORE_SOCKET` tests the explicit migration, import/review transactions and audit rollback in a disposable fixture database. The optional `--with-restored-metadata` flag also reads metadata from the private `recovery_application` database and configuration presence from `/opt/vuln/.env.local`, then writes drafts only into that fixture database. Database addresses in the environment file are not used by this test. The fixture database is dropped on exit; the test does not approve real customer bindings.
 
-Next: a read-only, customer-scoped Connectors status/review view, followed by permission-preserving mutation adapters and read-model parity. Until those release gates pass, existing stores, schedulers, permissions, source routing and pages continue unchanged.
+Status tests: `node --experimental-vm-modules --test tests/customer-connector-status.test.mjs`. For the actual UI, build in a clean checkout without `.env` files, then run `node tests/customer-connectors-browser.mjs` with `PLAYWRIGHT_MODULE` pointing to an installed Playwright module. The browser test runs a credential-free local server with synthetic intercepted source data; it does not test live vendor connections.
+
+Next: a shared customer-source read contract and the first adapter/parity checks over retained data. Mutation adapter authorization, actual scope verification and activation are separate release gates. Existing stores, schedulers, permissions and source routing remain authoritative.
