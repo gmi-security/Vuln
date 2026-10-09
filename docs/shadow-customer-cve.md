@@ -5,8 +5,9 @@
 ## Connections and flow
 
 ```text
-Explicit enable + trusted customer/projection binding
+Explicit enable + trusted customer binding (fixed UUID or published selection)
   -> existing customer resolver supplied by the caller
+  -> optional shadow publication selection, pinned once for the request
   -> shadow client: complete bounded CVE evidence
   -> application client: saved cve_enrichment
   -> dashboard/ticket client: saved references and exact exclusions
@@ -18,6 +19,8 @@ The three clients are passed explicitly. Enrichment belongs to the application d
 `createShadowCustomerCveReader` is disabled unless `enabled` is the boolean `true`. Its bindings are copied from trusted configuration at construction. The request supplies only a customer and CVE; a supplied projection or source cannot override configuration. Only an explicit Defender binding is supported. A duplicate binding, unsupported source, unknown customer, demo customer, mismatched identity or invalid projection fails. A binding selects a comparison snapshot; it does not establish tenant ownership or activate the proposed connector registry. Authentication remains the eventual route's responsibility, using existing guards.
 
 The source read completes before any contextual lookup, so a CVE absent from the selected customer's verified projection does not become a global enrichment/ticket search. This retains the published-Defender-cohort label. It must not replace the complete customer view where other providers contribute findings.
+
+A trusted binding may now specify `selection:"published"` instead of `projectionId`. Supplying both or an unknown selection mode fails. The adapter resolves the same-customer complete publication once before reconstructing CVE details. Missing publication fails with 409; no fallback source or generation is selected. Immutable retained data allows a request to finish consistently if a later publication or rollback changes the pointer. Public detail includes the selected publication revision/time. A request cannot provide either the projection or selection policy. The existing UUID binding remains supported.
 
 ## Output and compatibility
 

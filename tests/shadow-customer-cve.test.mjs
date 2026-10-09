@@ -18,7 +18,19 @@ test('customer resolution rejects demo, wrong and missing customer before reads'
 });
 test('request cannot override a missing trusted projection',async()=>{
   const read=createShadowCustomerCveReader({...options,bindings:[{companyId:company.id,source:'defender'}]});
-  await assert.rejects(()=>read(clients,{...request,projectionId}),/Explicit projection scope/);
+  await assert.rejects(()=>read(clients,{...request,projectionId}),e=>e.status===400);
+  await assert.rejects(()=>read(clients,request),/Explicit projection scope/);
+});
+
+test('published selection validates scope and customer before any storage read',async()=>{
+  const binding={companyId:company.id,source:'defender',selection:'published'};
+  for(const extra of [{projectionId},{selection:'published'},{cve:'bad'}]){
+    await assert.rejects(()=>createShadowCustomerCveReader({...options,bindings:[binding]})(clients,{...request,...extra}),e=>e.status===400);
+  }
+  for(const change of [{selection:'latest'},{projectionId}]){
+    await assert.rejects(()=>createShadowCustomerCveReader({...options,bindings:[{...binding,...change}]})(clients,request),e=>e.status===409);
+  }
+  await assert.rejects(()=>createShadowCustomerCveReader({...options,bindings:[binding],resolveCustomer:async()=>null})(clients,request),e=>e.status===404);
 });
 function fake({tables={singles:true,groups:true,enrichment:true},n=0,bytes=0,rows=[]}={}){
   const calls=[];return {calls,async query(sql){calls.push(sql);
