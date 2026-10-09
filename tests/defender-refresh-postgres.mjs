@@ -8,12 +8,14 @@ import {reconstructShadowSql} from '../lib/db/defender-platform-shadow.mjs';
 import {buildDefenderShadowReads} from '../lib/db/defender-shadow-reads.mjs';
 import {publishDefenderShadow,readDefenderPublication} from '../lib/db/defender-shadow-publication.mjs';
 import {refreshModules,company,when,snapshot,storeFixture,inputFrom} from './defender-refresh-fixture.mjs';
+import {verifyRefreshBaseline} from './defender-refresh-baseline-validation.mjs';
 const socket=await realpath(process.argv[2]||'.');assert.ok(socket.startsWith('/home/codex/vuln-recovery/')&&socket.endsWith('/socket'));
 const options={host:socket,port:55483,user:'codex',connectionTimeoutMillis:5000,statement_timeout:15000,query_timeout:20000};
 const suffix=randomUUID().replaceAll('-',''),sourceName=`vuln2_shadow_source_test_${suffix}`,targetName=`vuln2_shadow_test_${suffix}`;
 const admin=new pg.Client({...options,database:'postgres'}),created=[];let source,target,writer,pool,checks=0;
 const pass=message=>{checks++;console.log('PASS '+message);};
-const {store,candidate:{prepareDefenderRefreshCandidate:prepare},source:{createDefenderStore}}=await refreshModules();
+const modules=await refreshModules();
+const {store,candidate:{prepareDefenderRefreshCandidate:prepare},source:{createDefenderStore}}=modules;
 const run=randomUUID(),nextRun=randomUUID();
 try{
   await admin.connect();for(const name of [sourceName,targetName]){await admin.query(`CREATE DATABASE ${name}`);created.push(name);}
@@ -53,6 +55,9 @@ try{
   assert.deepEqual(await readDefenderPublication(target,company.id),pointer);
   await assert.rejects(()=>writeDefenderRefreshCandidate(source,candidate),/Disposable target/);
   pass('interrupted candidates remain unreadable, previous publication is retained and source databases reject candidate writes');
+  await target.query(await readFile('docs/sql/defender-shadow-refresh-publication-block.sql','utf8'));
+  baseline.meta.defenderGenerations[company.id]='old-run';
+  await verifyRefreshBaseline({source,target,writer,baseline,when,company,run,modules,pass});
   const pinned=await readDefenderRefreshSource(source,company.id,{afterSelected:async selected=>{
     assert.equal(selected,run);await writer.query('UPDATE defender_connections SET current_run=$1 WHERE company_id=$2',[nextRun,company.id]);
     await writer.query('DELETE FROM defender_records WHERE run_id=$1',[run]);await writer.query('DELETE FROM defender_devices WHERE run_id=$1',[run]);

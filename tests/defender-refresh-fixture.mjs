@@ -13,7 +13,8 @@ export async function refreshModules(){
     return new SyntheticModule(Object.keys(values),function(){for(const k of Object.keys(values))this.setExport(k,values[k]);});
   }
   async function entry(path){const m=await load(path);if(m.status==='unlinked')await m.link(link);if(m.status!=='evaluated')await m.evaluate();return m.namespace;}
-  return {store:await entry('lib/store.ts'),candidate:await entry('lib/defender-refresh-candidate.ts'),source:await entry('lib/defender-store.ts')};
+  return {store:await entry('lib/store.ts'),candidate:await entry('lib/defender-refresh-candidate.ts'),source:await entry('lib/defender-store.ts'),
+    assessment:await entry('lib/defender-refresh-assessment.ts'),threat:await entry('lib/threat.ts')};
 }
 export const company={id:'CO-TEST',name:'Refresh fixture',kind:'client',createdAt:'2026-10-01T00:00:00Z'};
 export const when='2026-10-09T12:00:00Z';
