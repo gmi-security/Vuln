@@ -1,0 +1,39 @@
+# Defender refresh candidate (offline prototype)
+
+This is an isolated import-to-candidate path. It has no application route, scheduler, source API client, active publication call or production writer. Candidate writes refuse anything except a disposable database in the private recovery cluster. It does not replace `reconcileDefenderPlatform`.
+
+## Flow
+
+1. `readDefenderRefreshSource` reads the customer's completed current import in a repeatable-read, read-only transaction. It checks source revision, success state and retained row/device counts against the completed summary. It reads the same device/CVE aggregation used by the existing `platformSnapshot` method, without calling its schema initializer. The read snapshot survives concurrent pointer changes and source pruning.
+2. An offline caller supplies one customer baseline: existing findings, inventory, applied run ID and saved timestamp, plus a scoring callback and assessment-context label. **A consistent baseline collector and genuinely frozen threat/control context are still required.** The label alone does not freeze a cache or prevent concurrent workflow changes.
+3. `prepareDefenderRefreshCandidate` reuses the existing pure projection rules. It merges proposed changes over the baseline, retaining untouched Defender history. Other scanner findings participate in correlation, but records without Defender evidence are not copied into this Defender-only model. Candidate inventory is retained as evidence, not applied to the live inventory.
+4. `writeDefenderRefreshCandidate` writes a separate generation in batches of 500, reconstructs each batch and compares it with the persisted JSON representation. Optional `undefined` properties are omitted, as in existing JSON snapshot persistence. It records baseline/run/revision/context, inventory evidence and a record digest, then verifies the generation using the existing immutability guards. A failed build cannot be read as a completed generation. The existing saved-summary builder can run separately after success; nothing selects this candidate automatically.
+
+## Preserved behavior
+
+| Condition | Candidate behavior |
+| --- | --- |
+| Same completed import already applied | Preserve the baseline unchanged; do not reopen later manual resolutions or rescore |
+| New import still detects a resolved finding | Reopen it under the existing legacy rule, preserving its stable ID and assignee |
+| Risk Accepted / False Positive | Preserve the workflow decision under existing projection rules |
+| Device absent, stale or without a usable heartbeat | Retain the old finding and source evidence; absence alone is not patch confirmation |
+| Fresh device no longer reports an open finding | Resolve eligible Defender-only findings |
+| Another scanner still reports the finding | Remove active Defender evidence without closing the other scanner's finding |
+| Shared scanner identity | Reuse the existing unambiguous correlation and stable finding/asset IDs |
+| Ticket history | No ticket table is read or written by these new modules; stable identifiers are retained |
+| Source revision or retained counts disagree | Refuse the source read, with no partial successful result |
+
+Bounds: at most 1,000,000 raw source instances, 500,000 grouped/baseline/candidate findings, 100,000 devices/assets and 512 MiB of expanded source JSON. Reads have 15-second statement limits and a 120-second default total deadline. Candidate writes have a five-minute maximum deadline, 16 MiB batch payload limit and 32 MiB provenance limit. These are offline protection limits, not proven production sizing. The planner currently holds customer baseline and source arrays in memory; it must run outside page requests.
+
+## Evidence
+
+- Four candidate contract tests compare actual existing projection/publication behavior, including same-run retries, analyst decisions, correlation, stale/missing devices and invalid input.
+- Five PostgreSQL test groups compare source aggregation and candidate records to the actual legacy methods, test append-only provenance, repeated candidate content, a build interrupted after 500 of 501 records, publication preservation, rejection of source-database writes, concurrent source replacement/pruning and valid empty imports.
+- The full retained source read processed 212,921 device/CVE pairs and 2,348 devices in 6,095 ms, with peak process RSS 282,064 KiB (about 275 MiB). This measured source reading only, without baseline hydration, candidate planning or full candidate writes. It is not a live count or end-to-end performance result.
+- Production build/type checks and 51 local regression tests passed. Private SQL tests block outbound TCP and permit only the recovery PostgreSQL socket. No source APIs or real ticket actions occurred.
+
+SQL fixture runner: `node --experimental-vm-modules tests/defender-refresh-postgres.mjs <private-socket-directory>`. It creates and drops its own source and target test databases. Migrations are applied only there, in base/read/publication/refresh order. `tests/defender-refresh-source-scale.mjs` reads only the retained recovery database.
+
+## Remaining before activation
+
+Collect and fence a consistent baseline and source selection; freeze actual assessment inputs; validate full-size candidate planning/writing and memory; preserve inventory/scans/history consumers; add durable job leases/retries and source-authority checks; prove workflow edits during a build cannot be overwritten; and test publication/rollback integration. Source and workflow freshness must be checked again before any candidate is selected. No production caller should be added until these are satisfied.
