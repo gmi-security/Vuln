@@ -1,0 +1,523 @@
+# GMI Vuln platform change proposal
+
+## Decision summary
+
+**Combined change plan: retain the existing application, gradually move it to a shared, customer-scoped PostgreSQL data model, and consolidate reporting, prioritization and patch tickets into Remediation.** Keep each connector's original records and capabilities, but make customer pages, reporting and patch workflows use consistent data services. Start by placing those services over the current implementations; replace storage behind them in bounded steps.
+
+This is a proposal for review, not an implemented redesign or authorization to change production. It covers the current architecture, the proposed architecture, regression exposure, migration stages and release criteria. It does not promise zero regressions.
+
+**Current status: implementation started on October 9, 2026.** The user authorized the work. The first checkpoint preserves a private recovery baseline and introduces a disabled Remediation layout using the existing reporting services. Development is on `Vuln2.0`; no production application deployment, schema cutover or change to customer permissions has occurred. Progress and verification limits are recorded below.
+
+**October 9, 2026 update:** The user approved the clickable Remediation workflow as the direction for the new layout and requested its inclusion in this change plan alongside the backend overhaul. Layout and workflow approval does not mean implementation, merge or deployment has occurred. The mockup uses fictional CVEs, hosts, board names and ticket references; it is not evidence of production integration behavior.
+
+**Prepared October 9, 2026.** The code baseline is `gmi-security/Vuln` main revision `a6c485b39b11e681602b1eb8019e18b31c5b9e14`, fetched and checked on that date. Current behavior below describes this code. The customer inventory section records subsequent read-only database evidence and its limits. Active worker processes, the deployed build and runtime database/source configuration still require reconciliation before migration.
+
+The change is not simply adding a database. The application already has PostgreSQL, customer IDs, source-specific tables, normalized findings and correlation logic. The proposal makes storage ownership, source selection and publication consistent across the application.
+
+## Delivery approach agreed for this work
+
+- **Development branch:** `Vuln2.0`. At the October 9 branch check, it and `main` both pointed to `a6c485b`; the server checkout was on `main` at that revision. Reconfirm the deployed build and branch heads before any release. No other developers are expected to work on this project today, so routine synchronization with others is not part of today's workflow; still check that the destination branch has not moved before a merge.
+- **No separate staging environment:** Develop and validate locally using tests, fixtures and disposable test data where necessary. Prepare the production release separately from the running application directory. Do not start a second application or worker against the live database as a substitute for staging.
+- **Small checkpoints:** Commit each bounded change to `Vuln2.0` after the relevant checks. Keep the existing production version available. Review the exact changes before releasing them; do not merge or deploy automatically just because a development step is complete.
+- **Protect data first:** Before the first production mutation, preserve a usable database backup, configuration and encryption keys securely, and a known-working application build. Establish restore verification and recovery steps; a Git branch or successful backup command alone is not evidence of recoverability.
+- **Separate UI and backend releases:** Introduce the new layout using compatible services over existing data, then migrate storage in bounded domains. Retain old readers/routes behind reversible controls where appropriate. Do not combine the first UI release with the final database write cutover.
+- **Re-ingestion is supplementary recovery:** Prefer rebuilding from retained completed source generations before making a full vendor pull. Re-ingestion cannot replace ticket/workflow records, settings or historical measurements.
+
+The first deliverable is the recovery baseline and implementation breakdown, followed by customer-scoped service contracts and the first bounded UI change. This plan does not assume the whole database overhaul can safely be completed in one day.
+
+## What changes and what stays
+
+| Area | Current system | Proposed system |
+| --- | --- | --- |
+| Core platform storage | Companies, assets, scans and findings are loaded into mutable Node.js memory and persisted in JSONB snapshot buckets | Transactional PostgreSQL records are authoritative; bounded caches are optional and disposable |
+| Customer connections | Mapping is spread across environment variables, source-specific connection records, tile ownership and some Atlas-specific logic | A registry explicitly binds each customer to approved connections, tenants and datasets |
+| Connector integration | Several source-specific import and reporting paths | Adapters implement shared ingestion and capability contracts while preserving vendor details |
+| Defender | Dedicated source import followed by publication into the in-memory platform store and a durable save | Completed source generation published to the shared model with a durable publication state |
+| CrowdStrike Spotlight | Full records and current-generation pointers already live in dedicated SQL tables | Retain those records; expose common customer metrics and findings through indexed SQL projections and shared services |
+| Reporting | Core reporting traverses the platform store; source views and custom queries follow additional paths | Existing reporting features use shared definitions, customer scope and explicit freshness |
+| Navigation and remediation | Reporting and Prioritize are separate entry points; supported reporting CVEs expose patch actions | Six main sections; Remediation contains Overview, Prioritize and Tickets, with the same CVE-to-ticket panel available from every view |
+| Dashboard tiles | Cached query results and definitions have their own storage and saved source connections | Preserve existing tiles and caches; bind queries explicitly to approved customer source scopes |
+| Updates | Some platform changes are acknowledged before the periodic snapshot save | A successful write means the database transaction committed |
+| Background work | Multiple in-process schedulers, with a mixture of memory state and durable jobs | Durable job ownership, checkpoints and publication records, introduced incrementally |
+| Database topology | Application tables use `DATABASE_URL`; dashboard and ticket tables may use `ELASTIC_VULN_DATABASE_URL` | Application data starts with `DATABASE_URL`; existing dashboard/ticket storage stays in place during the initial migration |
+
+Existing capabilities, customer IDs, saved tile IDs, permissions, ticket references, history and audit records are preservation requirements. The approved layout changes navigation and workflow presentation and includes the explicitly requested default Threat Intelligence tile in Prioritize. It does not authorize other new standard tiles, change risk formulas, enable new integrations, or delete existing pages and data. Sample metrics in the mockup do not authorize a new default tile collection.
+
+## Approved experience: Remediation
+
+**Approved for the change plan on October 9, 2026.** Use the existing GMI Vuln theme with readable supporting text, compact layouts and bounded long lists. The purpose is to bring reporting, prioritization and patch requests into one customer workflow, not introduce workspaces or another customer selector.
+
+### Main navigation
+
+| Section | Responsibility |
+| --- | --- |
+| Remediation | Customer reporting, saved tiles, prioritized findings/remediations and ticket tracking |
+| Companies | Customer records and entry points to their assets, findings, coverage and related detail pages |
+| AppSec | Existing application and repository security functions |
+| Scanner Telemetry | Existing scanner activity, results, failures and troubleshooting |
+| Connectors | Customer source assignments, existing connection configuration, import health and freshness |
+| Settings | Existing platform configuration, policies and schedule settings within current permissions |
+
+Retain findings, scans, scan scheduling, coverage, attack paths, compliance and remediation SLA capabilities as appropriate drill-downs or settings destinations. Final link placement requires a route inventory before implementation. Preserve existing URLs, or provide compatible redirects retaining customer/filter context; removing sidebar entries must not remove the underlying functionality.
+
+### Customer connectors and scan actions
+
+Use the existing customer selector to scope Connectors. The setup flow is **select customer -> view assigned connectors -> add or reuse a connection -> verify tenant/dataset mapping -> test -> save -> initial import -> publish complete results**. Reuse existing credentials and mappings where verified rather than require re-entry. Keep global/shared connection configuration separate from the customer's explicit binding. Current account permissions remain unchanged; selecting a customer does not grant configuration access.
+
+Retain **Start scan** on the customer detail page and provide the customer-list action: **customer -> configured/enabled scanner -> approved targets and profile -> review -> launch -> progress and results**. Use a customer Scans tab for progress/history and Scanner Telemetry for operational detail. Keep **Sync now** separate for importing CrowdStrike/Defender and other upstream results. Review the customer and target scope before creating work, and publish completed results only to that customer. Preserve existing schedule behavior and authorization.
+
+SpiderFoot is a shared scanner connection, not a credential set per customer. Its current bulk launcher selects client records with domains derived from existing inventory/findings; importing completed results is a separate step. Nine customer records had SpiderFoot findings in the audit, which does not establish that only nine can use it. The current importer matches scan names/targets to customer names heuristically. The new binding must retain explicit approved target domains and source scan-to-customer IDs, with ambiguous legacy scans held for review. Show available, enabled for this customer, last scanned and imported-result states separately. Preserve the bulk scan capability with explicit scope review; do not automatically enable scanning for every customer during migration.
+
+### One customer selection, three views
+
+The existing customer selector owns the page context. Switching views preserves that customer. Switching customers clears or rebinds open CVE details and drafts so another customer's findings, hosts or routing cannot carry over. Cached results and requests must include customer scope; a late response from the previous selection must not populate the new customer's view.
+
+| View | Content | Ticket access |
+| --- | --- | --- |
+| Overview | That customer's existing reporting and saved tiles, using only approved source bindings | Click any CVE to open the shared details and patch-request panel |
+| Prioritize | Worklist using existing risk rules and affected-device counts; optional grouping by shared remediation; default Threat Intelligence tile | Click any CVE for the same panel; a remediation group can prepare a scoped request for its covered CVEs |
+| Tickets | Existing and newly created patch requests, their CVE/remediation links and recorded ConnectWise references/status | Click any CVE for the same panel, including its existing tickets and available actions |
+
+Tickets is a tracking view, not a required stop before creating a ticket. Preserve saved tiles, IDs, customer ownership, query text, display/refresh settings, order, cached successful results and history. The approved scope does not add another tile customer selector. A tile saved from a customer page continues to belong to the currently selected customer.
+
+Footprint with Defender should show its supported Defender/platform information. It must not inherit Atlas Elastic or CrowdStrike tiles. Atlas may display its approved CrowdStrike and Elastic results without counting mirrored records twice. Unavailable source capabilities remain explicit rather than displaying zero or substituting another customer's connection.
+
+### Shared CVE panel and patch-request flow
+
+**Any CVE in any Remediation view -> shared customer-scoped panel -> prepare request -> review ticket and host CSV -> create ConnectWise ticket -> show its reference everywhere -> verify resolution against later source evidence.**
+
+1. Open the CVE with customer identity, source provenance, available severity/scores, affected devices and recommended remediations. Reuse the current reporting workflow instead of maintaining three ticket implementations.
+2. Show existing linked requests and tickets before offering creation. Their scope may cover one CVE, multiple CVEs, or only some affected devices; a partial ticket must not imply the whole CVE is covered.
+3. Prepare a patch packet for the selected customer and supported source evidence. Keep original source IDs and generation/timestamps so the user can see what the request represents. Unsupported packet capabilities need an explicit explanation, not a silent CrowdStrike fallback for a Defender customer.
+4. Let the user review the summary, contents, customer routing, actual ConnectWise board names and affected-host CSV. Keep host lists in the CSV, not the ticket body. Preserve the agreed recommended-remediation rules; do not reintroduce minimum-remediation duplicate rows. Preserve current default priority/status behavior rather than adding new required controls.
+5. Create only after the user's explicit action using the existing authorized server-side integration. Preserve request identity, delivery/audit state, CSV attachment handling and reconciliation for uncertain responses. Do not automatically retry a timed-out create as a new ticket.
+6. Persist the reference against the customer and covered CVEs/findings/remediation group, then display it in all three views and the panel. Existing request/ticket IDs and audit history remain intact.
+7. Track ticket progress separately from vulnerability verification. Closing a ticket does not by itself establish that a vulnerability is fixed; later complete, correctly scoped source observations provide verification under the existing lifecycle rules.
+
+For a grouped remediation, calculate unique affected devices within the selected customer and retain the covered CVE-to-device relationships in the packet. Do not add per-CVE device counts together or attach unrelated findings. Preserve per-CVE scoring evidence rather than inventing a group CVSS or ExPRT value.
+
+### Shared implementation boundary
+
+Use one customer context, one reusable CVE panel and one patch-request service across Overview, Prioritize and Tickets. CVE actions from saved tiles must resolve validated customer/source identities; the displayed CVE string alone is not permission to retrieve another tenant's hosts. All authorization remains server-side and current role behavior is preserved.
+
+This UI consumes the customer-scoped services described below. Initially those services can wrap the existing stores. Later SQL-backed implementations should not require another UI rewrite. Review packet data freshness and scope again before delivery, and require a new review if materially changed scope would alter the request.
+
+### Default Prioritize tile: Threat Intelligence
+
+**Added to the approved scope October 9, 2026:** Carry the current threat-enrichment capability into the redesigned platform and make it visible in a default tile in Prioritize. This is the explicitly approved exception to the earlier decision not to add a new collection of standard tiles. It is a plan requirement, not a production implementation or a change to existing permissions.
+
+The tile is present for each selected customer and shows only CVEs associated with that customer's current open findings. It reads stored enrichment and customer-scoped risk services, rather than making MISP/OpenCTI calls during page rendering. Existing configured threat sources can remain shared services; their enrichment must be joined to the selected customer's findings before displaying CVEs, affected-device counts or ticket associations. It works independently of whether the customer's vulnerability source is CrowdStrike or Defender.
+
+| Tile element | Required behavior |
+| --- | --- |
+| Summary | Count unique customer CVEs with qualifying threat evidence; show unique affected devices separately. Do not sum overlapping source or CVE counts. Clearly name confirmed exploitation, threat associations and other signals rather than presenting them all as confirmed exploitation |
+| CVE list | Bounded, paginated list with CVE, severity, customer-specific affected devices, signal type, source, last successful check, risk tier and existing ticket reference |
+| Evidence | Preserve MISP sightings, OpenCTI relationship details and provenance; show relevant existing CISA KEV/EPSS or IntelOwl enrichment with distinct labels when available. Do not represent missing fields as zero or source absence as a clean assessment |
+| CVE interaction | Clicking any CVE opens the same shared panel and Prepare patch request flow used throughout Remediation; no navigation to Tickets is required |
+| Freshness and health | Distinguish unconfigured, not checked, no qualifying evidence, stale, and failed lookup. Retain last successful evidence with its timestamp during an outage; an aggregate refresh success alone is not proof that each source succeeded |
+| Score explanation | Explain how qualifying evidence contributes to the existing risk score/tier, with vendor/source evidence accessible from the panel. Keep threat enrichment distinct from CVSS severity, ExPRT and proof of compromise on a customer device |
+
+The migration must preserve evidence and its origin rather than reduce multiple feeds to one unexplained boolean. Define per-source observation/check times, signal types, confidence or qualification, and policy for expiry/retraction. Preserve existing enrichment records during migration; do not fabricate historical evidence that the current cache did not retain.
+
+Three current implementation limitations require an explicit reviewed treatment before promoting the new tile as trustworthy exploitation evidence: OpenCTI currently counts any returned relationship rather than verifying its type/target; the existing active-exploitation persistence uses an OR update and does not clear a prior true flag; the UI currently hides much of the source provenance behind a generic explanation. A MISP sighting also needs a defined evidence interpretation before it is labelled confirmed exploitation. Preserve the integration capability, not these ambiguous semantics. Any resulting score/tier change must be measured, versioned and reviewed separately from navigation changes, including effects on ticket automation.
+
+Acceptance requires customer isolation across shared CVEs; correct deduplication across MISP/OpenCTI and multiple devices; working CVE-to-ticket actions; source-specific stale/error/unconfigured states; coverage for both CrowdStrike and Defender customers; preservation of existing ticket references; no live feed calls during normal rendering; and fixtures for valid/irrelevant OpenCTI relationships, evidence expiry/retraction and failed refreshes. Retained legacy signals must be identifiable when their underlying evidence cannot be reconstructed.
+
+### Current position and next steps
+
+- Completed: approved navigation/workflow concept and a clickable mockup covering all three views, shared CVE details, request review, CSV preview, demo creation and customer separation.
+- Approved addition: default Threat Intelligence tile in Prioritize, retaining enrichment with visible evidence, freshness and the shared CVE-to-ticket workflow. The existing mockup does not yet depict this new tile.
+- Implemented locally: `/remediation` with Overview, Prioritize and Tickets, the existing single customer selector, customer/view URL state, six-section navigation and links to original tools. The route and new navigation require `VULN_REMEDIATION_UI=true` plus the existing dashboard feature/access. The new flag defaults off. `/reporting` keeps its existing layout and behavior.
+- Each view mounts only its own sections. Switching customers, views or refreshing remounts the customer-bound content, so a previous customer's open dialog or late response cannot become the next customer's content. Prioritize and Tickets do not request the full customer report. Existing source queries, definitions, caches, ownership, IDs and ordering are reused.
+- First shared service boundary: `resolveCustomerScope` resolves an explicit app company ID through the existing store. Reporting reads, customer tile reads and tile ownership validation reuse it. Missing/malformed, unknown, demo or mismatched identities are rejected; client and internal companies remain supported. Authentication remains in the existing route guards, and source-tenant ownership is not inferred by this helper.
+- Not implemented: generalized cross-view CVE panel, default Threat Intelligence tile, customer connector registry, SQL model migration, production navigation switch or deployment. The layout is an integration foundation, not a completed or release-ready Vuln2.0 workflow.
+- Next bounded step: implement and verify the customer-scoped CVE read/packet service and shared panel, using normalized stored findings or explicitly bound source tenants. Then integrate all CVE entry points and the Threat Intelligence tile. Keep scoring changes and backend storage cutover separate.
+- Develop on `Vuln2.0` in bounded commits and deliver UI/backend changes through separately reviewed releases, without a separate staging environment. Keep the six-section layout and shared panel in this combined plan; do not combine a visual rollout with an irreversible storage cutover.
+- Review reference: the standalone file `GMI Vuln Ticket Workflow.html` accompanies the readable proposal in Downloads. It is a workflow demonstration, not an implementation dependency.
+
+### First checkpoint: recovery and service boundaries
+
+The deployed checkout and both remote branch heads were verified at `a6c485b39b11e681602b1eb8019e18b31c5b9e14` before work began. The running build ID was `gwayjA6gd3o4a-vQKuMRI`. A local annotated tag, `vuln2-baseline-20261009`, preserves that code reference. Two server-local script changes were preserved in the private archive; they were not overwritten or copied into this branch. The app, `.git`, installed dependencies, built output and configuration files were archived outside the web root. No credentials or raw customer records are in this plan.
+
+Recovery files are private to the operator account under `/home/codex/vuln-recovery/baseline-uVic9i`. The application archive is 210,693,160 bytes; the PostgreSQL custom-format dump is 3,084,215,619 bytes. Both database settings resolved to the same physical target in the loaded configuration, so the dump was taken once. It used an exported read-only snapshot with critical-table counts from that same snapshot. SHA-256 hashes, timestamps, versions and counts are in the private manifest. Archive listing and a full archive decode completed successfully, followed by the actual isolated restore test below. Backup collection took about 8 minutes 59 seconds; the database snapshot is from October 9 at 18:01:13 UTC.
+
+The PostgreSQL restore test used an unprivileged, disposable cluster reachable only through a private Unix socket on the droplet. No application process, scheduler or external integration pointed at it. PostgreSQL server packages were extracted into the operator's private directory; the system PostgreSQL service was not installed or changed. The test restored with original ownership and grants omitted. It completed at 18:25:23 UTC after about 15 minutes 37 seconds, matched all seven saved table counts, found zero invalid indexes and stopped the disposable server. Verification is recorded in `restore-6hXR1M/verification.json` under the private baseline directory. This verifies data/schema restoration, not production role/grant recreation, application startup with recovered encryption keys or end-to-end ticket operations; the measured duration is not an end-to-end recovery-time guarantee.
+
+Matched counts: 91 platform snapshot rows, one Defender connection, 16 saved queries, five single-CVE patch requests, 132,063 grouped patch requests, one customer routing record and 15,234 enrichment records. These are table row counts, not counts of created ConnectWise tickets. Production still had the original commit/build and the same two local script changes after verification; the health endpoint returned HTTP 200 in approximately 45 ms.
+
+Recovery remains incomplete for disaster recovery until there is an approved off-server copy and a documented root PM2/runtime-environment handoff. The archive includes file-based configuration but not root's PM2 runtime configuration. The online backup does not include writes or external tickets created after its snapshot. A fresh recovery point is required at an eventual storage cutover; do not restore this older snapshot over new ticket activity.
+
+| View / operation | Existing service reused in the first UI checkpoint | Current authority and boundary |
+| --- | --- | --- |
+| Customer selector and Overview report | `reportingSetup`, `reportingCustomer`, `buildCustomerReportingModel` | Explicit existing company ID; hydrated platform findings/assets/scans plus stored history. Nonexistent/demo customers rejected; no selection loads no customer results |
+| Overview custom tiles | `readCustomerTiles`, `ElasticQueryDashboard` | Existing saved-query SQL cache and verified persisted/legacy ownership; no new tiles or ownership rewrites |
+| Defender source detail | Existing `DefenderCustomerPanel` and results route | Completed source import for the selected company; keep source-instance counts distinct from normalized finding counts |
+| Prioritize worklist | `TopFixes`, `RiskDashboard` | Existing company-filtered patch-group and risk SQL services; retain current rankings and scoring policy |
+| Tickets | `PatchReviewQueue`, `PatchTicketTracker` | Existing company-scoped drafts, reviews, ConnectWise references and routing; global tracker actions remain disabled in customer context |
+| Access and rollout | Existing `dashboardAccess`; new UI-only flag | Existing member/admin behavior is preserved. The flag controls no workers, storage writers or database migrations |
+
+**CVE action issue found during implementation:** `PatchRequestPanel` does not carry an app customer ID, and its live CrowdStrike collection can span visible tenants. `PatchConsolidationPanel` carries a customer label but the collector's tenant filter is independently supplied; the customer label alone does not prove tenant ownership. Do not generalize these paths into the shared panel unchanged. The next service must derive allowed tenants from verified bindings, validate every returned record and scope stored-finding packets by company. No new automatic ticket action was introduced in this checkpoint.
+
+**Writer inventory for the later cutover:** the app boot hook starts hydration, dashboard refresh/jobs, reporting queue generation, ticket-status sync, SLA escalation, draft deduplication, draft/routing/priority backfills, automatic ticket creation, closure validation, risk refresh and Defender imports. The core store also has a snapshot flusher and independent scanner-export and Vulners-bridge timers. Manual import, scan, query-refresh and ticket routes can start work separately. `VULN_DISABLE_SCHEDULER` is therefore not a complete maintenance lock. This is a code inventory; current external cron/n8n jobs, active leases and every runtime owner still need reconciliation at release time. None of these production workers were changed or restarted during this checkpoint.
+
+**Validation at this checkpoint:** production build and TypeScript completed; 30 reporting, customer-tile, tenant-scope, consolidation and new customer-scope/route-access tests passed. Eleven additional existing dashboard unit tests passed; the dashboard PostgreSQL integration test was skipped because no fixture database was configured. A local production-build HTTP test passed with the flag off and on, checking login protection, the unchanged original reporting route, empty customer selection and separation of the three views. The HTTP test uses disposable session keys and no production database or provider credentials. Full browser interaction, real customer CVE packets and ticket-delivery tests remain release gates. ESLint could not run because this checkout has no ESLint configuration. The dependency install reported five high-severity advisories; dependency upgrades were not bundled into this UI change.
+
+Local implementation commits: `24706ea` adds the private recovery tools; `7bd878e` adds the gated views and customer-scope boundary. These checkpoints and the baseline tag have not been pushed or merged. The first checkpoint establishes recovery evidence and a disabled UI foundation; the complete Stage 0 operational recovery handoff, shared CVE workflow and storage migration remain open.
+
+## How the system works today
+
+```mermaid
+flowchart TD
+    Import[Most platform imports] --> RAM[Core store in Node memory]
+    RAM <--> Snapshot[PostgreSQL snapshot buckets]
+    RAM --> Pages[Core customer pages and reports]
+    Falcon[CrowdStrike Spotlight import] --> CS[Spotlight SQL generations]
+    CS --> CSViews[Source reporting risk and patch processing]
+    Microsoft[Defender import] --> DF[Defender SQL generations]
+    DF --> DFViews[Defender source results]
+    DF --> Publish[Platform publication and persistence]
+    Publish --> RAM
+    Query[Saved ES and Falcon queries] --> Cache[Dashboard SQL definitions and results]
+    Cache --> Tiles[Customer assigned custom tiles]
+    CSViews --> Tickets[Patch review and ticket workflow]
+    Pages --> Tickets
+    Tickets --> TicketDB[Existing ticket SQL tables]
+```
+
+### Core platform store
+
+`lib/store.ts` holds many application objects in memory. `ensureHydrated()` rebuilds this state from PostgreSQL. `lib/persist.ts` saves changed JSONB buckets in `vuln_store`, with `vuln_snapshot` retained as a legacy fallback. The dirty-state flusher checks every six seconds; some operations explicitly wait for a save. Core reporting still obtains companies, findings, scans and assets through this store.
+
+Consequently, database persistence and the data currently served by the process are separate states. A failed save, an interrupted publication or an unsafe additional writer can affect consistency. The redesign must remove that ambiguity without discarding existing data.
+
+### Dedicated source stores
+
+Spotlight already retains full records, import checkpoints and completed-generation selection in `spotlight_import_*` tables. These should be reused. Copying millions of source records into another unbounded in-memory collection is not the proposed solution.
+
+Defender uses `defender_*` tables for connections, import runs, records, devices, CVE aggregates and history. A completed generation can appear in its source view before publication into the platform store finishes. Current reconciliation retries failed publication from the completed source import. That recovery behavior is valuable and must survive the redesign.
+
+### Reporting and custom queries
+
+Saved Elastic and Falcon tiles have definitions, cached results and jobs in the dashboard database. The current implementation records customer ownership on tiles and preserves legacy reviewed assignments. That is useful existing functionality, not something to remove.
+
+However, tile ownership and upstream query scope are distinct: assigning a tile to a customer does not rewrite its ES query or change the Falcon tenant. Saved dashboard connections are also separate from environment-based import connections. A common customer source registry would connect these concepts explicitly.
+
+### Existing behavior worth preserving
+
+Cross-connector correlation already exists for supported host/CVE scanners. The code preserves evidence from multiple scanners and keeps web, reconnaissance and service-test results on different correlation paths. Reporting already separates vulnerability, web-test and OSINT classes. Migration must first reproduce these rules rather than replace them with an overly simple one-row-per-CVE model.
+
+## Proposed architecture
+
+```mermaid
+flowchart TD
+    Customer[Existing customer identity] --> Binding[Approved customer source bindings]
+    Binding --> Adapter[Connector adapters and capabilities]
+    Adapter --> Source[Original records and import generations]
+    Source --> Normalize[Normalize identity findings and remediation]
+    Normalize --> Platform[Authoritative PostgreSQL platform model]
+    Platform --> Service[Customer scoped data services]
+    Service --> UI[Existing pages reports and patch review]
+    Binding --> Queries[Optional ES and FQL query tiles]
+    Queries --> Results[Customer scoped cached query results]
+    Results --> UI
+    UI --> Workflow[Existing ticket workflow and audit]
+```
+
+**One shared platform model does not mean a separate database for every customer.** Records carry the existing customer ID and all reads, writes and relationships enforce that scope. It also does not require merging the existing physical databases in the first release.
+
+PostgreSQL becomes the durable platform authority. Polling, file import and streaming remain ingestion methods. They determine how observations arrive, not which storage abstraction every page must understand. Elasticsearch can remain an upstream dataset or optional query engine; ConnectWise remains the external owner of service tickets.
+
+Large source tables remain authoritative for original evidence. Shared services can use indexed projections, joins and aggregate tables rather than duplicate every raw payload. Standard finding reads should not require live vendor calls. Source-specific actions may still call vendor APIs and must label their scope and freshness.
+
+## Customer source selection
+
+| Customer setup | Proposed binding | Required protection |
+| --- | --- | --- |
+| CrowdStrike only | Falcon tenant supplies its supported inventory and vulnerability observations | Bind tenant and customer explicitly; retain Falcon IDs and import generation |
+| Defender only | Defender tenant supplies devices and software vulnerability observations | Preserve tenant mapping and software-instance detail; publish only a complete validated generation |
+| CrowdStrike and Elasticsearch | Declare whether ES mirrors Falcon, adds independent scanner data, or only supports custom queries | Do not add mirrored counts together; query scope must match the customer |
+| Multiple vulnerability scanners | Each approved source contributes observations under defined correlation rules | Preserve conflicting evidence and avoid merging devices merely because names or IPs match |
+| Inventory connectors such as Intune Tidal or Automate | Supply identity, ownership and inventory context according to capability | Inventory presence does not imply a vulnerability assessment or a clean scan |
+| Web scanning and OSINT | Supply typed web findings, service observations or exposures | Do not require a CVE or mix exposure counts into software vulnerability totals |
+
+The binding should include customer ID, connection reference, source tenant/dataset, capabilities, collection mode, enabled state, authority rules and mapping revision. Authority is chosen per dataset or field where necessary, not as a single global winner for all customer information.
+
+For shared Elasticsearch clusters, application queries must enforce a validated customer scope through constrained datasets, credentials or supported query templates. An arbitrary query plus a customer label is insufficient. If a saved query cannot be safely scoped, retain it in its reviewed context and mark it for migration review rather than silently reassigning it.
+
+A query returning only a total cannot populate individual platform findings. Such a dataset can remain a custom tile until an import contract provides stable record identities, fields and lifecycle semantics.
+
+## Customer and connector migration inventory
+
+**Updated October 9, 2026 from the completed read-only export.** The customer directory and saved connection/routing metadata were collected at **17:32 UTC (10:32 a.m. Arizona)** with no query errors. They contain **40 customer records**. The earlier complete asset/finding snapshot aggregation at **16:05 UTC** contains source records for **38 of those IDs**. Both configured database roles resolved to the same database in this collector's environment; the running process environment was not inspected.
+
+This table separates **observed imported data** from **saved configuration**. An old source record is not proof of an enabled or healthy connector today; a saved connection is not proof its latest API call succeeded. The export does not establish every environment-based scanner/inventory connection or vendor tenant mapping. Those remain validation items before cutover. No credentials, host lists or finding payloads are included here.
+
+### Customer directory and observed sources
+
+| Customer name in database | Customer ID | Inventory sources observed | Finding / exposure sources observed | Saved customer configuration confirmed |
+| --- | --- | --- | --- | --- |
+| A-S Urethane Systems, | CO-230143 | ConnectWise Automate | Not observed | Not established by this export |
+| Accu-Trax | CO-25233 | Not observed | Not observed | Not established by this export |
+| Arizona Association of REALTORSÂ® | CO-230075 | ConnectWise Automate | Not observed | Not established by this export |
+| Atlas Healthcare Partners | CO-147284 | ConnectWise Automate, CrowdStrike | CrowdStrike, SpiderFoot | CrowdStrike + Elasticsearch assigned tiles; ConnectWise PSA routing |
+| Comea Shelter | CO-18989 | Tidal | Not observed | Not established by this export |
+| DisCorp | CO-20016 | Tidal | Not observed | Not established by this export |
+| Dysart Community Center | CO-17153 | Tidal | Not observed | Not established by this export |
+| Flexe | CO-17172 | Tidal | Not observed | Not established by this export |
+| Footprint Inc. | CO-230784 | ConnectWise Automate, Microsoft Defender, Tidal | Microsoft Defender | Defender connection |
+| Garland Technology | CO-230682 | ConnectWise Automate | Not observed | Not established by this export |
+| GCON | CO-99724 | Tidal | Not observed | Not established by this export |
+| GCON Inc. | CO-230311 | ConnectWise Automate | Not observed | Not established by this export |
+| Global Market Innovators, Inc. | CO-229336 | ConnectWise Automate | Not observed | Not established by this export |
+| GMI Scans | CO-9150 | CrowdStrike | Artemis, CrowdStrike, Nessus, SpiderFoot, Vulners | Not established by this export |
+| GPSI External Scan | CO-9159 | Not observed | Nessus, SpiderFoot | Not established by this export |
+| Gray DI | CO-9162 | Not observed | Nessus | Not established by this export |
+| Hampton Lumber Mills | CO-17130 | Tidal | Not observed | Not established by this export |
+| Johnstone Supply | CO-19223 | Tidal | Not observed | Not established by this export |
+| Leadpoint Business Services | CO-229963 | ConnectWise Automate | SpiderFoot | Not established by this export |
+| Mattur | CO-230738 | ConnectWise Automate | Not observed | Not established by this export |
+| MayoGlobal | CO-230297 | ConnectWise Automate | Not observed | Not established by this export |
+| MCSI External Scan | CO-9156 | Not observed | Nessus, SpiderFoot | Not established by this export |
+| Mission of Our Lady of the Angels | CO-17090 | Tidal | Not observed | Not established by this export |
+| OnQGlobal | CO-230617 | ConnectWise Automate | Not observed | Not established by this export |
+| Openworks | CO-17120 | ConnectWise Automate, Tidal | CrowdStrike, SpiderFoot | Not established by this export |
+| Pacific Plumbing Supply Co, LLC | CO-18966 | Tidal | Not observed | Not established by this export |
+| Passport Health | CO-230279 | ConnectWise Automate | Not observed | Not established by this export |
+| PHOENIX REALTORS | CO-230062 | ConnectWise Automate | Not observed | Not established by this export |
+| Projects & Labs | CO-230100 | Not observed | Not observed | Not established by this export |
+| Skymed | CO-9165 | Not observed | Nessus | Not established by this export |
+| Spear Education | CO-230102 | ConnectWise Automate | Not observed | Not established by this export |
+| Spinato's Pizza | CO-230623 | ConnectWise Automate | Not observed | Not established by this export |
+| SplashWorks Services, Inc. (Testing) | CO-19071 | Tidal | CrowdStrike, SpiderFoot, Vulners | Not established by this export |
+| Ste. Michelle Wine Estates | CO-19914 | Tidal | Not observed | Not established by this export |
+| The Pasha Group | CO-20130 | Tidal | Not observed | Not established by this export |
+| Town of Wickenburg | CO-230156 | ConnectWise Automate | SpiderFoot | Not established by this export |
+| Town of Wickenburg Police Department | CO-230240 | ConnectWise Automate | Not observed | Not established by this export |
+| Valor Global Scans | CO-9153 | Not observed | Artemis, Nessus, SpiderFoot | Not established by this export |
+| Valor Global, LLC | CO-229438 | ConnectWise Automate | Not observed | Not established by this export |
+| Vinum 55 | CO-230127 | ConnectWise Automate | Not observed | Not established by this export |
+
+**Coverage notes:** Accu-Trax (`CO-25233`) and Projects & Labs (`CO-230100`) exist in the customer directory but had no asset/finding source observations in the earlier audit. This does not establish that no connector is configured. All 38 observed customer IDs matched a directory record; no customer-name placeholders remain. The audit covered all 16 asset and 64 finding buckets, but only grouped primary source fields: secondary `seenBy` evidence, enrichment lists and scan-only activity were not expanded.
+
+Customer names are reproduced from the directory, including the stored encoding issue in Arizona Association of REALTORS and the trailing comma in A-S Urethane Systems. Do not silently rename records during connector migration. GCON and GCON Inc., and Valor Global, LLC and Valor Global Scans, have distinct IDs and must remain separate unless an explicit identity review authorizes consolidation. Names such as GMI Scans, Projects & Labs and SplashWorks Services, Inc. (Testing) need active-client/internal/test classification review; the exported `type` field was null and does not establish that classification.
+
+### Saved connections and routing verified by the export
+
+| Scope | Evidence found | Migration treatment |
+| --- | --- | --- |
+| Atlas Healthcare Partners / CO-147284 | Two tile definitions explicitly owned by Atlas: one Elasticsearch and one CrowdStrike. Both have successful refresh timestamps | Preserve IDs, ownership and connection references. Query connections remain distinct from import connections |
+| Footprint Inc. / CO-230784 | One Defender connection, daily import flag enabled, completed source run selected; last source success October 8 at 18:39 UTC | Reuse the saved connection and publication state. Its Tidal and Automate inventory records are additional context, not additional vulnerability assessments |
+| Shared dashboard connections | Saved CrowdStrike connection revision 1 and Elasticsearch connection revision 2 | Preserve configuration; verify each customer tenant/dataset scope instead of granting every customer access to both |
+| Atlas ConnectWise PSA routing | Application customer CO-147284 maps to ConnectWise company ID 32628 and board ID 159 | Preserve routing. Actual company/board names and permission health still require a ConnectWise lookup; do not invent names |
+| Other customers' ConnectWise routing | No additional rows in the exported routing table | Do not copy Atlas routing to other customers. Review manual routing and intended destinations before enabling customer-specific automation |
+| Legacy saved tiles | 14 of 16 definitions omit the customer field; two explicitly name Atlas. Legacy entries include successful results and entries with no recorded success | Preserve every tile. Resolve existing reviewed environment/legacy assignments before migration; missing explicit ownership does not by itself mean the tile is currently visible to all customers or has no valid legacy owner |
+
+### Shared threat-enrichment configuration
+
+| Service | Export result | What is still unverified |
+| --- | --- | --- |
+| MISP | URL and API-key configuration present | Reachability, authentication, last successful per-source lookup and evidence quality |
+| OpenCTI | URL and API-key configuration present | Reachability, authentication, last successful per-source lookup and relationship semantics |
+| IntelOwl | Required URL/API-key pair incomplete or absent | Whether it is intentionally unused; do not label it a working integration |
+
+These flags reflect configuration loaded by the collector from the server environment/files, not a comparison with the running PM2 process environment. No secret values were exported. Shared threat services enrich only CVEs associated with the selected customer in the proposed UI; their presence does not grant cross-customer data access.
+
+### Migration checklist for each customer
+
+1. Confirm the directory name and existing ID, including whether the record represents an active client, internal/test environment or retired account.
+2. Reconcile observed data with configured connections, scan activity, secondary evidence, tenant/dataset mappings, source capabilities and last successful import/publication. No observed records does not mean no configured connector.
+3. Reuse credential references and existing records; preserve source IDs, tile ownership and ConnectWise routing without copying secrets into the plan.
+4. Verify customer-scoped results and exports before enabling the new binding. Keep the old path until validation passes; flag ambiguous mappings for review instead of guessing.
+
+**Evidence:** the read-only `gmi-customer-connector-inventory-result-1791567175075.json` export and `GMI Vuln Storage Audit Evidence.json`. This inventory update changed documentation only; it did not alter connector assignments or merge customer records.
+
+## Proposed data structure
+
+These are logical entities for schema design. Final table names and indexes must follow inventory and compatibility review.
+
+| Entity | Required contents | Key rule |
+| --- | --- | --- |
+| Customer | Existing ID, name, type and metadata | Preserve public `CO-*` IDs and current visibility behavior |
+| Connection | Provider, endpoint, credential reference and revision | Secrets stay server-side; preserve existing authorization and encryption compatibility |
+| Customer source binding | Customer, connection, tenant/dataset and capabilities | No implicit ownership from a display name or the currently selected page |
+| Import run | Scope, collection mode, progress, cursor, errors, completeness and generation | Processing success and publication success are distinct recorded states |
+| Asset | Customer-scoped platform identity and business context | Preserve existing asset IDs and aliases during migration |
+| Asset source identity | Customer, connection, source tenant and vendor device ID | Names and addresses are evidence for matching, not universally unique identities |
+| Source observation | Original source ID, payload/reference, scores, source status and timestamps | Stable identity includes source scope; generation identifies a version rather than a new issue |
+| Platform finding | Customer, finding type, affected asset/resource, normalized issue identity and lifecycle | CVE may be absent; web findings may need URL, plugin, port or other location information |
+| Finding evidence link | Finding to source observations | Support multiple observations per finding and multiple CVEs where current behavior requires it |
+| Remediation and links | Recommendation, vendor reference, applicability and affected findings | One fix can cover many findings; one finding can have multiple remediation choices |
+| Workflow state | Assignment, exceptions, review decisions, ticket references and verification | Connector refreshes must not erase human decisions |
+| Measurements | Customer, definition/version, scope, observation time, value and completeness | Never silently combine histories with different counting rules |
+
+Every join must retain customer scope. Where tables contain customer-owned records, use database constraints as well as scoped service methods to prevent relationships crossing customers. Database row-level security can be evaluated as an additional control after the current authentication and worker model is mapped; it is not assumed to exist today.
+
+Keep vendor severity, CVSS version, ExPRT, exploit status and the platform risk calculation distinguishable. Missing values stay unknown rather than becoming zero. Define source observation time, ingestion time and platform publication time separately so freshness is understandable.
+
+## Publication and update rules
+
+| Input type | Proposed processing | Must not happen |
+| --- | --- | --- |
+| Full snapshot | Stage bounded batches; validate scope and completeness; publish a completed generation through a durable pointer/transaction | An incomplete run replacing the last successful dataset |
+| Differential API pull | Apply repeatable upserts using stable source keys and saved checkpoints | Treating every record absent from the delta as resolved |
+| Event stream | Apply deduplicated, ordered/version-aware changes; persist checkpoints and replay state | An older or repeated event undoing newer state |
+| Uploaded file | Validate schema and customer scope; record file/import identity and the meaning of its coverage | Assuming the file represents the customer's complete environment |
+| Source outage or expired credentials | Retain last successful results with stale/error state | Presenting the outage as zero findings or successful remediation |
+
+Automatic closure requires source-specific evidence and coverage rules. A disappeared or offline device is not sufficient evidence of a fix. First preserve current closure semantics; any policy change receives its own review and measurement baseline.
+
+Publication should stage large imports in bounded transactions and atomically switch the active generation when validation is complete. It should not hold a single transaction open for an entire vendor download. Derived summaries either publish with the matching generation or report that they are still catching up.
+
+## Code boundaries
+
+| Module | Owns | Must not own |
+| --- | --- | --- |
+| Connections | Credential access, bindings, connection tests and capability registry | Dashboard-specific count formulas |
+| Ingestion | Vendor adapters, pagination, retries, checkpoints and source storage | Customer page rendering or ticket creation as an accidental import side effect |
+| Assets and findings | Identity, correlation, provenance and finding lifecycle | Vendor authentication details |
+| Reporting | Shared metric definitions, filters, pagination and history reads | Separate copies of Falcon and Defender business rules in each page |
+| Risk | Existing scoring formulas, evidence, overrides and calculation versions | Unreviewed score changes bundled with storage migration |
+| Remediation and tickets | Patch packets, routing, delivery state, verification and audit | Reimplementing finding identity or source selection |
+| Dashboard queries | Custom queries, source scope, cache and tile configuration | Automatically treating aggregate query output as canonical findings |
+| Jobs and persistence | Durable claims, retries, transaction boundaries and schema migrations | Multiple independent authoritative writers to the same migrated data |
+
+Keep these modules in the existing application initially. Separate worker processes can be introduced when job ownership is durable and tested. A microservice split would add deployment and coordination work before the current ownership problems are resolved.
+
+## Regression risk register
+
+Ratings describe the consequence of a migration defect, not the measured probability of failure or proof of an existing production bug. **Critical** means potential cross-customer exposure, data loss or unintended external action. **High** means materially incorrect findings, reporting or workflows. **Moderate** means a more contained display or operational failure.
+
+| ID and rating | System at risk | Possible regression | Required control and release evidence |
+| --- | --- | --- | --- |
+| R01 Critical | Customer isolation and source selection | Another customer's findings, devices, credentials or cached tile results are returned | Test forged customer IDs, shared-source filters, exports, jobs and joins; zero unauthorized cross-customer results |
+| R02 Critical | Persistence and deployment | Acknowledged edits disappear after restart, old snapshot overwrites SQL, or old/new workers both write | One authority per migrated domain; committed-write and restart tests; final reconciliation and a tested rollback path |
+| R03 High | Finding identity and counts | Duplicate findings, incorrectly merged devices, missing non-CVE results or changed totals | Fixed-generation comparisons by customer/source/status/severity plus exact identity and relationship comparisons |
+| R04 High | Defender source and platform publication | Source import succeeds while platform data is missing, partial or from another generation | Interrupt each publication stage; preserve the previous generation; retry without another full download; validate published counts and marker |
+| R05 High | Spotlight ingestion and scale | Cursor resets lose coverage, incomplete generations become active, or queries load millions of rows into memory | Resume/replay tests; complete source-ID inventory; bounded SQL pagination and representative-volume query plans |
+| R06 Critical | ConnectWise creation and routing | Duplicate tickets, wrong customer/board, lost references or incorrect attachments | Preserve request IDs and routing; shadow jobs cannot send tickets; record external-attempt state and reconcile uncertain responses before retry |
+| R07 High | Ticket status SLA and closure verification | Valid tickets disappear, timers reset, or tickets close/reopen on incorrect evidence | Replay lifecycle fixtures; preserve timestamps and audit; test missing, stale and conflicting source evidence |
+| R08 High | Patch packets and CSV exports | Affected hosts are omitted or repeated, minimum fixes replace recommended fixes, or host lists return to ticket text | Compare full export content and grouping; preserve recommended remediation rules and assets-in-CSV behavior |
+| R09 High | Reporting and executive output | Zero replaces unknown, source totals are double-counted, OSINT is treated as CVEs, or exports disagree with the page | Compare model, API and generated output using the same cohort/generation and existing measurement definitions |
+| R10 High | Risk prioritization and overrides | CVSS/ExPRT are confused, GMI ranking changes, manual overrides vanish, or stale evidence suppresses risk | Preserve formulas and source fields; score/reason/override fixture comparison; version any approved future formula change |
+| R11 High | Inventory coverage and derived pages | Assets disappear, scan coverage is overstated, or attack-path/compliance/quantification inputs change | Preserve asset aliases and provenance; test source-specific coverage semantics and each dependent page/API |
+| R12 High | Background jobs scans and notifications | Duplicate imports, scans, emails or escalations; checkpoints or schedules stop working | Durable job claims and deduplication; restart/concurrency tests; explicitly suppress external effects in local tests and shadow comparison jobs |
+| R13 High | Connection credentials and permissions | Existing secrets stop decrypting, settings become inaccessible, or members gain unintended privileges | Preserve secret configuration and role behavior; test each credential path and rotation failure without exposing secrets |
+| R14 Moderate | Saved tiles and historical charts | Tiles vanish or change order, stale results look current, or history silently changes meaning | Compare IDs, ownership, order, queries, display and refresh settings; retain history and annotate any measurement-version boundary |
+| R15 High | Performance and availability | SQL migration replaces memory pressure with slow aggregates, lock contention or exhausted connections | Measure baseline and new request latency, memory, DB load and import duration at representative scale; agree limits before rollout |
+| R16 High | Remediation navigation and shared CVE actions | Existing pages become unreachable, cross-view context is lost, duplicate ticket paths diverge, or a stale response/draft uses the previous customer | Inventory routes and compatible deep links; use one panel/service; test every CVE entry point, customer switch during an in-flight request, draft handling and consistent ticket references across views |
+| R17 High | Threat-enrichment migration and default tile | MISP/OpenCTI signals disappear, unrelated relationships or stale flags become confirmed exploitation, source failures look clean, or shared CVEs expose another customer's devices | Preserve provenance and last successful evidence; qualify relationship/sighting semantics; define expiry/retraction; test per-source freshness, customer joins, score/ticket effects and all tile-to-ticket actions |
+
+The highest-priority release blockers are R01, R02 and R06. A report that looks correct is not enough if tenant isolation, durability or ticket delivery is unsafe. High-rated count and publication failures also block promotion of the affected workflow.
+
+## Migration stages and approval gates
+
+| Stage | Work | What remains authoritative | Exit evidence |
+| --- | --- | --- | --- |
+| 0 Recovery baseline and inventory | Preserve current code/build, secure configuration and database backup; verify restoration without overwriting production; inventory writers, source mappings and consumer routes | Existing system | Recorded recovery point, usable restore evidence and representative fixtures; no standing staging application required; unresolved ownership listed |
+| 1 Contracts and common services | Define identities, measurement semantics and connector capabilities; wrap existing reads behind customer-scoped services | Existing storage and write paths | Existing API/output parity and permission tests; no source or score changes |
+| UI track after Stage 1 contracts | Add the six-section navigation and Remediation views, reuse the shared CVE panel and ticket service, preserve existing pages and tile records | Existing storage/write paths until their separate domain cutover; one existing ticket delivery service | Cross-view workflow acceptance below, route compatibility, customer isolation, unchanged permissions and a reversible UI rollout |
+| 2 Schema and shadow population | Add versioned SQL migrations and resumable backfill; populate new records/projections without serving them to users | Existing system; new model is non-authoritative | Checksums, counts, relationships and semantic comparison from fixed revisions; shadow external actions disabled |
+| 3 Shadow reads and limited read rollout | Compare old/new services, then switch selected compatible reads under explicit controls | Existing writer; any new read model must be caught up and versioned | Zero unexplained data differences; current generation alignment and acceptable query performance |
+| 4 Authoritative write cutover | Quiesce relevant writers; apply final delta; verify; move one domain to SQL ownership; retire its old writes | New SQL path for the cut-over domain | Durable-write, restart, import replay and failure tests; clear rollback boundary and one worker owner |
+| 5 Consumer and workflow migration | Move remaining reports, exports, risk and ticket consumers in bounded releases | Documented authority for each domain | Workflow-specific parity; sandboxed external-action validation before enabling delivery |
+| 6 Retirement | Remove unused snapshot reads/flushing and compatibility code after a monitored stabilization period | New SQL model and preserved source stores | No remaining consumers or writers of retired paths; retention and recovery procedure approved |
+
+Customer-level flags are suitable for scoped readers. They are not automatically safe for storage ownership: the existing snapshot spans customers. Do not allow a legacy snapshot writer to overwrite migrated customers. Use domain-level cutover unless per-customer write isolation has been explicitly implemented and verified.
+
+Stages can produce separate pull requests. Schema, storage authority, correlation policy, risk scoring and UI redesign should not be bundled into a single deployment. Release gates apply to the affected stage; creating this proposal does not execute any of them.
+
+For this engagement, these stages are checkpoints on `Vuln2.0`, not a requirement for another hosted environment. Run builds and automated checks before touching the active release. For read-only comparison against production, bound SQL work, monitor load and allow cancellation. Adding parallel tables still consumes production disk, I/O and connections: check capacity for backfill, indexes, WAL and retained rollback data before scheduling it. Only the existing owner writes authoritative records until the explicit cutover.
+
+The UI track can use compatibility services before the backend overhaul is complete. It must not introduce an additional source of truth or a second ticket writer. Backend stages continue independently behind the shared contracts, with each affected consumer validated before its data path changes.
+
+## Validation plan
+
+Use a fixed snapshot revision or pinned completed source generations for comparisons. Comparing moving live feeds can produce false mismatches. Preserve exact record IDs and relationships as well as counts; matching totals alone can conceal missing and duplicate records.
+
+| Scenario | Required checks |
+| --- | --- |
+| Atlas with Falcon and ES | Verified customer/tenant binding; reviewed mirrored-versus-independent datasets; existing tile ownership and queries; Spotlight completeness; patch and routing compatibility |
+| Footprint with Defender | Source instances versus normalized device/CVE findings; inventory; publication retry; company page/report parity; customer-specific risk and patch eligibility |
+| CS-only customer fixture | All supported platform views work without an Elastic connection; source-specific features are capability-gated |
+| Multiple scanner fixture | Same host/CVE from two sources, distinct devices with the same name, reused IPs, conflicting severities and independent remediations |
+| Inventory-only or no assessment | Inventory remains visible; unavailable assessment is not presented as zero risk or zero vulnerabilities |
+| Web and OSINT fixture | Non-CVE findings, multiple affected URLs/ports, scan history and separate exposure metrics |
+| Failure and recovery | API outage, expired cursor, partial full import, delta replay, process termination during publication, failed DB commit and concurrent job triggers |
+| External actions | Create-response timeout, retry, ticket status change, closure verification, CSV attachment, scheduled report and scan launch using local mocks/fixtures; use a designated external test destination only for a separately authorized integration test |
+| Customer scan controls | Customer page/list launch actions, approved scanner/target restrictions, progress and results routing, Start scan versus Sync now, and preserved schedules; test ambiguous legacy SpiderFoot name matches without launching scans |
+| Remediation workflow | Open the same CVE from Overview, Prioritize and Tickets; verify identical customer/source scope, scores, host set, recommendations and linked ticket references |
+| Navigation and customer changes | Preserve old deep links and customer filters; switch customers with a panel, draft or request in flight; reject late responses and cross-customer routing; retain all saved tiles |
+| Grouped fixes and partial coverage | Multiple CVEs on overlapping devices; one CVE with partial ticket coverage; unique device totals and exact CSV relationships; no duplicate ticket after an uncertain create response |
+
+Reuse the repository's existing tests for snapshot persistence, finding correlation, Defender risk, reporting scope/model/metrics, customer tiles, risk scoring, patch tickets and ticket lifecycle. Their presence is a starting point, not proof of complete migration coverage. Add integration tests where fixtures cannot establish transaction, restart or external-action behavior. No migration tests have been run or claimed successful as part of this proposal.
+
+Release requires zero unexplained ownership/identity/measurement differences for the affected contract and zero lost acknowledged writes in failure tests. Any intended behavior correction must be recorded separately, approved, and reflected in the expected results. Establish numerical performance limits from the live baseline before implementation; this proposal does not invent latency or capacity guarantees.
+
+For the UI release, acceptance also requires: every visible CVE in the three views invokes the shared panel; ticket creation can begin without navigating to Tickets; actual permitted board names load through the existing integration; host CSV and recommended-remediation behavior remain correct; successful creation updates references in every view; existing tickets survive the release; and permissions/default priority/status remain unchanged. Validate delivery/attachment contracts with local mocks and fixtures. If a real external test is needed, prepare its exact scope for review; never create production tickets during layout testing. Record any live-integration behavior not yet verified.
+
+## Rollback and data preservation
+
+### What re-ingestion can and cannot recover
+
+| Data | Recovery from source ingestion | Required protection |
+| --- | --- | --- |
+| Current CrowdStrike/Defender devices and findings | Generally rebuildable within the vendor's currently available scope and retention; results may differ from the earlier state | Retain completed source generations and IDs; validate scope, totals and publication before switching |
+| Differential feeds and older scan findings | A delta alone cannot recreate a complete baseline; upstream may no longer retain earlier results | Keep the original baseline and retained raw scan/source records; verify full-resync support before relying on it |
+| Daily trends, historical counts and prior risk measurements | Not reliably reconstructed by a current-state import | Preserve history/snapshot tables and measurement definitions |
+| Ticket links, prepared packets, approvals, audits and exact CVE/device coverage | Not restored by vulnerability ingestion; tickets can still exist externally after local records are lost | Preserve ticket tables and routing; reconcile uncertain/external actions before retrying |
+| Manual assignments, risk overrides and review decisions | Not supplied by scanner APIs | Preserve platform workflow state and stable finding/customer identities |
+| Saved tiles, queries, ownership, ordering and connection settings | Not supplied by vulnerability feeds | Preserve configuration tables and compatible encryption keys |
+| Customer identities and ConnectWise company/board routing | Not guaranteed to recreate with the same identity or scope | Preserve existing IDs and reviewed mappings; never infer from names alone |
+
+### Recovery procedure without a separate staging environment
+
+1. Record the actual current release and worker ownership; keep a known-working build and dependencies in a separate release directory. Preserve environment configuration and encryption keys securely without including their contents in Git or this document.
+2. Take a consistent database backup for every distinct configured target. The collector found one target for both roles, but recheck runtime configuration before release. Record its recovery timestamp and prove the backup is usable without restoring over the live database. Confirm available disk space for both backup and migration overhead.
+3. Build and check the candidate outside the running application's directory. Do not overwrite its active `.next` build. Document PM2 working directory, environment and start command before changing deployment paths.
+4. Use additive schema changes and bounded backfills first. Retain old tables and source generations during comparison; avoid destructive column removal, snapshot deletion or a second authoritative writer.
+5. For each cutover, pause/drain the relevant writers and side effects, reconcile the final changes, switch a bounded domain and verify health plus customer data/workflow checks. Resume only its documented worker owner. This may require a maintenance window; no zero-downtime guarantee is made.
+6. If a UI/read-path release fails, disable its new path or switch to the previous compatible build. Leave unused additive tables in place. A successful HTTP health response alone does not establish that findings, exports and ticket references remain correct.
+7. If the new storage path has accepted writes, preserve those changes before any recovery. Prefer a previous build compatible with the new SQL authority or a tested reverse/replay process. Restore an older database backup only with its post-backup data-loss boundary understood and newer changes/external actions reconciled.
+
+| Rollback point | Recovery method |
+| --- | --- |
+| Navigation, tiles or customer-scoped readers | Revert the UI/read switch or deploy the previous compatible build |
+| New tables populated for comparison only | Stop comparison/backfill work and continue with the old authoritative store |
+| New storage has accepted application writes | Use compatible code or tested reverse migration/replay; an old snapshot is no longer a complete recovery point |
+| ConnectWise tickets, scans or messages already sent | Reconcile their external IDs and effects; Git/database rollback does not undo them |
+
+Before SQL accepts authoritative writes, new reads can return to the legacy implementation if it remains current, and shadow tables can remain unused. Existing customer IDs, source records, tickets and histories remain intact.
+
+After SQL accepts authoritative writes, switching to an old snapshot would discard changes. Prefer rolling back application code to a compatible SQL-backed version. Returning to legacy storage requires a tested reverse migration or replay of every accepted write. Record this boundary in each release runbook.
+
+For write cutover, identify and stop every relevant writer, including in-process jobs, independent scanner schedulers, manual triggers and any older running deployment. The general scheduler-disable flag is not a universal stop switch. Wait for active work to finish or preserve a proven resume checkpoint, then reconcile the final revision.
+
+Keep a restorable backup, frozen legacy data and a record of generation pointers until retention is approved. Inventory both database settings before moving any tables. Do not delete old snapshots, rotate encryption secrets or rebuild ticket records as part of the initial storage cutover.
+
+## Decisions to settle before storage cutover
+
+1. **Source authority for overlapping datasets.** For each customer with CS and ES, establish whether ES is a mirror, an independent source, or query-only. Record the chosen dataset/field authority and fallback policy.
+2. **Measurement contracts.** Preserve current definitions first; explicitly name software instances, normalized findings, unique CVEs, devices, exposures and assessments.
+3. **Identity rules.** Document existing source keys and aliases, treatment of ambiguous matches, and handling of findings without CVEs before creating unique constraints.
+4. **Operational ownership.** Identify database and worker owners, acceptable cutover windows, test destinations and the person responsible for each release gate.
+5. **Scope of the first migration.** Begin with source inventory, contracts and read-only parity tooling. Select the first reader/domain only after mapping dependencies; do not start with ticket automation or full Spotlight replacement.
+
+**Implementation is authorized and underway.** Merging, production deployment, storage cutover and retirement still require a concrete reviewed release scope and evidence. The first local UI checkpoint does not authorize switching database writers or enabling the unfinished shared CVE workflow.
+
+## Implementation evidence and related design
+
+The following files anchor the current-state description and identify regression-sensitive consumers. Proposed entities and controls above are design recommendations, not claims that these protections are already implemented.
+
+| Topic | Current implementation or existing design |
+| --- | --- |
+| Snapshot authority and persistence | [Core store](../lib/store.ts), [snapshot persistence](../lib/persist.ts) |
+| Existing migration direction | [PostgreSQL source of truth design](superpowers/specs/2026-09-29-postgres-source-of-truth-design.md), [database inventory](db-migration-inventory.md) |
+| Source storage and publication | [Spotlight store](../lib/spotlight-record-store.ts), [Defender store](../lib/defender-store.ts), [Defender publication](../lib/defender-platform.ts), [Defender projection](../lib/defender-projection.ts) |
+| Existing identity and correlation | [Finding correlation](../lib/finding-correlation.ts), [core types](../lib/types.ts) |
+| Reporting contracts | [Reporting store](../lib/reporting-store.ts), [customer model](../lib/reporting-customer-model.ts), [metrics](../lib/reporting-metrics.ts), [release gate](reporting-release-gate.md) |
+| Custom tile ownership and source connections | [Dashboard store](../lib/elastic-dashboard-store.ts), [reporting direct sources](../lib/reporting-direct-sources.ts), [query adapters](../lib/dashboard-query-connectors.ts) |
+| Risk and prioritization | [Risk store](../lib/risk-scoring-store.ts), [scoring](../lib/risk-scoring.ts), [Defender risk](../lib/defender-risk.ts) |
+| Patch and ticket workflow | [Patch ticket store](../lib/patch-ticket-store.ts), [ticket status sync](../lib/ticket-status-sync.ts), [ticket SLA](../lib/ticket-sla-escalation.ts), [ticket reconciliation](../lib/group-ticket-reconciliation.ts) |
+| Startup and recurring work | [Instrumentation](../instrumentation.ts), [Defender worker](../lib/defender-worker.ts), [risk scheduler](../lib/risk-refresh-scheduler.ts) |
+
+At this checkpoint, application changes exist only in the development worktree. Private backup/restore artifacts were created on the server; the production app was not redeployed or restarted. Production schema, source configuration, permissions and ticket actions were not changed by this work.
