@@ -1,4 +1,6 @@
-# Defender platform finding shadow contract, version 1
+# Defender platform finding shadow contract, version 2
+
+Version 2 retains the lossless version-1 field layout and adds the original snapshot order to finding identity rows. This preserves stable priority ties for the saved read model described in `docs/defender-shadow-reads.md`. Earlier version-1 measurements below remain historical; existing disposable version-1 projections must be rebuilt, not silently reused.
 
 This is the first storage migration prototype for published platform findings. It copies the existing customer-scoped Defender findings into a separate disposable database, verifies reconstruction of every field and preserves the old database unchanged. It is not an active ingestion path, a replacement source of truth or a complete schema for all providers.
 
@@ -66,4 +68,4 @@ It creates and drops separate fixture databases, including the full-data target.
 
 This verifies storage fidelity, not a new risk formula or end-to-end reporting/ticket behavior. It does not implement incremental source updates, asset correlation, an active generation pointer, history measurement migration, an authoritative writer, customer authorization routes or other-provider migration.
 
-Next, add bounded verified-generation summary and paginated finding reads and compare their results and query costs with the existing reporting/prioritization semantics. Keep the shadow isolated until lifecycle, source authority, ticket linkage, failure recovery and rollout/rollback gates are satisfied.
+Saved summary and paginated reads now have an isolated implementation and validation harness described in `docs/defender-shadow-reads.md`. Keep the shadow isolated until lifecycle, source authority, CVE detail/patch-input parity, ticket linkage, failure recovery and rollout/rollback gates are satisfied.

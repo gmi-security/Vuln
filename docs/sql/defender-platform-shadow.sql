@@ -2,7 +2,7 @@
 CREATE TABLE defender_shadow_generations (
   company_id text NOT NULL,
   projection_id uuid NOT NULL,
-  model_version integer NOT NULL CHECK (model_version=1),
+  model_version integer NOT NULL CHECK (model_version=2),
   source_run text NOT NULL,
   snapshot_saved_at timestamptz NOT NULL,
   state text NOT NULL CHECK (state IN ('building','verified','failed')),
@@ -20,6 +20,7 @@ CREATE TABLE defender_shadow_findings (
   issue_key text NOT NULL,
   asset_key text NOT NULL,
   connector text NOT NULL,
+  legacy_order integer NOT NULL CHECK (legacy_order>=0),
   detail jsonb NOT NULL CHECK (jsonb_typeof(detail)='object'),
   PRIMARY KEY (company_id,projection_id,finding_id),
   FOREIGN KEY (company_id,projection_id) REFERENCES defender_shadow_generations(company_id,projection_id) ON DELETE CASCADE

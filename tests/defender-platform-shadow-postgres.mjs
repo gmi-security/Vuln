@@ -7,9 +7,11 @@ const socket=await realpath(process.argv[2]||'.');
 assert.ok(socket.startsWith('/home/codex/vuln-recovery/')&&socket.endsWith('/socket'));
 const options={host:socket,port:55483,user:'codex',connectionTimeoutMillis:5000,statement_timeout:15000,query_timeout:20000};
 const suffix=randomUUID().replaceAll('-',''),sourceName=`vuln2_shadow_source_test_${suffix}`,targetName=`vuln2_shadow_test_${suffix}`;
-const admin=new pg.Client({...options,database:'postgres'}),created=[];let source,target,restored,checks=0;
+const admin=new pg.Client({...options,database:'postgres'}),created=[];let source,target,restored,observer,checks=0;
 const ok=message=>{checks++;console.log(`PASS ${message}`);};
+const readValidation=process.argv.includes('--with-shadow-reads')?await import('./defender-shadow-read-validation.mjs'):null;
 const run=randomUUID(),first={id:'F-1',companyId:'CO-A',cve:'CVE-2026-1234',asset:'asset-1',connector:'defender',
+  title:'Fixture vulnerability',
   status:'Risk Accepted',assignee:'operator',firstSeen:'2026-01-01',lastSeen:'2026-09-01',resolvedAt:null,
   severity:'High',cvss:8.1,realRisk:42,riskPriority:'Medium',remediation:'Recommended fix',kev:true,
   seenBy:['defender','nessus'],futureField:{preserved:[null,'value']},
@@ -21,6 +23,10 @@ try{
   source=new pg.Client({...options,database:sourceName});target=new pg.Client({...options,database:targetName});
   source.on('error',()=>{});target.on('error',()=>{});
   await source.connect();await target.connect();await target.query(await readFile('docs/sql/defender-platform-shadow.sql','utf8'));
+  if(readValidation){
+    await target.query(await readFile('docs/sql/defender-shadow-reads.sql','utf8'));
+    observer=new pg.Client({...options,database:targetName});observer.on('error',()=>{});await observer.connect();
+  }
   await source.query(`CREATE TABLE vuln_store(key text PRIMARY KEY,data jsonb,updated_at timestamptz DEFAULT now());
     CREATE TABLE defender_connections(company_id text,revision int,current_run uuid);
     CREATE TABLE defender_import_runs(id uuid,company_id text,revision int,status text);`);
@@ -63,8 +69,20 @@ try{
   await assert.rejects(()=>build(source,target,'CO-A'),/Known non-demo customer/);
   await source.query(`UPDATE vuln_store SET data=$1 WHERE key='companies:00'`,[JSON.stringify([['CO-A',{id:'CO-A',name:'Fixture',isDemo:false}]])]);
   await assert.rejects(()=>target.query(`INSERT INTO defender_shadow_generations(company_id,projection_id,model_version,source_run,snapshot_saved_at,state,verified_at)
-    VALUES('CO-A',$1,1,'test',now(),'verified',now())`,[randomUUID()]),e=>e.code==='23514');
+    VALUES('CO-A',$1,2,'test',now(),'verified',now())`,[randomUUID()]),e=>e.code==='23514');
   ok('malformed demo metadata and verified generations without a row count fail closed');
+  if(readValidation){
+    await readValidation.verifyShadowReads(target,initial,[first,second],{failure:true,observer});
+    const fixtures=Array.from({length:703},(_,i)=>({...first,id:`SORT-${String(1000-i)}`,cve:i===700?'NO-CVE':`CVE-2026-${1000+Math.floor(i/3)}`,
+      asset:`asset-${i%7}`,connector:i%23===0?'spiderfoot':i%29===0?'burp':'defender',
+      severity:['Critical','High','Medium','Low','Info'][i%5],cvss:i%3?8:9,realRisk:i%4?50:70,
+      status:['Open','In Remediation','Risk Accepted','False Positive','Resolved'][i%5],
+      defender:{...first.defender,deviceId:`device-${i}`,runId:run}}));
+    await setRows(fixtures);const fixtureProjection=await build(source,target,'CO-A');
+    console.log(JSON.stringify({phase:'fixture-read-parity',...await readValidation.verifyShadowReads(target,fixtureProjection,fixtures,{failure:true,observer})}));
+    await setRows([]);const empty=await build(source,target,'CO-A');await readValidation.verifyShadowReads(target,empty,[]);
+    ok('saved summaries and complete keyset traversal match legacy filters, stable risk ties, CVE grouping, empty and rollback states');
+  }
   if(process.argv.includes('--with-restored-defender')){
     restored=new pg.Client({...options,database:'recovery_application'});restored.on('error',()=>{});await restored.connect();
     const result=await build(restored,target,'CO-230784',{afterBatch:({count,batches,elapsedMs})=>{if(batches<=3||batches%20===0)console.log(JSON.stringify({phase:'shadow-roundtrip',count,elapsedMs}));}});
@@ -78,14 +96,27 @@ try{
     const {rows:[size]}=await target.query("SELECT sum(pg_total_relation_size(oid))::text bytes FROM pg_class WHERE relnamespace='public'::regnamespace AND relkind='r'");
     console.log(JSON.stringify({phase:'restored-shadow-verified',...result,summary,summaryReadMs:Math.round(readMs),tableIndexBytes:Number(size.bytes),peakRssMiB:Math.round(process.resourceUsage().maxRSS/1024)}));
     ok('all 288878 restored findings round-trip; 2970 older open findings and 72987 resolved records retained');
+    if(readValidation){
+      console.log(JSON.stringify({phase:'restored-reference-start'}));
+      const reference=await readValidation.savedReference(restored,result.companyId);
+      console.log(JSON.stringify({phase:'restored-derived-read-start'}));
+      console.log(JSON.stringify({phase:'restored-read-parity',...await readValidation.verifyShadowReads(target,result,reference)}));
+      const {rows:[derivedSize]}=await target.query("SELECT sum(pg_total_relation_size(oid))::text bytes FROM pg_class WHERE relnamespace='public'::regnamespace AND relkind='r' AND relname IN('defender_shadow_read_summary','defender_shadow_priority','defender_shadow_cve_pages')");
+      console.log(JSON.stringify({phase:'derived-read-storage',bytes:Number(derivedSize.bytes),peakRssMiB:Math.round(process.resourceUsage().maxRSS/1024)}));
+      ok('every restored priority/CVE page and saved totals match the independent source/reporting reference');
+    }
   }
   console.log(`Passed ${checks} PostgreSQL scenarios; no production connection or publication.`);
 } catch(error) {
   // PostgreSQL constraint details and assertion diffs can include private finding payloads.
-  console.error(JSON.stringify({phase:'shadow-validation-failed',code:error.code??'VALIDATION_FAILED'}));
+  console.error(JSON.stringify({phase:'shadow-validation-failed',step:error.auditPhase,code:error.code??'VALIDATION_FAILED',
+    location:error.stack?.split('\n').filter(line=>/^\s+at /.test(line)).slice(0,8)}));
   process.exitCode=1;
 } finally {
-  await restored?.end();await source?.end();await target?.end();
-  for(const name of created.reverse())await admin.query(`DROP DATABASE ${name}`);
+  await restored?.end();await source?.end();await observer?.end();await target?.end();
+  for(const name of created.reverse()){
+    if(process.exitCode&&process.argv.includes('--keep-failed-shadow')&&name===targetName){console.log(`PRIVATE_FAILED_TARGET=${name}`);continue;}
+    await admin.query(`DROP DATABASE ${name}`);
+  }
   await admin.end();
 }
