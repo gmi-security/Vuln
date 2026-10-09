@@ -26,12 +26,19 @@ async function metadata(client: PoolClient, companyId: string) {
  * Build in a dedicated worker with at least two pool connections; never a page request.
  */
 export function createSpotlightSummaryStore(db: Database) {
-  async function build(companyId: string, actor: string, options: { limits?: typeof summaryLimits } = {}) {
+  async function build(companyId: string, actor: string, options: {
+    limits?: typeof summaryLimits; expectedRunId?: string; signal?: AbortSignal;
+    checkpoint?: (scanned: number) => Promise<void>;
+    beforePublish?: (client: PoolClient) => Promise<void>;
+  } = {}) {
     validateSourceRead({ companyId, now: new Date(), staleAfterMs: 86400000 });
     if (!actor || actor.length > 200 || /[\r\n\x00]/.test(actor)) throw new Error("A valid summary builder identity is required.");
     const writer = await db.connect(); let source: PoolClient | undefined, locked = false, destroy = false;
     const started = Date.now();
-    const deadline = () => { if (Date.now()-started > 300000) throw new Error("Summary build exceeded five minutes; previous summary retained."); };
+    const deadline = () => {
+      if (options.signal?.aborted) throw new Error("Summary worker stopped; previous summary retained.");
+      if (Date.now()-started > 300000) throw new Error("Summary build exceeded five minutes; previous summary retained.");
+    };
     try {
       // A single summary build across workers limits memory and source database load.
       locked = (await writer.query("SELECT pg_try_advisory_lock($1,1) AS acquired", [LOCK])).rows[0]?.acquired === true;
@@ -42,6 +49,10 @@ export function createSpotlightSummaryStore(db: Database) {
       if (!current?.run_id) { await source.query("COMMIT"); return { state: "no-completed-import" as const }; }
       if (!current.owned_run || current.status !== "completed" || !current.finished_at) throw new Error("Invalid completed source generation.");
       const runId = String(current.run_id);
+      if (options.expectedRunId && options.expectedRunId !== runId) {
+        await source.query("COMMIT"); return { state: "superseded" as const, runId: options.expectedRunId };
+      }
+      deadline(); await options.checkpoint?.(0);
       const previous = (await writer.query(`SELECT run_id,model_version FROM public.spotlight_summary_current WHERE company_id=$1`, [companyId])).rows[0];
       if (previous?.run_id === runId && previous.model_version === VERSION) {
         await source.query("COMMIT"); return { state: "reused" as const, runId };
@@ -57,7 +68,7 @@ export function createSpotlightSummaryStore(db: Database) {
       if (total > limits.records) throw new Error("Summary record limit exceeded.");
       let after = "";
       for (;;) {
-        deadline();
+        deadline(); await options.checkpoint?.(accumulator.scanned);
         const rows: SummaryInput[] = (await source.query(`SELECT r.source_id,r.cve,r.status,r.company_id,
           v.id,v.cid,v.aid,v.status AS raw_status,v.cve->>'id' AS raw_cve,v.cve->>'severity' AS raw_severity,
           v.cve->'base_score' AS score,v.suppression_info->'is_suppressed' AS suppressed
@@ -74,6 +85,7 @@ export function createSpotlightSummaryStore(db: Database) {
       const artifact = accumulator.finish();
       if (artifact.scanned !== total) throw new Error("Summary scan did not cover the completed source generation.");
       deadline(); await source.query("COMMIT");
+      source.release(); source = undefined;
       await writer.query("BEGIN");
       await writer.query("SET LOCAL statement_timeout='15s'");
       await writer.query("SET LOCAL lock_timeout='2s'");
@@ -91,12 +103,13 @@ export function createSpotlightSummaryStore(db: Database) {
         VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9)`, [companyId, runId, VERSION, current.finished_at, total,
         verified ? "import-count-reconciled" : "completion-marker-only", JSON.stringify(artifact.summary), artifact.rows.length, actor]);
       for (let offset=0; offset<artifact.rows.length; offset+=500) {
-        deadline();
+        deadline(); await options.checkpoint?.(artifact.scanned);
         await writer.query(`INSERT INTO public.spotlight_summary_cves(company_id,run_id,model_version,cve,severity,cvss,affected_devices,source_instances)
           SELECT $1,$2,$3,v.cve,v.severity,v.cvss,v.devices,v.findings FROM jsonb_to_recordset($4::jsonb)
           v(cve text,severity text,cvss double precision,devices bigint,findings bigint)`, [companyId,runId,VERSION,
           JSON.stringify(artifact.rows.slice(offset,offset+500).map(v => ({ cve:v.cve,severity:v.severity,cvss:v.cvss,devices:v.affectedDevices,findings:v.sourceInstances })))]);
       }
+      deadline(); await options.beforePublish?.(writer);
       await writer.query(`INSERT INTO public.spotlight_summary_current(company_id,run_id,model_version) VALUES($1,$2,$3)
         ON CONFLICT(company_id) DO UPDATE SET run_id=EXCLUDED.run_id,model_version=EXCLUDED.model_version`, [companyId,runId,VERSION]);
       await writer.query("COMMIT");
