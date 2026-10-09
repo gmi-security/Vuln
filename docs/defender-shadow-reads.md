@@ -1,6 +1,6 @@
 # Saved reads for the Defender platform shadow
 
-These readers remain offline validation code. No page, API route, worker or production database uses them. They target an explicitly selected customer and verified version-2 shadow projection, never whichever customer/source happens to be globally configured.
+These readers now support a disabled, authenticated platform comparison endpoint as well as offline validation. No default page, worker or production deployment uses them. They target an explicitly selected customer and verified version-2 shadow projection, never whichever customer/source happens to be globally configured. The builders remain restricted to disposable targets.
 
 ## What is stored once
 
@@ -32,6 +32,8 @@ The prototype assumes a frozen verified base generation. There is no live mutati
 
 The opaque continuation token binds customer, projection, view, workflow filter and last position. Tokens from another scope/filter are rejected, along with malformed tokens and excessive page sizes. This is pagination validation, not authentication; any future API must retain the existing authorization and customer-binding checks.
 
+Page fields are now measured in PostgreSQL before transfer with an 8 MiB aggregate row-data cap, including the lookahead row. Oversized pages fail with 413 rather than returning partial or truncated records. The size check and row read share the same read-only snapshot. This adds one bounded query per page; the historical full-cohort page timings below predate this check and are not new latency measurements.
+
 Unknown, failed or version-incompatible base generations fail. A verified base without derived results returns `not-ready`; a verified empty summary returns available zero values and empty pages. Summary arithmetic is validated before use. Snapshot isolation keeps a reader's summary and rows consistent if a separate transaction removes the generation mid-read; a subsequent request fails rather than returning another generation or fabricated zeros.
 
 ## Validation and remaining work
@@ -50,6 +52,25 @@ node --experimental-vm-modules --max-old-space-size=768 \
   --with-restored-defender --with-shadow-reads
 ```
 
-The private-cluster harness enforces cleanup and a nine-minute limit for projection plus exhaustive read validation. Base projection limits remain unchanged. Runtime/UI wiring, trusted source activation, other-provider reconciliation, CVE detail/patch-input parity, live generation immutability and deployment remain separate steps.
+The private-cluster harness enforces cleanup and a nine-minute limit for projection plus exhaustive read validation. Base projection limits remain unchanged. The results above describe the original checkpoint-16 validation. Later checkpoints added immutable publication and CVE comparisons; the API below was added in checkpoint 24. UI wiring, trusted source activation, other-provider reconciliation, lifecycle writes and deployment remain separate steps.
 
 For diagnosis only, `--keep-failed-shadow` retains a failed run's private target and prints its generated database name. It is off by default and requires explicit cleanup after investigation; the completed validation above left no such target behind.
+
+## Disabled platform comparison endpoint
+
+`GET /api/elastic-dashboard/customer-platform-comparison` accepts one `companyId`, optional `view` (`summary`, `findings`, `cves`), optional workflow `status` for findings, a decimal `limit` from 1 to 100 (default 50), and an optional cursor. Default view is summary and default status is open. All duplicate or unknown parameters, projection/source overrides, malformed cursors and cross-customer/view/status cursors are rejected with 400. POST is unsupported.
+
+The endpoint uses existing dashboard authentication, `VULN_REMEDIATION_UI` and the disabled `VULN_SHADOW_CVE_READS` flag. It requires that specific customer's `VULN_SHADOW_CVE_CUSTOMERS` entry to be `"published"`; fixed-UUID CVE bindings do not opt a customer into this API. No new configuration defaults or member privileges were introduced. A known non-demo customer is resolved from saved application metadata before evidence storage is opened. The metadata client is released before obtaining the shared read-only shadow connection. No ticket connection, enrichment query, source API, schema initializer or full-store hydration runs as part of this request.
+
+| Response | Meaning |
+| --- | --- |
+| 200, `state: available` | Complete published summary and optional page; includes generation, publication revision/time and the explicit published-Defender-cohort scope |
+| 200, `state: unpublished` | Known configured customer with no selected complete generation; no summary, page or invented zero totals |
+| 200, available zero | A verified published empty generation, with zero summary values and empty requested pages |
+| 409 | Unsupported customer binding, or a valid cursor from a different selected generation; the latter instructs the caller to restart from page one |
+| 413 | Selected page row data exceeds 8 MiB; no partial page |
+| 503 | Missing/unavailable required storage or invalid stored evidence; no stale/global fallback |
+
+Responses are private/no-store. Cursor generation values only validate continuation; they never select storage. A request pins one complete immutable generation even if another transaction switches the pointer while its page query waits. Enrichment and patch review remain in the separate CVE flow. The current reporting UI and default tiles were not switched or supplemented.
+
+Checkpoint-24 validation passed the build/type check, 40 local tests, six saved-read PostgreSQL fixture checks, seven fixed-UUID CVE HTTP checks and eleven published HTTP checks. The published suite exercises 105 finding/CVE rows over multiple pages, correct ordering, workflow filters, zero versus unpublished, malformed and stale cursors, concurrent publication, missing tables, ticket-store independence and a page containing more than 8 MiB of text. Non-publication data fingerprints remain unchanged. The new page-size query was fixture-tested; a new full-cohort performance measurement was not claimed.
