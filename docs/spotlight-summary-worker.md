@@ -46,11 +46,31 @@ Before publishing, the worker checks and locks its current lease inside the same
 
 Safe stored error codes are `build-failed`, `lease-expired`, and `worker-stopped`. The scoped status service returns the latest 50 jobs for one customer, without lease tokens. It is an internal service, not a new API or permission grant. General CLI errors use safe event codes instead of printing database connection strings or raw error stacks.
 
+## Derived-summary retention
+
+`lib/spotlight-summary-retention.ts` is an explicit maintenance service compiled alongside the worker. It is not called by the worker, a timer or a route. `run(companyId)` previews one bounded batch in a read-only transaction; `run(companyId, {apply: true})` reselects candidates under locks and applies that batch atomically. Preview IDs are never accepted as deletion instructions. The eventual caller must authorize the customer and record the returned candidate/deletion information.
+
+Proposed configurable defaults for these new derived copies:
+
+| Setting | Default / protection |
+| --- | --- |
+| Recent complete summaries | Keep up to 90 per customer. Generations beyond the 90 newest are eligible. Versions count toward the same customer limit. |
+| Summary age | Older than 365 days is eligible even below that count. Age uses summary build time; original observation timestamps remain unchanged. |
+| Permanent exceptions to those cutoffs | Protect the three newest summaries, the current published summary, any summary of the current source import, and summaries with queued/running/retry jobs, including expired running leases awaiting normal recovery. These protections can exceed the configured count or age targets. |
+| Terminal job records | Retain up to 100 and expire after 90 days, except jobs for retained summaries or the current source import. Active jobs are never candidates. Current-import failures remain visible rather than being erased and automatically rediscovered. |
+| Batch size | At most five generations and 100 terminal jobs per customer/call; each generation's CVE detail rows cascade with its header. A larger backlog needs further explicit calls. |
+
+Summary and job selection occurs before deletion, so the job for a summary removed in this batch survives until at least a later pass. The service does not delete source imports, daily-history tables, saved-query results, tickets, connector state or enrichment. This policy does not promise 90 days of trend history: it keeps recent generated copies, and multiple imports on one day consume multiple positions. Existing trend history has separate retention and remains untouched.
+
+Apply acquires the same global advisory lock as the builder, serializes job discovery/claims, and pins the selected customer's source pointer while selecting/deleting. A running build returns `busy` without cleanup. Current-summary foreign keys are an additional guard. The saved reader already uses repeatable-read transactions; PostgreSQL keeps the old rows visible to an in-flight reader even if a newer summary is published and the older one is pruned. This guarantee was tested for that reader; future consumers must preserve a consistent transaction rather than make unrelated reads across generations.
+
+Statements have a 15-second timeout, lock waits a two-second timeout, and the service checks a 30-second batch deadline between deletions. A failed batch rolls back all its deletions. Physical disk use need not shrink immediately after deletion; database vacuum/space reuse and backup retention are separate operational work. At the measured Atlas summary size, 90 copies are approximately 298 MiB before bloat, backups and protected exceptions; this is a sizing illustration, not an enforced byte limit.
+
 ## Rollback and remaining gates
 
 Stop the dedicated process before changing its code or migrations. Preserve job history and saved summaries during an ordinary code rollback; production source records and ticket state are independent. The migration files contain destructive removal instructions for an explicitly approved schema rollback, not normal deployment steps.
 
-Before any recurring production use: choose retention and cleanup behavior, confirm database access and resource allocation alongside current imports, define failed-job operator recovery/monitoring, approve the customer/source bindings and migration, and wire authenticated read-only page consumers with pending/stale states. No retention deletion or production activation is implemented here.
+Before any recurring production use: approve the retention settings and wire cleanup/monitoring, confirm database access and resource allocation alongside current imports, define failed-job operator recovery, approve the customer/source bindings and migration, and wire authenticated read-only page consumers with pending/stale states. Cleanup has been exercised only in a disposable fixture database; there is no production activation. A code rollback cannot recreate previously pruned derived copies; raw-source availability or an appropriate backup is required to rebuild them. Current summaries and the protected rollback set are excluded from cleanup.
 
 ## Validation
 
@@ -59,5 +79,6 @@ Build first, then run `node --test tests/spotlight-summary-worker.test.mjs` for 
 - `tests/spotlight-summary-worker-postgres.mjs`: disposable fixture database, retries/leases/fencing, actual killed-process recovery and singleton behavior.
 - `tests/spotlight-summary-postgres.mjs`: atomic summaries, customer scope, concurrent reads and supersession regressions.
 - `tests/spotlight-summary-worker-restored.mjs`: dedicated CLI against the retained Atlas generation, exact comparison against the earlier independent aggregate baseline, saved reads and restart replay. Installs/removes only the four new tables; refuses existing ones.
+- `tests/spotlight-summary-retention-postgres.mjs`: disposable fixtures for scoped preview/apply, protected generations, builder contention, stale-preview revalidation, atomic rollback, count/age limits and an actual in-flight saved reader during pruning. `tests/spotlight-summary-retention.test.mjs` checks input bounds before any database connection.
 
 The authoritative platform change proposal records measured results and remaining release gates. Restored-copy timing is not a production performance guarantee.

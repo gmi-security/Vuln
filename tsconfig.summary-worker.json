@@ -11,5 +11,5 @@
     "outDir": ".worker-build/spotlight-summary",
     "noEmitOnError": true
   },
-  "include": ["lib/spotlight-summary-worker.ts"]
+  "include": ["lib/spotlight-summary-worker.ts", "lib/spotlight-summary-retention.ts"]
 }
