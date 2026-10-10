@@ -1,3 +1,4 @@
+import { readSourceSelectionStatus } from "./customer-source-selection";
 import { appsecRouteEvidenceSelect, appsecRoutingStatus } from "./customer-appsec-routing";
 import { queryRouteEvidenceSelect, queryRoutingStatus } from "./customer-query-routing";
 import { scannerRouteEvidenceSelect, scannerRoutingStatus, type ScannerRouteEvidence } from "./customer-scanner-routing";
@@ -83,6 +84,7 @@ export async function readCustomerConnectorStatus(companyId: string | null) {
         scanner.map(row=>scannerRoutingStatus(row,preview,process.env.VULN_REVIEWED_SCANNER_PROVIDERS)),
         queries.map(row=>queryRoutingStatus(row,preview,process.env.VULN_REVIEWED_QUERY_PROVIDERS)),
         appsec.map(row=>appsecRoutingStatus(row,preview,process.env)));
+      result.sourceSelection = await readSourceSelectionStatus(client,companyId,preview);
       await client.query("COMMIT");
       return result;
     } catch (error) { await client.query("ROLLBACK").catch(() => {}); throw error; }

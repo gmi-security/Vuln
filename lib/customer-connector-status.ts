@@ -1,3 +1,4 @@
+import type { SourceSelectionStatus } from "./customer-source-selection";
 import type { ScannerRoutingStatus } from "./customer-scanner-routing";
 import type { SpotlightRoutingStatus } from "./customer-spotlight-routing";
 import type { ConnectorCandidate, buildConnectorPreview } from "./customer-connector-preview";
@@ -13,6 +14,7 @@ export type ConnectorStatusDraft = {
 };
 export type CustomerConnectorStatus = {
   companyId: string; companyName: string; checkedAt: string; registryAvailable: boolean;
+  sourceSelection?: SourceSelectionStatus;
   items: { id: string; provider: string; evidence: string; configuration: string;
     review: string; reasons: string[]; scope: string; reviewedAt: string | null;
     data?: { domains: readonly string[]; storage: string; lifecycle: string; routing: string } }[];

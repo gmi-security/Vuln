@@ -185,3 +185,12 @@ Checkpoint 49 closes the saved-source path behind the existing Spotlight opt-in.
 Activation now requires a completed reviewed Spotlight import before saved CrowdStrike CVE preparation can succeed. Renewed assignments or a newer completed generation require fresh drafts for sending. Existing draft/history records are retained; a concurrent revocation can leave a pending audited draft but cannot pass the subsequent proof check. No distributed transaction with ConnectWise is claimed.
 
 Next: remaining stored-platform source authority and mirror/correlation decisions, live customer/source acceptance, SQL reporting integration and authoritative writer recovery, followed by the combined release rehearsal. The prior Artemis/ZAP issues and intentionally disabled integrations remain unchanged.
+
+
+## Follow-up: customer primary-source and mirror review
+
+Checkpoint 50 adds persisted source selection and an atomic review audit in the application database. Operator `export-sources` / `review-sources` commands derive decisions from current customer bindings. An Elastic mirror requires an explicit same-customer primary and mapping evidence reference; its existing query-only permission can remain intact. Changed bindings/configuration invalidate review, and separate endpoint primaries still require finding-level correlation before combined reporting. The Connectors page displays the selected customer's status without source identities, private notes or new controls.
+
+**320 distinct local tests passed**, **18 isolated PostgreSQL groups passed**, **11 browser scenario groups passed**, and final production build/TypeScript passed. JSONB key-order stability was corrected after the first SQL run, and the final real database round trip passed. Mobile screenshots were inspected; test databases were removed and the private cluster stopped. See [source-selection review and limits](customer-source-selection-review.md).
+
+This records review, not runtime reporting activation. The current report also includes workflow, scanners, web/OSINT, risk, inventory context and history; replacing it with a raw-source count would change behavior. Actual source/mirror ownership, overlapping-source correlation, compatible SQL report reads, writer/recovery handoff and combined release acceptance remain required. No live source, ticket, production configuration or database change occurred. Nothing was pushed or deployed.

@@ -6,10 +6,12 @@ import { userInfo, hostname } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
 import nextEnv from '@next/env';
-import { loadConnectorPreview, loadConnectorDraftStore, loadConnectorBindingStore, loadInventoryRouting, loadSpotlightRouting, loadScannerRouting, loadQueryRouting, loadAppSecRouting } from './connector-preview-loader.mjs';
+import { loadConnectorPreview, loadConnectorDraftStore, loadConnectorBindingStore, loadInventoryRouting, loadSpotlightRouting, loadScannerRouting, loadQueryRouting, loadAppSecRouting, loadSourceSelection } from './connector-preview-loader.mjs';
 import { readApplicationConnectorMetadata, readDashboardConnectorMetadata } from '../lib/db/connector-metadata.mjs';
 
 const commands = {
+  'review-sources': ['--input', '--env-file'],
+  'export-sources': ['--company', '--output', '--env-file'],
   import: ['--fingerprint', '--env-file'],
   export: ['--company', '--output', '--env-file'],
   review: ['--input', '--env-file'],
@@ -37,7 +39,7 @@ export function parseRegistryArgs(args) {
   }
   if (command === 'import' && !/^[a-f0-9]{64}$/.test(options['--fingerprint'] ?? '')) throw new Error('A reviewed preview fingerprint is required.');
   if (command.startsWith('export') && (!options['--company'] || options['--company'].length > 100 || !options['--output'])) throw new Error('Export requires a customer and private output path.');
-  if (['review','assign','route-inventory','route-spotlight','route-scanner','route-query','route-appsec'].includes(command) && !options['--input']) throw new Error('Review requires a private input file.');
+  if (['review-sources','review','assign','route-inventory','route-spotlight','route-scanner','route-query','route-appsec'].includes(command) && !options['--input']) throw new Error('Review requires a private input file.');
   return { command, options };
 }
 export function registryReviewInput(value) {
@@ -95,10 +97,12 @@ export async function runRegistry(args, runtimeEnv = process.env) {
     const collect = async () => build({ ...await readApplicationConnectorMetadata(app),
       ...(operationalCommand ? { connections: [], tiles: [] } : await readDashboardConnectorMetadata(dashboard)) }, env);
     if (command === 'import') return { action: command, ...await store.importPreview(options['--fingerprint'], actor, collect), enabledBindings: 0 };
-    if (['review','assign','route-inventory','route-spotlight','route-scanner','route-query','route-appsec'].includes(command)) {
+    if (['review-sources','review','assign','route-inventory','route-spotlight','route-scanner','route-query','route-appsec'].includes(command)) {
       const path = resolve(options['--input']);
       if ((await stat(path)).size > 32 * 1024) throw new Error('Review file exceeds 32 KiB.');
       const value = JSON.parse(await readFile(path, 'utf8'));
+      if (command === 'review-sources') return { action: command,
+        ...await (await loadSourceSelection()).createSourceSelectionStore(pool).save(value,actor,collect) };
       if (command === 'route-appsec') return { action: command,
         ...await (await loadAppSecRouting()).createAppSecRoutingStore(pool,env).save(value,actor,collect) };
       if (command === 'route-query') return { action: command,
@@ -113,6 +117,12 @@ export async function runRegistry(args, runtimeEnv = process.env) {
         ? await (await loadConnectorBindingStore())(pool).save(value,actor,collect)
         : await store.reviewCurrentDraft(registryReviewInput(value), actor, collect);
       return { action: command, revision: result.revision, reviewState: result.reviewState ?? result.review_state, enabledBindings: 0 };
+    }
+    if (command === 'export-sources') {
+      const result = await (await loadSourceSelection()).createSourceSelectionStore(pool).exportCustomer(options['--company'],collect);
+      file = await open(resolve(options['--output']),'wx',0o600);
+      await file.writeFile(JSON.stringify(result,null,2)+'\n');
+      return { action:command, bindings:result.bindings.length, canActivate:false };
     }
     if (command === 'export-appsec-routes') {
       const result = await (await loadAppSecRouting()).createAppSecRoutingStore(pool,env).exportCustomer(options['--company']);
@@ -165,6 +175,12 @@ export async function runRegistry(args, runtimeEnv = process.env) {
 }
 
 const safeMessages = new Set([
+  'Invalid customer source selection review.', 'Invalid mirror evidence reference.', 'Duplicate mirror selection.',
+  'Review all current customer bindings before selecting primary sources and mirrors.',
+  'Every mirror requires exactly one reviewed primary and evidence reference.',
+  'Mirror target must be a reviewed endpoint primary for the same customer with explicit mapping evidence.',
+  'Duplicate primary source origin; reconcile assignments first.', 'Source selection changed; export current state before review.',
+  'Customer bindings changed; export current state before review.', 'No source selection exists to revoke.',
   'Invalid appsec routing approval.', 'Appsec routing changed; export current state before approval.',
   'No appsec route exists to disable.', 'Appsec binding changed; review current state before approval.',
   'Appsec routing limit exceeded.', 'AppSec assignment needs a current review.',

@@ -24,10 +24,12 @@ let browser, page, checks = 0; const pass = message => { checks++; console.log('
 const artifacts = await mkdtemp(join(tmpdir(), 'vuln2-connectors-browser-'));
 const companies = [{ id: 'CO-A', name: 'Fixture Alpha' }, { id: 'CO-B', name: 'Fixture Beta' }, { id: 'CO-EMPTY', name: 'Fixture Empty' }];
 const calls = [], errors = [], unexpected = []; let fail = false, pending = false, release;
-let previewFailure=false;
+let previewFailure=false, sourceNeedsReview=false;
 let shared = false, partial = true, inventoryRouting = false, inventoryProvider = "automate", spotlightRouting = false, scannerRouting = false, scannerProvider = "nessus", queryRouting = false, queryProvider = "crowdstrike";
 function status(id) {
   const result = { companyId: id, companyName: companies.find(c => c.id === id).name, checkedAt: '2026-10-09T19:00:00Z', registryAvailable: id !== 'CO-A',
+    sourceSelection: {state:id==='CO-A'?'not-installed':sourceNeedsReview?'needs-review':'reviewed',revision:1,primaryCount:1,mirrorCount:1,canActivate:false,
+      readiness:id==='CO-A'?'Source selection review is not installed. Existing reporting is unchanged.':sourceNeedsReview?'Bindings or source configuration changed. Review source selection again.':'One primary source is selected for comparison. Reporting has not switched.'},
     items: id === 'CO-EMPTY' ? [] : [{ id: id+'-record', provider: inventoryRouting ? inventoryProvider : id === 'CO-A' ? 'defender' : 'crowdstrike', evidence: 'Saved customer connection', configuration: 'Configuration recorded',
       review: inventoryRouting ? 'Inventory route approved' : id === 'CO-A' ? 'Not imported for review' : 'Needs review', scope: inventoryRouting ? 'A separate inventory import approval is recorded. See routing details for its current state.' : 'Tenant recorded; scope verification pending.', reviewedAt: null,
       data: {domains:inventoryRouting?['inventory']:['endpoint-findings'],storage:inventoryRouting?'Existing platform inventory':'Completed source SQL generations',lifecycle:inventoryRouting?'Reviewed customer ownership':'Only complete imports',routing:inventoryRouting ? 'Approved for inventory routing; the provider switch is on. All routes are checked again when an import starts. This does not confirm a successful import.' : 'Customer scope has not been reviewed.'},
@@ -115,6 +117,16 @@ try {
   await page.screenshot({ path: join(artifacts, 'customer-connectors-mobile.png'), fullPage: true });
   assert.ok(calls.every(c => c.method === 'GET')); assert.deepEqual(unexpected, []); assert.deepEqual(errors, []);
   pass('mobile fit; no mutation, global connector health probe, scan or sync request');
+  await page.getByRole('heading',{name:'Endpoint source selection',exact:true}).waitFor();
+  await page.getByText('1 primary sources and 1 declared mirrors.',{exact:false}).waitFor();
+  sourceNeedsReview=true;await page.getByRole('button',{name:'Refresh status',exact:true}).click();
+  await page.getByText('Bindings or source configuration changed. Review source selection again.',{exact:true}).waitFor();
+  assert.equal(await page.getByText('1 primary sources and 1 declared mirrors.',{exact:false}).count(),0);
+  assert.equal(await page.getByRole('combobox').count(),1);
+  await page.screenshot({path:join(artifacts,'source-selection-needs-review-mobile.png'),fullPage:true});
+  sourceNeedsReview=false;await page.getByRole('button',{name:'Refresh status',exact:true}).click();
+  await page.getByText('1 primary sources and 1 declared mirrors.',{exact:false}).waitFor();
+  pass('source selection review shows one primary and declared mirror; stale selection removes counts without another selector or activation control');
   inventoryRouting=true;
   for(const [provider,label] of [['automate','ConnectWise Automate'],['tidal','Tidal'],['crowdstrike','CrowdStrike']]) {
     inventoryProvider=provider;await page.getByRole('button',{name:'Refresh status'}).click();

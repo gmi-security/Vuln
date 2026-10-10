@@ -196,3 +196,8 @@ SpiderFoot and Artemis use the same scanner approval commands with separate exac
 The [ZAP and Vulners bridge extension](customer-active-scanner-routing.md) uses the same operational approval commands with exact origins/hosts and an additive migration. Cloud enrichment is separate; source completeness and live acceptance limits are documented there.
 
 The [Elastic saved-query extension](customer-elastic-query-routing.md) reuses `route-query` and `export-query-routes` with exclusive exact datasets and the additive query-routes v2 migration. CrowdStrike approvals remain independent; neither review nor query approval publishes findings.
+
+
+## Customer primary-source and mirror selection
+
+The [source-selection review workflow](customer-source-selection-review.md) adds `export-sources` and `review-sources` after its explicit application-database migration. It records current primary bindings, explicit Elastic mirror links, non-secret mapping evidence references and an atomic audit. It preserves existing query-only permissions, scopes each decision to the selected customer and invalidates reviews after binding/configuration changes. The customer Connectors page displays review state without new controls or private evidence. This review does not activate reporting or create combined counts; multi-source record correlation, live acceptance and the reporting/writer handoff remain separate gates.

@@ -42,6 +42,14 @@ function Status({ companyId, refresh }: { companyId: string; refresh: number }) 
           <p className="mt-1 text-sm text-zinc-300">{data.items.length} configuration and review {data.items.length === 1 ? "record" : "records"} · {providers.length} source {providers.length === 1 ? "type" : "types"}</p></div>
         <p className="text-xs text-zinc-300">Configuration checked {new Date(data.checkedAt).toLocaleString()}</p>
       </div>
+      {data.sourceSelection && <section aria-label="Endpoint source selection" className="rounded-xl border border-zinc-800 bg-[#090909] p-4">
+        <h3 className="font-medium text-white">Endpoint source selection</h3>
+        <p className="mt-1 text-sm text-zinc-200">{data.sourceSelection.readiness}</p>
+        {data.sourceSelection.state === "reviewed" && <p className="mt-2 text-sm text-zinc-300">
+          {data.sourceSelection.primaryCount} primary sources and {data.sourceSelection.mirrorCount} declared mirrors. A mirror does not contribute a second findings total to the proposed model.
+        </p>}
+        <p className="mt-2 text-xs text-zinc-300">Selection review is separate from import approval and reporting activation.</p>
+      </section>}
       {!data.registryAvailable && <p className="rounded-xl border border-amber-900/70 bg-amber-950/20 p-4 text-sm text-amber-100">
         Registry review has not been initialized. Existing customer configuration is shown; source routing remains unchanged.
       </p>}
