@@ -12,10 +12,11 @@ import {verifyRefreshBaseline} from './defender-refresh-baseline-validation.mjs'
 import {verifyDefenderWorkflow} from './defender-workflow-validation.mjs';
 import {verifyLegacyHandoff} from './defender-handoff-validation.mjs';
 import {verifyWriterOwnership} from './defender-ownership-validation.mjs';
+import {verifyReverseExport} from './defender-reverse-export-validation.mjs';
 const socket=await realpath(process.argv[2]||'.');assert.ok(socket.startsWith('/home/codex/vuln-recovery/')&&socket.endsWith('/socket'));
 const options={host:socket,port:55483,user:'codex',connectionTimeoutMillis:5000,statement_timeout:15000,query_timeout:20000};
 const suffix=randomUUID().replaceAll('-',''),sourceName=`vuln2_shadow_source_test_${suffix}`,targetName=`vuln2_shadow_test_${suffix}`;
-const admin=new pg.Client({...options,database:'postgres'}),created=[];let source,target,writer,editor,pool,checks=0;
+const admin=new pg.Client({...options,database:'postgres'}),created=[];let source,target,writer,editor,pool,exportPool,checks=0;
 const pass=message=>{checks++;console.log('PASS '+message);};
 const modules=await refreshModules();
 const {store,candidate:{prepareDefenderRefreshCandidate:prepare},source:{createDefenderStore}}=modules;
@@ -67,6 +68,8 @@ try{
   await verifyWriterOwnership({source,target,peer:editor,company,modules,first,pass,newClient:async()=>{
     const c=new pg.Client({...options,database:targetName});await c.connect();return c;
   }});
+  exportPool=new pg.Pool({...options,database:targetName,max:1});
+  await verifyReverseExport({source,target,pool,exportPool,company,run,modules,pass});
   const pinned=await readDefenderRefreshSource(source,company.id,{afterSelected:async selected=>{
     assert.equal(selected,run);await writer.query('UPDATE defender_connections SET current_run=$1 WHERE company_id=$2',[nextRun,company.id]);
     await writer.query('DELETE FROM defender_records WHERE run_id=$1',[run]);await writer.query('DELETE FROM defender_devices WHERE run_id=$1',[run]);
@@ -83,6 +86,6 @@ try{
   pass('revision drift, failed imports and incomplete retained rows fail closed; verified empty imports remain valid');
   console.log(JSON.stringify({checks,passed:true,productionWrites:0,sourceApiCalls:0,ticketsSent:0}));
 }finally{
-  await pool?.end();for(const c of [source,target,writer,editor])await c?.end().catch(()=>{});
+  await exportPool?.end();await pool?.end();for(const c of [source,target,writer,editor])await c?.end().catch(()=>{});
   for(const name of created.reverse())await admin.query(`DROP DATABASE ${name} WITH(FORCE)`);await admin.end();
 }
