@@ -1,3 +1,4 @@
+import { scannerTargetMatcher, assertScannerResultScope } from "./scanner-target-scope";
 import https from "node:https";
 import http from "node:http";
 import type { Severity } from "@/lib/types";
@@ -101,10 +102,15 @@ export async function nessusLaunchScan(
   name: string,
   targets: string[],
   profile: string,
+  scope?: { config: NessusConfig; folderId: number; targets: string[] },
 ): Promise<{ nessusScanId: number }> {
-  const config = nessusConfig();
+  const config = scope?.config ?? nessusConfig();
   if (!config) throw new Error("Nessus is not configured.");
+  if (scope && (!targets.length || !targets.every(scannerTargetMatcher(scope.targets))))
+    throw new Error("Nessus scan targets exceed the reviewed customer scope.");
 
+  if (scope && !(await nessusListFolders(config)).some(folder => folder.id === scope.folderId && folder.type === "custom"))
+    throw new Error("Nessus launch requires its approved customer folder.");
   const templates = await api(config, "GET", "/editor/scan/templates");
   const wanted = PROFILE_TEMPLATE[profile] ?? "basic";
   const list: any[] = templates?.templates ?? [];
@@ -120,12 +126,17 @@ export async function nessusLaunchScan(
       name,
       description: "Launched from GMI Vuln console",
       text_targets: targets.join(","),
+      ...(scope ? { folder_id: scope.folderId } : {}),
       enabled: false,
     },
   });
   const scanId: number = created?.scan?.id;
-  if (!scanId) throw new Error("Nessus did not return a scan id.");
+  if (!scanId || scope && (!Number.isSafeInteger(scanId) || scanId < 1)) throw new Error("Nessus did not return a scan id.");
 
+  if (scope) {
+    const created = (await nessusListScans(config, scope.folderId)).find(scan => scan.id === scanId);
+    if (!created) throw new Error("Created Nessus scan is not in its approved folder; it was not launched.");
+  }
   await api(config, "POST", `/scans/${scanId}/launch`);
   return { nessusScanId: scanId };
 }
@@ -188,10 +199,14 @@ export type NessusFolder = {
 
 // List the folders configured on the scanner. In an MSSP setup each folder
 // typically represents a client, so these map onto Vuln companies.
-export async function nessusListFolders(): Promise<NessusFolder[]> {
-  const config = nessusConfig();
+export async function nessusListFolders(pinned?: NessusConfig): Promise<NessusFolder[]> {
+  const config = pinned ?? nessusConfig();
   if (!config) throw new Error("Nessus is not configured.");
   const data = await api(config, "GET", "/folders");
+  if (pinned && (!Array.isArray(data?.folders) || data.error || data.errors?.length ||
+      data.folders.some((f: any) => !Number.isSafeInteger(f.id) || f.id < 1 || typeof f.name !== "string" || typeof f.type !== "string") ||
+      new Set(data.folders.map((f: any) => f.id)).size !== data.folders.length))
+    throw new Error("Nessus returned an invalid folder roster.");
   const folders: any[] = data?.folders ?? [];
   return folders.map((f) => ({
     id: Number(f.id),
@@ -209,10 +224,17 @@ export type NessusScanSummary = {
 };
 
 // List all scans on the scanner with their folder assignment and status.
-export async function nessusListScans(): Promise<NessusScanSummary[]> {
-  const config = nessusConfig();
+export async function nessusListScans(pinned?: NessusConfig, folderId?: number): Promise<NessusScanSummary[]> {
+  const config = pinned ?? nessusConfig();
   if (!config) throw new Error("Nessus is not configured.");
-  const data = await api(config, "GET", "/scans");
+  if (folderId !== undefined && (!Number.isSafeInteger(folderId) || folderId < 1)) throw new Error("Invalid Nessus folder scope.");
+  const data = await api(config, "GET", folderId === undefined ? "/scans" : `/scans?folder_id=${folderId}`);
+  if (pinned && (!Array.isArray(data?.scans) || data.error || data.errors?.length ||
+      data.scans.some((scan: any) => !Number.isSafeInteger(scan.id) || scan.id < 1 || !Number.isSafeInteger(scan.folder_id) || scan.folder_id < 1 ||
+        (folderId !== undefined && scan.folder_id !== folderId) || typeof scan.status !== "string" || !scan.status ||
+        (scan.last_modification_date != null && (!Number.isSafeInteger(scan.last_modification_date) || scan.last_modification_date < 0))) ||
+      new Set(data.scans.map((scan: any) => scan.id)).size !== data.scans.length))
+    throw new Error("Nessus returned an invalid or out-of-scope scan roster.");
   const scans: any[] = data?.scans ?? [];
   return scans.map((sc) => ({
     id: Number(sc.id),
@@ -224,9 +246,9 @@ export async function nessusListScans(): Promise<NessusScanSummary[]> {
 }
 
 export async function nessusScanStatus(
-  nessusScanId: number,
+  nessusScanId: number, pinned?: NessusConfig,
 ): Promise<{ status: string; progress: number }> {
-  const config = nessusConfig();
+  const config = pinned ?? nessusConfig();
   if (!config) throw new Error("Nessus is not configured.");
   const detail = await api(config, "GET", `/scans/${nessusScanId}`);
   const info = detail?.info ?? {};
@@ -290,9 +312,9 @@ export async function nessusScanSchedule(nessusScanId: number): Promise<NessusSc
 
 export async function nessusScanControl(
   nessusScanId: number,
-  action: "pause" | "resume" | "stop",
+  action: "pause" | "resume" | "stop", pinned?: NessusConfig,
 ): Promise<void> {
-  const config = nessusConfig();
+  const config = pinned ?? nessusConfig();
   if (!config) throw new Error("Nessus is not configured.");
   await api(config, "POST", `/scans/${nessusScanId}/${action}`);
 }
@@ -360,12 +382,23 @@ export type NessusImportFindingsResult = {
 export async function nessusImportFindings(
   nessusScanId: number,
   detailBudget = 500,
+  scope?: { config: NessusConfig; folderId: number; targets: string[]; lastModified?: number | null },
 ): Promise<NessusImportFindingsResult> {
-  const config = nessusConfig();
+  const config = scope?.config ?? nessusConfig();
   if (!config) throw new Error("Nessus is not configured.");
+  let source: NessusScanSummary | undefined;
+  if (scope) {
+    source = (await nessusListScans(config, scope.folderId)).find(scan => scan.id === nessusScanId);
+    if (!source || source.status !== "completed" || !source.lastModified ||
+        (scope.lastModified != null && source.lastModified !== scope.lastModified))
+      throw new Error("Nessus scan is not a completed run in its reviewed folder.");
+  }
   const detail = await api(config, "GET", `/scans/${nessusScanId}`);
   if (!Array.isArray(detail?.hosts)) throw new Error("Nessus returned an invalid scan host list.");
   const hosts: any[] = detail.hosts;
+  if (scope && (detail?.info?.status !== "completed" || hosts.some(h => !Number.isSafeInteger(h.host_id) || h.host_id < 0) ||
+      new Set(hosts.map(h => h.host_id)).size !== hosts.length))
+    throw new Error("Nessus returned an incomplete or invalid scan host roster.");
   const findings: NessusFinding[] = [];
   const scannedHosts: NessusScannedHost[] = [];
   const pluginCache = new Map<number, any>();
@@ -381,6 +414,7 @@ export async function nessusImportFindings(
       hostDetail?.info?.["host-fqdn"] ?? hostDetail?.info?.["host-ip"] ?? host.hostname;
     const assetAliases = [...new Set([hostDetail?.info?.["host-fqdn"], hostDetail?.info?.["host-ip"], host.hostname]
       .filter((x): x is string => typeof x === "string" && x.length > 0))];
+    if (scope) assertScannerResultScope(scope.targets, { scannedHosts: [{ hostname, assetAliases }], findings: [] });
     scannedHosts.push({ hostname, assetAliases });
     if (!Array.isArray(hostDetail?.vulnerabilities)) throw new Error("Nessus returned an invalid host vulnerability list.");
     const vulns: any[] = hostDetail.vulnerabilities.sort(
@@ -455,6 +489,12 @@ export async function nessusImportFindings(
           String(attrs?.vuln_information?.exploit_available ?? "false") === "true",
       });
     }
+  }
+  if (scope) {
+    const current = (await nessusListScans(config, scope.folderId)).find(scan => scan.id === nessusScanId);
+    if (!current || current.status !== "completed" || current.lastModified !== source!.lastModified)
+      throw new Error("Nessus run changed during collection; results were not applied.");
+    assertScannerResultScope(scope.targets, { findings, scannedHosts });
   }
   return { findings, scannedHosts };
 }

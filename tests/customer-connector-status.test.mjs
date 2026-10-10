@@ -4,8 +4,8 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { SourceTextModule, SyntheticModule } from 'node:vm';
 import ts from 'typescript';
-import { loadConnectorPreview, loadConnectorStatus, loadInventoryRouting, loadSpotlightRouting } from '../scripts/connector-preview-loader.mjs';
-const build = await loadConnectorPreview(), project = await loadConnectorStatus(), inventory = await loadInventoryRouting(), spotlight = await loadSpotlightRouting();
+import { loadConnectorPreview, loadConnectorStatus, loadInventoryRouting, loadSpotlightRouting, loadScannerRouting } from '../scripts/connector-preview-loader.mjs';
+const build = await loadConnectorPreview(), project = await loadConnectorStatus(), inventory = await loadInventoryRouting(), spotlight = await loadSpotlightRouting(), scanner = await loadScannerRouting();
 const metadata = () => ({ companies: [{ id: 'A', name: 'Alpha' }, { id: 'B', name: 'Beta' }],
   defender: [{ companyId: 'A', tenantId: 'PRIVATE_TENANT_A', revision: 1 }, { companyId: 'B', tenantId: 'PRIVATE_TENANT_B', revision: 1 }],
   spotlight: [], connections: [{ source: 'elastic', revision: 1 }], tiles: [{ id: 'tile-a', source: 'elastic', companyId: 'A', revision: 1 }] });
@@ -111,7 +111,7 @@ test('read service skips schema initialization, preserves customer filters and f
     const service = await load('lib/customer-connector-status-service.ts', {
       'pg': { Pool: class { constructor() { throw new Error('Unexpected new database'); } } },
       './persist': { applicationDatabase: () => app }, './elastic-dashboard': { DashboardError },
-      './customer-spotlight-routing':spotlight, './customer-inventory-routing': inventory, './customer-connector-preview': { buildConnectorPreview: build }, './customer-connector-status': { customerConnectorStatus: project },
+      './customer-scanner-routing':scanner, './customer-spotlight-routing':spotlight, './customer-inventory-routing': inventory, './customer-connector-preview': { buildConnectorPreview: build }, './customer-connector-status': { customerConnectorStatus: project },
       './db/connector-metadata.mjs': { readApplicationConnectorMetadata: async () => data, readDashboardConnectorMetadata: async () => data },
     });
     assert.equal((await service.readCustomerConnectorStatus('A')).registryAvailable, false);
@@ -145,7 +145,7 @@ test('status reads each customer binding over the legacy proposal without export
     const service=await load('lib/customer-connector-status-service.ts',{
       'pg':{Pool:class{constructor(){throw Error('Unexpected pool');}}},
       './persist':{applicationDatabase:()=>({connect:async()=>client})},'./elastic-dashboard':{DashboardError},
-      './customer-spotlight-routing':spotlight, './customer-inventory-routing':inventory, './customer-connector-preview':{buildConnectorPreview:build},'./customer-connector-status':{customerConnectorStatus:project},
+      './customer-scanner-routing':scanner, './customer-spotlight-routing':spotlight, './customer-inventory-routing':inventory, './customer-connector-preview':{buildConnectorPreview:build},'./customer-connector-status':{customerConnectorStatus:project},
       './db/connector-metadata.mjs':{readApplicationConnectorMetadata:async()=>data,readDashboardConnectorMetadata:async()=>data},
     });
     const a=await service.readCustomerConnectorStatus('A'),b=await service.readCustomerConnectorStatus('B');

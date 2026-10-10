@@ -183,3 +183,8 @@ User decision, October 10: Burp, Nmap, Intune, IntelOwl and n8n remain available
 ## Spotlight operational approval
 
 The separate [Spotlight routing workflow](customer-spotlight-routing.md) adds `route-spotlight` and `export-spotlight-routes`. It requires a current primary-findings binding and an independent runtime switch. Inventory permission alone is insufficient. Review/assignment commands still cannot activate workers. The source pin, exact migration ordering, empty-result limit and compatible rollback requirement are documented in that workflow.
+
+
+## Nessus scanner operational approval
+
+The [Nessus routing workflow](customer-scanner-routing.md) adds `route-scanner` and `export-scanner-routes`. It requires a primary-findings binding with the numeric folder ID and approved targets, a separate operational approval, and its own provider switch. The shared approval service retains optimistic revisions and transactional audits for inventory, Spotlight and scanners. Review alone still cannot activate an import or launch a scan.

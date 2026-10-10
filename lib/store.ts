@@ -1,3 +1,7 @@
+import { loadReviewedScannerRoutes } from "@/lib/customer-scanner-routing-server";
+import type { ScannerRoute } from "@/lib/customer-scanner-routing";
+import { scannerTargetMatcher, assertScannerResultScope } from "@/lib/scanner-target-scope";
+import type { NessusConfig, NessusImportFindingsResult } from "@/lib/nessus";
 import { loadReviewedSpotlightRoutes } from "@/lib/customer-spotlight-routing-server";
 import { DEMO_ASSETS, DEMO_PORTS, VULN_CATALOG } from "@/lib/catalog";
 import { normalizeCompanyName, findNearDuplicateCompanyName } from "@/lib/company-name";
@@ -1780,16 +1784,64 @@ const NESSUS_STATUS_MAP: Record<string, ScanStatus> = {
 
 // Poll active vendor-backed scans (throttled per scan) and import findings
 // when a scan completes on the scanner.
+type ReviewedNessus = { config: NessusConfig; route: ScannerRoute; folderId: number; targets: string[] };
+async function reviewedNessusContext(companyId?: string, targets?: string[]): Promise<ReviewedNessus | null> {
+  return nessusContextFromRoutes(await loadReviewedScannerRoutes("nessus"), companyId, targets);
+}
+function nessusContextFromRoutes(routes: ScannerRoute[] | null, companyId?: string, targets?: string[]): ReviewedNessus | null {
+  if (routes === null) return null;
+  const matches = routes.filter(r => r.companyId === companyId);
+  const config = nessusConfig();
+  if (!companyId || !store().companies.has(companyId) || demoCompanyIds(store()).has(companyId) || matches.length !== 1 || !config)
+    throw new Error("Nessus requires one reviewed folder assignment for an existing customer.");
+  const route = matches[0];
+  if (targets && (!targets.length || !targets.every(scannerTargetMatcher(route.targets))))
+    throw new Error("Nessus scan targets exceed the reviewed customer scope.");
+  return { config, route, folderId: Number(route.sourceScope), targets: route.targets };
+}
+async function reviewedNessusScan(context: ReviewedNessus, id: number) {
+  const roster = await nessusListScans(context.config, context.folderId);
+  const summary = roster.find(scan => scan.id === id);
+  if (!summary) throw new Error("Nessus scan is no longer in its reviewed customer folder.");
+  return summary;
+}
+async function collectNessusFindings(companyId: string, scanId: number, lastModified?: number | null): Promise<NessusImportFindingsResult> {
+  const context = await reviewedNessusContext(companyId);
+  if (!context) return nessusImportFindings(scanId);
+  const result = await nessusImportFindings(scanId, 500, { ...context, lastModified });
+  const current = await reviewedNessusContext(companyId);
+  if (!current || current.route.candidateId !== context.route.candidateId || current.route.revision !== context.route.revision ||
+      current.route.bindingRevision !== context.route.bindingRevision || current.folderId !== context.folderId ||
+      JSON.stringify(current.targets) !== JSON.stringify(context.targets) || current.config.url !== context.config.url ||
+      current.config.insecure !== context.config.insecure)
+    throw new Error("Nessus assignment changed during import; results were not applied.");
+  assertScannerResultScope(context.targets, result);
+  return result;
+}
+
 async function refreshVendorScans(s: StoreShape): Promise<void> {
   const now = Date.now();
-  for (const scan of s.scans.values()) {
+  const pending = [...s.scans.values()].filter(scan => scan.vendor &&
+    ["Running", "Paused", "Queued"].includes(scan.status) && now - scan.vendor.lastPoll >= 4000);
+  if (!pending.length) return;
+  let routes: ScannerRoute[] | null;
+  try { routes = await loadReviewedScannerRoutes("nessus"); }
+  catch { for (const scan of pending) { scan.vendor!.lastPoll = now; scan.error = "Reviewed scanner routing is unavailable."; } markDirty(); return; }
+  const rosters = new Map<number, Promise<Awaited<ReturnType<typeof nessusListScans>>>>();
+  for (const scan of pending) {
     if (!scan.vendor) continue;
     const active =
       scan.status === "Running" || scan.status === "Paused" || scan.status === "Queued";
     if (!active || now - scan.vendor.lastPoll < 4000) continue;
     scan.vendor.lastPoll = now;
     try {
-      const remote = await nessusScanStatus(scan.vendor.nessusScanId);
+      const context = nessusContextFromRoutes(routes, scan.companyId);
+      if (context) {
+        if (!rosters.has(context.folderId)) rosters.set(context.folderId, nessusListScans(context.config, context.folderId));
+        if (!(await rosters.get(context.folderId)!).some(row => row.id === scan.vendor!.nessusScanId))
+          throw new Error("Nessus scan is no longer in its reviewed customer folder.");
+      }
+      const remote = await nessusScanStatus(scan.vendor.nessusScanId, context?.config);
       scan.progressFrozenAt = remote.progress;
       scan.status = NESSUS_STATUS_MAP[remote.status] ?? scan.status;
       markDirty();
@@ -1812,8 +1864,8 @@ async function refreshVendorScans(s: StoreShape): Promise<void> {
   }
 }
 
-async function importVendorFindings(s: StoreShape, scan: InternalScan): Promise<void> {
-  const { findings: imported, scannedHosts } = await nessusImportFindings(scan.vendor!.nessusScanId);
+async function importVendorFindings(s: StoreShape, scan: InternalScan, prepared?: NessusImportFindingsResult): Promise<void> {
+  const { findings: imported, scannedHosts } = prepared ?? await collectNessusFindings(scan.companyId, scan.vendor!.nessusScanId);
   const completedAt = scan.completedAt ?? new Date().toISOString();
   // Company-scoped, cross-connector correlation: customers can share asset
   // strings (10.x IPs, DESKTOP-XXXX), so one client's finding must never
@@ -6896,13 +6948,19 @@ export type NessusImportResult = {
 export async function importFromNessus(): Promise<
   NessusImportResult | { error: string }
 > {
-  if (!nessusConfig()) {
+  const config = nessusConfig();
+  if (!config) {
     return {
       error:
         "Nessus is not configured. Set NESSUS_URL, NESSUS_ACCESS_KEY, and NESSUS_SECRET_KEY to import.",
     };
   }
+  let routes: ScannerRoute[] | null;
+  try { routes = await loadReviewedScannerRoutes("nessus"); }
+  catch (error) { return { error: error instanceof Error ? error.message : "Nessus routing is unavailable." }; }
   const s = store();
+  if (routes !== null && (!routes.length || routes.some(r => !s.companies.has(r.companyId) || demoCompanyIds(s).has(r.companyId))))
+    return { error: "Nessus requires reviewed folder routes to existing non-demo customers." };
 
   // One-time correction for the recurring-scan-import fix's first backfill
   // pass, which unconditionally trusted Nessus's current lastModified as
@@ -6910,7 +6968,7 @@ export async function importFromNessus(): Promise<
   // completed since a record's own completion. Clear every stamped value so
   // this sync re-evaluates each record against the corrected (completedAt-
   // compared) logic below instead of short-circuiting on the equality check.
-  if (!s.meta.nessusBackfillCorrected) {
+  if (routes === null && !s.meta.nessusBackfillCorrected) {
     for (const scan of s.scans.values()) {
       if (scan.connector === "nessus" && scan.vendor) {
         scan.vendor.nessusLastModified = null;
@@ -6922,7 +6980,7 @@ export async function importFromNessus(): Promise<
 
   let folders;
   try {
-    folders = await nessusListFolders();
+    folders = await nessusListFolders(routes === null ? undefined : config);
   } catch (err) {
     return {
       error: err instanceof Error ? err.message : "Failed to list Nessus folders.",
@@ -6939,6 +6997,12 @@ export async function importFromNessus(): Promise<
   let companiesMatched = 0;
   const errors: string[] = [];
   for (const folder of folders) {
+    if (routes !== null) {
+      const route = routes.find(r => r.sourceScope === String(folder.id));
+      if (!route) continue;
+      if (folder.type !== "custom") { errors.push("Approved Nessus folder is not a customer folder."); continue; }
+      folderToCompany.set(folder.id, route.companyId); companiesMatched++; continue;
+    }
     if (folder.type === "trash" || folder.type === "main") continue;
     if (BUILTIN_FOLDERS.has(folder.name.trim().toLowerCase())) continue;
     const matches = Array.from(s.companies.values()).filter(
@@ -6965,10 +7029,15 @@ export async function importFromNessus(): Promise<
 
   let scans: Awaited<ReturnType<typeof nessusListScans>>;
   try {
-    scans = await nessusListScans();
-  } catch {
-    scans = [];
-  }
+    scans = routes === null ? await nessusListScans() : [];
+    if (routes !== null) {
+      for (const route of routes) {
+        if (!folderToCompany.has(Number(route.sourceScope))) { errors.push("An approved Nessus folder was not found."); continue; }
+        try { scans.push(...await nessusListScans(config, Number(route.sourceScope))); }
+        catch { errors.push("An approved Nessus folder's scan roster could not be verified."); }
+      }
+    }
+  } catch { scans = []; }
 
   let scansImported = 0;
   let findingsImported = 0;
@@ -6990,8 +7059,17 @@ export async function importFromNessus(): Promise<
       skipped += 1;
       continue;
     }
-    const existing = existingScans[0];
-    if (existing) {
+    // Reviewed imports follow the most recently observed run. The scan ID is
+    // reused by Nessus, so choosing the oldest local record would reimport a
+    // newer completed run on every sync.
+    const existing = routes === null ? existingScans[0] : existingScans.sort((a, b) =>
+      (b.vendor?.nessusLastModified ?? 0) - (a.vendor?.nessusLastModified ?? 0))[0];
+    if (routes !== null && existing?.vendor && !existing.vendor.imported && summary.status !== "completed") {
+      // The existing pending record is handled by polling; do not duplicate it.
+      skipped++;
+      continue;
+    }
+    if (existing && (routes === null || existing.vendor?.imported)) {
       // Older records (imported before this field existed, or created by the
       // live Start-Scan flow which doesn't set it) have no stamped
       // lastModified yet. Don't just trust Nessus's current value as "already
@@ -7020,6 +7098,15 @@ export async function importFromNessus(): Promise<
       // Otherwise: this scan has completed a new scheduled run since we last
       // imported it. Fall through and import it as a fresh scan record.
     }
+    let prepared: NessusImportFindingsResult | undefined;
+    if (routes !== null) {
+      if (!Object.prototype.hasOwnProperty.call(NESSUS_STATUS_MAP, summary.status)) { errors.push("Nessus returned an unrecognized scan state."); skipped++; continue; }
+      if (summary.status === "completed") {
+        try { prepared = await collectNessusFindings(companyId, summary.id, summary.lastModified); }
+        catch (error) { errors.push(error instanceof Error ? error.message : "Reviewed Nessus result was withheld."); skipped++; continue; }
+      }
+      if (!s.companies.has(companyId) || demoCompanyIds(s).has(companyId)) { errors.push("Nessus destination changed during import."); skipped++; continue; }
+    }
     const company = s.companies.get(companyId)!;
     const folder = ensureFolder(s, companyId, "Nessus");
     const status = NESSUS_STATUS_MAP[summary.status] ?? "Completed";
@@ -7030,6 +7117,24 @@ export async function importFromNessus(): Promise<
           ? new Date(summary.lastModified * 1000).toISOString()
           : nowIso
         : null;
+    if (prepared && existing?.vendor && !existing.vendor.imported) {
+      // A pending or previously failed run keeps its local identity when its
+      // completed result has passed the current ownership checks.
+      existing.completedAt = completedAt;
+      try {
+        await importVendorFindings(s, existing, prepared);
+        existing.status = "Completed";
+        existing.progressFrozenAt = 100;
+        existing.vendor.imported = true;
+        existing.vendor.nessusLastModified = summary.lastModified;
+        existing.error = undefined;
+        findingsImported += existing.findingsCount;
+      } catch (error) {
+        errors.push(error instanceof Error ? error.message : "Nessus result could not be applied.");
+      }
+      markDirty();
+      continue;
+    }
     const id = nextId(s, "SCAN");
     const scan: InternalScan = {
       id,
@@ -7063,10 +7168,11 @@ export async function importFromNessus(): Promise<
     scansImported += 1;
     if (status === "Completed") {
       try {
-        await importVendorFindings(s, scan);
+        await importVendorFindings(s, scan, prepared);
         scan.vendor!.imported = true;
         findingsImported += scan.findingsCount;
-      } catch {
+      } catch (error) {
+        if (routes !== null) errors.push(error instanceof Error ? error.message : "Nessus result could not be applied.");
         // leave imported=false so a later poll retries the findings import
       }
     }
@@ -7474,6 +7580,11 @@ export async function startScan(input: {
   if (!input.targets.length) {
     return { error: "At least one target is required." };
   }
+  let nessusContext: ReviewedNessus | null = null;
+  if (input.connector === "nessus") {
+    try { nessusContext = await reviewedNessusContext(input.companyId, input.targets); }
+    catch (error) { return { error: error instanceof Error ? error.message : "Nessus scope is unavailable." }; }
+  }
   const { company, folder } = resolveScanLocation(s, input);
 
   const name = input.name || `${input.connector} scan`;
@@ -7483,7 +7594,7 @@ export async function startScan(input: {
 
   if (input.connector === "nessus" && nessusConfig()) {
     try {
-      const launched = await nessusLaunchScan(name, input.targets, input.profile);
+      const launched = await nessusLaunchScan(name, input.targets, input.profile, nessusContext ?? undefined);
       vendor = { nessusScanId: launched.nessusScanId, lastPoll: 0, imported: false };
     } catch (err) {
       return {
@@ -7555,7 +7666,9 @@ export async function scanAction(
   // state converges on the next poll.
   if (scan.vendor && (action === "pause" || action === "resume" || action === "stop")) {
     try {
-      await nessusScanControl(scan.vendor.nessusScanId, action);
+      const context = await reviewedNessusContext(scan.companyId);
+      if (context) await reviewedNessusScan(context, scan.vendor.nessusScanId);
+      await nessusScanControl(scan.vendor.nessusScanId, action, context?.config);
       scan.status =
         action === "pause" ? "Paused" : action === "resume" ? "Running" : "Stopped";
       if (action === "stop") scan.completedAt = new Date(now).toISOString();
@@ -7569,7 +7682,8 @@ export async function scanAction(
   }
   if (scan.vendor && action === "rescan") {
     try {
-      const launched = await nessusLaunchScan(scan.name, scan.targets, scan.profile);
+      const context = await reviewedNessusContext(scan.companyId, scan.targets);
+      const launched = await nessusLaunchScan(scan.name, scan.targets, scan.profile, context ?? undefined);
       scan.vendor = { nessusScanId: launched.nessusScanId, lastPoll: 0, imported: false };
       scan.status = "Queued";
       scan.startedAt = new Date(now).toISOString();

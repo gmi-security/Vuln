@@ -6,7 +6,7 @@ import { userInfo, hostname } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
 import nextEnv from '@next/env';
-import { loadConnectorPreview, loadConnectorDraftStore, loadConnectorBindingStore, loadInventoryRouting, loadSpotlightRouting } from './connector-preview-loader.mjs';
+import { loadConnectorPreview, loadConnectorDraftStore, loadConnectorBindingStore, loadInventoryRouting, loadSpotlightRouting, loadScannerRouting } from './connector-preview-loader.mjs';
 import { readApplicationConnectorMetadata, readDashboardConnectorMetadata } from '../lib/db/connector-metadata.mjs';
 
 const commands = {
@@ -15,6 +15,8 @@ const commands = {
   review: ['--input', '--env-file'],
   assign: ['--input', '--env-file'],
   'export-bindings': ['--company', '--output', '--env-file'],
+  'route-scanner': ['--input', '--env-file'],
+  'export-scanner-routes': ['--company', '--output', '--env-file'],
   'route-spotlight': ['--input', '--env-file'],
   'export-spotlight-routes': ['--company', '--output', '--env-file'],
   'route-inventory': ['--input', '--env-file'],
@@ -31,7 +33,7 @@ export function parseRegistryArgs(args) {
   }
   if (command === 'import' && !/^[a-f0-9]{64}$/.test(options['--fingerprint'] ?? '')) throw new Error('A reviewed preview fingerprint is required.');
   if (command.startsWith('export') && (!options['--company'] || options['--company'].length > 100 || !options['--output'])) throw new Error('Export requires a customer and private output path.');
-  if (['review','assign','route-inventory','route-spotlight'].includes(command) && !options['--input']) throw new Error('Review requires a private input file.');
+  if (['review','assign','route-inventory','route-spotlight','route-scanner'].includes(command) && !options['--input']) throw new Error('Review requires a private input file.');
   return { command, options };
 }
 export function registryReviewInput(value) {
@@ -82,17 +84,19 @@ export async function runRegistry(args, runtimeEnv = process.env) {
       return client;
     }
     const app = await metadataClient(env.DATABASE_URL);
-    const operationalCommand = ['route-inventory','export-inventory-routes','route-spotlight','export-spotlight-routes'].includes(command);
+    const operationalCommand = ['route-inventory','export-inventory-routes','route-spotlight','export-spotlight-routes','route-scanner','export-scanner-routes'].includes(command);
     const dashboard = !operationalCommand && env.ELASTIC_VULN_DATABASE_URL && env.ELASTIC_VULN_DATABASE_URL !== env.DATABASE_URL
       ? await metadataClient(env.ELASTIC_VULN_DATABASE_URL) : app;
     const build = await loadConnectorPreview(), store = (await loadConnectorDraftStore())(pool);
     const collect = async () => build({ ...await readApplicationConnectorMetadata(app),
       ...(operationalCommand ? { connections: [], tiles: [] } : await readDashboardConnectorMetadata(dashboard)) }, env);
     if (command === 'import') return { action: command, ...await store.importPreview(options['--fingerprint'], actor, collect), enabledBindings: 0 };
-    if (['review','assign','route-inventory','route-spotlight'].includes(command)) {
+    if (['review','assign','route-inventory','route-spotlight','route-scanner'].includes(command)) {
       const path = resolve(options['--input']);
       if ((await stat(path)).size > 32 * 1024) throw new Error('Review file exceeds 32 KiB.');
       const value = JSON.parse(await readFile(path, 'utf8'));
+      if (command === 'route-scanner') return { action: command,
+        ...await (await loadScannerRouting()).createScannerRoutingStore(pool).save(value,actor,collect) };
       if (command === 'route-spotlight') return { action: command,
         ...await (await loadSpotlightRouting()).createSpotlightRoutingStore(pool).save(value,actor,collect) };
       if (command === 'route-inventory') return { action: command,
@@ -101,6 +105,12 @@ export async function runRegistry(args, runtimeEnv = process.env) {
         ? await (await loadConnectorBindingStore())(pool).save(value,actor,collect)
         : await store.reviewCurrentDraft(registryReviewInput(value), actor, collect);
       return { action: command, revision: result.revision, reviewState: result.reviewState ?? result.review_state, enabledBindings: 0 };
+    }
+    if (command === 'export-scanner-routes') {
+      const result = await (await loadScannerRouting()).createScannerRoutingStore(pool).exportCustomer(options['--company']);
+      file = await open(resolve(options['--output']),'wx',0o600);
+      await file.writeFile(JSON.stringify(result,null,2)+'\n');
+      return { action:command, routes:result.routes.length };
     }
     if (command === 'export-spotlight-routes') {
       const result = await (await loadSpotlightRouting()).createSpotlightRoutingStore(pool).exportCustomer(options['--company']);
@@ -154,6 +164,12 @@ const safeMessages = new Set([
   'No spotlight route exists to disable.', 'Spotlight binding changed; review current state before approval.',
   'Spotlight assignment needs a current review.', 'Spotlight requires a primary findings assignment for one configured Falcon connection.',
   'Spotlight routing limit exceeded.',
+  'Invalid scanner routing approval.', 'Scanner routing changed; export current state before approval.',
+  'No scanner route exists to disable.', 'Scanner binding changed; review current state before approval.',
+  'Scanner assignment needs a current review.', 'Scanner routing requires a primary findings assignment for the configured Nessus scanner.',
+  'Nessus routing requires its numeric folder ID.', 'Scanner routing limit exceeded.',
+  'Invalid scanner target.', 'Invalid scanner network.', 'Use exact scanner hostnames, IP addresses or CIDR networks.',
+  'Scanner routing requires approved targets.',
   'Invalid inventory routing approval.', 'Inventory routing changed; export current state before approval.',
   'No inventory route exists to disable.', 'Inventory binding changed; review current state before approval.',
   'Inventory assignment needs a current review.', 'This assignment is not supported by the inventory import router.',

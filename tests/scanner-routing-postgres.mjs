@@ -1,0 +1,66 @@
+// Disposable fixture database on the private recovery cluster only. Never uses live connector configuration.
+import assert from 'node:assert/strict';import {readFile,writeFile,realpath,mkdtemp} from 'node:fs/promises';
+import {tmpdir} from 'node:os';import {join} from 'node:path';import {randomUUID} from 'node:crypto';import pg from 'pg';
+import {runRegistry} from '../scripts/customer-connector-registry.mjs';
+import {loadConnectorPreview,loadConnectorBindingStore,loadScannerRouting} from '../scripts/connector-preview-loader.mjs';
+import {readApplicationConnectorMetadata} from '../lib/db/connector-metadata.mjs';
+globalThis.fetch=()=>{throw Error('Unexpected source request');};
+const socket=await realpath(process.argv[2]||'.');assert.ok(socket.startsWith('/home/codex/vuln-recovery/')&&socket.endsWith('/socket'));
+const config={host:socket,port:55483,user:'codex',connectionTimeoutMillis:5000,statement_timeout:15000};
+const name=`vuln2_scanner_test_${randomUUID().replaceAll('-','')}`,admin=new pg.Client({...config,database:'postgres'});
+let db,pool,created=false,checks=0;const ok=m=>{checks++;console.log('PASS '+m);};
+const dir=await mkdtemp(join(tmpdir(),'vuln-scanner-'));
+try{
+ await admin.connect();const state=(await admin.query("SELECT current_setting('data_directory') data,current_setting('listen_addresses') listen")).rows[0];
+ assert.ok(state.data.startsWith('/home/codex/vuln-recovery/')&&!state.listen);await admin.query(`CREATE DATABASE ${name}`);created=true;
+ db=new pg.Client({...config,database:name});await db.connect();pool=new pg.Pool({...config,database:name,max:4});
+ await db.query(await readFile('docs/sql/customer-connector-drafts.sql','utf8'));await db.query(await readFile('docs/sql/customer-connector-bindings.sql','utf8'));
+ await db.query('CREATE TABLE vuln_store(key text PRIMARY KEY,data jsonb)');
+ await db.query("INSERT INTO vuln_store VALUES('meta',$1)",[JSON.stringify({companies:[['A',{id:'A',name:'Alpha'}],['B',{id:'B',name:'Beta'}]]})]);
+ const url=new URL(`postgresql://codex@localhost/${name}`);url.searchParams.set('host',socket);url.searchParams.set('port','55483');
+ const env={DATABASE_URL:url.href,NESSUS_URL:'https://fixture.invalid',NESSUS_ACCESS_KEY:'fixture',NESSUS_SECRET_KEY:'fixture'};
+ const build=await loadConnectorPreview(),routing=(await loadScannerRouting()).createScannerRoutingStore(pool),bindings=(await loadConnectorBindingStore())(pool);
+ const collect=async()=>build({...await readApplicationConnectorMetadata(db),connections:[],tiles:[]},env),run=args=>runRegistry(args,env);
+ const command=async(cmd,input)=>{const file=join(dir,randomUUID()+'.json');await writeFile(file,JSON.stringify(input),{mode:0o600});return run([cmd,'--input',file]);};
+ await run(['import','--fingerprint',(await collect()).fingerprint]);
+ await assert.rejects(()=>routing.read('nessus',collect),e=>e.code==='42P01');
+ assert.equal((await db.query("SELECT to_regclass('customer_scanner_routes') n")).rows[0].n,null);
+ await db.query(await readFile('docs/sql/customer-scanner-routes.sql','utf8'));assert.deepEqual(await routing.read('nessus',collect),[]);
+ ok('scanner routing requires an explicit migration and starts with no approvals');
+ async function bind(company,folder,targets=['10.0.0.0/24']){
+  const input=structuredClone((await bindings.list(company,collect)).items.find(i=>i.provider==='nessus').assignmentRequest);
+  Object.assign(input,{decision:'reviewed',note:'Fixture folder and targets',proposal:{companyId:company,tenantId:folder,authority:'findings-primary',targets,datasets:[]}});
+  const result=await command('assign',input);return {candidateId:input.candidateId,companyId:company,bindingRevision:result.revision,expectedRevision:0,enabled:true,note:'Fixture scanner approval'};
+ }
+ const a=await bind('A','17'),b=await bind('B','18');assert.deepEqual(await routing.read('nessus',collect),[]);
+ await command('route-scanner',a);await command('route-scanner',b);
+ assert.deepEqual((await routing.read('nessus',collect)).map(r=>[r.companyId,r.sourceScope,r.targets]),[['A','17',['10.0.0.0/24']],['B','18',['10.0.0.0/24']]]);
+ assert.equal((await db.query('SELECT count(*)::int n FROM customer_connector_bindings WHERE enabled')).rows[0].n,0);
+ ok('actual CLI separately approves two scanner folders; overlapping private IPs remain customer-scoped');
+ let dup=await bind('B','17');await assert.rejects(()=>command('route-scanner',{...dup,expectedRevision:1}),e=>e.code==='23505');
+ await assert.rejects(()=>routing.read('nessus',collect),/changed/);
+ let repaired=await bind('B','18');await command('route-scanner',{...repaired,expectedRevision:1});
+ ok('a folder cannot belong to two customers and changing a binding invalidates its old approval');
+ const before=(await db.query("SELECT revision FROM customer_scanner_routes WHERE company_id='A'")).rows[0].revision;
+ const simultaneous=await Promise.allSettled([command('route-scanner',{...a,expectedRevision:before}),command('route-scanner',{...a,expectedRevision:before})]);
+ assert.equal(simultaneous.filter(r=>r.status==='fulfilled').length,1);assert.equal(simultaneous.filter(r=>r.status==='rejected').length,1);
+ assert.equal((await routing.read('nessus',collect)).find(r=>r.companyId==='B').revision,2);
+ ok('concurrent updates accept one expected revision and preserve the other customer');
+ await db.query("CREATE FUNCTION reject_scanner_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture audit failure'; END; $$");
+ await db.query('CREATE TRIGGER reject_scanner_audit BEFORE INSERT ON customer_scanner_route_audit FOR EACH ROW EXECUTE FUNCTION reject_scanner_audit()');
+ await assert.rejects(()=>command('route-scanner',{...a,expectedRevision:2,enabled:false}),/fixture audit/);
+ assert.equal((await routing.read('nessus',collect)).find(r=>r.companyId==='A').revision,2);
+ await db.query('DROP TRIGGER reject_scanner_audit ON customer_scanner_route_audit');
+ ok('failed audit rolls back an approval change');
+ const file=join(dir,'routes.json');await run(['export-scanner-routes','--company','A','--output',file]);
+ const exported=JSON.parse(await readFile(file,'utf8'));assert.equal(exported.routes.length,1);assert.equal(exported.routes[0].expectedRevision,2);
+ assert.doesNotMatch(JSON.stringify(exported),/10.0.0|fixture.invalid|secret|companyId":"B/);await assert.rejects(()=>run(['export-scanner-routes','--company','A','--output',file]),e=>e.code==='EEXIST');
+ ok('scoped private exports exclude targets and other customers and never overwrite a prior file');
+ env.NESSUS_TLS_INSECURE='1';await assert.rejects(()=>routing.read('nessus',collect),/review/);delete env.NESSUS_TLS_INSECURE;
+ assert.equal((await routing.read('nessus',collect)).length,2);
+ await db.query("UPDATE vuln_store SET data=jsonb_set(data,'{companies}',$1) WHERE key='meta'",[JSON.stringify([['B',{id:'B',name:'Beta'}]])]);
+ await assert.rejects(()=>routing.read('nessus',collect),/review/);
+ await command('route-scanner',{...a,expectedRevision:2,enabled:false});assert.equal((await routing.read('nessus',collect)).length,1);
+ ok('transport configuration changes and deleted customers fail closed; stale approvals remain revocable');
+ console.log(`PASS ${checks} isolated scanner routing groups`);
+}finally{await pool?.end();await db?.end();if(created)await admin.query(`DROP DATABASE ${name} WITH (FORCE)`);await admin.end();}

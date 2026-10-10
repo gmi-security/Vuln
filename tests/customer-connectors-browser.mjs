@@ -24,7 +24,7 @@ let browser, page, checks = 0; const pass = message => { checks++; console.log('
 const artifacts = await mkdtemp(join(tmpdir(), 'vuln2-connectors-browser-'));
 const companies = [{ id: 'CO-A', name: 'Fixture Alpha' }, { id: 'CO-B', name: 'Fixture Beta' }, { id: 'CO-EMPTY', name: 'Fixture Empty' }];
 const calls = [], errors = [], unexpected = []; let fail = false, pending = false, release;
-let shared = false, partial = true, inventoryRouting = false, inventoryProvider = "automate", spotlightRouting = false;
+let shared = false, partial = true, inventoryRouting = false, inventoryProvider = "automate", spotlightRouting = false, scannerRouting = false;
 function status(id) {
   const result = { companyId: id, companyName: companies.find(c => c.id === id).name, checkedAt: '2026-10-09T19:00:00Z', registryAvailable: id !== 'CO-A',
     items: id === 'CO-EMPTY' ? [] : [{ id: id+'-record', provider: inventoryRouting ? inventoryProvider : id === 'CO-A' ? 'defender' : 'crowdstrike', evidence: 'Saved customer connection', configuration: 'Configuration recorded',
@@ -34,6 +34,9 @@ function status(id) {
   if(spotlightRouting && result.items.length){result.items[0].review='Inventory route approved; Spotlight route approved';
     result.items[0].scope='Separate inventory and Spotlight approvals are recorded. See routing details for each state.';
     result.items[0].data.routing+=' Approval recorded; the Spotlight routing switch is off. Existing import routing still applies.';}
+  if(scannerRouting && result.items.length){result.items[0].provider='nessus';result.items[0].review='Scanner route approved';
+    result.items[0].scope='A separate scanner folder and target approval is recorded. See routing details for its current state.';
+    result.items[0].data={domains:['endpoint-findings'],storage:'Existing platform findings',lifecycle:'Reviewed folder and target ownership',routing:'Approved for scanner routing; the provider switch is on. This does not confirm a successful import.'};}
   return result;
 }
 try {
@@ -129,6 +132,12 @@ try {
   assert.equal(await page.getByRole('combobox').count(),1);
   await page.screenshot({path:join(artifacts,'spotlight-route-status-mobile.png'),fullPage:true});
   pass('Spotlight approval displays separately from host inventory with no extra selector or import control');
+  scannerRouting=true;await page.getByRole('button',{name:'Refresh status'}).click();
+  await page.getByText('Scanner route approved',{exact:true}).waitFor();
+  await page.getByText('A separate scanner folder and target approval is recorded.',{exact:false}).waitFor();
+  assert.equal(await page.getByRole('combobox').count(),1);
+  await page.screenshot({path:join(artifacts,'scanner-route-status-mobile.png'),fullPage:true});
+  pass('Nessus approval displays without private targets, another selector or new operational controls');
   shared = true; await page.setViewportSize({width:1440,height:1050});
   await page.goto(base+'/connectors?view=shared&companyId=CO-B');
   await page.getByRole('heading',{name:'Fixture Nessus',exact:true}).click();

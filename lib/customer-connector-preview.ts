@@ -130,7 +130,7 @@ export function buildConnectorPreview(metadata: ConnectorMetadata, env: Partial<
     if (!present) continue;
     add({ ...base(connector.id, `environment:scanner:${connector.id}`, [...(connectorDataContract(connector.id)?.capabilities ?? [])]),
       evidence: "shared-configuration", configured: connector.configured,
-      revision: environmentRevision(connector.id,env,connector.envVars.filter(key=>/URL$/.test(key))),
+      revision: environmentRevision(connector.id,env,[...connector.envVars.filter(key=>/URL$/.test(key)), ...(connector.id === "nessus" ? ["NESSUS_TLS_INSECURE"] : [])]),
       review: ["customer-target-scope-not-assigned", ...(connector.status === "Planned" ? ["adapter-planned"] : []),
         ...(!connector.configured ? ["incomplete-credentials"] : []),
         ...(connector.id === "spiderfoot" ? ["scan-to-customer-mapping-needs-review"] : [])],

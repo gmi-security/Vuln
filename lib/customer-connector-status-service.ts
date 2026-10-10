@@ -1,3 +1,4 @@
+import { scannerRouteEvidenceSelect, scannerRoutingStatus, type ScannerRouteEvidence } from "./customer-scanner-routing";
 import { spotlightRouteEvidenceSelect, spotlightRoutingStatus, type SpotlightRouteEvidence } from "./customer-spotlight-routing";
 import { Pool } from "pg";
 import { applicationDatabase } from "./persist";
@@ -62,9 +63,14 @@ export async function readCustomerConnectorStatus(companyId: string | null) {
       const spotlight: SpotlightRouteEvidence[] = spotlightAvailable ? (await client.query(`${spotlightRouteEvidenceSelect}
         WHERE r.company_id=$1 ORDER BY r.candidate_id LIMIT 1001`,[companyId])).rows : [];
       if (spotlight.length > 1000) throw new DashboardError("Too many Spotlight routes to display.",503);
+      const scannerAvailable = Boolean((await client.query("SELECT to_regclass('public.customer_scanner_routes') AS name")).rows[0].name);
+      const scanner: ScannerRouteEvidence[] = scannerAvailable ? (await client.query(`${scannerRouteEvidenceSelect}
+        WHERE r.company_id=$1 ORDER BY r.candidate_id LIMIT 1001`,[companyId])).rows : [];
+      if (scanner.length > 1000) throw new DashboardError("Too many scanner routes to display.",503);
       const result = customerConnectorStatus(companyId, preview, [...scoped.values()], available, undefined,
         routes.map(row=>inventoryRoutingStatus(row,preview,process.env.VULN_REVIEWED_INVENTORY_PROVIDERS)),
-        spotlight.map(row=>spotlightRoutingStatus(row,preview,process.env.VULN_REVIEWED_SPOTLIGHT_PROVIDERS)));
+        spotlight.map(row=>spotlightRoutingStatus(row,preview,process.env.VULN_REVIEWED_SPOTLIGHT_PROVIDERS)),
+        scanner.map(row=>scannerRoutingStatus(row,preview,process.env.VULN_REVIEWED_SCANNER_PROVIDERS)));
       await client.query("COMMIT");
       return result;
     } catch (error) { await client.query("ROLLBACK").catch(() => {}); throw error; }

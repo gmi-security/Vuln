@@ -1,3 +1,4 @@
+import type { ScannerRoutingStatus } from "./customer-scanner-routing";
 import type { SpotlightRoutingStatus } from "./customer-spotlight-routing";
 import type { ConnectorCandidate, buildConnectorPreview } from "./customer-connector-preview";
 import type { ConnectorProposal } from "./customer-connector-drafts";
@@ -58,7 +59,7 @@ const reasons: Record<string, string> = {
 // Public projection: never spread SQL rows, references, raw tenants, target lists,
 // audit notes or another customer's candidates into the browser response.
 export function customerConnectorStatus(companyId: string, preview: ReturnType<typeof buildConnectorPreview>,
-  drafts: ConnectorStatusDraft[], registryAvailable: boolean, checkedAt = new Date().toISOString(), inventory: InventoryRoutingStatus[] = [], spotlight: SpotlightRoutingStatus[] = []): CustomerConnectorStatus {
+  drafts: ConnectorStatusDraft[], registryAvailable: boolean, checkedAt = new Date().toISOString(), inventory: InventoryRoutingStatus[] = [], spotlight: SpotlightRoutingStatus[] = [], scanner: ScannerRoutingStatus[] = []): CustomerConnectorStatus {
   const company = preview.companies.find(c => c.id === companyId);
   if (!company) throw new Error("Customer not found.");
   const current = new Map(preview.candidates.map(c => [c.id, c]));
@@ -109,6 +110,13 @@ export function customerConnectorStatus(companyId: string, preview: ReturnType<t
     item.scope = hasInventory ? "Separate inventory and Spotlight approvals are recorded. See routing details for each state." :
       "A separate Spotlight import approval is recorded. See routing details for its current state.";
     if (item.data) item.data.routing = hasInventory ? `${item.data.routing} ${status.routing}` : status.routing;
+  }
+  for (const status of scanner) {
+    const item = items.find(i => i.id === status.id && i.provider === "nessus");
+    if (!item) continue;
+    item.review = status.review;
+    item.scope = "A separate scanner folder and target approval is recorded. See routing details for its current state.";
+    if (item.data) item.data.routing = status.routing;
   }
   return { companyId, companyName: company.name, checkedAt, registryAvailable, items };
 }

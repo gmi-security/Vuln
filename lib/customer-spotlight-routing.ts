@@ -1,7 +1,8 @@
+import { createOperationalRoutingStore, operationalRouteEvidenceSelect } from "./customer-operational-routing";
 import { createHash } from "node:crypto";
 import type { Pool } from "pg";
 import type { buildConnectorPreview } from "./customer-connector-preview";
-import { validatePreview, type ConnectorProposal } from "./customer-connector-drafts";
+import { type ConnectorProposal } from "./customer-connector-drafts";
 import { checkCustomerConnectorBinding } from "./customer-connector-routing";
 
 export type RoutedSpotlightProvider = "crowdstrike";
@@ -50,11 +51,7 @@ function validateRoute(row: SpotlightRouteEvidence, preview: Preview): Spotlight
     bindingKey: createHash("sha256").update(JSON.stringify(["spotlight-route-v1", row.candidate_id, row.company_id, scope.connectionRef,
       scope.sourceScope, row.candidate_hash, row.binding_revision, row.revision])).digest("hex") };
 }
-export const spotlightRouteEvidenceSelect = `SELECT r.*,b.candidate_hash AS binding_hash,b.revision AS current_binding_revision,
-  b.proposal,b.review_state,b.reviewed_at,d.candidate_hash AS imported_hash,d.source_present
-  FROM public.customer_spotlight_routes r
-  LEFT JOIN public.customer_connector_bindings b ON b.candidate_id=r.candidate_id AND b.company_id=r.company_id
-  LEFT JOIN public.customer_connector_drafts d ON d.id=r.candidate_id`;
+export const spotlightRouteEvidenceSelect = operationalRouteEvidenceSelect("spotlight");
 export type SpotlightRoutingStatus = { id: string; review: string; routing: string };
 // Only these fixed labels reach the browser; private scope and audit fields do not.
 export function spotlightRoutingStatus(row: SpotlightRouteEvidence, preview: Preview, rawProviders?: string): SpotlightRoutingStatus {
@@ -74,73 +71,12 @@ export type SpotlightRouteInput = {
  * No schema initialization, credentials, upstream calls or platform writes.
  */
 export function createSpotlightRoutingStore(db: Pick<Pool, "connect">) {
-  async function save(input: SpotlightRouteInput, actor: string, collect: () => Promise<Preview>) {
-    const keys = ["candidateId", "companyId", "bindingRevision", "expectedRevision", "enabled", "note"];
-    if (!input || Object.keys(input).length !== keys.length || Object.keys(input).some(k => !keys.includes(k)) ||
-        !/^[a-f0-9]{64}$/.test(input.candidateId) || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(input.companyId) ||
-        !Number.isSafeInteger(input.bindingRevision) || input.bindingRevision < 1 || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0 ||
-        typeof input.enabled !== "boolean" || typeof input.note !== "string" || !input.note.trim() || input.note.length > 1000 || /[\x00-\x1f\x7f]/.test(input.note) ||
-        typeof actor !== "string" || !actor || actor.length > 160 || /[\x00-\x1f\x7f]/.test(actor))
-      return fail("Invalid spotlight routing approval.");
-    const client = await db.connect();
-    try {
-      await client.query("BEGIN");
-      await client.query("SET LOCAL statement_timeout='15s'");
-      await client.query("SET LOCAL lock_timeout='2s'");
-      await client.query("SELECT pg_advisory_xact_lock(716301,1)");
-      const before: RouteRow | undefined = (await client.query(`SELECT * FROM public.customer_spotlight_routes
-        WHERE candidate_id=$1 AND company_id=$2 FOR UPDATE`, [input.candidateId, input.companyId])).rows[0];
-      if ((before?.revision ?? 0) !== input.expectedRevision) fail("Spotlight routing changed; export current state before approval.");
-      if (!input.enabled && !before) fail("No spotlight route exists to disable.");
-      let provider = before?.provider, sourceScope = before?.source_scope, candidateHash = before?.candidate_hash;
-      if (input.enabled) {
-        const preview = await collect(); validatePreview(preview);
-        const row = (await client.query(`SELECT b.*,d.candidate_hash AS imported_hash,d.source_present FROM public.customer_connector_bindings b
-          JOIN public.customer_connector_drafts d ON d.id=b.candidate_id WHERE b.candidate_id=$1 AND b.company_id=$2 FOR SHARE OF b,d`,
-          [input.candidateId, input.companyId])).rows[0];
-        if (!row || row.revision !== input.bindingRevision) fail("Spotlight binding changed; review current state before approval.");
-        const scope = spotlightBindingScope(input.companyId, preview, row);
-        provider = scope.provider; sourceScope = scope.sourceScope; candidateHash = row.candidate_hash;
-      }
-      const after = (await client.query(`INSERT INTO public.customer_spotlight_routes
-        (candidate_id,company_id,provider,source_scope,binding_revision,candidate_hash,revision,enabled)
-        VALUES($1,$2,$3,$4,$5,$6,1,$7) ON CONFLICT(candidate_id,company_id) DO UPDATE SET
-        provider=EXCLUDED.provider,source_scope=EXCLUDED.source_scope,binding_revision=EXCLUDED.binding_revision,candidate_hash=EXCLUDED.candidate_hash,
-        revision=customer_spotlight_routes.revision+1,enabled=EXCLUDED.enabled,updated_at=now() RETURNING *`,
-        [input.candidateId, input.companyId, provider, sourceScope, input.enabled ? input.bindingRevision : before!.binding_revision, candidateHash, input.enabled])).rows[0];
-      await client.query(`INSERT INTO public.customer_spotlight_route_audit(candidate_id,company_id,revision,actor,before_state,after_state,note)
-        VALUES($1,$2,$3,$4,$5,$6,$7)`, [input.candidateId, input.companyId, after.revision, actor, before ?? null, after, input.note]);
-      await client.query("COMMIT");
-      return { revision: after.revision, enabled: after.enabled, provider: after.provider };
-    } catch (error) { await client.query("ROLLBACK").catch(() => {}); throw error; } finally { client.release(); }
-  }
-  async function read(provider: RoutedSpotlightProvider, collect: () => Promise<Preview>): Promise<SpotlightRoute[]> {
-    if (!providers.includes(provider)) fail("Unsupported spotlight route provider.");
-    const preview = await collect(); validatePreview(preview);
-    const client = await db.connect();
-    try {
-      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
-      await client.query("SET LOCAL statement_timeout='15s'");
-      await client.query("SET LOCAL lock_timeout='2s'");
-      const rows: SpotlightRouteEvidence[] = (await client.query(`${spotlightRouteEvidenceSelect} WHERE r.provider=$1 AND r.enabled ORDER BY r.company_id LIMIT 1001`, [provider])).rows;
-      if (rows.length > 1000) fail("Spotlight routing limit exceeded.");
-      const routes = rows.map(row => validateRoute(row, preview));
+  return createOperationalRoutingStore<RoutedSpotlightProvider, SpotlightRoute>(db, { kind: "spotlight",
+    providers: providers as RoutedSpotlightProvider[], bindingScope: spotlightBindingScope, validateRoute,
+    checkRoutes(routes, provider) {
       if (new Set(routes.map(r => r.sourceScope)).size !== routes.length) fail("Spotlight source has conflicting customer routes.");
       if (provider === "crowdstrike" && new Set(routes.map(r => r.connectionRef)).size !== routes.length) fail("CrowdStrike connection has conflicting customer routes.");
       if (new Set(routes.map(r => r.companyId)).size !== routes.length) fail("Spotlight customer has conflicting routes.");
-      await client.query("COMMIT"); return routes;
-    } catch (error) { await client.query("ROLLBACK").catch(() => {}); throw error; } finally { client.release(); }
-  }
-  async function exportCustomer(companyId: string) {
-    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(companyId)) fail("Choose an existing customer.");
-    const client = await db.connect();
-    try {
-      const rows = (await client.query(`SELECT candidate_id,company_id,binding_revision,revision,enabled,provider
-        FROM public.customer_spotlight_routes WHERE company_id=$1 ORDER BY candidate_id LIMIT 1001`, [companyId])).rows;
-      if (rows.length > 1000) fail("Spotlight routing limit exceeded.");
-      return { companyId, routes: rows.map(r => ({ provider: r.provider, candidateId: r.candidate_id, companyId: r.company_id,
-        bindingRevision: r.binding_revision, expectedRevision: r.revision, enabled: r.enabled })) };
-    } finally { client.release(); }
-  }
-  return { save, read, exportCustomer };
+    }
+  });
 }

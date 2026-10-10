@@ -237,3 +237,33 @@ test('AppSec keeps repository metrics and scan deltas separate; incomplete resul
     response=result('repository',[['repo-a']]);await assert.rejects(()=>appsec.fetchAppSecSummary(),/missing.*column/);
   }finally{for(const[k,v]of Object.entries(before))v===undefined?delete process.env[k]:process.env[k]=v;}
 });
+
+
+test('reviewed Nessus transport scopes requests, rejects changed/foreign results and verifies the folder before launching',async()=>{
+ const calls=[],bodies=[];let mode='valid',rosterReads=0;
+ const server=createServer((req,res)=>{let text='';req.on('data',chunk=>text+=chunk);req.on('end',()=>{
+  calls.push({method:req.method,url:req.url});if(text)bodies.push(JSON.parse(text));res.setHeader('Content-Type','application/json');
+  let body={error:'Unexpected fixture request'};
+  if(req.url==='/folders')body={folders:[{id:17,name:'Fixture',type:'custom'}]};
+  if(req.url==='/scans?folder_id=17'){rosterReads++;body={scans:mode==='missing'?[]:[{id:1,folder_id:mode==='foreign'?18:17,status:'completed',last_modification_date:mode==='changed'&&rosterReads>1?200:100}]};}
+  if(req.url==='/scans/1')body={info:{status:mode==='running'?'running':'completed'},hosts:[{host_id:1,hostname:'host-a'},...(mode==='duplicate'?[{host_id:1,hostname:'host-a'}]:[])]};
+  if(req.url==='/scans/1/hosts/1')body={info:{'host-fqdn':'host-a','host-ip':mode==='outside'?'10.1.0.1':'10.0.0.1'},vulnerabilities:[]};
+  if(req.url==='/editor/scan/templates')body={templates:[{uuid:'fixture',name:'basic'}]};
+  if(req.url==='/scans'&&req.method==='POST')body={scan:{id:1}};
+  if(req.url==='/scans/1/launch')body={scan_uuid:'fixture'};
+  res.end(JSON.stringify(body));
+ });});await new Promise(r=>server.listen(0,'127.0.0.1',r));
+ try{
+  const nessus=await load('nessus'),config={url:'http://127.0.0.1:'+server.address().port,accessKey:'fixture',secretKey:'fixture',insecure:false};
+  const scope={config,folderId:17,targets:['10.0.0.0/24'],lastModified:100};
+  assert.equal((await nessus.nessusImportFindings(1,500,scope)).scannedHosts.length,1);
+  for(mode of ['foreign','outside','running','duplicate','changed','missing']){rosterReads=0;await assert.rejects(()=>nessus.nessusImportFindings(1,500,scope));}
+  mode='valid';rosterReads=0;assert.equal((await nessus.nessusLaunchScan('Fixture',['10.0.0.1'],'standard',scope)).nessusScanId,1);
+  assert.equal(bodies.at(-1).settings.folder_id,17);assert.equal(bodies.at(-1).settings.enabled,false);
+  const launched=calls.filter(c=>c.url.endsWith('/launch')).length;
+  mode='missing';await assert.rejects(()=>nessus.nessusLaunchScan('Fixture',['10.0.0.1'],'standard',scope),/not launched/);
+  assert.equal(calls.filter(c=>c.url.endsWith('/launch')).length,launched);
+  const before=calls.length;await assert.rejects(()=>nessus.nessusLaunchScan('Fixture',['10.0.1.1'],'standard',scope),/exceed/);assert.equal(calls.length,before);
+  assert.ok(calls.every(c=>c.url!=='/scans'||c.method==='POST'));
+ }finally{await new Promise(r=>server.close(r));}
+});

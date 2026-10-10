@@ -11,6 +11,8 @@ globalThis.fetch=fail;
 const ROOT=resolve('.'),modules=new Map();
 let sfScans=[],sfReads=0,arFindings=[],folders=[],scans=[],clients=[],deviceReads=0,configs=[];
 let routes=null,routeError=false,clientReads=0,requestedClients=[],afterDevices=()=>{},intuneReads=0,intuneConfigUsed;
+let scannerRouteLoads=0,nessusRosterReads=0,nessusStatusReads=0,nessusStatus="completed";
+let scannerRoutes=null,scannerError=false,nessusResults={findings:[],scannedHosts:[]},nessusReads=[],nessusLaunches=[],nessusControls=[],afterNessus=()=>{};
 let spotlightRoutes=null,spotlightFailure=false,spotlightRuns=[],afterSpotlight=()=>{},spotlightPromotions=0;
 let tidalReads=0,tidalOptions,tidalResult,crowdstrikeReads=[],falconFailure;
 const tenantId='11111111-1111-1111-1111-111111111111';
@@ -20,7 +22,11 @@ const mocks={
  'lib/spotlight-resumable-import.ts':{runPartitionedSpotlightImport:async(selection,_partitions,deps)=>{spotlightRuns.push(selection);afterSpotlight();return {...await deps.complete('fixture',selection.tenantKey,selection.reviewedScope),skipped:0};}},
  'lib/spotlight-record-store.ts':{completeResumableSpotlightRun:async()=>{spotlightPromotions++;return {findingsImported:1,hostsAffected:1};}},
  'lib/persist.ts':{persistenceEnabled:()=>false,applicationDatabase:()=>null},
- 'lib/nessus.ts':{nessusConfig:()=>({}),nessusListFolders:async()=>folders,nessusListScans:async()=>scans},
+ 'lib/nessus.ts':{nessusConfig:()=>({url:'https://fixture.invalid'}),nessusListFolders:async()=>folders,nessusListScans:async(_config,folder)=>{nessusRosterReads++;return scans.filter(s=>folder===undefined||s.folderId===folder);},
+  nessusImportFindings:async(id,_budget,scope)=>{nessusReads.push({id,scope});afterNessus();return nessusResults;},
+  nessusLaunchScan:async(name,targets,profile,scope)=>{nessusLaunches.push({name,targets,profile,scope});return {nessusScanId:10};},
+  nessusScanControl:async(id,action)=>{nessusControls.push({id,action});},nessusScanStatus:async()=>{nessusStatusReads++;return {status:nessusStatus,progress:50};}},
+ 'lib/customer-scanner-routing-server.ts':{loadReviewedScannerRoutes:async()=>{scannerRouteLoads++;if(scannerError)throw Error('Scanner route unavailable');return scannerRoutes;}},
  'lib/spiderfoot.ts':{spiderfootConfig:()=>({}),spiderfootListScans:async()=>sfScans,spiderfootImportFindings:async()=>{sfReads++;return[];}},
  'lib/artemis.ts':{artemisConfig:()=>({}),artemisImportFindings:async()=>arFindings},
  'lib/customer-inventory-routing-server.ts':{loadReviewedInventoryRoutes:async()=>{if(routeError)throw Error('Routing needs renewed approval');return routes;}},
@@ -51,6 +57,8 @@ const module=await getModule('lib/store.ts');await module.link(linker);await mod
 const company=(id,name,kind='client')=>({id,name,kind,industry:'Test',createdAt:'2026-10-01T00:00:00Z',contactName:'',contactEmail:''});
 const acme=company('CO-A','Acme'),beacon=company('CO-B','Beacon');
 function fixture(companies=[acme,beacon]){
+ scannerRouteLoads=0;nessusRosterReads=0;nessusStatusReads=0;nessusStatus="completed";
+ scannerRoutes=null;scannerError=false;nessusResults={findings:[],scannedHosts:[]};nessusReads=[];nessusLaunches=[];nessusControls=[];afterNessus=()=>{};
  spotlightRoutes=null;spotlightFailure=false;spotlightRuns=[];afterSpotlight=()=>{};spotlightPromotions=0;
  sfScans=[];sfReads=0;arFindings=[];folders=[];scans=[];clients=[];deviceReads=0;configs=[];
  routes=null;routeError=false;clientReads=0;requestedClients=[];afterDevices=()=>{};intuneReads=0;intuneConfigUsed=undefined;
@@ -227,4 +235,54 @@ test('actual Spotlight entrypoints cannot bypass missing/stale routes, deleted c
 test('Spotlight switch off preserves the existing named-tenant selection',async()=>{
  fixture();configs=[{customerName:'Beacon',label:'Legacy'}];assert.equal((await store.importFromCrowdstrikeSpotlight()).findingsImported,1);
  assert.equal(spotlightRuns[0].companyId,beacon.id);assert.equal(spotlightRuns[0].reviewedScope,undefined);
+});
+
+const scannerRoute=()=>({provider:'nessus',companyId:acme.id,sourceScope:'17',connectionRef:'environment:scanner:nessus',candidateId:'a'.repeat(64),revision:1,bindingRevision:1,targets:['10.0.0.0/24']});
+function scannerFixture(){const s=fixture();scannerRoutes=[scannerRoute()];folders=[{id:17,name:'Beacon',type:'custom'}];scans=[{id:10,folderId:17,name:'Fixture',status:'completed',lastModified:100}];
+ nessusResults={scannedHosts:[{hostname:'host.example',assetAliases:['10.0.0.1']}],findings:[]};return s;}
+test('reviewed Nessus uses folder ID instead of name and rechecks all data before publishing',async()=>{
+ const s=scannerFixture();const result=await store.importFromNessus();assert.equal(result.scansImported,1);assert.equal([...s.scans.values()][0].companyId,acme.id);assert.equal(nessusReads[0].scope.folderId,17);assert.equal(s.companies.size,2);
+ for(const failure of ['foreign-host','revoked','changed','deleted']){
+  const next=scannerFixture();if(failure==='foreign-host')nessusResults.scannedHosts.push({hostname:'foreign',assetAliases:['10.1.0.1']});
+  if(failure==='revoked')afterNessus=()=>{scannerRoutes=[];};if(failure==='changed')afterNessus=()=>{scannerRoutes=[{...scannerRoute(),revision:2}];};
+  if(failure==='deleted')afterNessus=()=>{next.companies.delete(acme.id);};
+  const rejected=await store.importFromNessus();assert.equal(rejected.scansImported,0);assert.ok(rejected.errors.length);assert.equal(next.findings.size,0);assert.equal(next.scans.size,0);
+ }
+});
+test('reviewed Nessus rejects missing routing before API/state changes and supports approved native start/control',async()=>{
+ let s=scannerFixture();scannerRoutes=[];assert.ok((await store.importFromNessus()).error);assert.equal(nessusReads.length,0);unchanged(s);
+ s=scannerFixture();const input={name:'Fixture',connector:'nessus',profile:'standard',companyId:acme.id,targets:['10.0.1.1']};
+ assert.ok((await store.startScan(input)).error);assert.equal(nessusLaunches.length,0);
+ const scan=await store.startScan({...input,targets:['10.0.0.1']});assert.equal(nessusLaunches[0].scope.folderId,17);
+ await store.scanAction(scan.id,'pause');assert.equal(nessusControls.length,1);
+ scans=[];assert.ok((await store.scanAction(scan.id,'resume')).error);assert.equal(nessusControls.length,1);
+ scannerRoutes=[];assert.ok((await store.scanAction(scan.id,'rescan')).error);assert.equal(nessusLaunches.length,1);
+});
+
+test('reviewed Nessus clean-host reconciliation changes only the approved customer after full validation',async()=>{
+ const s=scannerFixture();const old={id:'old',companyId:acme.id,companyName:acme.name,scanId:'prior',connector:'nessus',status:'Open',asset:'10.0.0.1',cve:'CVE-2026-1234',severity:'High',cvss:8,lastSeen:'2026-01-01'};
+ s.findings.set('old',old);s.findings.set('other',{...old,id:'other',companyId:beacon.id});
+ assert.equal((await store.importFromNessus()).errors.length,0);assert.equal(old.status,'Resolved');assert.equal(s.findings.get('other').status,'Open');
+ const next=scannerFixture();next.findings.set('old',{...old,status:'Open'});nessusResults.scannedHosts.push({hostname:'foreign',assetAliases:['10.1.0.1']});
+ assert.ok((await store.importFromNessus()).errors.length);assert.equal(next.findings.get('old').status,'Open');assert.equal(next.scans.size,0);
+});
+
+test('reviewed scan polling shares route/roster reads and blocks moved scans before status or findings calls',async()=>{
+ const s=scannerFixture();await store.listScans();assert.equal(scannerRouteLoads,0);
+ nessusStatus='running';scans.push({...scans[0],id:11});
+ for(const id of [10,11])s.scans.set('scan-'+id,{id:'scan-'+id,name:'Fixture',companyId:acme.id,companyName:acme.name,connector:'nessus',targets:['10.0.0.1'],status:'Queued',createdAt:'2026-01-01',startedAt:'2026-01-01',vendor:{nessusScanId:id,lastPoll:0,imported:false},severityCounts:{},findingsCount:0,hostsScanned:0});
+ await store.listScans();assert.equal(scannerRouteLoads,1);assert.equal(nessusRosterReads,1);assert.equal(nessusStatusReads,2);assert.equal(nessusReads.length,0);
+ scans=[];for(const scan of s.scans.values())scan.vendor.lastPoll=0;
+ await store.listScans();assert.equal(nessusStatusReads,2);assert.ok([...s.scans.values()].every(scan=>/no longer/.test(scan.error)));
+});
+
+test('reviewed Nessus repeated sync reuses a pending scan and imports each completed run once',async()=>{
+ const s=scannerFixture();scans[0].status='running';
+ assert.equal((await store.importFromNessus()).scansImported,1);const pending=[...s.scans.values()][0];
+ assert.equal((await store.importFromNessus()).scansImported,0);assert.equal(s.scans.size,1);assert.equal(nessusReads.length,0);
+ scans[0].status='completed';scans[0].lastModified=200;
+ assert.equal((await store.importFromNessus()).errors.length,0);assert.equal(s.scans.size,1);assert.equal(pending.vendor.imported,true);assert.equal(pending.status,'Completed');assert.equal(nessusReads.length,1);
+ assert.equal((await store.importFromNessus()).scansImported,0);assert.equal(nessusReads.length,1);
+ scans[0].lastModified=300;assert.equal((await store.importFromNessus()).scansImported,1);assert.equal(s.scans.size,2);assert.equal(nessusReads.length,2);
+ assert.equal((await store.importFromNessus()).scansImported,0);assert.equal(s.scans.size,2);assert.equal(nessusReads.length,2);
 });
