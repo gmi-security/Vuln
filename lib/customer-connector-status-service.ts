@@ -4,6 +4,7 @@ import { DashboardError } from "./elastic-dashboard";
 import { buildConnectorPreview, type ConnectorMetadata } from "./customer-connector-preview";
 import { customerConnectorStatus, type ConnectorStatusDraft } from "./customer-connector-status";
 import { readApplicationConnectorMetadata, readDashboardConnectorMetadata } from "./db/connector-metadata.mjs";
+import { inventoryRouteEvidenceSelect, inventoryRoutingStatus, type InventoryRouteEvidence } from "./customer-inventory-routing";
 
 let dedicated: { url: string; pool: Pool } | undefined;
 // Reuse the application pool without schema initialization; keep the optional
@@ -52,7 +53,12 @@ export async function readCustomerConnectorStatus(companyId: string | null) {
       // only. Other customers' assignments never enter this projection.
       const scoped = new Map(drafts.map(row => [row.id,row]));
       for (const binding of bindings) scoped.set(binding.id,binding);
-      const result = customerConnectorStatus(companyId, preview, [...scoped.values()], available);
+      const routingAvailable = Boolean((await client.query("SELECT to_regclass('public.customer_inventory_routes') AS name")).rows[0].name);
+      const routes: InventoryRouteEvidence[] = routingAvailable ? (await client.query(`${inventoryRouteEvidenceSelect}
+        WHERE r.company_id=$1 ORDER BY r.candidate_id LIMIT 1001`,[companyId])).rows : [];
+      if (routes.length > 1000) throw new DashboardError("Too many inventory routes to display.",503);
+      const result = customerConnectorStatus(companyId, preview, [...scoped.values()], available, undefined,
+        routes.map(row=>inventoryRoutingStatus(row,preview,process.env.VULN_REVIEWED_INVENTORY_PROVIDERS)));
       await client.query("COMMIT");
       return result;
     } catch (error) { await client.query("ROLLBACK").catch(() => {}); throw error; }

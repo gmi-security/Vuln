@@ -52,7 +52,7 @@ function Status({ companyId, refresh }: { companyId: string; refresh: number }) 
           <div className="mt-4 max-h-[32rem] space-y-4 overflow-y-auto pr-1">
             {data.items.filter(item => item.provider === provider).map(item => <div key={item.id} className="border-t border-zinc-800 pt-4">
               <div className="flex flex-wrap justify-between gap-2"><h4 className="text-sm font-medium text-zinc-100">{item.evidence}</h4>
-                <span className={`rounded-full border px-2 py-1 text-xs ${item.review === "Needs review" ? "border-amber-800 text-amber-200" : "border-zinc-700 text-zinc-200"}`}>{item.review}</span></div>
+                <span className={`rounded-full border px-2 py-1 text-xs ${item.review.toLowerCase().includes("needs review") ? "border-amber-800 text-amber-200" : "border-zinc-700 text-zinc-200"}`}>{item.review}</span></div>
               <p className="mt-2 text-sm text-zinc-200">{item.configuration}</p>
               <p className="mt-1 text-sm text-zinc-300">{item.scope}</p>
               {item.data && <details className="mt-3 text-sm text-zinc-300"><summary className="cursor-pointer text-zinc-100">How this source is used</summary>
@@ -88,7 +88,7 @@ export default function CustomerConnectorsPage({ initialCompanyId = "" }: { init
       <Link className={styles.button} href={customerConnectorsHref(companyId, true)}>Shared connector tools</Link></div>}>
     <ReportingCustomer key={`selector-${refresh}`} companyId={companyId} onCompanyChange={selectCustomer} refreshToken={refresh} showReport={false} setupPath="customer-connectors?setup=1"/>
     <p className="rounded-xl border border-zinc-800 bg-zinc-950 p-4 text-sm leading-relaxed text-zinc-300">
-      This view reads saved configuration. It does not test live access or start imports and scans. Registry proposals remain inactive, including reviewed proposals. Existing data collection continues through current configuration.
+      This view reads saved configuration. It does not test live access or start imports and scans. Reviewing an assignment does not enable it. Inventory routing requires a separate operational approval and provider switch; other imports continue through existing configuration.
     </p>
     {companyId ? <Status key={companyId} companyId={companyId} refresh={refresh}/> : <p className="text-sm text-zinc-300">Choose a customer to see its source configuration. Shared connections are not automatically assigned to every customer.</p>}
   </VulnShell>;

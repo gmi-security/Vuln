@@ -24,12 +24,12 @@ let browser, page, checks = 0; const pass = message => { checks++; console.log('
 const artifacts = await mkdtemp(join(tmpdir(), 'vuln2-connectors-browser-'));
 const companies = [{ id: 'CO-A', name: 'Fixture Alpha' }, { id: 'CO-B', name: 'Fixture Beta' }, { id: 'CO-EMPTY', name: 'Fixture Empty' }];
 const calls = [], errors = [], unexpected = []; let fail = false, pending = false, release;
-let shared = false, partial = true;
+let shared = false, partial = true, inventoryRouting = false;
 function status(id) {
   return { companyId: id, companyName: companies.find(c => c.id === id).name, checkedAt: '2026-10-09T19:00:00Z', registryAvailable: id !== 'CO-A',
-    items: id === 'CO-EMPTY' ? [] : [{ id: id+'-record', provider: id === 'CO-A' ? 'defender' : 'crowdstrike', evidence: 'Saved customer connection', configuration: 'Configuration recorded',
-      review: id === 'CO-A' ? 'Not imported for review' : 'Needs review', scope: 'Tenant recorded; scope verification pending.', reviewedAt: null,
-      data: {domains:['endpoint-findings'],storage:'Completed source SQL generations',lifecycle:'Only complete imports',routing:'Customer scope has not been reviewed.'},
+    items: id === 'CO-EMPTY' ? [] : [{ id: id+'-record', provider: inventoryRouting ? 'automate' : id === 'CO-A' ? 'defender' : 'crowdstrike', evidence: 'Saved customer connection', configuration: 'Configuration recorded',
+      review: inventoryRouting ? 'Inventory route approved' : id === 'CO-A' ? 'Not imported for review' : 'Needs review', scope: 'Tenant recorded; scope verification pending.', reviewedAt: null,
+      data: {domains:['endpoint-findings'],storage:'Completed source SQL generations',lifecycle:'Only complete imports',routing:inventoryRouting ? 'Approved for inventory routing; the provider switch is on. All routes are checked again when an import starts. This does not confirm a successful import.' : 'Customer scope has not been reviewed.'},
       reasons: ['Verify the vendor tenant and how this source contributes data.', 'Source evidence has changed since the saved review.'] }] };
 }
 try {
@@ -106,6 +106,14 @@ try {
   await page.screenshot({ path: join(artifacts, 'customer-connectors-mobile.png'), fullPage: true });
   assert.ok(calls.every(c => c.method === 'GET')); assert.deepEqual(unexpected, []); assert.deepEqual(errors, []);
   pass('mobile fit; no mutation, global connector health probe, scan or sync request');
+  inventoryRouting=true;await page.getByRole('button',{name:'Refresh status'}).click();
+  await page.getByText('Inventory route approved',{exact:true}).waitFor();
+  await page.getByText('How this source is used',{exact:true}).click();
+  await page.getByText('Approved for inventory routing; the provider switch is on.',{exact:false}).waitFor();
+  assert.equal(await page.getByRole('button',{name:/Approve|Enable|Configure|Sync|Scan/}).count(),0);
+  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+  await page.screenshot({path:join(artifacts,'inventory-route-status-mobile.png'),fullPage:true});
+  pass('operational inventory approval is visible without implying import health or granting new controls');
   shared = true; await page.setViewportSize({width:1440,height:1050});
   await page.goto(base+'/connectors?view=shared&companyId=CO-B');
   await page.getByRole('heading',{name:'Fixture Nessus',exact:true}).click();

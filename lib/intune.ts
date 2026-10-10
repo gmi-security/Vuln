@@ -97,8 +97,7 @@ function normalizeIntuneDevice(raw: any): IntuneAsset {
 }
 
 // Pull managed devices from Graph, following @odata.nextLink pagination.
-export async function intuneListAssets(): Promise<IntuneAsset[]> {
-  const config = intuneConfig();
+export async function intuneListAssets(config = intuneConfig()): Promise<IntuneAsset[]> {
   if (!config) throw new Error("Intune is not configured.");
   const token = await graphToken(config);
 

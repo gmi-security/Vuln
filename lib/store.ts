@@ -1,6 +1,8 @@
 import { DEMO_ASSETS, DEMO_PORTS, VULN_CATALOG } from "@/lib/catalog";
 import { normalizeCompanyName, findNearDuplicateCompanyName } from "@/lib/company-name";
 import { connectorImportWarnings } from "@/lib/connector-import-result";
+import { loadReviewedInventoryRoutes } from "@/lib/customer-inventory-routing-server";
+import type { InventoryRoute } from "@/lib/customer-inventory-routing";
 import { getDemoProfile, isPlanned } from "@/lib/connectors";
 import {
   CORRELATED_CONNECTORS,
@@ -3027,7 +3029,7 @@ export type AutoScanResult = {
 // Launch scans for every known-but-unscanned asset, one scan per customer
 // into an "Auto-Scan" folder, targeting that customer's gap assets. Naturally
 // idempotent: once an asset has findings it leaves the gap and won't re-scan.
-export async function autoScanGaps(): Promise<AutoScanResult> {
+export async function autoScanGaps(companyIds?: ReadonlySet<string>): Promise<AutoScanResult> {
   const s = store();
   // Spotlight-merged, not the raw legacy diff -- otherwise every gap-scan
   // (including the automatic one that fires after a CrowdStrike/Intune sync
@@ -3036,6 +3038,7 @@ export async function autoScanGaps(): Promise<AutoScanResult> {
   const coverage = await assetCoverageWithSpotlight();
   const byCompany = new Map<string, string[]>();
   for (const row of coverage.knownNotScanned) {
+    if (companyIds && !companyIds.has(row.companyId)) continue;
     const list = byCompany.get(row.companyId) ?? [];
     list.push(row.identifier);
     byCompany.set(row.companyId, list);
@@ -4584,11 +4587,13 @@ export function rescoreFinding(s: StoreShape, f: Finding): void {
 async function rescoreAllFindings(
   s: StoreShape,
   matchesSource: (f: Finding) => boolean,
+  companyIds?: ReadonlySet<string>,
 ): Promise<number> {
   let rescored = 0;
   let i = 0;
   for (const f of s.findings.values()) {
     const before = f.realRisk;
+    if (companyIds && !companyIds.has(f.companyId)) continue;
     rescoreFinding(s, f);
     if (f.realRisk !== before || matchesSource(f)) rescored += 1;
     i += 1;
@@ -6031,6 +6036,7 @@ export type AutomateImportResult = {
   assetsUpserted: number;
   findingsRescored: number;
   autoScan?: AutoScanResult;
+  skipped?: number;
 };
 
 // Pull ConnectWise Automate's device inventory directly (see
@@ -6067,6 +6073,12 @@ export async function importFromAutomate(): Promise<AutomateImportResult | { err
     };
   }
   const s = store();
+  let routes: InventoryRoute[] | null;
+  try {
+    routes = await loadReviewedInventoryRoutes("automate");
+    if (routes && (!routes.length || routes.some(route => !s.companies.has(route.companyId) || isDemoCompany(s.companies.get(route.companyId)!))))
+      return { error: "Automate requires activated routes to existing non-demo customers." };
+  } catch (err) { return { error: err instanceof Error ? err.message : "Automate inventory routing is unavailable." }; }
   let clients;
   try {
     clients = await automateListClients(config);
@@ -6076,21 +6088,32 @@ export async function importFromAutomate(): Promise<AutomateImportResult | { err
     };
   }
 
+  if (routes && new Set(clients.map(c => c.id)).size !== clients.length)
+    return { error: "Automate returned duplicate client identities; no inventory was imported." };
   let companiesMatched = 0;
   let companiesCreated = 0;
   const createdCompanies: string[] = [];
   const errors: string[] = [];
   let assetsUpserted = 0;
+  let skipped = 0;
+  const importedCompanies = new Set<string>();
+  if (routes) for (const route of routes) {
+    if (!clients.some(client => client.id === route.sourceScope)) errors.push("An approved Automate client was not returned by the source; review routing and API access.");
+  }
   for (const client of clients) {
+    const route = routes?.find(route => route.sourceScope === client.id);
+    if (routes && !route) { skipped++; continue; }
     const clientNorm = normalizeCompanyName(client.name);
-    const candidates = Array.from(s.companies.values()).filter((c) => normalizeCompanyName(c.name) === clientNorm);
+    const candidates = route ? [s.companies.get(route.companyId)].filter((c): c is InternalCompany => !!c) :
+      Array.from(s.companies.values()).filter((c) => normalizeCompanyName(c.name) === clientNorm);
     if (candidates.length > 1) {
       errors.push(`${client.name}: multiple platform companies match; review customer mapping.`);
       continue;
     }
     let company: InternalCompany | undefined;
-    try { company = candidates[0] ?? resolveAutomateAliasCompany(s, client.name); }
+    try { company = candidates[0] ?? (route ? undefined : resolveAutomateAliasCompany(s, client.name)); }
     catch { errors.push(`${client.name}: multiple internal companies match; review customer mapping.`); continue; }
+    if (route && (!company || isDemoCompany(company))) { errors.push("An approved Automate customer is no longer available."); continue; }
     if (company) {
       companiesMatched += 1;
     } else {
@@ -6110,6 +6133,11 @@ export async function importFromAutomate(): Promise<AutomateImportResult | { err
       errors.push(`${client.name}: ${err instanceof Error ? err.message : String(err)}`);
       continue;
     }
+    // Recheck after the network await; never recreate a deleted customer.
+    if (route && (!s.companies.has(route.companyId) || isDemoCompany(s.companies.get(route.companyId)!))) {
+      errors.push("An approved Automate customer changed during collection; inventory was not applied."); continue;
+    }
+    importedCompanies.add(company.id);
     for (const a of computers) {
       upsertAsset(s, {
         identifier: a.hostname,
@@ -6129,15 +6157,15 @@ export async function importFromAutomate(): Promise<AutomateImportResult | { err
     }
   }
 
-  const findingsRescored = await rescoreAllFindings(s, (f) => f.assetSource === "automate");
+  const findingsRescored = await rescoreAllFindings(s, (f) => f.assetSource === "automate", routes ? importedCompanies : undefined);
 
   let autoScan: AutoScanResult | undefined;
   if (s.settings.autoScanNewAssets) {
-    autoScan = await autoScanGaps();
+    autoScan = await autoScanGaps(routes ? importedCompanies : undefined);
   }
 
   await flushNow();
-  return { companiesMatched, companiesCreated, createdCompanies, errors, assetsUpserted, findingsRescored, autoScan };
+  return { companiesMatched, companiesCreated, createdCompanies, errors, assetsUpserted, findingsRescored, autoScan, ...(routes ? { skipped } : {}) };
 }
 
 // --- Background Tidal sync with pollable progress ---------------------------
@@ -6478,7 +6506,8 @@ export type IntuneImportResult = {
 export async function importFromIntune(): Promise<
   IntuneImportResult | { error: string }
 > {
-  if (!intuneConfig()) {
+  const config = intuneConfig();
+  if (!config) {
     return {
       error:
         "Intune is not configured. Set INTUNE_TENANT_ID, INTUNE_CLIENT_ID, and INTUNE_CLIENT_SECRET to sync managed devices.",
@@ -6486,8 +6515,12 @@ export async function importFromIntune(): Promise<
   }
   const s = store();
   try {
-    const devices = await intuneListAssets();
-    return await importEndpoints(s, devices, "intune");
+    const routes = await loadReviewedInventoryRoutes("intune");
+    if (routes && (routes.length !== 1 || routes[0].sourceScope !== config.tenantId.toLowerCase() ||
+        !s.companies.has(routes[0].companyId) || isDemoCompany(s.companies.get(routes[0].companyId)!)))
+      return { error: "Intune requires one activated route matching its tenant and an existing non-demo customer." };
+    const devices = await intuneListAssets(config);
+    return await importEndpoints(s, devices, "intune", undefined, routes?.[0].companyId);
   } catch (err) {
     return {
       error: err instanceof Error ? err.message : "Failed to reach Microsoft Graph.",
@@ -6524,9 +6557,13 @@ async function importEndpoints(
   }[],
   source: AssetSource,
   customerName?: string,
+  reviewedCompanyId?: string,
 ): Promise<EndpointImportResult> {
   let internal: InternalCompany | undefined;
-  if (customerName) {
+  if (reviewedCompanyId) {
+    internal = s.companies.get(reviewedCompanyId);
+    if (!internal || isDemoCompany(internal)) throw new Error("The reviewed inventory customer is no longer available.");
+  } else if (customerName) {
     // Pin to a named client company; create it if first encounter.
     const matches = Array.from(s.companies.values()).filter(
       (c) => normalizeCompanyName(c.name) === normalizeCompanyName(customerName),
@@ -6570,10 +6607,11 @@ async function importEndpoints(
     assetsUpserted += 1;
   }
 
-  const findingsRescored = await rescoreAllFindings(s, (f) => f.assetSource === source);
+  const companyIds = reviewedCompanyId ? new Set([reviewedCompanyId]) : undefined;
+  const findingsRescored = await rescoreAllFindings(s, (f) => f.assetSource === source, companyIds);
 
   let autoScan: AutoScanResult | undefined;
-  if (s.settings.autoScanNewAssets) autoScan = await autoScanGaps();
+  if (s.settings.autoScanNewAssets) autoScan = await autoScanGaps(companyIds);
 
   await flushNow();
   return { assetsUpserted, findingsRescored, company: internal.name, autoScan };

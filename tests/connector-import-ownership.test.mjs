@@ -10,14 +10,17 @@ const fail=()=>{throw new Error('Unexpected external operation in ownership fixt
 globalThis.fetch=fail;
 const ROOT=resolve('.'),modules=new Map();
 let sfScans=[],sfReads=0,arFindings=[],folders=[],scans=[],clients=[],deviceReads=0,configs=[];
+let routes=null,routeError=false,clientReads=0,requestedClients=[],afterDevices=()=>{},intuneReads=0,intuneConfigUsed;
+const tenantId='11111111-1111-1111-1111-111111111111';
 const device={externalId:'device-1',hostname:'managed-host',ipAddresses:[],os:'Windows',owner:'',tags:[],criticality:'Normal',exposure:'Internal'};
 const mocks={
  'lib/persist.ts':{persistenceEnabled:()=>false,applicationDatabase:()=>null},
  'lib/nessus.ts':{nessusConfig:()=>({}),nessusListFolders:async()=>folders,nessusListScans:async()=>scans},
  'lib/spiderfoot.ts':{spiderfootConfig:()=>({}),spiderfootListScans:async()=>sfScans,spiderfootImportFindings:async()=>{sfReads++;return[];}},
  'lib/artemis.ts':{artemisConfig:()=>({}),artemisImportFindings:async()=>arFindings},
- 'lib/connectwise-automate.ts':{automateConfig:()=>({}),automateListClients:async()=>clients,automateListComputers:async()=>{deviceReads++;return[device];}},
- 'lib/intune.ts':{intuneConfig:()=>({}),intuneListAssets:async()=>[device]},
+ 'lib/customer-inventory-routing-server.ts':{loadReviewedInventoryRoutes:async()=>{if(routeError)throw Error('Routing needs renewed approval');return routes;}},
+ 'lib/connectwise-automate.ts':{automateConfig:()=>({}),automateListClients:async()=>{clientReads++;return clients;},automateListComputers:async(_config,id)=>{deviceReads++;requestedClients.push(id);afterDevices();return[device];}},
+ 'lib/intune.ts':{intuneConfig:()=>({tenantId}),intuneListAssets:async(config)=>{intuneReads++;intuneConfigUsed=config;afterDevices();return[device];}},
  'lib/crowdstrike.ts':{falconConfigs:()=>configs,falconListAssets:async()=>[device],SPOTLIGHT_DISCOVERY_PARTITIONS:[]},
 };
 async function getModule(path){
@@ -43,6 +46,7 @@ const company=(id,name,kind='client')=>({id,name,kind,industry:'Test',createdAt:
 const acme=company('CO-A','Acme'),beacon=company('CO-B','Beacon');
 function fixture(companies=[acme,beacon]){
  sfScans=[];sfReads=0;arFindings=[];folders=[];scans=[];clients=[];deviceReads=0;configs=[];
+ routes=null;routeError=false;clientReads=0;requestedClients=[];afterDevices=()=>{};intuneReads=0;intuneConfigUsed=undefined;
  const s={companies:new Map(companies.map(c=>[c.id,c])),folders:new Map(),scans:new Map(),findings:new Map(),assets:new Map(),
   compensatingControls:new Map(),identityAliases:new Map(),settings:{autoScanNewAssets:false,
     schedule:{autoSyncEnabled:false,alertsEnabled:false,monthlyReportsEnabled:false},sla:{Critical:7,High:30,Medium:60,Low:90}},
@@ -89,6 +93,46 @@ test('Automate refuses duplicate names and ambiguous internal alias before fetch
  assert.equal([...s.assets.values()][0].companyId,beacon.id);
  s=fixture([company('CO-A','Internal East','internal'),company('CO-B','Internal West','internal')]);clients=[{id:1,name:'Global Market Innovators, Inc.'}];
  result=await store.importFromAutomate();assert.equal(deviceReads,0);assert.equal(result.errors.length,1);unchanged(s);assert.equal(s.companies.size,2);
+});
+
+const route=(provider,companyId,sourceScope)=>({provider,companyId,sourceScope,candidateId:'a'.repeat(64),revision:1});
+test('reviewed Automate client ID wins over duplicate names; unassigned clients cannot create customers or overwrite other inventory',async()=>{
+ const s=fixture([acme,company('CO-C',' ACME '),beacon]);
+ routes=[route('automate',beacon.id,'17')];clients=[{id:'17',name:'Acme'},{id:'18',name:'New customer'}];
+ s.assets.set('existing',{...device,id:'existing',identifier:device.hostname,companyId:acme.id,companyName:acme.name,source:'manual'});
+ // If unassigned findings were rescored, this deliberately incomplete record would fail.
+ const finding={id:'keep',companyId:acme.id,realRisk:73};s.findings.set('keep',finding);
+ const before=structuredClone(s.assets.get('existing'));
+ const result=await store.importFromAutomate();
+ assert.equal(result.assetsUpserted,1);assert.equal(result.skipped,1);assert.equal(result.companiesCreated,0);
+ assert.deepEqual(requestedClients,['17']);assert.equal(s.companies.size,3);assert.equal(s.assets.size,2);
+ assert.deepEqual(s.assets.get('existing'),before);assert.deepEqual(finding,{id:'keep',companyId:acme.id,realRisk:73});
+ assert.equal([...s.assets.values()].find(a=>a.id!=='existing').companyId,beacon.id);
+});
+test('reviewed inventory imports stop before vendor collection when approval is missing, stale, or customer is unavailable',async()=>{
+ for(const provider of ['automate','intune'])for(const scenario of ['empty','stale','missing']){
+  const s=fixture();routes=scenario==='empty'?[]:[route(provider,'UNKNOWN',provider==='intune'?tenantId:'17')];routeError=scenario==='stale';
+  const result=await store[provider==='intune'?'importFromIntune':'importFromAutomate']();
+  assert.ok(result.error);assert.equal(clientReads,0);assert.equal(deviceReads,0);assert.equal(intuneReads,0);unchanged(s);
+ }
+});
+test('reviewed Automate detects duplicate/absent client IDs and deletion during collection without inventing ownership',async()=>{
+ let s=fixture();routes=[route('automate',acme.id,'17')];clients=[{id:'17',name:'A'},{id:'17',name:'B'}];
+ assert.match((await store.importFromAutomate()).error,/duplicate client/);assert.equal(deviceReads,0);unchanged(s);
+ s=fixture();routes=[route('automate',acme.id,'17')];clients=[{id:'18',name:'Acme'}];
+ let result=await store.importFromAutomate();assert.equal(result.errors.length,1);assert.equal(result.skipped,1);assert.equal(deviceReads,0);unchanged(s);
+ s=fixture();routes=[route('automate',acme.id,'17')];clients=[{id:'17',name:'Other'}];afterDevices=()=>s.companies.delete(acme.id);
+ result=await store.importFromAutomate();assert.equal(result.errors.length,1);assert.equal(result.assetsUpserted,0);unchanged(s);assert.equal(s.companies.has(acme.id),false);
+});
+test('reviewed Intune uses its exact tenant and customer, pins configuration and never falls back to internal',async()=>{
+ let s=fixture([acme,beacon,company('CO-I','Internal','internal')]);routes=[route('intune',beacon.id,tenantId)];
+ let result=await store.importFromIntune();assert.equal(result.assetsUpserted,1);assert.equal([...s.assets.values()][0].companyId,beacon.id);
+ assert.equal(intuneConfigUsed.tenantId,tenantId);assert.equal(s.companies.size,3);
+ for(const invalid of [[route('intune',acme.id,'wrong-tenant')],[route('intune',acme.id,tenantId),route('intune',beacon.id,tenantId)]]){
+  s=fixture();routes=invalid;result=await store.importFromIntune();assert.ok(result.error);assert.equal(intuneReads,0);unchanged(s);
+ }
+ s=fixture();routes=[route('intune',acme.id,tenantId)];afterDevices=()=>s.companies.delete(acme.id);
+ result=await store.importFromIntune();assert.match(result.error,/no longer available/);unchanged(s);assert.equal(s.companies.has(acme.id),false);
 });
 test('Intune and Falcon never choose between multiple internal or named customers; other Falcon tenants continue',async()=>{
  let s=fixture([company('CO-A','Internal East','internal'),company('CO-B','Internal West','internal')]);

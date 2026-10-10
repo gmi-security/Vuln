@@ -3,6 +3,7 @@ import type { ConnectorProposal } from "./customer-connector-drafts";
 import { connectorDraftEvidence } from "./customer-connector-drafts";
 import { connectorDataContract } from "./connector-data-contracts";
 import { customerConnectorReadPlan } from "./customer-connector-routing";
+import type { InventoryRoutingStatus } from "./customer-inventory-routing";
 
 export type ConnectorStatusDraft = {
   id: string; candidate: ConnectorCandidate; candidate_hash: string; proposal: ConnectorProposal;
@@ -56,7 +57,7 @@ const reasons: Record<string, string> = {
 // Public projection: never spread SQL rows, references, raw tenants, target lists,
 // audit notes or another customer's candidates into the browser response.
 export function customerConnectorStatus(companyId: string, preview: ReturnType<typeof buildConnectorPreview>,
-  drafts: ConnectorStatusDraft[], registryAvailable: boolean, checkedAt = new Date().toISOString()): CustomerConnectorStatus {
+  drafts: ConnectorStatusDraft[], registryAvailable: boolean, checkedAt = new Date().toISOString(), inventory: InventoryRoutingStatus[] = []): CustomerConnectorStatus {
   const company = preview.companies.find(c => c.id === companyId);
   if (!company) throw new Error("Customer not found.");
   const current = new Map(preview.candidates.map(c => [c.id, c]));
@@ -92,5 +93,12 @@ export function customerConnectorStatus(companyId: string, preview: ReturnType<t
       scope, reviewedAt: draft?.reviewed_at ? new Date(draft.reviewed_at).toISOString() : null });
   }
   items.sort((a, b) => a.provider.localeCompare(b.provider) || a.evidence.localeCompare(b.evidence) || a.id.localeCompare(b.id));
+  for (const status of inventory) {
+    const item = items.find(i => i.id === status.id);
+    if (!item || !["automate", "intune"].includes(item.provider)) continue;
+    item.review = status.review;
+    item.scope = "A separate inventory import approval is recorded. See routing details for its current state.";
+    if (item.data) item.data.routing = status.routing;
+  }
   return { companyId, companyName: company.name, checkedAt, registryAvailable, items };
 }

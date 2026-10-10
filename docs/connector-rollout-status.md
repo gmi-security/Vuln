@@ -9,10 +9,11 @@ Updated October 10, 2026. Development branch: `Vuln2.0`. Production was not depl
 - Changes to non-secret endpoint, tenant/client/cloud and AppSec stream settings invalidate old reviews. Credential values are neither copied nor displayed.
 - Defender saved reads enforce reviewed tenant and connection/import revision. CrowdStrike saved reads enforce whole-generation CID evidence, using summary model v3, with exact local unresolved placeholders accounted for separately.
 - Customer Connectors shows how each source is used, without adding a second customer selector or configuration permissions.
+- Automate and Intune now have optional runtime routing by reviewed vendor client/tenant ID. A separate audited approval and provider switch are required; review alone never activates an import. These paths were tested with fixtures and remain off in production; Intune remains disabled.
 - Malformed Nessus, SpiderFoot, Artemis and ZAP import responses now fail instead of appearing empty. Intune and Automate reject truncated/malformed inventories; Intune pagination cannot send its token to another origin; Automate rejects invalid customer filters and explicitly conflicting customer IDs in returned rows.
 - Existing reporting classifications, customer isolation, source-specific counting and manual patch packet behavior have regression coverage. Inventory and OSINT do not become patchable vulnerability counts. Tidal now reports failed/truncated roster and device pages, preserves separate customer sessions and retains its explicit partial-source error reporting. Artemis rejects truncated task-result imports. Tidal's existing first-page 400/403/404 unavailable-integration convention remains unchanged and does not prove absence of devices.
 
-This completes the implemented connector catalog, review contracts and this regression pass. It does **not** complete live customer assignment activation or the authoritative platform database migration. Most existing importers still use their legacy customer-routing paths. The common review checker is not an upstream API filter or an authorization layer for those importers.
+This completes the implemented connector catalog, review contracts and this regression pass. It does **not** complete live customer assignment activation or the authoritative platform database migration. Most existing importers still use their legacy customer-routing paths. The common review checker is not an upstream API filter or an authorization layer for those importers. The two new inventory consumers explicitly enforce their supported reviewed scopes only when opted in.
 
 ## Connector-by-connector status
 
@@ -29,14 +30,14 @@ This completes the implemented connector catalog, review contracts and this regr
 | Artemis | Attack-surface observations | Configured; mapping, import completeness and scope fixtures; live status connection refused | Remote service/network must be repaired and rechecked |
 | ZAP | Web findings | Configured; report/scope fixtures; live status timed out | Remote service/network must be repaired and rechecked |
 | Tidal | Customer/device inventory | Configured; CSV and session-scoped inventory fixtures, malformed/partial/capped pagination checks | Ambiguous normalized company names now skip affected inventory with an error. Verify vendor customer mapping; no live import |
-| ConnectWise Automate | Customer/device inventory | Configured; actual adapter pagination, IDs, customer filter and error fixtures | Ambiguous customer names/internal aliases now skip affected clients with an error; independent clients continue. No live inventory pull |
+| ConnectWise Automate | Customer/device inventory | Configured; actual adapter and import fixtures, reviewed client-ID routing, SQL approval/revocation checks | Runtime routing implemented behind an empty provider switch; live ownership review and activation pending. No live inventory pull |
 | MISP | CVE threat enrichment | Configured; actual adapter response/failure and enrichment-role tests | Preserve existing signals; a sighting is not independently verified exploitation |
 | OpenCTI | CVE threat enrichment | Configured; actual adapter response/failure and enrichment-role tests | Preserve existing signals; relationship presence alone does not prove exploitation |
 | AppSec / Trivy via Elastic | Repository scans, findings and deltas | Configured; summary/trend result fixtures and dataset/repository review checks | Existing organization AppSec path retained; customer-scoped AppSec reader not activated |
 | ConnectWise PSA | Ticket delivery and tracking | Saved connection revision present; mock transport and ticket lifecycle checks | Existing board/company routing retained; no live ticket created; not a findings source |
 | Burp | Web scan findings | Unconfigured; XML parser and assignment fixtures | Available but disabled, as requested |
 | Nmap | Host/service discovery and observations | Unconfigured; XML/service and assignment fixtures | Available but disabled, as requested |
-| Intune | Managed-device inventory | Unconfigured; actual adapter pagination and normalization fixtures | Available but disabled, as requested |
+| Intune | Managed-device inventory | Unconfigured; adapter and import fixtures, reviewed tenant-ID routing, SQL approval/revocation checks | Routing implemented and tested with fixtures; remains available but disabled, as requested |
 | IntelOwl | Threat analysis/enrichment | Unconfigured; adapter/enrichment-role fixtures | Available but disabled; no analysis job launched |
 | n8n | Optional orchestration | Unconfigured; configuration and prohibited-findings-role checks | Available but disabled; no workflow invoked |
 | Qualys | Planned connector | Planned state and unsupported-role rejection | No production adapter claimed or enabled |
@@ -75,6 +76,12 @@ The actual store import paths now refuse ambiguous customer selection: tied name
 This deliberately changes ambiguous imports from first-match assignment to a reported conflict. Existing records are preserved; unambiguous legacy mappings and scoring remain unchanged. This is an interim safeguard, **not reviewed-registry routing**: unique fuzzy names still do not prove customer ownership. Correct explicit source/target bindings remain necessary before activation. No role/configuration permissions change. Manual sync and sync-all summaries now report partial import errors, tenant failures and mapping conflicts as attention-needed, without embedding raw provider error text.
 
 Validation for this follow-up: **113 local tests passed**, including seven groups invoking the actual store import entrypoints with mocked transports; **29 isolated PostgreSQL groups passed** (12 summary, nine worker, eight retention), plus the full retained-data comparison above. The local production build/TypeScript pass succeeded. Four customer-connector browser groups passed, including partial-import warning display, redaction and recovery to success. All vendor responses were intercepted fixtures. No live import, scan or ticket was executed; the private cluster was stopped after testing.
+
+## Reviewed inventory routing checkpoint
+
+The latest inventory routing checkpoint passed **106 distinct local tests**, **17 isolated PostgreSQL groups** (seven inventory-route and ten existing binding regression groups), a local production build/TypeScript pass and **five browser groups**. The one extra runtime-wrapper test was run after the initial 105-test suite; counts are distinct, not repeated-run totals. Screenshots were inspected. A first SQL assertion expected the wrong guard because the synthetic unknown customer used a nonzero route revision; the fixture was corrected and both suites then passed. Test databases were removed and the private cluster stopped. SQL evidence: `inventory-routing-result.log`, `inventory-bindings-regression.log` in the private recovery test directory.
+
+The inventory change adds `customer_inventory_routes` and its audit table, exact binding-revision approval, optimistic concurrent edits, one active owner per source scope, current-metadata validation and customer-visible approval/switch state. Existing review-table `enabled=false` constraints are retained. It does not move historical assets, switch platform storage or cancel already running imports; drain jobs before changing ownership. An empty switch restores legacy routing, so it is **not a source kill switch**. See [inventory routing and rollback](customer-inventory-routing.md).
 
 ## Remaining before the combined rollout
 

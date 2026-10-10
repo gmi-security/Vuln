@@ -6,7 +6,7 @@ import { userInfo, hostname } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
 import nextEnv from '@next/env';
-import { loadConnectorPreview, loadConnectorDraftStore, loadConnectorBindingStore } from './connector-preview-loader.mjs';
+import { loadConnectorPreview, loadConnectorDraftStore, loadConnectorBindingStore, loadInventoryRouting } from './connector-preview-loader.mjs';
 import { readApplicationConnectorMetadata, readDashboardConnectorMetadata } from '../lib/db/connector-metadata.mjs';
 
 const commands = {
@@ -15,6 +15,8 @@ const commands = {
   review: ['--input', '--env-file'],
   assign: ['--input', '--env-file'],
   'export-bindings': ['--company', '--output', '--env-file'],
+  'route-inventory': ['--input', '--env-file'],
+  'export-inventory-routes': ['--company', '--output', '--env-file'],
 };
 export function parseRegistryArgs(args) {
   const [command, ...rest] = args;
@@ -27,7 +29,7 @@ export function parseRegistryArgs(args) {
   }
   if (command === 'import' && !/^[a-f0-9]{64}$/.test(options['--fingerprint'] ?? '')) throw new Error('A reviewed preview fingerprint is required.');
   if (command.startsWith('export') && (!options['--company'] || options['--company'].length > 100 || !options['--output'])) throw new Error('Export requires a customer and private output path.');
-  if (['review','assign'].includes(command) && !options['--input']) throw new Error('Review requires a private input file.');
+  if (['review','assign','route-inventory'].includes(command) && !options['--input']) throw new Error('Review requires a private input file.');
   return { command, options };
 }
 export function registryReviewInput(value) {
@@ -78,19 +80,29 @@ export async function runRegistry(args, runtimeEnv = process.env) {
       return client;
     }
     const app = await metadataClient(env.DATABASE_URL);
-    const dashboard = env.ELASTIC_VULN_DATABASE_URL && env.ELASTIC_VULN_DATABASE_URL !== env.DATABASE_URL
+    const inventoryCommand = command === 'route-inventory' || command === 'export-inventory-routes';
+    const dashboard = !inventoryCommand && env.ELASTIC_VULN_DATABASE_URL && env.ELASTIC_VULN_DATABASE_URL !== env.DATABASE_URL
       ? await metadataClient(env.ELASTIC_VULN_DATABASE_URL) : app;
     const build = await loadConnectorPreview(), store = (await loadConnectorDraftStore())(pool);
-    const collect = async () => build({ ...await readApplicationConnectorMetadata(app), ...await readDashboardConnectorMetadata(dashboard) }, env);
+    const collect = async () => build({ ...await readApplicationConnectorMetadata(app),
+      ...(inventoryCommand ? { connections: [], tiles: [] } : await readDashboardConnectorMetadata(dashboard)) }, env);
     if (command === 'import') return { action: command, ...await store.importPreview(options['--fingerprint'], actor, collect), enabledBindings: 0 };
-    if (['review','assign'].includes(command)) {
+    if (['review','assign','route-inventory'].includes(command)) {
       const path = resolve(options['--input']);
       if ((await stat(path)).size > 32 * 1024) throw new Error('Review file exceeds 32 KiB.');
       const value = JSON.parse(await readFile(path, 'utf8'));
+      if (command === 'route-inventory') return { action: command,
+        ...await (await loadInventoryRouting()).createInventoryRoutingStore(pool).save(value,actor,collect) };
       const result = command === 'assign'
         ? await (await loadConnectorBindingStore())(pool).save(value,actor,collect)
         : await store.reviewCurrentDraft(registryReviewInput(value), actor, collect);
       return { action: command, revision: result.revision, reviewState: result.reviewState ?? result.review_state, enabledBindings: 0 };
+    }
+    if (command === 'export-inventory-routes') {
+      const result = await (await loadInventoryRouting()).createInventoryRoutingStore(pool).exportCustomer(options['--company']);
+      file = await open(resolve(options['--output']),'wx',0o600);
+      await file.writeFile(JSON.stringify(result,null,2)+'\n');
+      return { action:command, routes:result.routes.length };
     }
     if(command === 'export-bindings') {
       const result = await (await loadConnectorBindingStore())(pool).list(options['--company'],collect);
@@ -128,11 +140,17 @@ const safeMessages = new Set([
   'Binding changed; export current assignments before reviewing.', 'Historical data cannot be assigned as a connection.',
   'Valid customer and source evidence are required.', 'Valid binding revision required.', 'Invalid binding decision.',
   'A non-secret binding review note is required.', 'Customer binding limit exceeded.',
+  'Invalid inventory routing approval.', 'Inventory routing changed; export current state before approval.',
+  'No inventory route exists to disable.', 'Inventory binding changed; review current state before approval.',
+  'Inventory assignment needs a current review.', 'This assignment is not supported by the inventory import router.',
+  'Automate routing requires its numeric client ID.', 'Intune routing requires the configured tenant ID.',
+  'Inventory routing limit exceeded.', 'Choose an existing customer.',
 ]);
 export function registryFailure(error) {
   if (safeMessages.has(error?.message)) return error.message;
   if (error?.code === '42P01') return 'Registry tables are not installed. Review the explicit migration; this command does not create tables.';
   if (error?.code === 'EEXIST') return 'Output already exists. Choose a new private output file.';
+  if (error?.code === '23505') return 'A conflicting approval already exists. Export current state and resolve source ownership before retrying.';
   return 'Registry operation failed. No success is confirmed. Check database access, input and operator logs; recollect before retrying.';
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
