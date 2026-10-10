@@ -80,6 +80,7 @@ try {
   j=await records.savePartitionPage(j.id,'A','open','',rows.map(r=>r.sourceId),'',rows.length);
   await records.writeSpotlightHydrationBatch(j.id,'A',rows.map(r=>r.sourceId),rows);return j;};
  job=await stage([row('one')]);await assert.rejects(()=>records.completeResumableSpotlightRun(job.id,'A'),/original reviewed scope/);
+ await assert.rejects(()=>records.completeSpotlightRun(job.id,'A',1),/original reviewed scope/);
  assert.equal((await records.completeResumableSpotlightRun(job.id,'A',scope)).findingsImported,1);
  const previous=job.id,current=async()=>(await db.query("SELECT run_id FROM spotlight_import_current WHERE tenant_key='A'")).rows[0]?.run_id;
  assert.equal(await current(),previous);ok('valid reviewed generation promotes atomically; a caller cannot omit its scope');

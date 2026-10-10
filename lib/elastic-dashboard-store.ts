@@ -1,4 +1,5 @@
 import { checkReviewedElasticConnection } from "./customer-elastic-query";
+import { assertStoredSpotlightPacketScope, type StoredSpotlightPacket } from "./customer-stored-spotlight";
 import { assertPatchCid, type QueryScopeProof } from "./customer-query-scope";
 import { parsePatchInput, parseConsolidationInput } from "./patch-request";
 import { loadReviewedQueryRoutes, selectQueryRoute, recheckQueryRoute } from "./customer-query-routing-server";
@@ -302,8 +303,8 @@ function queryProof(route: QueryRoute): QueryScopeProof {
 }
 // Saved reports remain available as history. Only a current reviewed proof can
 // authorize a new live ticket/verification once reviewed routing is enabled.
-export async function assertPatchRequestScope(packet: { source?: string; appCompanyId?: string; queryScope?: QueryScopeProof; hostScope?: string[]; tenantIds?: string[]; tenantId?: string }, revision?: number) {
-  if (packet.source === "stored-findings") return;
+export async function assertPatchRequestScope(packet: StoredSpotlightPacket & { queryScope?: QueryScopeProof; tenantIds?: string[] }, revision?: number) {
+  if (packet.source === "stored-findings") return assertStoredSpotlightPacketScope(packet);
   const routes = await loadReviewedQueryRoutes(await database());
   if (routes === null) return;
   const proof = packet.queryScope;

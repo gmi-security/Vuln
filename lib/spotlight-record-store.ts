@@ -658,8 +658,8 @@ export function createSpotlightRecordStore(db: Database) {
       }
       const updated = await client.query(`UPDATE spotlight_import_runs
         SET status = 'completed', finished_at = now(), error = NULL
-        WHERE id = $1::uuid AND tenant_key = $2 AND status = 'running' RETURNING id`, [runId, tenantKey]);
-      if (updated.rowCount !== 1) throw new Error("Spotlight run is missing or no longer running.");
+        WHERE id = $1::uuid AND tenant_key = $2 AND status = 'running' AND checkpoint_version < 4 RETURNING id`, [runId, tenantKey]);
+      if (updated.rowCount !== 1) throw new Error("Spotlight run is missing, no longer running, or requires its original reviewed scope.");
       await client.query(`INSERT INTO spotlight_import_current (tenant_key, run_id)
         VALUES ($1, $2::uuid) ON CONFLICT (tenant_key) DO UPDATE
         SET run_id = EXCLUDED.run_id, promoted_at = now()`, [tenantKey, runId]);

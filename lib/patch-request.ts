@@ -5,6 +5,7 @@ import { getCompany } from "./store";
 import { worstSeverityOf } from "./vuln-sla";
 
 import type { QueryScopeProof } from "./customer-query-scope";
+import type { StoredSpotlightScopeProof } from "./customer-stored-spotlight";
 
 export type PatchRequest = {
   appCompanyId?: string; queryScope?: QueryScopeProof;
@@ -71,6 +72,7 @@ export function parseVerifyInput(value: unknown): { source: "crowdstrike"; ticke
 
 export type PatchGroup = {
   queryScope?: QueryScopeProof;
+  storedSpotlightScope?: StoredSpotlightScopeProof;
   manualOnly?: boolean;
   source?: "stored-findings";
   appCompanyId?: string; companyName?: string; connectors?: string[];

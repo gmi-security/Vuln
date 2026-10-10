@@ -60,9 +60,9 @@ export function spotlightRoutingStatus(row: SpotlightRouteEvidence, preview: Pre
   try {
     const route = validateRoute(row, preview);
     if (!reviewedSpotlightProviders(rawProviders).includes(route.provider))
-      return { id, review: "Spotlight route approved", routing: "Approval recorded; the provider routing switch is off. Existing import routing still applies." };
-    return { id, review: "Spotlight route approved", routing: "Approved for spotlight routing; the provider switch is on. All routes are checked again when an import starts. This does not confirm a successful import." };
-  } catch { return { id, review: "Spotlight routing needs review", routing: "This approval or provider configuration is stale or invalid. An opted-in import stops until it is resolved." }; }
+      return { id, review: "Spotlight route approved", routing: "Approval recorded; the provider routing switch is off. Existing import and saved CVE routing still apply." };
+    return { id, review: "Spotlight route approved", routing: "Approved for spotlight routing; the provider switch is on. Imports and saved CVE preparation require current approval. Saved CVEs also require a completed reviewed import; approval alone does not confirm one." };
+  } catch { return { id, review: "Spotlight routing needs review", routing: "This approval or provider configuration is stale or invalid. Opted-in imports and saved CrowdStrike CVE preparation stop until it is resolved." }; }
 }
 export type SpotlightRouteInput = {
   candidateId: string; companyId: string; bindingRevision: number; expectedRevision: number; enabled: boolean; note: string;
