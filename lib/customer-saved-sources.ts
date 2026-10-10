@@ -4,6 +4,7 @@ export type SavedSourceSelection = {
   sources: SavedSource[];
   blocked: { source: SavedSource; reason: string }[];
   defenderConnection?: CustomerSourceReadRequest["defenderConnection"];
+  spotlightTenant?: string;
 };
 export class SavedSourceError extends Error { constructor(message: string, readonly status: number) { super(message); } }
 export function savedSourcePolicy(raw: string | undefined): Record<string, SavedSource[]> {
@@ -44,7 +45,8 @@ export function createCustomerSavedSources(deps: {
     if (!source) return { companyId: company.id, sources, ...(selection ? { blocked: selection.blocked } : {}) };
     if (!sources.includes(source)) throw new SavedSourceError("This saved source is not enabled for this customer.", 404);
     const result = await deps.read[source]({companyId: company.id, now: new Date(), staleAfterMs: 36 * 3600000, offset: Number(rawOffset), limit: 50,
-      ...(source === "defender" && selection ? { defenderConnection: selection.defenderConnection } : {})});
+      ...(source === "defender" && selection ? { defenderConnection: selection.defenderConnection } : {}),
+      ...(source === "crowdstrike" && selection ? { spotlightTenant: selection.spotlightTenant } : {})});
     if (result.companyId !== company.id || result.source !== source) throw new SavedSourceError("Saved source scope is inconsistent.", 503);
     return result;
   }

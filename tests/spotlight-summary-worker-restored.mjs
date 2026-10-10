@@ -7,6 +7,7 @@ import {spawn} from 'node:child_process';
 import pg from 'pg';
 const require=createRequire(import.meta.url);
 const {createSpotlightSummaryStore}=require('../.worker-build/spotlight-summary/lib/spotlight-summary-store.js');
+const {SPOTLIGHT_SUMMARY_VERSION,matchesSpotlightTenant}=require('../.worker-build/spotlight-summary/lib/spotlight-summary-model.js');
 const socket=await realpath(process.argv[2]||'.');
 assert.ok(socket.startsWith('/home/codex/vuln-recovery/')&&socket.endsWith('/socket'));
 const db=new pg.Pool({host:socket,port:55483,user:'codex',database:'recovery_application',max:2,connectionTimeoutMillis:5000,statement_timeout:15000});
@@ -34,18 +35,26 @@ try {
     const job=(await db.query('SELECT * FROM spotlight_summary_jobs WHERE company_id=$1',[baseline.companyId])).rows[0];
     assert.equal(job.status,'succeeded');assert.equal(job.attempts,1);assert.equal(Number(job.source_rows),baseline.sourceRows);
     const header=(await db.query('SELECT * FROM spotlight_summary_generations WHERE company_id=$1',[baseline.companyId])).rows[0];
-    assert.deepEqual(header.summary,baseline.summary);assert.equal(Number(header.source_rows),baseline.sourceRows);
+    const {vendorScope,...publicSummary}=header.summary;assert.deepEqual(publicSummary,baseline.summary);assert.equal(vendorScope.version,1);assert.equal(vendorScope.rows,baseline.sourceRows);assert.equal(Number(header.source_rows),baseline.sourceRows);
     const all=(await db.query(`SELECT cve,severity,cvss,affected_devices,source_instances FROM spotlight_summary_cves
-      WHERE company_id=$1 AND run_id=$2 AND model_version=1 ORDER BY severity_rank DESC,affected_devices DESC,cve`,[baseline.companyId,baseline.runId])).rows;
+      WHERE company_id=$1 AND run_id=$2 AND model_version=$3 ORDER BY severity_rank DESC,affected_devices DESC,cve`,[baseline.companyId,baseline.runId,SPOTLIGHT_SUMMARY_VERSION])).rows;
     assert.deepEqual(all.map(v=>({cve:v.cve,severity:v.severity,cvss:v.cvss,affectedDevices:Number(v.affected_devices),sourceInstances:Number(v.source_instances)})),baseline.cves);
     const reader=createSpotlightSummaryStore(db),timings=[];
     for(let i=0;i<3;i++){
       const at=performance.now();const read=await reader.read({companyId:baseline.companyId,now:new Date(),staleAfterMs:86400000,limit:100});
       timings.push(Math.round((performance.now()-at)*10)/10);assert.equal(read.state,'available');assert.equal(read.projection.state,'ready');assert.deepEqual(read.summary,baseline.summary);
     }
+    const guardedCid=vendorScope.tenantId??'0'.repeat(32);
+    const tenantEvidence=matchesSpotlightTenant(vendorScope,guardedCid,baseline.sourceRows);
+    const guarded=await reader.read({companyId:baseline.companyId,now:new Date(),staleAfterMs:86400000,limit:100,spotlightTenant:guardedCid});
+    assert.equal(guarded.state,tenantEvidence?'available':'inconsistent');
+    if(tenantEvidence)assert.deepEqual(guarded.summary,baseline.summary);
+    assert.ok(!JSON.stringify(guarded).includes(guardedCid),'CID must not reach a browser response');
     assert.match(await once(baseline.companyId),/"state":"idle"/);
     assert.equal((await db.query('SELECT count(*)::int n FROM spotlight_summary_jobs WHERE company_id=$1',[baseline.companyId])).rows[0].n,1);
-    console.log(JSON.stringify({companyId:baseline.companyId,sourceRows:baseline.sourceRows,allCvesMatched:all.length,workerElapsedMs:elapsedMs,savedReadMs:timings,attempts:job.attempts,restart:'idle-no-new-job',productionChanges:0}));
+    console.log(JSON.stringify({companyId:baseline.companyId,sourceRows:baseline.sourceRows,allCvesMatched:all.length,tenantEvidence,
+      tenantEvidenceDetail:{missingOrInvalidRows:vendorScope.missingRows,mixed:vendorScope.mixed,hasRecognizedCid:vendorScope.tenantId!==null},
+      workerElapsedMs:elapsedMs,savedReadMs:timings,attempts:job.attempts,restart:'idle-no-new-job',productionChanges:0}));
   }
 } finally {
   if(child){const closed=new Promise(resolve=>child.once('close',resolve));child.kill('SIGKILL');await closed;}

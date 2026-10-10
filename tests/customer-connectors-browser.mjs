@@ -28,6 +28,7 @@ function status(id) {
   return { companyId: id, companyName: companies.find(c => c.id === id).name, checkedAt: '2026-10-09T19:00:00Z', registryAvailable: id !== 'CO-A',
     items: id === 'CO-EMPTY' ? [] : [{ id: id+'-record', provider: id === 'CO-A' ? 'defender' : 'crowdstrike', evidence: 'Saved customer connection', configuration: 'Configuration recorded',
       review: id === 'CO-A' ? 'Not imported for review' : 'Needs review', scope: 'Tenant recorded; scope verification pending.', reviewedAt: null,
+      data: {domains:['endpoint-findings'],storage:'Completed source SQL generations',lifecycle:'Only complete imports',routing:'Customer scope has not been reviewed.'},
       reasons: ['Verify the vendor tenant and how this source contributes data.', 'Source evidence has changed since the saved review.'] }] };
 }
 try {
@@ -36,7 +37,7 @@ try {
   assert.ok(ready, output);
   const anonymous = await fetch(base+'/api/elastic-dashboard/customer-connectors?companyId=CO-A', { redirect: 'manual' });
   assert.ok([401, 307, 302].includes(anonymous.status));
-  browser = await chromium.launch({ headless: true });
+  browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_CHANNEL ? {channel:process.env.PLAYWRIGHT_CHANNEL} : {}) });
   const context = await browser.newContext({ viewport: { width: 1440, height: 1050 } });
   const token = await encode({ secret, token: { name: 'Fixture member', orgMember: true, orgRole: 'MEMBER' }, maxAge: 300 });
   await context.addCookies([{ name: 'next-auth.session-token', value: token, url: base }]);
@@ -67,6 +68,8 @@ try {
   await page.getByText('Review details (2)', { exact: true }).click();
   await page.getByText('Verify the vendor tenant and how this source contributes data.', { exact: true }).waitFor();
   assert.equal(await page.getByRole('button', { name: /Approve|Enable|Configure|Sync|Scan/ }).count(), 0);
+  await page.getByText('How this source is used', {exact:true}).click();
+  await page.getByText('Completed source SQL generations', {exact:false}).waitFor();
   await page.screenshot({ path: join(artifacts, 'customer-connectors-desktop.png'), fullPage: true });
   pass('single customer selector, scoped links, review explanations and missing-registry state');
 

@@ -55,6 +55,8 @@ function Status({ companyId, refresh }: { companyId: string; refresh: number }) 
                 <span className={`rounded-full border px-2 py-1 text-xs ${item.review === "Needs review" ? "border-amber-800 text-amber-200" : "border-zinc-700 text-zinc-200"}`}>{item.review}</span></div>
               <p className="mt-2 text-sm text-zinc-200">{item.configuration}</p>
               <p className="mt-1 text-sm text-zinc-300">{item.scope}</p>
+              {item.data && <details className="mt-3 text-sm text-zinc-300"><summary className="cursor-pointer text-zinc-100">How this source is used</summary>
+                <p className="mt-2">{item.data.storage}</p><p className="mt-1">{item.data.lifecycle}</p><p className="mt-2">{item.data.routing}</p></details>}
               {item.reviewedAt && <p className="mt-2 text-xs text-zinc-300">Prior review recorded {new Date(item.reviewedAt).toLocaleString()}</p>}
               {!!item.reasons.length && <details className="mt-3 text-sm text-zinc-300"><summary className="cursor-pointer text-red-200">Review details ({item.reasons.length})</summary>
                 <ul className="mt-2 list-disc space-y-2 pl-5">{item.reasons.map((reason, i) => <li key={i}>{reason}</li>)}</ul></details>}

@@ -1,6 +1,8 @@
 import type { ConnectorCandidate, buildConnectorPreview } from "./customer-connector-preview";
 import type { ConnectorProposal } from "./customer-connector-drafts";
 import { connectorDraftEvidence } from "./customer-connector-drafts";
+import { connectorDataContract } from "./connector-data-contracts";
+import { customerConnectorReadPlan } from "./customer-connector-routing";
 
 export type ConnectorStatusDraft = {
   id: string; candidate: ConnectorCandidate; candidate_hash: string; proposal: ConnectorProposal;
@@ -9,7 +11,8 @@ export type ConnectorStatusDraft = {
 export type CustomerConnectorStatus = {
   companyId: string; companyName: string; checkedAt: string; registryAvailable: boolean;
   items: { id: string; provider: string; evidence: string; configuration: string;
-    review: string; reasons: string[]; scope: string; reviewedAt: string | null }[];
+    review: string; reasons: string[]; scope: string; reviewedAt: string | null;
+    data?: { domains: readonly string[]; storage: string; lifecycle: string; routing: string } }[];
 };
 const evidenceNames: Record<string, string> = {
   "saved-binding": "Saved customer connection", "environment-match": "Server configuration",
@@ -47,6 +50,7 @@ const reasons: Record<string, string> = {
   "import-pointer-is-not-a-connection": "Previous imported data does not prove a current connection.",
   "app-company-id-is-not-vendor-tenant": "The platform customer ID is not a verified vendor tenant.",
   "current-generation-not-completed": "The recorded import is not confirmed complete.",
+  "existing-ticket-routing-required": "Ticket delivery uses the existing customer and board routing. It is not a findings source.",
 };
 
 // Public projection: never spread SQL rows, references, raw tenants, target lists,
@@ -57,6 +61,9 @@ export function customerConnectorStatus(companyId: string, preview: ReturnType<t
   if (!company) throw new Error("Customer not found.");
   const current = new Map(preview.candidates.map(c => [c.id, c]));
   const ownedDrafts = new Map(drafts.filter(d => d.proposal.companyId === companyId).map(d => [d.id, d]));
+  const readPlan = customerConnectorReadPlan(companyId, preview, [...ownedDrafts.values()].map(row=>({ id: row.id,
+    candidateHash: row.candidate_hash, sourcePresent: row.source_present, reviewState: row.review_state,
+    reviewedAt: row.reviewed_at, proposal: row.proposal })));
   const ids = new Set([...preview.candidates.filter(c => c.companyId === companyId).map(c => c.id), ...ownedDrafts.keys()]);
   const items: CustomerConnectorStatus["items"] = [];
   for (const id of ids) {
@@ -73,7 +80,11 @@ export function customerConnectorStatus(companyId: string, preview: ReturnType<t
     const scope = ownershipChanged ? "Review the previous assignment." : draft
       ? `${draft.proposal.tenantId ? "Tenant recorded" : "Tenant not recorded"} · ${draft.proposal.datasets.length} datasets · ${draft.proposal.targets.length} targets. Proposal remains inactive.`
       : candidate.tenantId ? "Tenant recorded; scope verification pending." : "Customer source scope needs verification.";
+    const contract = connectorDataContract(candidate.provider);
     items.push({ id, provider: candidate.provider, evidence: evidenceNames[candidate.evidence] ?? "Source evidence",
+      ...(contract ? { data: { domains: contract.domains, storage: contract.storage, lifecycle: contract.lifecycle,
+        routing: readPlan.bindings.some(b=>b.id===id) ? "Customer scope reviewed; data-path activation remains disabled." :
+          readPlan.blocked.find(b=>b.id===id)?.reason ?? "Customer scope has not been reviewed." } } : {}),
       configuration, review: stale ? "Needs review" : draft ? reviewNames[draft.review_state] ?? "Needs review" : "Not imported for review",
       reasons: ownershipChanged ? ["This proposal no longer matches the current customer assignment. No new owner's details are shown."] :
         [...(stale ? ["Source evidence has changed since the saved review. Refreshing this page does not update or approve the proposal."] : []),

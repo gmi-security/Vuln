@@ -364,7 +364,8 @@ export async function nessusImportFindings(
   const config = nessusConfig();
   if (!config) throw new Error("Nessus is not configured.");
   const detail = await api(config, "GET", `/scans/${nessusScanId}`);
-  const hosts: any[] = detail?.hosts ?? [];
+  if (!Array.isArray(detail?.hosts)) throw new Error("Nessus returned an invalid scan host list.");
+  const hosts: any[] = detail.hosts;
   const findings: NessusFinding[] = [];
   const scannedHosts: NessusScannedHost[] = [];
   const pluginCache = new Map<number, any>();
@@ -381,7 +382,8 @@ export async function nessusImportFindings(
     const assetAliases = [...new Set([hostDetail?.info?.["host-fqdn"], hostDetail?.info?.["host-ip"], host.hostname]
       .filter((x): x is string => typeof x === "string" && x.length > 0))];
     scannedHosts.push({ hostname, assetAliases });
-    const vulns: any[] = (hostDetail?.vulnerabilities ?? []).sort(
+    if (!Array.isArray(hostDetail?.vulnerabilities)) throw new Error("Nessus returned an invalid host vulnerability list.");
+    const vulns: any[] = hostDetail.vulnerabilities.sort(
       (a: any, b: any) => (b.severity ?? 0) - (a.severity ?? 0),
     );
 

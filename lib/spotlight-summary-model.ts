@@ -1,6 +1,12 @@
 import { emptySeverityCounts, sourceSeverities, type CustomerSourceRead, type SourceCveRow } from "./customer-source-read-model";
 
-export const SPOTLIGHT_SUMMARY_VERSION = 1;
+export const SPOTLIGHT_SUMMARY_VERSION = 2;
+export type SpotlightVendorScope = { version: 1; tenantId: string | null; mixed: boolean; missingRows: number; rows: number };
+export function matchesSpotlightTenant(scope: unknown, tenantId: string, sourceRows: unknown): boolean {
+  const value = scope as SpotlightVendorScope | null;
+  return /^[a-f0-9]{32}$/i.test(tenantId) && !!value && value.version === 1 && value.rows > 0 &&
+    value.rows === Number(sourceRows) && value.missingRows === 0 && value.mixed === false && value.tenantId === tenantId.toLowerCase();
+}
 export const spotlightSummaryDefinition = { instanceUnit: "spotlight-finding", severityBasis: "source-cvss", suppression: "exclude-confirmed-suppressed" } as const;
 export type SpotlightSummary = Extract<CustomerSourceRead, { state: "available" }>["summary"];
 export type SummaryInput = {
@@ -20,11 +26,17 @@ export function createSpotlightSummaryAccumulator(companyId: string, limits = su
     if (!Number.isSafeInteger(limits[key]) || limits[key] < 1 || limits[key] > summaryLimits[key]) throw new Error("Invalid summary limits.");
   }
   let scanned = 0, pairs = 0, instances = 0, suppressed = 0, nonCve = 0, unknownSuppression = 0;
+  let tenantId: string | null = null, mixed = false, missingRows = 0;
   const severity = emptySeverityCounts(), devices = new Map<string, number>();
   const cves = new Map<string, SourceCveRow & { deviceKeys: Set<number> }>();
   function add(row: SummaryInput) {
     if (row.company_id !== companyId || !row.source_id) throw new Error("Source row does not match the selected customer.");
     if (++scanned > limits.records) throw new Error("Summary record limit exceeded.");
+    // Establish scope from every stored source row, including closed, suppressed
+    // and non-CVE entries. Never infer scope from just the displayed findings.
+    if (typeof row.cid !== "string" || !/^[a-f0-9]{32}$/i.test(row.cid)) missingRows++;
+    else if (tenantId === null) tenantId = row.cid.toLowerCase();
+    else if (tenantId !== row.cid.toLowerCase()) mixed = true;
     if (!["open", "reopen"].includes(row.status)) return;
     if (row.suppressed === true) { suppressed++; return; }
     if (!/^CVE-\d{4}-\d{4,}$/.test(row.cve)) { nonCve++; return; }
@@ -66,7 +78,8 @@ export function createSpotlightSummaryAccumulator(companyId: string, limits = su
     const summary: SpotlightSummary = { sourceInstances: instances, deviceCveFindings: pairs, uniqueCves: cves.size, affectedDevices: devices.size,
       inventoryDevices: null, unknownSuppressionInstances: unknownSuppression, excludedSuppressedInstances: suppressed, excludedNonCveInstances: nonCve,
       severity: { sourceInstances: { ...severity }, uniqueCves: unique } };
-    return { scanned, summary, rows };
+    const vendorScope: SpotlightVendorScope = { version: 1, tenantId: mixed ? null : tenantId, mixed, missingRows, rows: scanned };
+    return { scanned, summary, rows, vendorScope };
   }
   return { add, finish, get scanned() { return scanned; } };
 }

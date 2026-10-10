@@ -49,8 +49,8 @@ export function validatePreview(preview: Preview) {
     assert(c.connectionRef === null || /^(application:|dashboard:|environment:)/.test(c.connectionRef), "Unknown credential reference kind.");
     assert(["saved-binding", "environment-match", "shared-configuration", "saved-tile", "completed-import"].includes(c.evidence), "Invalid candidate evidence.");
     assert(["tenant", "unverified", "historical-only"].includes(c.scope), "Invalid candidate scope.");
-    assert(Array.isArray(c.capabilities) && c.capabilities.length <= 5 && c.capabilities.every(v =>
-      ["vulnerability-import", "inventory", "scan", "enrichment", "saved-query"].includes(v)), "Invalid capabilities.");
+    assert(Array.isArray(c.capabilities) && c.capabilities.length <= 8 && c.capabilities.every(v =>
+      ["vulnerability-import", "inventory", "scan", "enrichment", "saved-query", "appsec", "ticket-delivery", "orchestration"].includes(v)), "Invalid capabilities.");
     assert(Array.isArray(c.review) && c.review.length <= 30 && c.review.every(v => short(v, 100) && /^[a-z-]+$/.test(v)), "Invalid review reasons.");
     assert(c.revision === null || Number.isSafeInteger(c.revision) && c.revision > 0, "Invalid source revision.");
     assert(typeof c.configured === "boolean" && c.state === "pending-review" && c.enabled === false && c.authority === "unassigned", "Import candidates must be disabled and unreviewed.");
@@ -79,12 +79,14 @@ export function validateReviewScope(candidate: ConnectorCandidate, sourcePresent
   const allowed = candidate.capabilities.flatMap(capability => ({
     "vulnerability-import": ["findings-primary", "mirror"], "scan": ["findings-primary"],
     "inventory": ["inventory"], "enrichment": ["enrichment"], "saved-query": ["query-only", "mirror"],
+    "appsec": ["query-only"], "ticket-delivery": [], "orchestration": [],
   }[capability]));
   assert(allowed.includes(next.authority), "Choose authority supported by this source capability.");
   if (next.authority !== "enrichment") assert(next.tenantId || next.datasets.length || next.targets.length, "Record the verified tenant, dataset or targets before review.");
   if (candidate.provider === "defender" || candidate.provider === "crowdstrike") assert(next.tenantId, "Vendor tenant verification is required.");
   if (candidate.provider === "elastic") assert(next.datasets.length > 0, "Elasticsearch dataset verification is required.");
-  if (candidate.capabilities.includes("scan")) assert(next.targets.length > 0, "Approved scanner targets are required.");
+  if (candidate.capabilities.includes("scan") && next.authority !== "enrichment") assert(next.targets.length > 0, "Approved scanner targets are required.");
+  if (candidate.capabilities.includes("appsec")) assert(next.datasets.length > 0 && next.targets.length > 0, "Approved AppSec datasets and repositories are required.");
 }
 function snapshot(row: Draft) {
   return { candidate: row.candidate, candidateHash: row.candidate_hash, sourceEvidence: row.source_evidence, proposal: row.proposal,

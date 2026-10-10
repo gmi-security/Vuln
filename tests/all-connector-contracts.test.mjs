@@ -1,0 +1,239 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import {createHash} from 'node:crypto';
+import {readFileSync} from 'node:fs';
+import {resolve,dirname} from 'node:path';
+import {SourceTextModule,SyntheticModule} from 'node:vm';
+import ts from 'typescript';
+import {createServer} from 'node:http';
+import {loadConnectorPreview,loadConnectorContracts,loadConnectorRouting,loadConnectorReview} from '../scripts/connector-preview-loader.mjs';
+const build=await loadConnectorPreview(),contracts=await loadConnectorContracts(),routing=await loadConnectorRouting(),review=await loadConnectorReview();
+const metadata={companies:[{id:'A',name:'Alpha'},{id:'B',name:'Beta'}],defender:[{companyId:'A',tenantId:'tenant-a',revision:1}],spotlight:[],connections:[{source:'elastic',revision:1},{source:'crowdstrike',revision:1}],tiles:[{id:'tile-a',companyId:'A',source:'elastic',revision:1}],delivery:[{revision:1}]};
+const env={FALCON_CLIENT_ID:'fixture',FALCON_CLIENT_SECRET:'fixture',FALCON_CUSTOMER:'Alpha',FALCON_CLOUD:'us-2',
+  NESSUS_URL:'https://fixture.invalid',NESSUS_ACCESS_KEY:'fixture',NESSUS_SECRET_KEY:'fixture',
+  VULNERS_API_KEY:'fixture',SPIDERFOOT_URL:'https://fixture.invalid',ARTEMIS_API_URL:'https://fixture.invalid',ARTEMIS_API_TOKEN:'fixture',
+  BURP_API_URL:'https://fixture.invalid',BURP_API_KEY:'fixture',NMAP_RUNNER_URL:'https://fixture.invalid',NMAP_RUNNER_TOKEN:'fixture',ZAP_URL:'https://fixture.invalid',ZAP_API_KEY:'fixture',
+  TIDAL_EMAIL:'fixture',TIDAL_PASSWORD:'fixture',INTUNE_TENANT_ID:'tenant-intune',INTUNE_CLIENT_ID:'fixture',INTUNE_CLIENT_SECRET:'fixture',
+  AUTOMATE_BASE_URL:'https://fixture.invalid',AUTOMATE_API_CLIENT_ID:'fixture',AUTOMATE_USERNAME:'fixture',AUTOMATE_PASSWORD:'fixture',
+  MISP_URL:'https://fixture.invalid',MISP_API_KEY:'fixture',OPENCTI_URL:'https://fixture.invalid',OPENCTI_API_KEY:'fixture',INTELOWL_URL:'https://fixture.invalid',INTELOWL_API_KEY:'fixture',
+  APPSEC_ELASTIC_URL:'https://fixture.invalid',APPSEC_ELASTIC_API_KEY:'fixture',N8N_MCP_URL:'https://fixture.invalid',
+  QUALYS_API_URL:'https://fixture.invalid',QUALYS_USERNAME:'fixture',QUALYS_PASSWORD:'fixture'};
+const preview=build(metadata,env);
+const candidate=provider=>preview.candidates.find(c=>c.provider===provider && !['saved-tile','completed-import'].includes(c.evidence) && (provider!=='crowdstrike'||c.evidence==='environment-match'));
+function binding(c,role='findings-primary',extra={}) {
+  const sourceEvidence=c.evidence==='saved-tile'?preview.candidates.filter(p=>p.evidence==='shared-configuration'&&p.connectionRef===c.connectionRef&&p.provider===c.provider):[];
+  const hash=createHash('sha256').update(JSON.stringify({candidate:c,sourceEvidence})).digest('hex');
+  return{id:c.id,candidateHash:hash,importedHash:hash,sourcePresent:true,reviewState:'reviewed',reviewedAt:'2026-10-10',proposal:{companyId:'A',tenantId:c.tenantId??(c.provider==='crowdstrike'?'a'.repeat(32):null),datasets:role==='query-only'?['fixture-*']:[],targets:['fixture.invalid'],authority:role,...extra}};
+}
+test('inventory accounts for every implemented scanner and each non-scanner integration; Qualys remains planned',()=>{
+  review.validatePreview(preview);
+  assert.equal(Object.keys(contracts.connectorDataContracts).length,20);
+  assert.deepEqual([...new Set(preview.candidates.map(c=>c.provider))].sort(),Object.keys(contracts.connectorDataContracts).sort());
+  assert.equal(contracts.connectorDataContract('qualys').planned,true);
+  assert.equal(candidate('qualys').capabilities.length,0);
+  assert.equal(contracts.connectorDataContract('unknown'),null);
+  assert.doesNotMatch(JSON.stringify(preview),/fixture.invalid|_SECRET|API_KEY|PASSWORD/);
+});
+for(const provider of ['defender','crowdstrike','nessus','vulners','spiderfoot','artemis','nmap','burp','zap'])test(`${provider}: reviewed findings scope remains customer-specific and rejects a stale review`,()=>{
+  const c=candidate(provider),b=binding(c),result=routing.customerConnectorReadPlan('A',preview,[b]);
+  assert.equal(result.bindings.length,1);assert.equal(result.canActivate,false);assert.equal(result.combinedCounts,null);
+  assert.equal(routing.customerConnectorReadPlan('B',preview,[b]).bindings.length,0);
+  assert.equal(routing.customerConnectorReadPlan('A',preview,[{...b,candidateHash:'0'.repeat(64)}]).bindings.length,0);
+  assert.equal(routing.customerConnectorReadPlan('A',preview,[{...b,reviewState:'dismissed'}]).bindings.length,0);
+});
+for(const provider of ['tidal','intune','automate'])test(`${provider}: inventory role never authorizes scanner findings`,()=>{
+  const c=candidate(provider);assert.deepEqual(routing.customerConnectorReadPlan('A',preview,[binding(c,'inventory')]).bindings[0].domains,['inventory']);
+  assert.equal(routing.customerConnectorReadPlan('A',preview,[binding(c)]).bindings.length,0);
+});
+for(const provider of ['misp','opencti','intelowl'])test(`${provider}: enrichment has no endpoint finding or scan authority`,()=>{
+  const c=candidate(provider),b=binding(c,'enrichment',{targets:[]});
+  assert.deepEqual(routing.customerConnectorReadPlan('A',preview,[b]).bindings[0].domains,['enrichment']);
+  assert.equal(routing.customerConnectorReadPlan('A',preview,[binding(c)]).bindings.length,0);
+});
+test('Elastic and AppSec keep query/repository scope; delivery and orchestration never become finding sources',()=>{
+  for(const provider of ['elastic','appsec']) {
+    const c=candidate(provider),result=routing.customerConnectorReadPlan('A',preview,[binding(c,'query-only')]);assert.equal(result.bindings.length,1);
+    assert.equal(routing.customerConnectorReadPlan('A',preview,[binding(c,'query-only',{datasets:[]})]).bindings.length,0);
+  }
+  for(const provider of ['connectwise','n8n','qualys'])assert.equal(routing.customerConnectorReadPlan('A',preview,[binding(candidate(provider))]).bindings.length,0);
+});
+test('non-secret endpoint, tenant, cloud and AppSec stream changes invalidate source evidence',()=>{
+  for(const [provider,key,value] of [['nessus','NESSUS_URL','https://changed.invalid'],['crowdstrike','FALCON_CLOUD','us-1'],['intune','INTUNE_TENANT_ID','tenant-other'],['appsec','APPSEC_ELASTIC_FINDING_STREAM','other-findings'],['n8n','N8N_MCP_URL','https://changed.invalid']]) {
+    const changed=build(metadata,{...env,[key]:value});assert.notEqual(changed.candidates.find(c=>c.id===candidate(provider).id).revision,candidate(provider).revision);
+  }
+  assert.equal(build(metadata,{...env,FALCON_CLIENT_SECRET:'rotated'}).candidates.find(c=>c.id===candidate('crowdstrike').id).revision,candidate('crowdstrike').revision,'secret rotation is explicitly not claimed as revision evidence');
+});
+
+async function load(entry,overrides={}) {
+  const cache=new Map(),root=resolve('lib');
+  const get=path=>{path=resolve(path);assert.ok(path.startsWith(root));assert.doesNotMatch(path,/[\\/](store|persist|instrumentation)\.ts$/);
+    if(!cache.has(path))cache.set(path,new SourceTextModule(ts.transpileModule(readFileSync(path,'utf8'),{compilerOptions:{module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2022}}).outputText,{identifier:path}));return cache.get(path);};
+  const m=get(resolve(root,entry+'.ts'));await m.link(async(spec,parent)=>{
+    if(overrides[spec]) {const values=overrides[spec];return new SyntheticModule(Object.keys(values),function(){for(const[k,v]of Object.entries(values))this.setExport(k,v);});}
+    if(spec==='./store')return new SyntheticModule(['getCompany'],function(){this.setExport('getCompany',()=>({id:'A',name:'Alpha'}));});
+    if(spec==='@/lib/threat')return new SyntheticModule(['isKev'],function(){this.setExport('isKev',()=>false);});
+    if(spec.startsWith('.'))return get(resolve(dirname(parent.identifier),spec+'.ts'));
+    if(spec.startsWith('@/'))return get(resolve(spec.slice(2)+'.ts'));
+    const values=await import(spec);return new SyntheticModule(Object.keys(values),function(){for(const [k,v]of Object.entries(values))this.setExport(k,v);});
+  });await m.evaluate();return m.namespace;
+}
+test('all scanner records preserve existing report class, workflow exclusions and customer separation',async()=>{
+  const {buildCustomerReportingModel:report}=await load('reporting-customer-model');
+  const {buildCustomerCveGroups:groups}=await load('customer-cve-model');
+  for(const provider of ['defender','crowdstrike','nessus','vulners','spiderfoot','artemis','nmap','burp','zap']) {
+    const f={id:provider,companyId:'A',companyName:'Alpha',connector:provider,cve:'CVE-2026-1234',asset:'host-a',status:'Open',severity:'High',cvss:8.1,realRisk:65,remediation:'Install recommended update',assetSource:'inferred',lastSeen:'2026-10-10',title:'Fixture'};
+    const result=report({id:'A',name:'Alpha'},[f,{...f,id:'other',companyId:'B'}],[],[],[]);
+    const domain=contracts.connectorFindingClass(provider);
+    assert.equal(result.metrics.vulnerabilities.open,domain==='osint'?0:1);assert.equal(result.metrics.attackSurface.open,domain==='osint'?1:0);
+    assert.equal(report({id:'A',name:'Alpha'},[{...f,status:'Risk Accepted'}],[],[],[]).metrics.vulnerabilities.open,0);
+    if(domain!=='osint') {const packets=groups({id:'A',name:'Alpha'},f.cve,[f],[],new Set(),'2026-10-10');assert.equal(packets.length,1);assert.match(packets[0].csv,/host-a/);assert.ok(packets[0].manualOnly);assert.doesNotMatch(packets[0].ticketBody,/host-a/);}
+  }
+});
+test('Burp, Nmap, Artemis and Tidal actual import parsers preserve native non-CVE and inventory evidence',async()=>{
+  const burp=await load('burp'),nmap=await load('nmap'),artemis=await load('artemis'),tidal=await load('tidal'),zap=await load('zap');
+  const issue=burp.parseBurpXml('<issues><issue><type>123</type><host>https://app.fixture.invalid</host><path>/login</path><severity>High</severity><name>SQL injection</name><remediationBackground>Use bound parameters</remediationBackground></issue></issues>')[0];
+  assert.equal(issue.cve,'BURP-123');assert.equal(issue.path,'/login');assert.equal(issue.remediation,'Use bound parameters');
+  const host=nmap.parseNmapXml('<nmaprun><host><address addr="10.0.0.1" addrtype="ipv4"/><hostnames><hostname name="host-a"/></hostnames><ports><port protocol="tcp" portid="443"><state state="open"/><service name="https"/></port><port protocol="tcp" portid="3389"><state state="open"/><service name="ms-wbt-server"/></port><port protocol="tcp" portid="23"><state state="closed"/></port></ports></host></nmaprun>')[0];
+  assert.equal(host.ports.length,2);assert.equal(nmap.nmapServiceFindings(host).length,1);assert.match(nmap.nmapServiceFindings(host)[0].cve,/^NMAP-/);
+  const exposure=artemis.mapArtemisResult({target:'app.fixture.invalid',headline:'Exposed administration page',receiver:'admin',severity:'high',tag:'Alpha'});assert.equal(exposure.cve,'ARTEMIS-ADMIN');assert.equal(exposure.tag,'Alpha');
+  const asset=tidal.parseTidalCsv('id,hostname,customer,ip,criticality\nasset-1,host-a,Alpha,10.0.0.1,high')[0];assert.equal(asset.externalId,'asset-1');assert.equal(asset.customer,'Alpha');assert.deepEqual(asset.ipAddresses,['10.0.0.1']);
+  assert.equal(zap.zapMapRiskToSeverity('3'),'High');
+});
+
+test('Intune imports complete inventory pages and refuses unsafe links, malformed pages and truncated results',async()=>{
+  const intune=await load('intune'),fetchBefore=globalThis.fetch;
+  const keys=['INTUNE_TENANT_ID','INTUNE_CLIENT_ID','INTUNE_CLIENT_SECRET'],before=keys.map(k=>process.env[k]);
+  keys.forEach(k=>process.env[k]='fixture');
+  let pages=[],calls=[];
+  globalThis.fetch=async(url,options)=>{
+    calls.push(String(url));
+    if(String(url).startsWith('https://login.microsoftonline.com/'))return Response.json({access_token:'fixture-token'});
+    assert.equal(new URL(url).origin,'https://graph.microsoft.com');assert.equal(options.redirect,'error');
+    assert.equal(options.headers.Authorization,'Bearer fixture-token');
+    return Response.json(pages.shift());
+  };
+  const next='https://graph.microsoft.com/v1.0/deviceManagement/managedDevices?$skiptoken=fixture';
+  try {
+    pages=[{value:[{id:'device-1',deviceName:'first',operatingSystem:'Windows Server',userPrincipalName:'owner',complianceState:'compliant'}],'@odata.nextLink':next},{value:[{id:'device-2',deviceName:'second',operatingSystem:'Android',managedDeviceOwnerType:'personal'}]}];
+    const assets=await intune.intuneListAssets();assert.equal(assets.length,2);assert.equal(assets[0].criticality,'High');assert.equal(assets[1].criticality,'Low');assert.equal(assets[0].externalId,'device-1');assert.deepEqual(assets[0].ipAddresses,[]);
+    pages=[{value:[],'@odata.nextLink':'https://attacker.invalid/collect'}];calls=[];
+    await assert.rejects(()=>intune.intuneListAssets(),/unexpected.*pagination/);assert.equal(calls.length,2);
+    pages=[{error:'invalid'}];await assert.rejects(()=>intune.intuneListAssets(),/invalid inventory page/);
+    pages=Array.from({length:100},()=>({value:[],'@odata.nextLink':next}));
+    await assert.rejects(()=>intune.intuneListAssets(),/pagination limit/);
+  }finally{globalThis.fetch=fetchBefore;keys.forEach((k,i)=>before[i]===undefined?delete process.env[k]:process.env[k]=before[i]);}
+});
+
+test('Automate preserves customer filters and inventory identity; incomplete or cross-customer responses cannot publish',async()=>{
+  const automate=await load('connectwise-automate'),fetchBefore=globalThis.fetch;
+  const config={baseUrl:'https://fixture.invalid/api',apiClientId:'fixture',username:'fixture',password:'fixture'};
+  let pages=[],calls=[];
+  globalThis.fetch=async(url,options)=>{
+    calls.push(String(url));if(String(url).endsWith('/apitoken'))return Response.json({AccessToken:'fixture-token'});
+    assert.equal(options.headers.Authorization,'Bearer fixture-token');
+    if(String(url).includes('/computers?'))assert.equal(new URL(url).searchParams.get('condition'),'Client/Id=98');
+    return Response.json(pages.shift());
+  };
+  const device={Id:1,ComputerName:'host-a',Client:{Id:98},OperatingSystemName:'Windows',Type:'Server',LocalIPAddress:'10.0.0.1',LastUserName:'DOMAIN\\owner'};
+  try {
+    pages=[Array.from({length:250},(_,i)=>({...device,Id:i+1})),[{...device,Id:251}]];
+    const assets=await automate.automateListComputers(config,'98');assert.equal(assets.length,251);assert.equal(assets[0].externalId,'automate:1');assert.equal(assets[0].owner,'owner');assert.equal(assets[0].criticality,'High');assert.deepEqual(assets[0].ipAddresses,['10.0.0.1']);
+    calls=[];await assert.rejects(()=>automate.automateListComputers(config,'98 OR 1=1'),/valid Automate customer/);assert.equal(calls.length,0);
+    pages=[[{...device,Client:{Id:99}}]];await assert.rejects(()=>automate.automateListComputers(config,'98'),/different customer/);
+    pages=[{error:'invalid'}];await assert.rejects(()=>automate.automateListComputers(config,'98'),/invalid computers page/);
+    pages=[{error:'invalid'}];await assert.rejects(()=>automate.automateListClients(config),/invalid clients page/);
+    pages=Array.from({length:200},()=>Array.from({length:250},()=>device));await assert.rejects(()=>automate.automateListComputers(config,'98'),/pagination limit/);
+    pages=Array.from({length:200},()=>Array.from({length:250},()=>({Id:98,Name:'Fixture'})));await assert.rejects(()=>automate.automateListClients(config),/pagination limit/);
+    pages=[[{Id:98,Name:'Fixture'}]];assert.deepEqual(await automate.automateListClients(config),[{id:'98',name:'Fixture'}]);
+  }finally{globalThis.fetch=fetchBefore;}
+});
+
+test('Nessus, SpiderFoot and ZAP import fixtures preserve scan coverage and reject malformed success bodies',async()=>{
+  let replies=new Map();const calls=[];
+  const server=createServer((req,res)=>{calls.push(req.method);res.setHeader('Content-Type','application/json');
+    const path=new URL(req.url,'http://localhost').pathname;res.end(JSON.stringify(replies.get(path)??{error:'unexpected request'}));});
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  const base='http://127.0.0.1:'+server.address().port;
+  const vars={NESSUS_URL:base,NESSUS_ACCESS_KEY:'fixture',NESSUS_SECRET_KEY:'fixture',SPIDERFOOT_URL:base,ZAP_URL:base,ZAP_API_KEY:'fixture',ARTEMIS_API_URL:base,ARTEMIS_API_TOKEN:'fixture'};
+  const before=Object.fromEntries(Object.keys(vars).map(k=>[k,process.env[k]]));Object.assign(process.env,vars);
+  try {
+    const nessus=await load('nessus'),spider=await load('spiderfoot'),zap=await load('zap'),artemis=await load('artemis');
+    replies=new Map([
+      ['/scans/1',{hosts:[{host_id:1,hostname:'host-a'},{host_id:2,hostname:'host-clean'}]}],
+      ['/scans/1/hosts/1',{info:{'host-fqdn':'host-a','host-ip':'10.0.0.1'},vulnerabilities:[{plugin_id:100,severity:4,plugin_name:'Fixture plugin'}]}],
+      ['/scans/1/hosts/2',{info:{'host-fqdn':'host-clean'},vulnerabilities:[]}],
+      ['/scans/1/hosts/1/plugins/100',{info:{plugindescription:{pluginattributes:{cve:['CVE-2026-1234','CVE-2026-1235'],solution:'Install fix',risk_information:{cvss3_base_score:'9.8'}}}},outputs:[{ports:{'443 / tcp':[]}}]}]
+    ]);
+    const scan=await nessus.nessusImportFindings(1);assert.equal(scan.scannedHosts.length,2);assert.equal(scan.findings.length,1);assert.deepEqual(scan.findings[0].cves,['CVE-2026-1234','CVE-2026-1235']);assert.equal(scan.findings[0].remediation,'Install fix');assert.equal(scan.findings[0].port,'443');
+    replies.set('/scans/1/hosts/2',{});await assert.rejects(()=>nessus.nessusImportFindings(1),/invalid host vulnerability/);
+    replies.set('/scans/1',{});await assert.rejects(()=>nessus.nessusImportFindings(1),/invalid scan host/);
+    replies.set('/scanexportjsonmulti',[
+      {event_type:'VULNERABILITY_CVE_HIGH',data:'CVE-2026-1234 exposed',source_data:'host-a',scan_target:'alpha.fixture.test'},
+      {event_type:'VULNERABILITY_CVE_HIGH',data:'Ignored false positive',false_positive:'1'},
+      {event_type:'INTERNET_NAME',data:'Informational'}]);
+    const exposures=await spider.spiderfootImportFindings('fixture');assert.equal(exposures.length,1);assert.equal(exposures[0].asset,'host-a');assert.equal(exposures[0].cve,'CVE-2026-1234');
+    replies.set('/scanexportjsonmulti',{});await assert.rejects(()=>spider.spiderfootImportFindings('fixture'),/invalid scan event/);
+    replies.set('/OTHER/core/other/jsonreport/',{site:[{'@name':'https://alpha.fixture.test',alerts:[{name:'SQL injection',riskcode:'3',cweid:'89',solution:'Use bound parameters',instances:[{uri:'/a'},{uri:'/b'}]}]}]});
+    const findings=await zap.zapFetchReport();assert.equal(findings.length,1);assert.equal(findings[0].cve,'ZAP-89');assert.equal(findings[0].severity,'High');assert.match(findings[0].description,/2 instances/);
+    replies.set('/OTHER/core/other/jsonreport/',{});await assert.rejects(()=>zap.zapFetchReport(),/invalid report site/);
+    replies.set('/api/analyses',{});assert.equal((await artemis.artemisStatus()).ready,false);await assert.rejects(()=>artemis.artemisListAnalyses(),/invalid analysis/);
+    replies.set('/api/task-results',{});await assert.rejects(()=>artemis.artemisImportFindings(),/invalid task/);
+    replies.set('/api/task-results',Array.from({length:200},()=>({target:'host-a',headline:'Exposure',severity:'high'})));
+    await assert.rejects(()=>artemis.artemisImportFindings(),/pagination limit/);
+    assert.ok(calls.length>0&&calls.every(v=>v==='GET'),'fixtures never launch scans');
+  }finally{for(const[k,v]of Object.entries(before))v===undefined?delete process.env[k]:process.env[k]=v;server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
+});
+
+test('Tidal company sessions stay separate and partial inventories or roster failures are reported',async()=>{
+  const tidal=await load('tidal'),fetchBefore=globalThis.fetch,errorBefore=console.error;
+  const vars={TIDAL_EMAIL:'fixture',TIDAL_PASSWORD:'fixture',TIDAL_API_URL:'https://fixture.invalid'},before=Object.fromEntries(Object.keys(vars).map(k=>[k,process.env[k]]));
+  Object.assign(process.env,vars);console.error=()=>{};
+  let mode='ok',company=null,deviceCalls=[];
+  globalThis.fetch=async(raw,options={})=>{
+    const url=new URL(raw),path=url.pathname;
+    if(path==='/auth/csrf-cookie')return new Response('',{headers:{'set-cookie':'XSRF-TOKEN=fixture; Path=/'}});
+    if(path==='/auth/login')return Response.json({ok:true});
+    if(path==='/api/v1/admin/companies') {
+      if(mode==='roster-error'&&url.searchParams.has('page'))return new Response('',{status:503});
+      return Response.json({data:[{id:'A',name:'Alpha'},{id:'B',name:'Beta'}],...(mode==='roster-error'?{pagination:{has_next:true,links:{next:'https://fixture.invalid/api/v1/admin/companies?page=2'}}}: {})});
+    }
+    if(path.endsWith('/switch-company')){const next=JSON.parse(options.body).company_id;if(mode==='switch-error'&&next==='B')return new Response('',{status:403});company=next;return Response.json({ok:true});}
+    if(path.endsWith('/auvik/tenants'))return Response.json([]);
+    if(path.endsWith('/intune/devices')){
+      deviceCalls.push(company);
+      if(company==='B'&&mode==='malformed')return Response.json({error:'wrong shape'});
+      if(company==='B'&&mode==='partial'&&url.searchParams.has('page'))return new Response('',{status:403});
+      const more=company==='B'&&['partial','capped'].includes(mode);
+      return Response.json({data:[{device_id:'device-'+company,device_name:'host-'+company}],pagination:{has_next:more,...(more?{links:{next:'https://fixture.invalid'+path+'?page=2'}}:{})}});
+    }
+    if(path.endsWith('/devices'))return new Response('',{status:404});
+    throw new Error('Unexpected fixture request');
+  };
+  try {
+    let result=await tidal.tidalListAssets();assert.deepEqual(result.assets.map(a=>a.customer),['Alpha','Beta']);assert.equal(result.errors.length,0);
+    for(mode of ['malformed','partial','capped','switch-error']) {
+      deviceCalls=[];result=await tidal.tidalListAssets();assert.deepEqual(result.assets.map(a=>a.customer),['Alpha']);assert.equal(result.errors.length,1);assert.match(result.errors[0],/^Beta:/);
+      if(mode==='switch-error')assert.ok(!deviceCalls.includes('B'));
+    }
+    mode='roster-error';deviceCalls=[];await assert.rejects(()=>tidal.tidalListAssets(),/company roster failed/);assert.deepEqual(deviceCalls,[]);
+  }finally{globalThis.fetch=fetchBefore;console.error=errorBefore;for(const[k,v]of Object.entries(before))v===undefined?delete process.env[k]:process.env[k]=v;}
+});
+
+test('AppSec keeps repository metrics and scan deltas separate; incomplete result schemas fail explicitly',async()=>{
+  const before=Object.fromEntries(['APPSEC_ELASTIC_URL','APPSEC_ELASTIC_API_KEY'].map(k=>[k,process.env[k]]));
+  Object.assign(process.env,{APPSEC_ELASTIC_URL:'https://fixture.invalid',APPSEC_ELASTIC_API_KEY:'fixture'});
+  let response,queries=[];
+  const query=async(connection,sql)=>{assert.equal(connection.apiKey,'fixture');queries.push(sql);return response;};
+  const result=(names,rows)=>({columns:names.split(',').map(name=>({name,type:'keyword'})),rows});
+  try {
+    const appsec=await load('elastic-appsec',{'./elastic-query-client':{executeEsql:query}});
+    response=result('repository,last_scan,findings,vulnerabilities,misconfigurations,licenses,critical,high,medium,low,secrets,new_findings,new_critical,new_high,resolved,gate',[
+      ['repo-a','2026-10-10',10,7,2,1,1,3,4,2,0,2,1,1,3,'fail'],
+      ['repo-b','2026-10-10',5,3,1,1,0,1,2,2,1,1,0,0,2,'pass']]);
+    const summary=await appsec.fetchAppSecSummary();assert.equal(summary.repositories,2);assert.equal(summary.findings,15);assert.equal(summary.vulnerabilities,10);assert.equal(summary.resolved,5);assert.equal(summary.rows[0].repository,'repo-a');
+    response=result('day,critical,high,resolved',[['2026-10-10',1,4,5]]);
+    assert.deepEqual(await appsec.fetchAppSecTrend(),[{completedAt:'2026-10-10',critical:1,high:4,resolved:5}]);
+    assert.match(queries[1],/LATEST/);assert.match(queries[1],/SUM\(`gmi.appsec.delta.resolved.total`\)/);
+    response=result('repository',[['repo-a']]);await assert.rejects(()=>appsec.fetchAppSecSummary(),/missing.*column/);
+  }finally{for(const[k,v]of Object.entries(before))v===undefined?delete process.env[k]:process.env[k]=v;}
+});

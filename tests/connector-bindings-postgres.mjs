@@ -137,5 +137,39 @@ try {
   const fresh=await reader(nextRequest);assert.equal(fresh.state,'available');assert.equal(fresh.summary.sourceInstances,0);
   assert.equal((await db.query('SELECT count(*)::int n FROM customer_connector_bindings WHERE enabled')).rows[0].n,0);
   ok('reviewing a new connection cannot reuse its old import; a matching completed generation becomes readable');
+
+  Object.assign(env,{
+    NESSUS_URL:'https://fixture.invalid',NESSUS_ACCESS_KEY:'fixture',NESSUS_SECRET_KEY:'fixture',
+    ARTEMIS_API_URL:'https://fixture.invalid',ARTEMIS_API_TOKEN:'fixture',ZAP_URL:'https://fixture.invalid',ZAP_API_KEY:'fixture',
+    BURP_API_URL:'https://fixture.invalid',BURP_API_KEY:'fixture',NMAP_RUNNER_URL:'https://fixture.invalid',NMAP_RUNNER_TOKEN:'fixture',
+    VULNERS_API_KEY:'fixture',TIDAL_EMAIL:'fixture',TIDAL_PASSWORD:'fixture',
+    INTUNE_TENANT_ID:'tenant-intune',INTUNE_CLIENT_ID:'fixture',INTUNE_CLIENT_SECRET:'fixture',
+    AUTOMATE_BASE_URL:'https://fixture.invalid',AUTOMATE_API_CLIENT_ID:'fixture',AUTOMATE_USERNAME:'fixture',AUTOMATE_PASSWORD:'fixture',
+    MISP_URL:'https://fixture.invalid',MISP_API_KEY:'fixture',OPENCTI_URL:'https://fixture.invalid',OPENCTI_API_KEY:'fixture',
+    INTELOWL_URL:'https://fixture.invalid',INTELOWL_API_KEY:'fixture',APPSEC_ELASTIC_URL:'https://fixture.invalid',APPSEC_ELASTIC_API_KEY:'fixture',
+    N8N_MCP_URL:'https://fixture.invalid',QUALYS_API_URL:'https://fixture.invalid',QUALYS_USERNAME:'fixture',QUALYS_PASSWORD:'fixture'
+  });
+  await run(['import','--fingerprint',(await collect()).fingerprint]);
+  for(const [provider,role] of [
+    ...['nessus','artemis','zap','burp','nmap','vulners'].map(p=>[p,'findings-primary']),
+    ...['tidal','intune','automate'].map(p=>[p,'inventory']),
+    ...['misp','opencti','intelowl'].map(p=>[p,'enrichment']),['appsec','query-only']]) {
+    for(const company of ['A','B']) {
+      const input=request(await exported(company),provider);input.decision='reviewed';input.note='Synthetic scope contract';
+      input.proposal.authority=role;input.proposal.targets=['customer-'+company+'.fixture.test'];
+      if(role==='query-only')input.proposal.datasets=['customer-'+company+'-*'];
+      await store.save(input,'fixture',collect);
+    }
+    const saved=(await db.query('SELECT company_id,proposal FROM customer_connector_bindings WHERE candidate_id=$1 ORDER BY company_id',[request(await exported('A'),provider).candidateId])).rows;
+    assert.equal(saved.length,2);assert.deepEqual(saved.map(r=>r.proposal.authority),[role,role]);
+    assert.deepEqual(saved.map(r=>r.proposal.targets),[['customer-A.fixture.test'],['customer-B.fixture.test']]);
+  }
+  assert.doesNotMatch(JSON.stringify(await exported('A')),/customer-B.fixture.test|customer-B-\*/);
+  for(const provider of ['n8n','qualys']) {
+    const input=request(await exported('A'),provider);input.decision='reviewed';input.note='Unsupported findings authority';input.proposal.authority='findings-primary';
+    await assert.rejects(()=>store.save(input,'fixture',collect));
+  }
+  assert.equal((await db.query('SELECT count(*)::int n FROM customer_connector_bindings WHERE enabled')).rows[0].n,0);
+  ok('scanner, inventory, enrichment and AppSec scopes persist independently per customer; orchestration and planned sources cannot claim findings');
   console.log(JSON.stringify({checks,passed:true,productionWrites:false,externalCalls:false}));
 }finally{await pool?.end();await db?.end();if(created)await admin.query(`DROP DATABASE ${name}`);await admin.end();}

@@ -10,7 +10,7 @@ import * as metadata from '../lib/db/connector-metadata.mjs';
 
 async function loadConnectorModule(entry) {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-  const allowed = new Set(['customer-connector-preview', 'customer-connector-drafts', 'customer-connector-bindings', 'customer-connector-status', 'customer-saved-source-bindings', 'customer-saved-sources', 'connectors', 'company-name', 'reporting-direct-sources']
+  const allowed = new Set(['customer-connector-routing', 'connector-data-contracts', 'customer-connector-preview', 'customer-connector-drafts', 'customer-connector-bindings', 'customer-connector-status', 'customer-saved-source-bindings', 'customer-saved-sources', 'connectors', 'company-name', 'reporting-direct-sources']
     .map(name => resolve(root, `lib/${name}.ts`)));
   const cache = new Map();
   async function load(file) {
@@ -51,3 +51,6 @@ export async function loadConnectorBindingStore() {
   return (await loadConnectorModule('customer-connector-bindings')).createConnectorBindingStore;
 }
 export const loadSavedSourceBindings = () => loadConnectorModule('customer-saved-source-bindings');
+export const loadConnectorContracts = () => loadConnectorModule('connector-data-contracts');
+export const loadConnectorReview = () => loadConnectorModule('customer-connector-drafts');
+export const loadConnectorRouting = () => loadConnectorModule('customer-connector-routing');

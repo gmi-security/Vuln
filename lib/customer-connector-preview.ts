@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { getConnectors } from "./connectors";
 import { normalizeCompanyName, findNearDuplicateCompanyName } from "./company-name";
 import { reportingTileCompanyId, customerReportingTileIds } from "./reporting-direct-sources";
+import { connectorDataContract, type ConnectorCapability } from "./connector-data-contracts";
 
 // Migration evidence only. Nothing here grants access or chooses a source for a page.
 // Keep references to existing credentials; never copy/decrypt them into this model.
@@ -11,10 +12,11 @@ export type ConnectorMetadata = {
   defender: { companyId: string; tenantId: string; revision: number }[];
   spotlight: { companyId: string; runId: string; status: string | null }[];
   connections: { source: string; revision: number }[];
+  delivery?: { revision: number }[];
   tiles: { id: string; source: string; companyId?: string | null; revision: number }[];
 };
 type Evidence = "saved-binding" | "environment-match" | "shared-configuration" | "saved-tile" | "completed-import";
-type Capability = "vulnerability-import" | "inventory" | "scan" | "enrichment" | "saved-query";
+type Capability = ConnectorCapability;
 export type ConnectorCandidate = {
   id: string;
   provider: string;
@@ -37,6 +39,10 @@ export type ConnectorCandidate = {
 
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const text = (value: string | undefined) => value?.trim() ?? "";
+// Non-secret connection identity changes invalidate reviews. Key rotation itself
+// is not claimed as a detected revision; credential values never enter evidence.
+const environmentRevision = (provider: string, env: Partial<NodeJS.ProcessEnv>, keys: string[]) =>
+  parseInt(digest([provider, keys.map(key => [key, text(env[key])])]).slice(0, 12), 16) + 1;
 
 export function buildConnectorPreview(metadata: ConnectorMetadata, env: Partial<NodeJS.ProcessEnv> = {}) {
   const companies = metadata.companies.filter(c => !c.isDemo);
@@ -97,7 +103,7 @@ export function buildConnectorPreview(metadata: ConnectorMetadata, env: Partial<
     if (!present) continue;
     const owner = match(text(env[key("CUSTOMER")]), "falcon");
     add({ ...base("crowdstrike", `environment:FALCON${suffix}`, ["vulnerability-import", "inventory"]),
-      ...owner, evidence: "environment-match", configured,
+      ...owner, evidence: "environment-match", configured, revision: environmentRevision("crowdstrike", env, [key("CLIENT_ID"),key("CLOUD"),key("CUSTOMER")]),
       review: [...owner.review, "vendor-tenant-not-verified", ...(!configured ? ["incomplete-credentials"] : []),
         ...(blocked ? ["legacy-loader-stops-before-this-entry"] : []),
         ...(text(env[key("CLOUD")]) && !["us-1", "us1", "us-2", "us2", "eu-1", "eu1", "us-gov-1"].includes(text(env[key("CLOUD")]).toLowerCase()) ? ["unrecognized-cloud"] : [])],
@@ -111,7 +117,7 @@ export function buildConnectorPreview(metadata: ConnectorMetadata, env: Partial<
     const tenantId = text(env[key("TENANT_ID")]) || null;
     const saved = metadata.defender.find(s => s.companyId === owner.companyId);
     add({ ...base("defender", `environment:${prefix}`, ["vulnerability-import", "inventory"]),
-      ...owner, tenantId, evidence: "environment-match", configured,
+      ...owner, tenantId, evidence: "environment-match", configured, revision: environmentRevision("defender",env,[key("TENANT_ID"),key("CLIENT_ID"),key("CUSTOMER")]),
       review: [...owner.review, ...(!configured ? ["incomplete-credentials"] : []),
         ...(prefix !== "DEFENDER" && !text(env[key("TENANT_ID")]) ? ["legacy-loader-ignores-without-tenant"] : []),
         ...(saved ? [saved.tenantId === tenantId ? "also-present-in-saved-connection" : "saved-environment-tenant-conflict"] : [])],
@@ -122,8 +128,9 @@ export function buildConnectorPreview(metadata: ConnectorMetadata, env: Partial<
     if (["defender", "crowdstrike"].includes(connector.id)) continue;
     const present = connector.envVars.some(k => text(env[k]));
     if (!present) continue;
-    add({ ...base(connector.id, `environment:scanner:${connector.id}`, ["scan"]),
+    add({ ...base(connector.id, `environment:scanner:${connector.id}`, [...(connectorDataContract(connector.id)?.capabilities ?? [])]),
       evidence: "shared-configuration", configured: connector.configured,
+      revision: environmentRevision(connector.id,env,connector.envVars.filter(key=>/URL$/.test(key))),
       review: ["customer-target-scope-not-assigned", ...(connector.status === "Planned" ? ["adapter-planned"] : []),
         ...(!connector.configured ? ["incomplete-credentials"] : []),
         ...(connector.id === "spiderfoot" ? ["scan-to-customer-mapping-needs-review"] : [])],
@@ -141,8 +148,24 @@ export function buildConnectorPreview(metadata: ConnectorMetadata, env: Partial<
     if (!alternatives.flat().some(k => text(env[k]))) continue;
     const configured = alternatives.some(keys => keys.every(k => text(env[k])));
     add({ ...base(provider, `environment:${provider}`, [capability]), evidence: "shared-configuration", configured,
+      tenantId: provider === "intune" ? text(env.INTUNE_TENANT_ID) || null : null,
+      revision: environmentRevision(provider,env,Object.keys(env).filter(key=>key.startsWith(provider.toUpperCase()+"_")&&/(?:URL|TENANT_ID|CLIENT_ID|EMAIL|USERNAME)$/.test(key)).sort()),
       review: ["shared-connection-not-a-customer-binding", ...(!configured ? ["incomplete-credentials"] : [])] });
   }
+
+  // These integrations keep their own storage/consumers. Listing them does not
+  // promote repository issues, tickets or orchestration into endpoint findings.
+  for (const [provider, keys] of [["appsec",["APPSEC_ELASTIC_URL","APPSEC_ELASTIC_API_KEY"]],
+    ["n8n",["N8N_WEBHOOK_URL","N8N_MCP_URL"]]] as const) {
+    if (!keys.some(key=>text(env[key]))) continue;
+    add({ ...base(provider, `environment:${provider}`, [...connectorDataContract(provider)!.capabilities]),
+      evidence: "shared-configuration", configured: provider === "n8n" ? keys.some(key=>text(env[key])) : keys.every(key=>text(env[key])),
+      revision: environmentRevision(provider,env,provider === "appsec" ? ["APPSEC_ELASTIC_URL","APPSEC_ELASTIC_SCAN_STREAM","APPSEC_ELASTIC_FINDING_STREAM"] : ["N8N_WEBHOOK_URL","N8N_MCP_URL"]),
+      review: ["shared-connection-not-a-customer-binding"] });
+  }
+  for (const entry of metadata.delivery ?? []) add({ ...base("connectwise", "dashboard:patch_connectwise_connection:1", ["ticket-delivery"]),
+    evidence: "shared-configuration", configured: true, revision: entry.revision,
+    review: ["existing-ticket-routing-required"] });
 
   const ref = (source: string) => source === "elastic"
     ? "dashboard:elastic_dashboard_connection:1" : `dashboard:dashboard_source_connections:${source}`;

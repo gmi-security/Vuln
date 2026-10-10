@@ -283,7 +283,7 @@ export async function spiderfootImportFindings(
     config,
     `/scanexportjsonmulti?ids=${encodeURIComponent(scanId)}`,
   );
-  if (!Array.isArray(events)) return [];
+  if (!Array.isArray(events)) throw new Error("SpiderFoot returned an invalid scan event list.");
   const out: SpiderfootFinding[] = [];
   for (const ev of events) {
     const type = String(ev.event_type ?? "");

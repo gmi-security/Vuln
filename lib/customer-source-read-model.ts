@@ -14,6 +14,7 @@ export type CustomerSourceReadRequest = {
   limit?: number;
   // Server-selected binding only; never populated from query parameters.
   defenderConnection?: { tenantId: string; revision: number };
+  spotlightTenant?: string;
 };
 export type SourceGeneration = {
   id: string;
@@ -81,6 +82,8 @@ export function validateSourceRead(request: CustomerSourceReadRequest) {
   if (request.defenderConnection && (!request.defenderConnection.tenantId ||
       !Number.isSafeInteger(request.defenderConnection.revision) || request.defenderConnection.revision < 1))
     throw new Error("Invalid saved connection guard.");
+  if (request.spotlightTenant !== undefined && !/^[a-f0-9]{32}$/i.test(request.spotlightTenant))
+    throw new Error("Invalid saved vendor tenant guard.");
   return { companyId, now, staleAfterMs, offset, limit };
 }
 

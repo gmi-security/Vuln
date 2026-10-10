@@ -7,7 +7,7 @@ import {loadSpotlightSummaryModules} from '../scripts/source-read-model-loader.m
 const socket=await realpath(process.argv[2]||'.');
 assert.ok(socket.startsWith('/home/codex/vuln-recovery/')&&socket.endsWith('/socket'));
 const db=new pg.Pool({host:socket,port:55483,user:'codex',database:'recovery_application',max:3,connectionTimeoutMillis:5000,statement_timeout:15000});
-const {createSpotlightSummaryStore:create}=await loadSpotlightSummaryModules();
+const {createSpotlightSummaryStore:create,SPOTLIGHT_SUMMARY_VERSION}=await loadSpotlightSummaryModules();
 let installed=false;
 try {
   const check=(await db.query("SELECT current_setting('data_directory') AS data,current_setting('listen_addresses') AS listen")).rows[0];
@@ -45,7 +45,7 @@ try {
       assert.equal(result.cves.total,baseline.cves.length);
     }
     const all=(await db.query(`SELECT cve,severity,cvss,affected_devices,source_instances FROM spotlight_summary_cves
-      WHERE company_id=$1 AND run_id=$2 AND model_version=1 ORDER BY severity_rank DESC,affected_devices DESC,cve`,[baseline.companyId,baseline.runId])).rows;
+      WHERE company_id=$1 AND run_id=$2 AND model_version=$3 ORDER BY severity_rank DESC,affected_devices DESC,cve`,[baseline.companyId,baseline.runId,SPOTLIGHT_SUMMARY_VERSION])).rows;
     assert.deepEqual(all.map(row=>({cve:row.cve,severity:row.severity,cvss:row.cvss,sourceInstances:Number(row.source_instances),affectedDevices:Number(row.affected_devices)})),baseline.cves);
     const start=performance.now(),replayed=await service.build(baseline.companyId,'private-restored-parity');
     assert.equal(replayed.state,'reused');const replayMs=Math.round((performance.now()-start)*10)/10;

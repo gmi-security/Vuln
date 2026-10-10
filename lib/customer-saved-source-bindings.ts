@@ -1,8 +1,9 @@
 import type { Pool } from "pg";
 import { readApplicationConnectorMetadata } from "./db/connector-metadata.mjs";
 import { buildConnectorPreview } from "./customer-connector-preview";
-import { connectorDraftEvidence, proposal, validateReviewScope, type ConnectorProposal } from "./customer-connector-drafts";
+import type { ConnectorProposal } from "./customer-connector-drafts";
 import { SavedSourceError, type SavedSource, type SavedSourceSelection } from "./customer-saved-sources";
+import { checkCustomerConnectorBinding } from "./customer-connector-routing";
 
 type BindingRow = {
   candidate_id: string; candidate_hash: string; imported_hash: string;
@@ -25,18 +26,13 @@ export function selectSavedSourceBindings(companyId: string, preview: ReturnType
     const findings = assignments.filter(row => !["inventory", "enrichment", "query-only"].includes(row.proposal?.authority));
     if (!findings.length) continue;
     if (findings.length !== 1) { block("Resolve overlapping source assignments before viewing saved findings."); continue; }
-    const row = findings[0], candidate = preview.candidates.find(c => c.id === row.candidate_id);
-    if (row.review_state !== "reviewed" || !row.reviewed_at || !row.source_present || !candidate || candidate.provider !== source ||
-        row.candidate_hash !== row.imported_hash ||
-        row.candidate_hash !== connectorDraftEvidence(candidate, preview.candidates).candidateHash) {
+    const row = findings[0];
+    const checked = checkCustomerConnectorBinding(companyId, preview, { id: row.candidate_id, candidateHash: row.candidate_hash,
+      importedHash: row.imported_hash, sourcePresent: row.source_present, reviewState: row.review_state, reviewedAt: row.reviewed_at, proposal: row.proposal });
+    if (!checked.ready || checked.binding.candidate.provider !== source) {
       block("This source assignment needs a current review."); continue;
     }
-    let scope: ConnectorProposal;
-    try {
-      scope = proposal(row.proposal);
-      if (scope.companyId !== companyId) throw new Error();
-      validateReviewScope(candidate, true, connectorDraftEvidence(candidate, preview.candidates).sourceEvidence, scope);
-    } catch { block("Resolve this source's customer ownership and scope before viewing saved findings."); continue; }
+    const { candidate, scope } = checked.binding;
     if (scope.authority !== "findings-primary") {
       block("Mirrored findings are not selected as an independent saved source."); continue;
     }
@@ -46,7 +42,11 @@ export function selectSavedSourceBindings(companyId: string, preview: ReturnType
       block("This saved reader cannot enforce the assignment's additional filters."); continue;
     }
     if (source === "crowdstrike") {
-      block("The saved CrowdStrike import still needs vendor-tenant provenance before registry routing can use it."); continue;
+      if (candidate.evidence !== "environment-match" || candidate.companyId !== companyId ||
+          !candidate.capabilities.includes("vulnerability-import") || !scope.tenantId || !/^[a-f0-9]{32}$/i.test(scope.tenantId)) {
+        block("Review the customer's Falcon connection and vendor CID before viewing saved findings."); continue;
+      }
+      result.sources.push(source); result.spotlightTenant = scope.tenantId.toLowerCase(); continue;
     }
     if (candidate.evidence !== "saved-binding" || candidate.companyId !== companyId ||
         candidate.connectionRef !== `application:defender_connections:${companyId}` ||

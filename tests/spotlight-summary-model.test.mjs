@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {loadSpotlightSummaryModules} from '../scripts/source-read-model-loader.mjs';
-const {createSpotlightSummaryAccumulator:create,validateSpotlightSummary:validate,summaryLimits}=await loadSpotlightSummaryModules();
+const {createSpotlightSummaryAccumulator:create,validateSpotlightSummary:validate,matchesSpotlightTenant,summaryLimits}=await loadSpotlightSummaryModules();
 const row=(extra={})=>({source_id:'1',id:'1',company_id:'A',cve:'CVE-2026-1000',status:'open',cid:'tenant',aid:'host',raw_cve:'CVE-2026-1000',raw_status:'open',raw_severity:'HIGH',score:7.5,suppressed:false,...extra});
 test('deduplicates device/CVE pairs but retains source instances, nullable scores and highest CVE severity',()=>{
   const a=create('A');a.add(row());a.add(row({source_id:'2',id:'2',raw_severity:'CRITICAL',score:null}));
@@ -36,4 +36,16 @@ test('empty generation has real zero totals; stored aggregate corruption is reje
 test('CVE ordering is severity, affected devices, then deterministic CVE; source score zero is retained',()=>{
   const a=create('A');a.add(row({cve:'CVE-2026-2000',raw_cve:'CVE-2026-2000',score:0}));a.add(row());
   assert.deepEqual(a.finish().rows.map(v=>v.cve),['CVE-2026-1000','CVE-2026-2000']);assert.equal(a.finish().rows[1].cvss,0);
+});
+
+test('vendor provenance covers closed and suppressed records, rejects mixed/missing tenants and cannot prove an empty run',()=>{
+  const cid='a'.repeat(32),a=create('A');a.add(row({cid}));
+  assert.ok(matchesSpotlightTenant(a.finish().vendorScope,cid,1));
+  assert.equal(matchesSpotlightTenant(a.finish().vendorScope,'b'.repeat(32),1),false);
+  assert.equal(matchesSpotlightTenant(a.finish().vendorScope,cid,2),false);
+  a.add(row({source_id:'2',id:'2',cid:'b'.repeat(32),status:'closed'}));
+  assert.equal(matchesSpotlightTenant(a.finish().vendorScope,cid,2),false);
+  const b=create('A');b.add(row({cid}));b.add(row({source_id:'2',id:'2',cid:null,suppressed:true}));
+  assert.equal(b.finish().vendorScope.missingRows,1);assert.equal(matchesSpotlightTenant(b.finish().vendorScope,cid,2),false);
+  assert.equal(matchesSpotlightTenant(create('A').finish().vendorScope,cid,0),false);
 });

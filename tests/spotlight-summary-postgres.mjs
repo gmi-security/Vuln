@@ -11,7 +11,7 @@ const {createSpotlightSummaryStore:create}=await loadSpotlightSummaryModules();
 const request={companyId:'CO-A',now:new Date('2026-10-10'),staleAfterMs:86400000};
 let db,created=false,checks=0;const disconnected=[],ok=message=>{checks++;console.log(`PASS ${message}`);};
 const migration=await readFile('docs/sql/spotlight-source-summaries.sql','utf8');
-const sample=(id,cve='CVE-2026-1000',aid='host')=>({id,cid:'tenant',aid,status:'open',cve:{id:cve,severity:'HIGH',base_score:8},suppression_info:{is_suppressed:false}});
+const sample=(id,cve='CVE-2026-1000',aid='host')=>({id,cid:'a'.repeat(32),aid,status:'open',cve:{id:cve,severity:'HIGH',base_score:8},suppression_info:{is_suppressed:false}});
 try {
   await admin.connect();
   const isolation=(await admin.query("SELECT current_setting('data_directory') AS data,current_setting('listen_addresses') AS listen")).rows[0];
@@ -42,11 +42,16 @@ try {
   assert.equal((await noRaw.read(request)).summary.sourceInstances,3);
   assert.equal((await store.read({...request,companyId:'CO-B'})).state,'no-completed-import');
   ok('atomic publication, replay without duplication, bounded pages, customer isolation and no raw records on reads');
+  const guarded=await noRaw.read({...request,spotlightTenant:'a'.repeat(32)});
+  assert.equal(guarded.state,'available');assert.doesNotMatch(JSON.stringify(guarded),/vendorScope|aaaaaaaa/);
+  assert.equal((await noRaw.read({...request,spotlightTenant:'b'.repeat(32)})).state,'inconsistent');
+  ok('tenant guarded reader validates whole-generation CID without returning it or scanning source rows');
   const hold=await db.connect();await hold.query('SELECT pg_advisory_lock(804244,1)');
   assert.equal((await store.build('CO-A','tester')).state,'busy');await hold.query('SELECT pg_advisory_unlock(804244,1)');hold.release();
   ok('global build lock prevents overlapping memory-heavy builders');
   const second=await install('CO-A',[sample('4','CVE-2026-3000')]);
   const pending=await store.read(request);assert.equal(pending.generation.id,first);assert.equal(pending.projection.state,'pending');assert.equal(pending.projection.currentImportId,second);
+  assert.equal((await store.read({...request,spotlightTenant:'a'.repeat(32)})).state,'inconsistent');
   await db.query(`CREATE FUNCTION reject_summary() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'test publication failure'; END $$;
     CREATE TRIGGER reject_summary BEFORE INSERT ON spotlight_summary_current FOR EACH ROW EXECUTE FUNCTION reject_summary()`);
   await assert.rejects(()=>store.build('CO-A','tester'),/test publication failure/);
@@ -85,6 +90,11 @@ try {
   await db.query("UPDATE spotlight_summary_generations SET summary=jsonb_set(summary,'{uniqueCves}','1') WHERE run_id=$1",[newer]);
   assert.equal((await store.read(request)).state,'inconsistent');
   ok('corrupt saved totals fail closed instead of presenting a healthy zero');
+  await install('CO-A',[sample('mixed-a'),{...sample('mixed-b'),cid:'b'.repeat(32),status:'closed'}]);
+  await store.build('CO-A','tester');
+  assert.equal((await store.read(request)).state,'available');
+  assert.equal((await store.read({...request,spotlightTenant:'a'.repeat(32)})).state,'inconsistent');
+  ok('a second CID in a closed finding blocks registry routing without altering legacy saved-count semantics');
   console.log(JSON.stringify({passed:checks,productionChanges:0}));
 } finally {
   await db?.end();await Promise.all(disconnected);if(created)await admin.query(`DROP DATABASE ${name}`);await admin.end();

@@ -38,8 +38,10 @@ test('conflicting customer tenants and environment-only evidence cannot route De
   const env=build({...metadata,defender:[]},{DEFENDER_CUSTOMER:'A',DEFENDER_TENANT_ID:'private-a',DEFENDER_CLIENT_ID:'fixture',DEFENDER_CLIENT_SECRET:'fixture'});
   assert.equal(select('A',env,[row(env.candidates[0])]).sources.length,0);
 });
-test('CrowdStrike review cannot invent saved vendor provenance or select a dashboard query',()=>{
+test('CrowdStrike review produces a private CID guard; malformed tenant is rejected',()=>{
   const cs=build({...metadata,defender:[]},{FALCON_CUSTOMER:'Alpha',FALCON_CLIENT_ID:'fixture',FALCON_CLIENT_SECRET:'fixture'});
   const result=select('A',cs,[row(cs.candidates[0],{tenantId:'declared-cid'})]);
-  assert.equal(result.sources.length,0);assert.match(result.blocked[0].reason,/provenance/);
+  assert.equal(result.sources.length,0);assert.match(result.blocked[0].reason,/CID/);
+  const valid=select('A',cs,[row(cs.candidates[0],{tenantId:'A'.repeat(32)})]);
+  assert.deepEqual(valid.sources,['crowdstrike']);assert.equal(valid.spotlightTenant,'a'.repeat(32));
 });

@@ -195,10 +195,12 @@ export async function zapFetchReport(): Promise<ZapFinding[]> {
   const data = await zapFetch(config, "/OTHER/core/other/jsonreport/", {}, 30_000);
 
   const out: ZapFinding[] = [];
-  const sites = Array.isArray(data?.site) ? data.site : [];
+  if (!Array.isArray(data?.site)) throw new Error("ZAP returned an invalid report site list.");
+  const sites = data.site;
   for (const site of sites) {
     const siteUrl = String(site?.["@name"] ?? "");
-    const alerts = Array.isArray(site?.alerts) ? site.alerts : [];
+    if (!Array.isArray(site?.alerts)) throw new Error("ZAP returned an invalid report alert list.");
+    const alerts = site.alerts;
     for (const alert of alerts) {
       const severity = zapMapRiskToSeverity(alert?.riskcode);
       const cweid = String(alert?.cweid ?? "").trim();

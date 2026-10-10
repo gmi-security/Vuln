@@ -324,17 +324,20 @@ async function listCompanies(config: TidalConfig, jar: Jar): Promise<TidalCompan
     guard += 1;
     const res: Response = await fetch(url, { headers: jarHeaders(config, jar), cache: "no-store" });
     absorb(jar, res);
-    if (!res.ok) break;
+    if (!res.ok) throw new Error(`Tidal company roster failed (HTTP ${res.status}).`);
     const data: any = await res.json();
-    const rows: any[] = Array.isArray(data) ? data : data?.data ?? [];
+    const rows: any[] = Array.isArray(data) ? data : data?.data;
+    if (!Array.isArray(rows)) throw new Error("Tidal returned an invalid company roster page.");
     for (const r of rows) {
       const id = s(r?.id);
       const name = s(r?.name);
       if (id && name) companies.push({ id, name, type: s(r?.type) });
     }
     const pg = data?.pagination;
+    if (pg?.has_next && !pg?.links?.next) throw new Error("Tidal company roster is missing its next page link.");
     url = pg?.has_next && pg?.links?.next ? rehost(config, String(pg.links.next)) : null;
   }
+  if (url) throw new Error("Tidal company roster exceeded the pagination limit.");
   return companies;
 }
 
@@ -402,19 +405,21 @@ async function pullDevices(
     guard += 1;
     const res: Response = await fetch(url, { headers: jarHeaders(config, jar), cache: "no-store" });
     absorb(jar, res);
-    if (res.status === 400 || res.status === 403 || res.status === 404) return out;
+    if (guard === 1 && (res.status === 400 || res.status === 403 || res.status === 404)) return out;
     if (!res.ok) {
       throw new Error(
         `Tidal ${source.path} ${res.status}: ${await res.text().catch(() => res.statusText)}`,
       );
     }
     const data: any = await res.json();
-    const rows: any[] = Array.isArray(data) ? data : data?.data ?? [];
+    const rows: any[] = Array.isArray(data) ? data : data?.data;
+    if (!Array.isArray(rows)) throw new Error("Tidal returned an invalid device page.");
     for (const r of rows) out.push(source.norm(r, ctx));
 
     // Two pagination shapes: Intune is cursor-based (has_next + links.next);
     // Auvik/SOTI are page-based (current_page/last_page, no has_next).
     const pg = data?.pagination;
+    if (pg?.has_next === true && !pg?.links?.next) throw new Error("Tidal inventory is missing its next page link.");
     let nextUrl: string | null = null;
     if (pg?.has_next === true && pg?.links?.next) {
       // Cursor-based: follow the server-supplied link.
@@ -426,6 +431,9 @@ async function pullDevices(
       // links.next if given, otherwise build the next page ourselves.
       const current = Number(pg.current_page);
       const last = pg.last_page == null ? null : Number(pg.last_page);
+      if (!Number.isSafeInteger(current) || current < 1 || (last !== null && (!Number.isSafeInteger(last) || last < current))) {
+        throw new Error("Tidal returned invalid inventory pagination.");
+      }
       if (last == null || current < last) {
         if (pg.links?.next) {
           nextUrl = rehost(config, String(pg.links.next));
@@ -438,6 +446,7 @@ async function pullDevices(
     }
     url = nextUrl;
   }
+  if (url) throw new Error("Tidal inventory exceeded the pagination limit; no complete source result was returned.");
   return out;
 }
 

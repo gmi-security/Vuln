@@ -108,7 +108,8 @@ export async function artemisStatus(): Promise<{
   }
   try {
     const analyses = await getJson(config, "/api/analyses");
-    const n = Array.isArray(analyses) ? analyses.length : 0;
+    if (!Array.isArray(analyses)) throw new Error("Artemis returned an invalid analysis list.");
+    const n = analyses.length;
     return {
       configured: true,
       reachable: true,
@@ -164,7 +165,7 @@ export async function artemisListAnalyses(): Promise<ArtemisAnalysis[]> {
   const config = artemisConfig();
   if (!config) throw new Error("Artemis is not configured.");
   const rows = await getJson(config, "/api/analyses");
-  if (!Array.isArray(rows)) return [];
+  if (!Array.isArray(rows)) throw new Error("Artemis returned an invalid analysis list.");
   return rows.map((r: any) => ({
     id: String(r?.id ?? r?._id ?? ""),
     target: String(r?.target ?? r?.target_string ?? r?.payload?.data ?? ""),
@@ -190,7 +191,7 @@ export async function artemisTaskResults(
   const data = await getJson(config, `/api/task-results?${params.toString()}`);
   if (Array.isArray(data)) return data;
   if (Array.isArray(data?.data)) return data.data;
-  return [];
+  throw new Error("Artemis returned an invalid task result page.");
 }
 
 // ---- field extractors (defensive against version drift) -------------------
@@ -353,6 +354,7 @@ export async function artemisImportFindings(): Promise<ArtemisFinding[]> {
     if (batch.length === 0) break;
     for (const r of batch) findings.push(mapArtemisResult(r));
     if (batch.length < pageSize) break;
+    if (page === 25) throw new Error("Artemis findings exceeded the pagination limit; no complete result was returned.");
   }
   return findings;
 }

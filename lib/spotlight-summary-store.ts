@@ -1,7 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import { importFreshness, validateSourceRead, type CustomerSourceRead, type CustomerSourceReadRequest, type SourceCveRow } from "./customer-source-read-model";
 import { createSpotlightSummaryAccumulator, SPOTLIGHT_SUMMARY_VERSION as VERSION, spotlightSummaryDefinition,
-  summaryCount, summaryLimits, validateSpotlightSummary, type SpotlightSummary, type SummaryInput } from "./spotlight-summary-model";
+  summaryCount, summaryLimits, validateSpotlightSummary, matchesSpotlightTenant, type SpotlightSummary, type SummaryInput } from "./spotlight-summary-model";
 
 type Database = Pick<Pool, "connect">;
 const LOCK = 804244;
@@ -101,7 +101,7 @@ export function createSpotlightSummaryStore(db: Database) {
       await writer.query(`INSERT INTO public.spotlight_summary_generations
         (company_id,run_id,model_version,source_completed_at,source_rows,count_verification,summary,cve_count,built_by)
         VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9)`, [companyId, runId, VERSION, current.finished_at, total,
-        verified ? "import-count-reconciled" : "completion-marker-only", JSON.stringify(artifact.summary), artifact.rows.length, actor]);
+        verified ? "import-count-reconciled" : "completion-marker-only", JSON.stringify({ ...artifact.summary, vendorScope: artifact.vendorScope }), artifact.rows.length, actor]);
       for (let offset=0; offset<artifact.rows.length; offset+=500) {
         deadline(); await options.checkpoint?.(artifact.scanned);
         await writer.query(`INSERT INTO public.spotlight_summary_cves(company_id,run_id,model_version,cve,severity,cvss,affected_devices,source_instances)
@@ -150,6 +150,8 @@ export function createSpotlightSummaryStore(db: Database) {
           base.projection = { state: saved?.run_id === current.run_id ? "ready" : "pending", currentImportId: current.run_id,
             builtAt: saved ? iso(saved.built_at) : null, modelVersion: VERSION };
           if (!saved) result = unavailable("summary-pending");
+          else if (request.spotlightTenant && (saved.run_id !== current.run_id ||
+              !matchesSpotlightTenant(saved.summary?.vendorScope, request.spotlightTenant, saved.source_rows))) result = unavailable("inconsistent");
           else {
             const aggregate = (await client.query(`SELECT severity,COUNT(*) AS cves,SUM(affected_devices) AS devices,SUM(source_instances) AS findings
               FROM public.spotlight_summary_cves WHERE company_id=$1 AND run_id=$2 AND model_version=$3 GROUP BY severity`, [companyId,saved.run_id,VERSION])).rows;
@@ -157,7 +159,8 @@ export function createSpotlightSummaryStore(db: Database) {
               WHERE company_id=$1 AND run_id=$2 AND model_version=$3 ORDER BY severity_rank DESC,affected_devices DESC,cve LIMIT $4 OFFSET $5`,
               [companyId,saved.run_id,VERSION,limit,offset])).rows;
             try {
-              const summary = saved.summary as SpotlightSummary;
+              // Vendor CID is private routing evidence, never browser metadata.
+              const { vendorScope: _privateScope, ...summary } = saved.summary as SpotlightSummary & { vendorScope?: unknown };
               validateSpotlightSummary(summary, aggregate);
               if (summaryCount(saved.cve_count) !== summary.uniqueCves || page.length !== Math.min(limit,Math.max(0,summary.uniqueCves-offset))) throw new Error("Incomplete summary page.");
               if (summaryCount(saved.source_rows) < summary.sourceInstances + summaryCount(summary.excludedSuppressedInstances) + summary.excludedNonCveInstances) throw new Error("Invalid source row count.");

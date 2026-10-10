@@ -149,7 +149,7 @@ Customer switching cancels and isolates earlier requests. Same-customer refresh 
 
 ## Validation and next implementation
 
-A disabled [registry-backed saved-result preview](customer-saved-source-reads.md#reviewed-registry-selection) now consumes reviewed customer bindings. It can select a saved Defender connection whose tenant and connection/import revision agree. Other scopes fail closed rather than using a global connection. This does not activate bindings, reroute imports or replace platform reporting; CrowdStrike vendor provenance and the wider authority migration remain pending.
+A disabled [registry-backed saved-result preview](customer-saved-source-reads.md#reviewed-registry-selection) now consumes reviewed customer bindings. It can select a saved Defender connection whose tenant and connection/import revision agree. Other scopes fail closed rather than using a global connection. This does not activate bindings, reroute imports or replace platform reporting; CrowdStrike preview now also checks whole-generation CID evidence in Spotlight summary v2. Live upstream verification and the wider authority migration remain pending.
 
 ```sh
 node --experimental-vm-modules --test tests/customer-connector-preview.test.mjs
@@ -166,3 +166,13 @@ Additional command checks: `node --experimental-vm-modules --test tests/customer
 `tests/connector-bindings-postgres.mjs PRIVATE_RESTORE_SOCKET` exercises the actual assignment/export commands, two customers sharing a scanner, optimistic edit conflicts, source changes, scope rules, transactional audit rollback and moved tile ownership in a disposable database. The source metadata is synthetic and provider APIs are never contacted.
 
 Next: verified scope/authority and integration with the common customer-source readers. Actual scope verification and activation remain combined-release gates. Existing stores, schedulers, permissions and source routing remain authoritative.
+
+## All-connector contracts and disabled integrations
+
+The [connector status report](connector-rollout-status.md) covers all 20 integration types. A shared catalog describes findings, inventory, exposures, enrichment, saved queries, AppSec, ticket delivery and orchestration separately. It describes existing data paths and native identity evidence, not an implemented replacement schema. The customer status page includes a readable explanation of storage, lifecycle and routing readiness.
+
+Environment evidence now includes a non-secret revision fingerprint for configured endpoints, cloud/tenant/client identity, and AppSec streams. Changing these fields invalidates review. Secrets never enter the fingerprint; secret rotation remains an explicit operational verification step. The collector also reads only the saved ConnectWise connection revision, preserving its existing credentials and routing.
+
+Customer review can record inventory, enrichment and AppSec scopes independently. AppSec review requires datasets and repositories; scan roles require targets. Delivery and orchestration cannot claim findings authority. The common read-plan checker rejects missing, stale, wrong-customer or unsupported scope and overlapping same-provider data roles. It does not resolve cross-provider overlap, enforce upstream scan scope or activate workers. The registry still enforces `enabled=false`.
+
+User decision, October 10: Burp, Nmap, Intune, IntelOwl and n8n remain available but disabled. Qualys remains planned. No missing credentials should be synthesized, and no active worker or scan should be created for these sources as part of rollout.

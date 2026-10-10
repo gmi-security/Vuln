@@ -6,7 +6,7 @@ import pg from 'pg';
 const require=createRequire(import.meta.url);
 const {createSpotlightSummaryRetention:create}=require('../.worker-build/spotlight-summary/lib/spotlight-summary-retention.js');
 const {createSpotlightSummaryStore:createStore}=require('../.worker-build/spotlight-summary/lib/spotlight-summary-store.js');
-const {createSpotlightSummaryAccumulator}=require('../.worker-build/spotlight-summary/lib/spotlight-summary-model.js');
+const {createSpotlightSummaryAccumulator,SPOTLIGHT_SUMMARY_VERSION}=require('../.worker-build/spotlight-summary/lib/spotlight-summary-model.js');
 const socket=await realpath(process.argv[2]||'.');
 assert.ok(socket.startsWith('/home/codex/vuln-recovery/')&&socket.endsWith('/socket'));
 const options={host:socket,port:55483,user:'codex',connectionTimeoutMillis:5000,statement_timeout:15000};
@@ -28,7 +28,7 @@ try {
     CREATE TABLE patch_ticket_requests(value text);INSERT INTO patch_ticket_requests VALUES('preserve ticket');
     CREATE TABLE elastic_dashboard_queries(value text);INSERT INTO elastic_dashboard_queries VALUES('preserve tile');`);
   for(const file of ['spotlight-source-summaries.sql','spotlight-summary-jobs.sql'])await db.query(await readFile(`docs/sql/${file}`,'utf8'));
-  async function install(company,n,age=100){
+  async function install(company,n,age=100,version=1){
     const result=[];
     const a=createSpotlightSummaryAccumulator(company);
     a.add({source_id:'1',id:'1',company_id:company,cve:'CVE-2026-1000',status:'open',cid:'tenant',aid:'host',raw_cve:'CVE-2026-1000',raw_status:'open',raw_severity:'HIGH',score:7.5,suppressed:false});
@@ -38,11 +38,11 @@ try {
       await db.query("INSERT INTO spotlight_import_runs VALUES($1,$2,'completed',now(),now(),3,1,1)",[run,company]);
       await db.query('INSERT INTO spotlight_import_records VALUES($1,$2)',[run,{keep:true}]);
       await db.query(`INSERT INTO spotlight_summary_generations(company_id,run_id,model_version,source_completed_at,source_rows,count_verification,summary,cve_count,built_at,built_by)
-        VALUES($1,$2,1,now(),1,'import-count-reconciled',$3,1,now()-make_interval(days=>$4,secs=>$5),'tester')`,[company,run,summary,age,i]);
-      await db.query("INSERT INTO spotlight_summary_cves(company_id,run_id,model_version,cve,severity,cvss,affected_devices,source_instances) VALUES($1,$2,1,'CVE-2026-1000','HIGH',7.5,1,1)",[company,run]);
+        VALUES($1,$2,$6,now(),1,'import-count-reconciled',$3,1,now()-make_interval(days=>$4,secs=>$5),'tester')`,[company,run,summary,age,i,version]);
+      await db.query("INSERT INTO spotlight_summary_cves(company_id,run_id,model_version,cve,severity,cvss,affected_devices,source_instances) VALUES($1,$2,$3,'CVE-2026-1000','HIGH',7.5,1,1)",[company,run,version]);
     }
     await db.query('INSERT INTO spotlight_import_current VALUES($1,$2)',[company,result[0]]);
-    await db.query('INSERT INTO spotlight_summary_current VALUES($1,$2,1)',[company,result[0]]);
+    await db.query('INSERT INTO spotlight_summary_current VALUES($1,$2,$3)',[company,result[0],version]);
     return result;
   }
   const ids=await install('CO-A',8),other=await install('CO-B',8);
@@ -79,7 +79,7 @@ try {
   assert.equal((await db.query("SELECT count(*)::int n FROM spotlight_summary_cves WHERE company_id='CO-ROLLBACK'")).rows[0].n,6);
   await db.query('DROP TRIGGER reject_retention ON spotlight_summary_generations;DROP FUNCTION reject_retention()');
   ok('an interrupted batch rolls back previously deleted headers and child rows');
-  const readIds=await install('CO-READER',5);
+  const readIds=await install('CO-READER',5,100,SPOTLIGHT_SUMMARY_VERSION);
   await db.query("UPDATE spotlight_summary_current SET run_id=$1 WHERE company_id='CO-READER'",[readIds[4]]);
   let pruned=false;
   const reader=createStore({connect:async()=>{

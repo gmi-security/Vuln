@@ -92,13 +92,15 @@ export async function automateListClients(config: AutomateConfig): Promise<Autom
       );
     }
     const rows: any[] = await res.json();
-    if (!Array.isArray(rows) || rows.length === 0) break;
+    if (!Array.isArray(rows)) throw new Error("Automate returned an invalid clients page.");
+    if (rows.length === 0) break;
     for (const r of rows) {
       const id = String(r?.Id ?? "").trim();
       const name = String(r?.Name ?? r?.Company ?? "").trim();
       if (id && name) out.push({ id, name });
     }
     if (rows.length < PAGE) break;
+    if (page === MAX_PAGES) throw new Error("Automate clients exceeded the pagination limit; no complete roster was returned.");
   }
   return out;
 }
@@ -150,6 +152,7 @@ export async function automateListComputers(
   config: AutomateConfig,
   clientId: string,
 ): Promise<AutomateAsset[]> {
+  if (!/^[1-9][0-9]*$/.test(clientId)) throw new Error("Choose a valid Automate customer ID.");
   const token = await automateToken(config);
   const headers = authHeaders(config, token);
   const condition = encodeURIComponent(`Client/Id=${clientId}`);
@@ -165,9 +168,14 @@ export async function automateListComputers(
       );
     }
     const rows: any[] = await res.json();
-    if (!Array.isArray(rows) || rows.length === 0) break;
+    if (!Array.isArray(rows)) throw new Error("Automate returned an invalid computers page.");
+    if (rows.length === 0) break;
+    if (rows.some(row => row?.Client?.Id != null && String(row.Client.Id) !== clientId)) {
+      throw new Error("Automate returned devices for a different customer.");
+    }
     out.push(...rows.map(normalizeComputer).filter((a) => a.hostname));
     if (rows.length < PAGE) break;
+    if (page === MAX_PAGES) throw new Error("Automate computers exceeded the pagination limit; no complete inventory was returned.");
   }
   return out;
 }
