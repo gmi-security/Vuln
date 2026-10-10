@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {reverseReceiptRequest,reverseSnapshotDigest,prepareOwnedReverseExport,verifyOwnedReverseRestore} from '../lib/db/defender-reverse-receipt.mjs';
 import {ownershipTransition} from '../lib/db/defender-writer-ownership.mjs';
+import {createReverseDigest,reverseValueDigest} from '../lib/db/defender-reverse-digest.mjs';
 const id='12345678-1234-1234-1234-123456789abc';
 test('reverse receipt requests reject caller-selected generations and declared evidence before storage access',async()=>{
   const r={companyId:'CO-TEST',attemptId:id,expectedRevision:1,actor:'fixture',reason:'test'};
@@ -26,4 +27,13 @@ test('aborting a reverse attempt preserves the selected generation while invalid
   const result=ownershipTransition(state,{action:'abort',attemptId:id,expectedRevision:3,actor:'fixture',reason:'retry'});
   assert.deepEqual(result.data.lastCompleted,lastCompleted);assert.deepEqual(result.data.participants,{});assert.equal(result.data.attempt,null);assert.equal(result.epoch,3);assert.equal(result.phase,'sql');
   assert.notEqual(result.data.lastCompleted,lastCompleted);
+});
+test('incremental digest matches complete snapshot across bucket order and refuses duplicate IDs',()=>{
+  const rows=Array.from({length:1001},(_,i)=>[`finding-${i}`,{id:`finding-${i}`,companyId:i%2?'CO-A':'CO-B',nested:[i,i+1]}]);
+  const s={findings:rows,assets:[],settings:{enabled:true}},stream=createReverseDigest();
+  stream.addValue('settings',s.settings);stream.startMap('assets');stream.startMap('findings');
+  for(let bucket=0;bucket<7;bucket++)for(let i=rows.length-1;i>=0;i--)if(i%7===bucket)stream.addEntryHash('findings',rows[i][0],reverseValueDigest(rows[i]));
+  assert.equal(stream.finish(),reverseSnapshotDigest(s));
+  assert.throws(()=>stream.addEntryHash('findings',rows[0][0],reverseValueDigest(rows[0])),/identity/);
+  assert.throws(()=>stream.startMap('assets'),/Duplicate/);
 });

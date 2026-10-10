@@ -3,6 +3,7 @@ CREATE TABLE defender_reverse_exports (
  company_id text NOT NULL, attempt_id uuid NOT NULL,
  ownership_revision bigint NOT NULL, ownership_epoch bigint NOT NULL,
  projection_id uuid NOT NULL, workflow_revision bigint NOT NULL,
+ digest_version smallint NOT NULL DEFAULT 2 CHECK(digest_version=2),
  artifact jsonb NOT NULL CHECK(octet_length(artifact::text)<=33554432),
  baseline_digest text NOT NULL, expected_digest text NOT NULL,
  source_identity jsonb NOT NULL, source_stamp jsonb NOT NULL,
