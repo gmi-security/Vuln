@@ -13,6 +13,7 @@ import {verifyDefenderWorkflow} from './defender-workflow-validation.mjs';
 import {verifyLegacyHandoff} from './defender-handoff-validation.mjs';
 import {verifyWriterOwnership} from './defender-ownership-validation.mjs';
 import {verifyReverseExport} from './defender-reverse-export-validation.mjs';
+import {verifyReverseReceipts} from './defender-reverse-receipt-validation.mjs';
 const socket=await realpath(process.argv[2]||'.');assert.ok(socket.startsWith('/home/codex/vuln-recovery/')&&socket.endsWith('/socket'));
 const options={host:socket,port:55483,user:'codex',connectionTimeoutMillis:5000,statement_timeout:15000,query_timeout:20000};
 const suffix=randomUUID().replaceAll('-',''),sourceName=`vuln2_shadow_source_test_${suffix}`,targetName=`vuln2_shadow_test_${suffix}`;
@@ -70,6 +71,9 @@ try{
   }});
   exportPool=new pg.Pool({...options,database:targetName,max:1});
   await verifyReverseExport({source,target,pool,exportPool,company,run,modules,pass});
+  await verifyReverseReceipts({source,target,peer:editor,pool,company,run,modules,pass,newClient:async()=>{
+    const c=new pg.Client({...options,database:targetName});await c.connect();return c;
+  }});
   const pinned=await readDefenderRefreshSource(source,company.id,{afterSelected:async selected=>{
     assert.equal(selected,run);await writer.query('UPDATE defender_connections SET current_run=$1 WHERE company_id=$2',[nextRun,company.id]);
     await writer.query('DELETE FROM defender_records WHERE run_id=$1',[run]);await writer.query('DELETE FROM defender_devices WHERE run_id=$1',[run]);
