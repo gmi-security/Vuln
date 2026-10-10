@@ -71,7 +71,9 @@ export function createSpotlightSummaryStore(db: Database) {
         deadline(); await options.checkpoint?.(accumulator.scanned);
         const rows: SummaryInput[] = (await source.query(`SELECT r.source_id,r.cve,r.status,r.company_id,
           v.id,v.cid,v.aid,v.status AS raw_status,v.cve->>'id' AS raw_cve,v.cve->>'severity' AS raw_severity,
-          v.cve->'base_score' AS score,v.suppression_info->'is_suppressed' AS suppressed
+          v.cve->'base_score' AS score,v.suppression_info->'is_suppressed' AS suppressed,
+          (r.status='closed' AND r.cve='CS-'||r.source_id AND
+            r.raw=jsonb_build_object('id',r.source_id,'unresolved',true)) AS local_placeholder
           FROM (SELECT source_id,cve,status,company_id,raw FROM public.spotlight_import_records
             WHERE run_id=$1 AND tenant_key=$2 AND source_id>$3 ORDER BY source_id LIMIT 2000) r
           CROSS JOIN LATERAL jsonb_to_record(r.raw) AS v(id text,cid jsonb,aid jsonb,status text,cve jsonb,suppression_info jsonb)

@@ -1,5 +1,6 @@
 import { DEMO_ASSETS, DEMO_PORTS, VULN_CATALOG } from "@/lib/catalog";
 import { normalizeCompanyName, findNearDuplicateCompanyName } from "@/lib/company-name";
+import { connectorImportWarnings } from "@/lib/connector-import-result";
 import { getDemoProfile, isPlanned } from "@/lib/connectors";
 import {
   CORRELATED_CONNECTORS,
@@ -4651,17 +4652,18 @@ function nameTokens(text: string): Set<string> {
   );
 }
 
-// Resolve a SpiderFoot scan to an existing company by token overlap between the
-// scan name/target and the company name. Returns null if nothing matches — we
-// never auto-create companies from OSINT scans to avoid polluting the roster.
-function matchCompanyForScan(
+// Legacy scan name/target matching. Keep all equally ranked candidates so a
+// tie cannot choose a customer by insertion order. Reviewed target bindings
+// are still required before replacing this heuristic with registry routing.
+function matchingCompaniesForScan(
   s: StoreShape,
   scanName: string,
   scanTarget: string,
-): string | null {
+): string[] {
   const scanToks = nameTokens(`${scanName} ${scanTarget}`);
-  if (scanToks.size === 0) return null;
-  let best: { id: string; score: number } | null = null;
+  if (scanToks.size === 0) return [];
+  let bestScore = 0;
+  let best: string[] = [];
   for (const company of s.companies.values()) {
     const compToks = nameTokens(company.name);
     let score = 0;
@@ -4669,23 +4671,28 @@ function matchCompanyForScan(
       if (scanToks.has(t)) score += 1;
       else if ([...scanToks].some((x) => x.includes(t) || t.includes(x))) score += 1;
     }
-    if (score > 0 && (!best || score > best.score)) best = { id: company.id, score };
+    if (score > bestScore) { best = [company.id]; bestScore = score; }
+    else if (score > 0 && score === bestScore) best.push(company.id);
   }
-  return best?.id ?? null;
+  return best;
+}
+function matchCompanyForScan(s: StoreShape, scanName: string, scanTarget: string): string | null {
+  const matches = matchingCompaniesForScan(s, scanName, scanTarget);
+  return matches.length === 1 ? matches[0] : null;
 }
 
 // Resolve a company by name (case-insensitive exact, then substring either way).
 function resolveCompanyByName(s: StoreShape, name: string): string | null {
   const n = name.trim().toLowerCase();
   if (!n) return null;
-  const exact = Array.from(s.companies.values()).find(
+  const exact = Array.from(s.companies.values()).filter(
     (c) => c.name.toLowerCase() === n,
   );
-  if (exact) return exact.id;
-  const partial = Array.from(s.companies.values()).find(
+  if (exact.length) return exact.length === 1 ? exact[0].id : null;
+  const partial = Array.from(s.companies.values()).filter(
     (c) => c.name.toLowerCase().includes(n) || n.includes(c.name.toLowerCase()),
   );
-  return partial?.id ?? null;
+  return partial.length === 1 ? partial[0].id : null;
 }
 
 // Explicit Artemis-tag -> company routing for tags whose label doesn't overlap
@@ -4737,7 +4744,7 @@ export async function importFromSpiderfoot(): Promise<
     }
     const companyId = matchCompanyForScan(s, sf.name, sf.target);
     if (!companyId) {
-      skipped.push({ scan: label, reason: "no matching company" });
+      skipped.push({ scan: label, reason: "no unambiguous matching company" });
       continue;
     }
 
@@ -5027,14 +5034,15 @@ export function importNmapScan(hosts: NmapHost[]): NmapImportResult {
     if (!identifier) continue;
     // Match by an existing asset first (keeps customer attribution honest) —
     // but only when every inventory match agrees on one owner; asset strings
-    // shared across customers are inconclusive. Then fall back to fuzzy
-    // name/host matching, and scope the asset lookup to the resolved company
+    // shared across customers are inconclusive and cannot be overridden by a
+    // name guess. With no inventory match, fall back to unique name/host
+    // matching, and scope the asset lookup to the resolved company
     // so inventory context is never borrowed cross-tenant.
     const owners = assetOwners(s, host.host, host.ip);
     const companyId =
       owners.size === 1
         ? owners.values().next().value!
-        : matchCompanyForScan(s, host.host, host.ip);
+        : owners.size > 1 ? null : matchCompanyForScan(s, host.host, host.ip);
     if (!companyId) {
       skipped += 1;
       continue;
@@ -5646,7 +5654,9 @@ export async function syncAllConnectors(): Promise<SyncAllEntry[]> {
       if (r && typeof r === "object" && "error" in r) {
         out.push({ connector: job.connector, configured: true, ok: false, error: (r as any).error });
       } else {
-        out.push({ connector: job.connector, configured: true, ok: true, result: r });
+        const warnings = connectorImportWarnings(r);
+        out.push({ connector: job.connector, configured: true, ok: warnings.length === 0, result: r,
+          ...(warnings.length ? { error: `Import needs attention: ${warnings.join("; ")}. Successful results were retained.` } : {}) });
       }
     } catch (err) {
       out.push({
@@ -5802,21 +5812,26 @@ export async function importFromArtemis(): Promise<
 
   for (const [tag, items] of byTag) {
     // Resolution order: explicit tag->company alias, then token overlap on the
-    // tag, then on the first asset.
+    // tag, then on the first asset only when the tag did not match at all.
+    // An ambiguous tag or explicit alias cannot be overridden by an asset guess.
     const alias = ARTEMIS_TAG_COMPANY.find((a) => a.pattern.test(tag));
-    const companyId =
-      (alias ? resolveCompanyByName(s, alias.company) : null) ??
-      matchCompanyForScan(s, tag, "") ??
-      matchCompanyForScan(s, "", items[0]?.asset ?? "");
+    const tagMatches = matchingCompaniesForScan(s, tag, "");
+    const companyId = alias ? resolveCompanyByName(s, alias.company) :
+      tagMatches.length ? (tagMatches.length === 1 ? tagMatches[0] : null) : matchCompanyForScan(s, "", items[0]?.asset ?? "");
     if (!companyId) {
-      skipped.push({ tag, reason: "no matching company" });
+      skipped.push({ tag, reason: "no unambiguous matching company" });
+      continue;
+    }
+    const existingScans = Array.from(s.scans.values()).filter((sc) => sc.externalRef === `artemis:${tag}`);
+    if (existingScans.some(sc => sc.companyId !== companyId)) {
+      skipped.push({ tag, reason: "existing scan belongs to a different company; review its mapping" });
       continue;
     }
     const company = s.companies.get(companyId)!;
     const folder = ensureFolder(s, companyId, "Artemis");
     const externalRef = `artemis:${tag}`;
 
-    let scan = Array.from(s.scans.values()).find((sc) => sc.externalRef === externalRef);
+    let scan = existingScans[0];
     if (!scan) {
       const scanId = nextId(s, "SCAN");
       scan = {
@@ -5935,11 +5950,19 @@ export async function importTidalInventory(
 
   let companiesCreated = 0;
   let assetsUpserted = 0;
+  const importErrors = [...(errors ?? [])];
+  const ambiguousCustomers = new Set<string>();
   for (const t of assets) {
     const customer = t.customer.trim() || "Unassigned";
-    let company = Array.from(s.companies.values()).find(
+    const candidates = Array.from(s.companies.values()).filter(
       (c) => normalizeCompanyName(c.name) === normalizeCompanyName(customer),
     );
+    if (candidates.length > 1) {
+      if (!ambiguousCustomers.has(customer)) importErrors.push(`${customer}: multiple platform companies match; review customer mapping.`);
+      ambiguousCustomers.add(customer);
+      continue;
+    }
+    let company = candidates[0];
     if (!company) {
       const created = createCompany({ name: customer });
       if ("error" in created) continue;
@@ -5975,7 +5998,7 @@ export async function importTidalInventory(
   }
 
   await flushNow();
-  return { companiesCreated, assetsUpserted, findingsRescored, errors, autoScan };
+  return { companiesCreated, assetsUpserted, findingsRescored, errors: importErrors.length ? importErrors : errors, autoScan };
 }
 
 // Live sync: sign in to Tidal with email + password and pull the inventory
@@ -6028,7 +6051,9 @@ function resolveAutomateAliasCompany(
   clientName: string,
 ): InternalCompany | undefined {
   if (normalizeCompanyName(clientName) === normalizeCompanyName("Global Market Innovators, Inc.")) {
-    return Array.from(s.companies.values()).find((c) => c.kind === "internal");
+    const matches = Array.from(s.companies.values()).filter((c) => c.kind === "internal");
+    if (matches.length > 1) throw new Error("Multiple internal companies match; review customer mapping.");
+    return matches[0];
   }
   return undefined;
 }
@@ -6058,9 +6083,14 @@ export async function importFromAutomate(): Promise<AutomateImportResult | { err
   let assetsUpserted = 0;
   for (const client of clients) {
     const clientNorm = normalizeCompanyName(client.name);
-    let company =
-      Array.from(s.companies.values()).find((c) => normalizeCompanyName(c.name) === clientNorm) ??
-      resolveAutomateAliasCompany(s, client.name);
+    const candidates = Array.from(s.companies.values()).filter((c) => normalizeCompanyName(c.name) === clientNorm);
+    if (candidates.length > 1) {
+      errors.push(`${client.name}: multiple platform companies match; review customer mapping.`);
+      continue;
+    }
+    let company: InternalCompany | undefined;
+    try { company = candidates[0] ?? resolveAutomateAliasCompany(s, client.name); }
+    catch { errors.push(`${client.name}: multiple internal companies match; review customer mapping.`); continue; }
     if (company) {
       companiesMatched += 1;
     } else {
@@ -6498,16 +6528,20 @@ async function importEndpoints(
   let internal: InternalCompany | undefined;
   if (customerName) {
     // Pin to a named client company; create it if first encounter.
-    internal = Array.from(s.companies.values()).find(
+    const matches = Array.from(s.companies.values()).filter(
       (c) => normalizeCompanyName(c.name) === normalizeCompanyName(customerName),
     );
+    if (matches.length > 1) throw new Error("Multiple platform companies match the endpoint customer; review customer mapping.");
+    internal = matches[0];
     if (!internal) {
       const created = createCompany({ name: customerName });
       if ("error" in created) throw new Error(created.error);
       internal = s.companies.get(created.id)!;
     }
   } else {
-    internal = Array.from(s.companies.values()).find((c) => c.kind === "internal");
+    const matches = Array.from(s.companies.values()).filter((c) => c.kind === "internal");
+    if (matches.length > 1) throw new Error("Multiple internal companies match the endpoint tenant; review customer mapping.");
+    internal = matches[0];
     if (!internal) {
       const created = createCompany({ name: "GMI", kind: "internal" });
       if ("error" in created) throw new Error(created.error);
@@ -6609,11 +6643,16 @@ export async function importFromCrowdstrike(
       });
       continue;
     }
-    const r = await importEndpoints(s, devices, "crowdstrike", config.customerName);
-    assetsUpserted += r.assetsUpserted;
-    findingsRescored += r.findingsRescored;
-    if (r.autoScan) autoScan = r.autoScan;
-    tenants.push({ label: config.label, company: r.company, assetsUpserted: r.assetsUpserted });
+    try {
+      const r = await importEndpoints(s, devices, "crowdstrike", config.customerName);
+      assetsUpserted += r.assetsUpserted;
+      findingsRescored += r.findingsRescored;
+      if (r.autoScan) autoScan = r.autoScan;
+      tenants.push({ label: config.label, company: r.company, assetsUpserted: r.assetsUpserted });
+    } catch (err) {
+      tenants.push({ label: config.label, company: config.customerName ?? "(internal)", assetsUpserted: 0,
+        error: err instanceof Error ? err.message : "Failed to import this tenant's device inventory." });
+    }
   }
   // Every tenant failed — surface as a top-level error rather than a silent
   // "0 assets synced" result.
@@ -6760,6 +6799,7 @@ export type NessusImportResult = {
   scansImported: number;
   findingsImported: number;
   skipped: number;
+  errors?: string[];
 };
 
 // Import the scanner's folder structure as companies: each Nessus folder
@@ -6810,12 +6850,18 @@ export async function importFromNessus(): Promise<
   const folderToCompany = new Map<number, string>();
   let companiesCreated = 0;
   let companiesMatched = 0;
+  const errors: string[] = [];
   for (const folder of folders) {
     if (folder.type === "trash" || folder.type === "main") continue;
     if (BUILTIN_FOLDERS.has(folder.name.trim().toLowerCase())) continue;
-    const existing = Array.from(s.companies.values()).find(
+    const matches = Array.from(s.companies.values()).filter(
       (c) => normalizeCompanyName(c.name) === normalizeCompanyName(folder.name),
     );
+    if (matches.length > 1) {
+      errors.push(`${folder.name}: multiple platform companies match; review customer mapping.`);
+      continue;
+    }
+    const existing = matches[0];
     let companyId: string;
     if (existing) {
       companyId = existing.id;
@@ -6849,9 +6895,15 @@ export async function importFromNessus(): Promise<
     // Nessus scans are recurring objects: the same id persists across every
     // scheduled run, only last_modification_date advances. Find any record
     // already linked to this scan id.
-    const existing = Array.from(s.scans.values()).find(
+    const existingScans = Array.from(s.scans.values()).filter(
       (sc) => sc.vendor?.nessusScanId === summary.id,
     );
+    if (existingScans.some(sc => sc.companyId !== companyId)) {
+      errors.push(`${summary.name}: existing scan belongs to a different company; review its folder mapping.`);
+      skipped += 1;
+      continue;
+    }
+    const existing = existingScans[0];
     if (existing) {
       // Older records (imported before this field existed, or created by the
       // live Start-Scan flow which doesn't set it) have no stamped
@@ -6940,6 +6992,7 @@ export async function importFromNessus(): Promise<
     scansImported,
     findingsImported,
     skipped,
+    errors,
   };
 }
 

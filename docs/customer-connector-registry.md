@@ -149,7 +149,7 @@ Customer switching cancels and isolates earlier requests. Same-customer refresh 
 
 ## Validation and next implementation
 
-A disabled [registry-backed saved-result preview](customer-saved-source-reads.md#reviewed-registry-selection) now consumes reviewed customer bindings. It can select a saved Defender connection whose tenant and connection/import revision agree. Other scopes fail closed rather than using a global connection. This does not activate bindings, reroute imports or replace platform reporting; CrowdStrike preview now also checks whole-generation CID evidence in Spotlight summary v2. Live upstream verification and the wider authority migration remain pending.
+A disabled [registry-backed saved-result preview](customer-saved-source-reads.md#reviewed-registry-selection) now consumes reviewed customer bindings. It can select a saved Defender connection whose tenant and connection/import revision agree. Other scopes fail closed rather than using a global connection. This does not activate bindings, reroute imports or replace platform reporting; CrowdStrike preview now also checks whole-generation CID evidence in Spotlight summary v3. Live upstream verification and the wider authority migration remain pending.
 
 ```sh
 node --experimental-vm-modules --test tests/customer-connector-preview.test.mjs

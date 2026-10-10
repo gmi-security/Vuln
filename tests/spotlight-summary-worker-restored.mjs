@@ -35,7 +35,7 @@ try {
     const job=(await db.query('SELECT * FROM spotlight_summary_jobs WHERE company_id=$1',[baseline.companyId])).rows[0];
     assert.equal(job.status,'succeeded');assert.equal(job.attempts,1);assert.equal(Number(job.source_rows),baseline.sourceRows);
     const header=(await db.query('SELECT * FROM spotlight_summary_generations WHERE company_id=$1',[baseline.companyId])).rows[0];
-    const {vendorScope,...publicSummary}=header.summary;assert.deepEqual(publicSummary,baseline.summary);assert.equal(vendorScope.version,1);assert.equal(vendorScope.rows,baseline.sourceRows);assert.equal(Number(header.source_rows),baseline.sourceRows);
+    const {vendorScope,...publicSummary}=header.summary;assert.deepEqual(publicSummary,baseline.summary);assert.equal(vendorScope.version,2);assert.equal(vendorScope.rows,baseline.sourceRows);assert.equal(Number(header.source_rows),baseline.sourceRows);
     const all=(await db.query(`SELECT cve,severity,cvss,affected_devices,source_instances FROM spotlight_summary_cves
       WHERE company_id=$1 AND run_id=$2 AND model_version=$3 ORDER BY severity_rank DESC,affected_devices DESC,cve`,[baseline.companyId,baseline.runId,SPOTLIGHT_SUMMARY_VERSION])).rows;
     assert.deepEqual(all.map(v=>({cve:v.cve,severity:v.severity,cvss:v.cvss,affectedDevices:Number(v.affected_devices),sourceInstances:Number(v.source_instances)})),baseline.cves);
@@ -46,6 +46,12 @@ try {
     }
     const guardedCid=vendorScope.tenantId??'0'.repeat(32);
     const tenantEvidence=matchesSpotlightTenant(vendorScope,guardedCid,baseline.sourceRows);
+    const independent=JSON.parse(await readFile('tenant-evidence-audit.json','utf8'));
+    assert.equal(independent.rows,baseline.sourceRows);assert.equal(independent.sourceMutation,0);
+    assert.equal(vendorScope.localPlaceholderRows,independent.exactLocalPlaceholders);
+    assert.equal(vendorScope.missingRows,independent.invalidCidOutsidePlaceholders);
+    assert.equal(vendorScope.mixed,independent.mixedRecognizedCid);
+    assert.ok(tenantEvidence,'all actual vendor records in this independently audited generation must prove tenant scope');
     const guarded=await reader.read({companyId:baseline.companyId,now:new Date(),staleAfterMs:86400000,limit:100,spotlightTenant:guardedCid});
     assert.equal(guarded.state,tenantEvidence?'available':'inconsistent');
     if(tenantEvidence)assert.deepEqual(guarded.summary,baseline.summary);
@@ -53,7 +59,7 @@ try {
     assert.match(await once(baseline.companyId),/"state":"idle"/);
     assert.equal((await db.query('SELECT count(*)::int n FROM spotlight_summary_jobs WHERE company_id=$1',[baseline.companyId])).rows[0].n,1);
     console.log(JSON.stringify({companyId:baseline.companyId,sourceRows:baseline.sourceRows,allCvesMatched:all.length,tenantEvidence,
-      tenantEvidenceDetail:{missingOrInvalidRows:vendorScope.missingRows,mixed:vendorScope.mixed,hasRecognizedCid:vendorScope.tenantId!==null},
+      tenantEvidenceDetail:{missingOrInvalidRows:vendorScope.missingRows,localPlaceholderRows:vendorScope.localPlaceholderRows,mixed:vendorScope.mixed,hasRecognizedCid:vendorScope.tenantId!==null},
       workerElapsedMs:elapsedMs,savedReadMs:timings,attempts:job.attempts,restart:'idle-no-new-job',productionChanges:0}));
   }
 } finally {

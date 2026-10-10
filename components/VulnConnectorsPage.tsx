@@ -18,6 +18,7 @@ import {
 import VulnShell from "@/components/VulnShell";
 import { PanelCard, Pill } from "@/components/ui";
 import type { Connector, ConnectorStatus } from "@/lib/types";
+import { connectorImportWarnings } from "@/lib/connector-import-result";
 
 type CardData = {
   id: string;
@@ -157,22 +158,13 @@ function summarizeSync(result: any): string {
   const skipped = Array.isArray(result.skipped) ? result.skipped.length : (typeof result.skipped === "number" ? result.skipped : 0);
   if (skipped) parts.push(`${skipped} skipped`);
   const summary = parts.length ? `Synced — ${parts.join(", ")}.` : "Sync complete.";
-  if (Array.isArray(result.truncatedTenants) && result.truncatedTenants.length) {
-    return (
-      `${summary} ⚠ Hit the pagination safety limit for ${result.truncatedTenants.join(", ")} — ` +
-      "there are more open findings than this sync fetched. The count above is a floor, not the real total. " +
-      "This should not happen under normal use; investigate before trusting this tenant's numbers."
-    );
-  }
-  return summary;
+  const warnings = connectorImportWarnings(result);
+  return warnings.length ? `${summary} Needs attention: ${warnings.join("; ")}. Successful results were retained.` : summary;
 }
 
-// A sync result carries a truncation warning worth flagging as attention-
-// needed (ok: false) even though data did import — presenting a silently
-// incomplete count as a clean success is exactly the bug this is guarding
-// against.
+// Partial imports and ownership conflicts must not look like a clean success.
 function syncOk(result: any): boolean {
-  return !(result && Array.isArray(result.truncatedTenants) && result.truncatedTenants.length);
+  return connectorImportWarnings(result).length === 0;
 }
 
 function summarizeOsint(result: any): string {

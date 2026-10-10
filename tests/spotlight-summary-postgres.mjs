@@ -26,9 +26,10 @@ try {
     CREATE TABLE spotlight_import_records(run_id uuid,tenant_key text,company_id text,source_id text,cve text,status text,raw jsonb,PRIMARY KEY(run_id,tenant_key,source_id));`);
   await db.query(migration);
   ok('explicit migration required; no automatic schema or source mutation');
-  async function install(company,entries) {
+  async function install(company,entries,storedFields={}) {
     const run=randomUUID();await db.query("INSERT INTO spotlight_import_runs VALUES($1,$2,'completed',now(),now(),3,$3,$3)",[run,company,entries.length]);
-    for(const raw of entries)await db.query('INSERT INTO spotlight_import_records VALUES($1,$2,$2,$3,$4,$5,$6)',[run,company,raw.id,raw.cve.id,raw.status,raw]);
+    for(const raw of entries)await db.query('INSERT INTO spotlight_import_records VALUES($1,$2,$2,$3,$4,$5,$6)',
+      [run,company,storedFields.source_id??raw.id,storedFields.cve??raw.cve?.id,storedFields.status??raw.status,raw]);
     await db.query('INSERT INTO spotlight_import_current VALUES($1,$2) ON CONFLICT(tenant_key) DO UPDATE SET run_id=EXCLUDED.run_id',[company,run]);return run;
   }
   const first=await install('CO-A',[sample('1'),sample('2'),sample('3','CVE-2026-2000','other')]);
@@ -95,6 +96,34 @@ try {
   assert.equal((await store.read(request)).state,'available');
   assert.equal((await store.read({...request,spotlightTenant:'a'.repeat(32)})).state,'inconsistent');
   ok('a second CID in a closed finding blocks registry routing without altering legacy saved-count semantics');
+  const local={id:'gone',unresolved:true};
+  const localFields={cve:'CS-gone',status:'closed'};
+  await install('CO-LOCAL',[local],localFields);
+  const localRequest={...request,companyId:'CO-LOCAL',spotlightTenant:'a'.repeat(32)};
+  await store.build('CO-LOCAL','tester');
+  assert.equal((await store.read(localRequest)).state,'inconsistent','placeholders alone do not prove vendor scope');
+  // Use a new completed import with both a vendor record and a local placeholder.
+  const nextLocal=await install('CO-LOCAL',[sample('actual')]);
+  await db.query('INSERT INTO spotlight_import_records VALUES($1,$2,$2,$3,$4,$5,$6)',
+    [nextLocal,'CO-LOCAL',local.id,localFields.cve,localFields.status,local]);
+  await db.query('UPDATE spotlight_import_runs SET expected_count=2,hydrated_count=2 WHERE id=$1',[nextLocal]);
+  await store.build('CO-LOCAL','tester');
+  const localRead=await noRaw.read(localRequest);assert.equal(localRead.state,'available');assert.equal(localRead.summary.sourceInstances,1);
+  assert.doesNotMatch(JSON.stringify(localRead),/vendorScope|localPlaceholderRows|aaaaaaaa/);
+  const privateScope=(await db.query('SELECT summary->\'vendorScope\' AS scope FROM spotlight_summary_generations WHERE run_id=$1',[nextLocal])).rows[0].scope;
+  assert.equal(privateScope.localPlaceholderRows,1);assert.equal(privateScope.missingRows,0);assert.equal(privateScope.rows,2);
+  assert.deepEqual((await db.query('SELECT raw FROM spotlight_import_records WHERE run_id=$1 AND source_id=$2',[nextLocal,'gone'])).rows[0].raw,local);
+  ok('only exact locally generated placeholders bypass CID checking, preserve counts and never establish tenant scope by themselves');
+  for(const raw of [{...local,extra:true},{...local,unresolved:'true'},{...local,cid:null},{...local,status:'closed'},
+    {...sample('gone'),cid:undefined,status:'closed',unresolved:true}]) {
+    const run=await install('CO-LOOKALIKE',[raw],localFields);await store.build('CO-LOOKALIKE','tester');
+    assert.equal((await noRaw.read({...request,companyId:'CO-LOOKALIKE',spotlightTenant:'a'.repeat(32)})).state,'inconsistent');
+    const scope=(await db.query('SELECT summary->\'vendorScope\' AS scope FROM spotlight_summary_generations WHERE run_id=$1',[run])).rows[0].scope;
+    assert.equal(scope.localPlaceholderRows,0);assert.equal(scope.missingRows,1);
+  }
+  await install('CO-LOOKALIKE',[local],{...localFields,cve:'CS-other'});await store.build('CO-LOOKALIKE','tester');
+  assert.equal((await noRaw.read({...request,companyId:'CO-LOOKALIKE',spotlightTenant:'a'.repeat(32)})).state,'inconsistent');
+  ok('extra fields, string booleans, real closed vendor findings and incorrect persisted placeholder identity remain untrusted');
   console.log(JSON.stringify({passed:checks,productionChanges:0}));
 } finally {
   await db?.end();await Promise.all(disconnected);if(created)await admin.query(`DROP DATABASE ${name}`);await admin.end();

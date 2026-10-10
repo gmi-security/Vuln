@@ -24,6 +24,7 @@ let browser, page, checks = 0; const pass = message => { checks++; console.log('
 const artifacts = await mkdtemp(join(tmpdir(), 'vuln2-connectors-browser-'));
 const companies = [{ id: 'CO-A', name: 'Fixture Alpha' }, { id: 'CO-B', name: 'Fixture Beta' }, { id: 'CO-EMPTY', name: 'Fixture Empty' }];
 const calls = [], errors = [], unexpected = []; let fail = false, pending = false, release;
+let shared = false, partial = true;
 function status(id) {
   return { companyId: id, companyName: companies.find(c => c.id === id).name, checkedAt: '2026-10-09T19:00:00Z', registryAvailable: id !== 'CO-A',
     items: id === 'CO-EMPTY' ? [] : [{ id: id+'-record', provider: id === 'CO-A' ? 'defender' : 'crowdstrike', evidence: 'Saved customer connection', configuration: 'Configuration recorded',
@@ -49,6 +50,17 @@ try {
     calls.push({ path: url.pathname, company: url.searchParams.get('companyId'), method: request.method() });
     const json = (data, code = 200) => route.fulfill({ status: code, contentType: 'application/json', body: JSON.stringify(data) }).catch(() => {});
     if (url.pathname === '/api/auth/session') return json({ user: { name: 'Fixture member' }, expires: '2099-01-01T00:00:00Z' });
+    if (shared) {
+      if (url.pathname === '/api/connectors') return json({connectors:[{id:'nessus',name:'Fixture Nessus',vendor:'Fixture',kind:'Scanner',
+        description:'Synthetic scanner',capabilities:[],envVars:[],configured:true,status:'Connected',docsUrl:'https://example.invalid'}]});
+      if (url.pathname === '/api/integrations') return json({integrations:[]});
+      if (url.pathname === '/api/elastic-vulnerabilities/status') return json({enabled:false});
+      if (url.pathname === '/api/osint/preview') return json({preview:{companies:0,domainsTotal:0,perCompany:[]}});
+      if (url.pathname === '/api/connectors/sync-all' && request.method() === 'GET') return json({status:null});
+      if (url.pathname === '/api/nessus/health') return json({reachable:true,status:'Connected'});
+      if (url.pathname === '/api/nessus/import' && request.method() === 'POST') return json({result:{scansImported:1,findingsImported:5,skipped:partial?1:0,
+        errors:partial?['Private provider response that must not be displayed']:[]}});
+    }
     if (url.pathname === '/api/elastic-dashboard/customer-connectors') {
       if (url.searchParams.get('setup') === '1') return json({ companies });
       const id = url.searchParams.get('companyId');
@@ -94,6 +106,19 @@ try {
   await page.screenshot({ path: join(artifacts, 'customer-connectors-mobile.png'), fullPage: true });
   assert.ok(calls.every(c => c.method === 'GET')); assert.deepEqual(unexpected, []); assert.deepEqual(errors, []);
   pass('mobile fit; no mutation, global connector health probe, scan or sync request');
+  shared = true; await page.setViewportSize({width:1440,height:1050});
+  await page.goto(base+'/connectors?view=shared&companyId=CO-B');
+  await page.getByRole('heading',{name:'Fixture Nessus',exact:true}).click();
+  await page.getByRole('button',{name:'Sync now',exact:true}).click();
+  const warning=page.getByText(/Needs attention: 1 import error/);await warning.waitFor();
+  assert.match(await warning.getAttribute('class'),/ff8a8a/);
+  assert.ok(!(await page.locator('body').innerText()).includes('Private provider response'));
+  await page.screenshot({path:join(artifacts,'import-partial-warning.png'),fullPage:true});
+  partial=false;await page.getByRole('button',{name:'Sync now',exact:true}).click();
+  const success=page.getByText('Synced — 5 findings, 1 scans.',{exact:true});await success.waitFor();
+  assert.match(await success.getAttribute('class'),/emerald/);
+  assert.equal(calls.filter(c=>c.method==='POST').length,2);assert.deepEqual(unexpected,[]);assert.deepEqual(errors,[]);
+  pass('shared tools display partial imports as attention-needed, redact provider details and recover after a successful fixture sync');
   await writeFile(join(artifacts, 'result.json'), JSON.stringify({ checks, unexpected, errors, calls }, null, 2));
   console.log(JSON.stringify({ passed: checks, artifacts }));
 } catch (error) {

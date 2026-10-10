@@ -49,3 +49,19 @@ test('vendor provenance covers closed and suppressed records, rejects mixed/miss
   assert.equal(b.finish().vendorScope.missingRows,1);assert.equal(matchesSpotlightTenant(b.finish().vendorScope,cid,2),false);
   assert.equal(matchesSpotlightTenant(create('A').finish().vendorScope,cid,0),false);
 });
+
+const placeholder=(extra={})=>row({source_id:'gone',id:'gone',cve:'CS-gone',status:'closed',cid:null,aid:null,
+  raw_cve:null,raw_status:null,raw_severity:null,score:null,suppressed:null,local_placeholder:true,...extra});
+test('exact local placeholders are accounted for without inventing tenant evidence or changing findings',()=>{
+  const cid='a'.repeat(32),a=create('A');a.add(row({cid}));const before=a.finish();a.add(placeholder());const after=a.finish();
+  assert.deepEqual(after.summary,before.summary);assert.deepEqual(after.rows,before.rows);
+  assert.equal(after.scanned,2);assert.equal(after.vendorScope.localPlaceholderRows,1);assert.equal(after.vendorScope.missingRows,0);
+  assert.ok(matchesSpotlightTenant(after.vendorScope,cid,2));
+  const only=create('A');only.add(placeholder());assert.equal(matchesSpotlightTenant(only.finish().vendorScope,cid,1),false);
+  const unproven=create('A');unproven.add(row({cid}));unproven.add(placeholder({local_placeholder:false}));
+  assert.equal(unproven.finish().vendorScope.missingRows,1);assert.equal(matchesSpotlightTenant(unproven.finish().vendorScope,cid,2),false);
+  for(const bad of [{id:'wrong'},{status:'open'},{cve:'CVE-2026-1000'},{cid},{aid:'host'},{raw_status:'closed'},
+    {raw_cve:'CS-gone'},{suppressed:false}])assert.throws(()=>create('A').add(placeholder(bad)),/placeholder/);
+  for(const bad of [{version:1},{localPlaceholderRows:-1},{localPlaceholderRows:2},{localPlaceholderRows:0.5},{rows:2.5}])
+    assert.equal(matchesSpotlightTenant({...after.vendorScope,...bad},cid,2),false);
+});

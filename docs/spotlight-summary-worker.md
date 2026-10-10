@@ -34,6 +34,14 @@ The existing source tables remain authoritative for the retained source generati
 - `spotlight_summary_generations`, `spotlight_summary_cves`, `spotlight_summary_current`: completed derived results and their current pointer.
 - `spotlight_summary_jobs`: durable execution status, attempts, progress, retry timing and lease ownership. No credentials or raw finding payloads are stored here.
 
+## Model version 3: vendor evidence versus importer placeholders
+
+Version 3 retains existing totals while classifying exact locally generated unresolved placeholders separately from vendor responses. The SQL builder checks stored ID/CVE/status and exact raw JSON equality; malformed lookalikes are not exempt. Every real vendor record still contributes tenant evidence, even if closed, suppressed or non-CVE. A placeholder-only generation cannot establish a tenant. Private scope metadata is version 2 and is never returned to the browser.
+
+The worker discovers a new job for model v3 even if v1/v2 summaries exist. Build the isolated worker artifact with the reviewed candidate before an eventual enablement. Older summaries cannot satisfy the v3 reader; the reader never runs the expensive build on demand. Existing retention/version rules continue to protect current and active work. This update does not rewrite source rows or enable the worker.
+
+The full retained recovery-copy build matched all 2,119,658 rows and all 11,710 CVE results against the independent original baseline. An independent read-only audit established 343 exact local placeholders, zero invalid CID rows outside those placeholders and no mixed recognized CID. The v3 guarded reader passed; build time was 83.99 seconds and saved reads 30.5-40.4 ms. Restart was idle with no duplicate job. These are private-copy source-summary measurements, not live whole-page latency.
+
 ## Job lifecycle
 
 Discovery polls only allowlisted customers with a completed owned import and completion timestamp. It creates one job per customer/import/model version; repeating discovery does not add duplicates. A newer source pointer supersedes queued work for the old generation. A claimed job cannot silently build a different generation.
