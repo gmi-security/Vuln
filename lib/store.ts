@@ -1,6 +1,6 @@
 import { loadReviewedScannerRoutes } from "@/lib/customer-scanner-routing-server";
 import type { ScannerRoute } from "@/lib/customer-scanner-routing";
-import { scannerTargetMatcher, assertScannerResultScope } from "@/lib/scanner-target-scope";
+import { scannerTargetMatcher, assertScannerResultScope, scannerExactTargetKey } from "@/lib/scanner-target-scope";
 import type { NessusConfig, NessusImportFindingsResult } from "@/lib/nessus";
 import { loadReviewedSpotlightRoutes } from "@/lib/customer-spotlight-routing-server";
 import { DEMO_ASSETS, DEMO_PORTS, VULN_CATALOG } from "@/lib/catalog";
@@ -103,6 +103,7 @@ import {
   artemisAddTargets,
   artemisConfig,
   artemisImportFindings,
+  artemisCollectReviewedFindings,
   type ArtemisFinding,
 } from "@/lib/artemis";
 import {
@@ -4760,12 +4761,42 @@ const ARTEMIS_TAG_COMPANY: { pattern: RegExp; company: string }[] = [
   { pattern: /^sonar/i, company: "GMI Scans" },
 ];
 
+type OsintProvider = "spiderfoot" | "artemis";
+async function reviewedOsintRoutes(provider: OsintProvider): Promise<ScannerRoute[] | null> {
+  const routes = await loadReviewedScannerRoutes(provider);
+  if (routes !== null && (!routes.length || routes.some(route => route.provider !== provider ||
+      !store().companies.has(route.companyId) || demoCompanyIds(store()).has(route.companyId))))
+    throw new Error("OSINT requires reviewed routes to existing non-demo customers.");
+  return routes;
+}
+function osintConnection(provider: OsintProvider) {
+  const config = provider === "spiderfoot" ? spiderfootConfig() : artemisConfig();
+  return config ? JSON.stringify([config.url, "insecure" in config ? config.insecure : false]) : null;
+}
+async function recheckOsintRoute(provider: OsintProvider, expected: ScannerRoute, connection: string | null) {
+  const current = (await reviewedOsintRoutes(provider))?.find(route => route.companyId === expected.companyId);
+  if (!current || JSON.stringify(current) !== JSON.stringify(expected) || osintConnection(provider) !== connection)
+    throw new Error("OSINT assignment changed during collection; results were withheld.");
+}
+async function pivotImportedOsint(reviewed: boolean, companies: Set<string>) {
+  if (!store().settings.autoScanNewAssets) return;
+  try {
+    if (!reviewed) { await pivotOsintToNessus(); return; }
+    // OSINT discovers related third-party assets. It cannot grant a Nessus scope.
+    const approvals = await loadReviewedScannerRoutes("nessus");
+    if (!approvals) return;
+    for (const companyId of companies) if (approvals.some(route => route.companyId === companyId))
+      await pivotOsintToNessus({ companyId });
+  } catch { /* The import remains available if an independently approved pivot fails. */ }
+}
+
 // Pull finished SpiderFoot scans in as findings, grouped under the matching
 // company. Pull-based (SpiderFoot runs scans in its own UI); no live polling.
 export async function importFromSpiderfoot(): Promise<
   SpiderfootImportResult | { error: string }
 > {
-  if (!spiderfootConfig()) {
+  const config = spiderfootConfig();
+  if (!config) {
     return {
       error:
         "SpiderFoot is not configured. Set SPIDERFOOT_URL (and SPIDERFOOT_USER / SPIDERFOOT_PASS if it requires auth) to import.",
@@ -4773,9 +4804,13 @@ export async function importFromSpiderfoot(): Promise<
   }
   const s = store();
 
+  let routes: ScannerRoute[] | null;
+  const connection = osintConnection("spiderfoot");
+  try { routes = await reviewedOsintRoutes("spiderfoot"); }
+  catch (error) { return { error: error instanceof Error ? error.message : "SpiderFoot routing is unavailable." }; }
   let scans: Awaited<ReturnType<typeof spiderfootListScans>>;
   try {
-    scans = await spiderfootListScans();
+    scans = await spiderfootListScans(routes === null ? undefined : config);
   } catch (err) {
     return {
       error: err instanceof Error ? err.message : "Failed to reach SpiderFoot.",
@@ -4789,19 +4824,28 @@ export async function importFromSpiderfoot(): Promise<
 
   for (const sf of scans) {
     const label = sf.name || sf.target || sf.id;
-    if (!/finish|done|complete/i.test(sf.status)) {
+    if (routes === null ? !/finish|done|complete/i.test(sf.status) : sf.status !== "FINISHED") {
       skipped.push({ scan: label, reason: `status ${sf.status}` });
       continue;
     }
-    // Skip scans already imported (scan record tagged with the SpiderFoot id).
-    const already = Array.from(s.scans.values()).some(
+    let route: ScannerRoute | undefined;
+    if (routes !== null) {
+      try {
+        const key = scannerExactTargetKey(sf.target);
+        const owners = routes.filter(route => route.targets.some(t => scannerExactTargetKey(t) === key));
+        if (owners.length !== 1) throw new Error("SpiderFoot scan has no unique approved target owner.");
+        route = owners[0];
+      } catch { skipped.push({ scan: label, reason: "no unique reviewed target owner" }); continue; }
+    }
+    const companyId = route?.companyId ?? matchCompanyForScan(s, sf.name, sf.target);
+    // Preserve existing records; a new assignment cannot move an imported scan.
+    const already = Array.from(s.scans.values()).filter(
       (sc) => sc.externalRef === `spiderfoot:${sf.id}`,
     );
-    if (already) {
-      skipped.push({ scan: label, reason: "already imported" });
+    if (already.length) {
+      skipped.push({ scan: label, reason: route && already.some(scan => scan.companyId !== companyId) ? "existing scan belongs to a different company; review its mapping" : "already imported" });
       continue;
     }
-    const companyId = matchCompanyForScan(s, sf.name, sf.target);
     if (!companyId) {
       skipped.push({ scan: label, reason: "no unambiguous matching company" });
       continue;
@@ -4809,7 +4853,8 @@ export async function importFromSpiderfoot(): Promise<
 
     let imported: Awaited<ReturnType<typeof spiderfootImportFindings>>;
     try {
-      imported = await spiderfootImportFindings(sf.id);
+      imported = await spiderfootImportFindings(sf.id, route ? { config, targets: route.targets, scan: sf } : undefined);
+      if (route) await recheckOsintRoute("spiderfoot", route, connection);
     } catch (err) {
       skipped.push({
         scan: label,
@@ -4908,13 +4953,7 @@ export async function importFromSpiderfoot(): Promise<
   }
 
   await flushNow();
-  if (s.settings.autoScanNewAssets) {
-    try {
-      await pivotOsintToNessus();
-    } catch {
-      // best-effort
-    }
-  }
+  await pivotImportedOsint(routes !== null, matchedCompanies);
   return {
     scansImported,
     findingsImported,
@@ -5735,25 +5774,28 @@ export type OsintPreview = {
   perCompany: { company: string; domains: string[] }[];
 };
 
-// Show exactly which customers and root domains a quarterly OSINT sweep would
-// target — without launching anything.
-export function previewOsintTargets(): OsintPreview {
-  const s = store();
-  // This runs unconditionally on every Connectors page load (no click
-  // needed) — osintTargetsForCompany() once per company used to rescan the
-  // whole store per company; build the grouped map once instead.
-  const domainsByCompany = buildDomainsByCompany(s);
-  const perCompany: { company: string; domains: string[] }[] = [];
-  let domainsTotal = 0;
-  for (const company of s.companies.values()) {
-    if (company.kind !== "client") continue;
-    const domains = domainsByCompany.get(company.id) ?? [];
-    if (domains.length === 0) continue;
-    perCompany.push({ company: company.name, domains });
-    domainsTotal += domains.length;
-  }
-  perCompany.sort((a, b) => a.company.localeCompare(b.company));
-  return { companies: perCompany.length, domainsTotal, perCompany };
+// One plan powers the read-only preview and launch selection. Approvals do not
+// enable scanning; the existing launch action/scheduler remains the trigger.
+async function osintLaunchPlan() {
+  const s = store(), sfConfig = spiderfootConfig(), arConfig = artemisConfig();
+  const [sfRoutes, arRoutes] = await Promise.all([reviewedOsintRoutes("spiderfoot"), reviewedOsintRoutes("artemis")]);
+  const legacy = sfRoutes === null || arRoutes === null ? buildDomainsByCompany(s) : new Map<string, string[]>();
+  const rows = [...s.companies.values()].filter(company => company.kind === "client").map(company => {
+    const sfRoute = sfRoutes?.find(route => route.companyId === company.id);
+    const arRoute = arRoutes?.find(route => route.companyId === company.id);
+    const sfTargets = sfRoutes === null ? legacy.get(company.id) ?? [] : sfRoute?.targets ?? [];
+    const arTargets = arRoutes === null ? legacy.get(company.id) ?? [] : arRoute?.targets ?? [];
+    const domains = sfRoutes === null && arRoutes === null ? legacy.get(company.id) ?? [] :
+      [...new Set([...(sfConfig ? sfTargets : []), ...(arConfig ? arTargets : [])])].sort();
+    return { company, sfRoute, arRoute, sfTargets, arTargets, domains };
+  }).filter(row => row.domains.length);
+  return { rows, sfConfig, arConfig, sfConnection: osintConnection("spiderfoot"), arConnection: osintConnection("artemis") };
+}
+
+export async function previewOsintTargets(): Promise<OsintPreview> {
+  const { rows } = await osintLaunchPlan();
+  const perCompany = rows.map(row => ({ company: row.company.name, domains: row.domains })).sort((a, b) => a.company.localeCompare(b.company));
+  return { companies: perCompany.length, domainsTotal: perCompany.reduce((n, row) => n + row.domains.length, 0), perCompany };
 }
 
 export type OsintLaunchResult = {
@@ -5789,42 +5831,33 @@ export async function launchOsintScans(): Promise<OsintLaunchResult> {
     return result;
   }
 
-  const clients = Array.from(s.companies.values()).filter(
-    (c) => c.kind === "client",
-  );
-  const domainsByCompany = buildDomainsByCompany(s);
-  for (const company of clients) {
-    const domains = domainsByCompany.get(company.id) ?? [];
-    if (domains.length === 0) continue;
-    result.companies += 1;
+  let plan: Awaited<ReturnType<typeof osintLaunchPlan>>;
+  try { plan = await osintLaunchPlan(); }
+  catch { result.errors.push("OSINT routing is unavailable or needs review; no scans were launched."); return result; }
+  for (const { company, domains, arRoute, sfRoute, arTargets, sfTargets } of plan.rows) {
+    result.companies++;
     result.domainsTotal += domains.length;
     result.perCompany.push({ company: company.name, domains });
-
-    // Artemis: one batch add for all of the company's domains, tagged by name.
-    if (artemisReady) {
+    if (plan.arConfig && arTargets.length) {
       try {
-        await artemisAddTargets(domains, company.name);
-        result.artemis.launched += 1;
+        if (arRoute) await recheckOsintRoute("artemis", arRoute, plan.arConnection);
+        await artemisAddTargets(arTargets, arRoute?.sourceScope ?? company.name,
+          arRoute ? { config: plan.arConfig, tag: arRoute.sourceScope, targets: arRoute.targets } : undefined);
+        result.artemis.launched++;
       } catch (err) {
-        result.artemis.failed += 1;
-        result.errors.push(
-          `Artemis (${company.name}): ${err instanceof Error ? err.message : "add failed"}`,
-        );
+        result.artemis.failed++;
+        result.errors.push(`Artemis (${company.name}): ${err instanceof Error ? err.message : "add failed"}`);
       }
     }
-
-    // SpiderFoot: one scan per domain, named by company so import maps back.
-    if (sfReady) {
-      for (const domain of domains) {
-        try {
-          await spiderfootStartScan(`${company.name} — ${domain}`, domain, sfUsecase);
-          result.spiderfoot.launched += 1;
-        } catch (err) {
-          result.spiderfoot.failed += 1;
-          result.errors.push(
-            `SpiderFoot (${company.name}/${domain}): ${err instanceof Error ? err.message : "start failed"}`,
-          );
-        }
+    if (plan.sfConfig && sfTargets.length) for (const domain of sfTargets) {
+      try {
+        if (sfRoute) await recheckOsintRoute("spiderfoot", sfRoute, plan.sfConnection);
+        await spiderfootStartScan(`${company.name} - ${domain}`, domain, sfUsecase,
+          sfRoute ? { config: plan.sfConfig, targets: sfRoute.targets } : undefined);
+        result.spiderfoot.launched++;
+      } catch (err) {
+        result.spiderfoot.failed++;
+        result.errors.push(`SpiderFoot (${company.name}/${domain}): ${err instanceof Error ? err.message : "start failed"}`);
       }
     }
   }
@@ -5838,17 +5871,32 @@ export async function launchOsintScans(): Promise<OsintLaunchResult> {
 export async function importFromArtemis(): Promise<
   ArtemisImportResult | { error: string }
 > {
-  if (!artemisConfig()) {
+  const config = artemisConfig();
+  if (!config) {
     return {
       error:
         "Artemis is not configured. Set ARTEMIS_API_URL and ARTEMIS_API_TOKEN to import.",
     };
   }
   const s = store();
+  let routes: ScannerRoute[] | null;
+  const connection = osintConnection("artemis");
+  try { routes = await reviewedOsintRoutes("artemis"); }
+  catch (error) { return { error: error instanceof Error ? error.message : "Artemis routing is unavailable." }; }
+  const skipped: { tag: string; reason: string }[] = [];
 
-  let mapped: ArtemisFinding[];
+  let mapped: ArtemisFinding[] = [];
   try {
-    mapped = await artemisImportFindings();
+    if (routes === null) mapped = await artemisImportFindings();
+    else for (const route of routes) {
+      try {
+        const { findings, incompleteAnalyses } = await artemisCollectReviewedFindings({ config, tag: route.sourceScope, targets: route.targets });
+        if (findings.some(item => item.tag !== route.sourceScope)) throw new Error("Artemis returned a conflicting source tag.");
+        await recheckOsintRoute("artemis", route, connection);
+        if (incompleteAnalyses) skipped.push({ tag: route.sourceScope, reason: `${incompleteAnalyses} pending or stopped analyses were not imported; existing data is retained` });
+        mapped.push(...findings);
+      } catch { skipped.push({ tag: route.sourceScope, reason: "reviewed Artemis collection failed; previous data is retained" }); }
+    }
   } catch (err) {
     return {
       error: err instanceof Error ? err.message : "Failed to reach Artemis.",
@@ -5863,7 +5911,6 @@ export async function importFromArtemis(): Promise<
     byTag.get(tag)!.push(f);
   }
 
-  const skipped: { tag: string; reason: string }[] = [];
   const matchedCompanies = new Set<string>();
   let findingsImported = 0;
   let tagsProcessed = 0;
@@ -5873,10 +5920,17 @@ export async function importFromArtemis(): Promise<
     // Resolution order: explicit tag->company alias, then token overlap on the
     // tag, then on the first asset only when the tag did not match at all.
     // An ambiguous tag or explicit alias cannot be overridden by an asset guess.
+    const route = routes?.find(route => route.sourceScope === tag);
+    if (routes !== null) {
+      try {
+        if (!route) throw new Error("No approved Artemis tag owner.");
+        await recheckOsintRoute("artemis", route, connection);
+      } catch { skipped.push({ tag, reason: "reviewed Artemis assignment changed; previous data is retained" }); continue; }
+    }
     const alias = ARTEMIS_TAG_COMPANY.find((a) => a.pattern.test(tag));
     const tagMatches = matchingCompaniesForScan(s, tag, "");
-    const companyId = alias ? resolveCompanyByName(s, alias.company) :
-      tagMatches.length ? (tagMatches.length === 1 ? tagMatches[0] : null) : matchCompanyForScan(s, "", items[0]?.asset ?? "");
+    const companyId = route?.companyId ?? (alias ? resolveCompanyByName(s, alias.company) :
+      tagMatches.length ? (tagMatches.length === 1 ? tagMatches[0] : null) : matchCompanyForScan(s, "", items[0]?.asset ?? ""));
     if (!companyId) {
       skipped.push({ tag, reason: "no unambiguous matching company" });
       continue;
@@ -5982,13 +6036,7 @@ export async function importFromArtemis(): Promise<
   }
 
   await flushNow();
-  if (s.settings.autoScanNewAssets) {
-    try {
-      await pivotOsintToNessus();
-    } catch {
-      // best-effort: never fail the import because the pivot scan failed
-    }
-  }
+  await pivotImportedOsint(routes !== null, matchedCompanies);
   return {
     findingsImported,
     tagsProcessed,

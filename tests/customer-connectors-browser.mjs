@@ -24,7 +24,8 @@ let browser, page, checks = 0; const pass = message => { checks++; console.log('
 const artifacts = await mkdtemp(join(tmpdir(), 'vuln2-connectors-browser-'));
 const companies = [{ id: 'CO-A', name: 'Fixture Alpha' }, { id: 'CO-B', name: 'Fixture Beta' }, { id: 'CO-EMPTY', name: 'Fixture Empty' }];
 const calls = [], errors = [], unexpected = []; let fail = false, pending = false, release;
-let shared = false, partial = true, inventoryRouting = false, inventoryProvider = "automate", spotlightRouting = false, scannerRouting = false;
+let previewFailure=false;
+let shared = false, partial = true, inventoryRouting = false, inventoryProvider = "automate", spotlightRouting = false, scannerRouting = false, scannerProvider = "nessus";
 function status(id) {
   const result = { companyId: id, companyName: companies.find(c => c.id === id).name, checkedAt: '2026-10-09T19:00:00Z', registryAvailable: id !== 'CO-A',
     items: id === 'CO-EMPTY' ? [] : [{ id: id+'-record', provider: inventoryRouting ? inventoryProvider : id === 'CO-A' ? 'defender' : 'crowdstrike', evidence: 'Saved customer connection', configuration: 'Configuration recorded',
@@ -34,8 +35,8 @@ function status(id) {
   if(spotlightRouting && result.items.length){result.items[0].review='Inventory route approved; Spotlight route approved';
     result.items[0].scope='Separate inventory and Spotlight approvals are recorded. See routing details for each state.';
     result.items[0].data.routing+=' Approval recorded; the Spotlight routing switch is off. Existing import routing still applies.';}
-  if(scannerRouting && result.items.length){result.items[0].provider='nessus';result.items[0].review='Scanner route approved';
-    result.items[0].scope='A separate scanner folder and target approval is recorded. See routing details for its current state.';
+  if(scannerRouting && result.items.length){result.items[0].provider=scannerProvider;result.items[0].review='Scanner route approved';
+    result.items[0].scope='A separate scanner source and target approval is recorded. See routing details for its current state.';
     result.items[0].data={domains:['endpoint-findings'],storage:'Existing platform findings',lifecycle:'Reviewed folder and target ownership',routing:'Approved for scanner routing; the provider switch is on. This does not confirm a successful import.'};}
   return result;
 }
@@ -62,7 +63,7 @@ try {
         description:'Synthetic scanner',capabilities:[],envVars:[],configured:true,status:'Connected',docsUrl:'https://example.invalid'}]});
       if (url.pathname === '/api/integrations') return json({integrations:[]});
       if (url.pathname === '/api/elastic-vulnerabilities/status') return json({enabled:false});
-      if (url.pathname === '/api/osint/preview') return json({preview:{companies:0,domainsTotal:0,perCompany:[]}});
+      if (url.pathname === '/api/osint/preview') return previewFailure?json({error:'OSINT routing unavailable'},503):json({preview:{companies:1,domainsTotal:1,perCompany:[{company:'Fixture Beta',domains:['fixture.invalid']}]}});
       if (url.pathname === '/api/connectors/sync-all' && request.method() === 'GET') return json({status:null});
       if (url.pathname === '/api/nessus/health') return json({reachable:true,status:'Connected'});
       if (url.pathname === '/api/nessus/import' && request.method() === 'POST') return json({result:{scansImported:1,findingsImported:5,skipped:partial?1:0,
@@ -134,10 +135,18 @@ try {
   pass('Spotlight approval displays separately from host inventory with no extra selector or import control');
   scannerRouting=true;await page.getByRole('button',{name:'Refresh status'}).click();
   await page.getByText('Scanner route approved',{exact:true}).waitFor();
-  await page.getByText('A separate scanner folder and target approval is recorded.',{exact:false}).waitFor();
+  await page.getByText('A separate scanner source and target approval is recorded.',{exact:false}).waitFor();
   assert.equal(await page.getByRole('combobox').count(),1);
   await page.screenshot({path:join(artifacts,'scanner-route-status-mobile.png'),fullPage:true});
   pass('Nessus approval displays without private targets, another selector or new operational controls');
+  for(const provider of ['spiderfoot','artemis']){
+    scannerProvider=provider;await page.getByRole('button',{name:'Refresh status',exact:true}).click();
+    await page.getByText(provider==='spiderfoot'?'SpiderFoot':provider,{exact:true}).waitFor();await page.getByText('Scanner route approved',{exact:true}).waitFor();
+    assert.equal(await page.getByRole('combobox').count(),1);
+  }
+  await page.screenshot({path:join(artifacts,'osint-route-status-mobile.png'),fullPage:true});
+  pass('SpiderFoot and Artemis approvals display within the same customer selector and permissions');
+
   shared = true; await page.setViewportSize({width:1440,height:1050});
   await page.goto(base+'/connectors?view=shared&companyId=CO-B');
   await page.getByRole('heading',{name:'Fixture Nessus',exact:true}).click();
@@ -151,6 +160,12 @@ try {
   assert.match(await success.getAttribute('class'),/emerald/);
   assert.equal(calls.filter(c=>c.method==='POST').length,2);assert.deepEqual(unexpected,[]);assert.deepEqual(errors,[]);
   pass('shared tools display partial imports as attention-needed, redact provider details and recover after a successful fixture sync');
+  previewFailure=true;await page.reload();await page.getByRole('alert').filter({hasText:'OSINT target preview is unavailable'}).waitFor();
+  assert.equal(await page.getByRole('button',{name:'Run OSINT scans',exact:true}).isDisabled(),true);
+  previewFailure=false;await page.reload();await page.waitForFunction(()=>[...document.querySelectorAll('button')].some(b=>b.textContent==='Run OSINT scans'&&!b.disabled));
+  assert.equal(calls.filter(c=>c.method==='POST').length,2);
+  pass('OSINT preview failure is visible and disables launch; restored preview recovers without launching scans');
+
   await writeFile(join(artifacts, 'result.json'), JSON.stringify({ checks, unexpected, errors, calls }, null, 2));
   console.log(JSON.stringify({ passed: checks, artifacts }));
 } catch (error) {

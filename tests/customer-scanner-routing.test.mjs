@@ -10,7 +10,7 @@ const row={candidate_id:c.id,company_id:'A',provider:'nessus',source_scope:'17',
 test('scanner routing requires explicit Nessus opt-in and complete current folder/target approval',()=>{
  for(const v of ['',undefined,' '])assert.deepEqual(routing.reviewedScannerProviders(v),[]);
  assert.deepEqual(routing.reviewedScannerProviders('nessus'),['nessus']);
- for(const v of ['all','spiderfoot','nessus,','nessus,nessus'])assert.throws(()=>routing.reviewedScannerProviders(v));
+ for(const v of ['all','zap','nessus,','nessus,nessus'])assert.throws(()=>routing.reviewedScannerProviders(v));
  assert.equal(routing.scannerBindingScope('A',preview,row).sourceScope,'17');
  for(const edit of [{source_present:false},{review_state:'pending-review'},{imported_hash:'0'.repeat(64)},
   ...[{tenantId:'Alpha'},{tenantId:'017'},{tenantId:'0'},{targets:[]},{targets:['*.example.com']},{authority:'mirror'},{datasets:['data']}].map(p=>({proposal:{...row.proposal,...p}}))])
@@ -39,4 +39,19 @@ test('scanner approval status is customer-scoped and never exports private folde
  assert.equal(project('B',preview,[draft],true,undefined,[],[],[status]).items.length,0);
  assert.match(routing.scannerRoutingStatus({...row,current_binding_revision:2},preview,'nessus').review,/needs review/);
  assert.match(routing.scannerRoutingStatus(row,preview,'').routing,/switch is off/);
+});
+
+test('OSINT scanner scope requires explicit roots, an exact Artemis tag and fresh source evidence',()=>{
+ const osintEnv={SPIDERFOOT_URL:'https://sf.fixture.invalid',ARTEMIS_API_URL:'https://ar.fixture.invalid',ARTEMIS_API_TOKEN:'fixture'};
+ const p=build(metadata,osintEnv);
+ assert.deepEqual(routing.reviewedScannerProviders('spiderfoot,artemis'),['spiderfoot','artemis']);
+ for(const provider of ['spiderfoot','artemis']){
+  const c=p.candidates.find(c=>c.provider===provider),hash=review.connectorDraftEvidence(c,p.candidates).candidateHash;
+  const evidence={...row,candidate_id:c.id,candidate_hash:hash,imported_hash:hash,proposal:{...row.proposal,tenantId:provider==='artemis'?'ExactTag':null,targets:['acme.example','10.0.0.1']}};
+  const scope=routing.scannerBindingScope('A',p,evidence);assert.equal(scope.provider,provider);
+  assert.match(scope.sourceScope,provider==='artemis'?/^ExactTag$/:/^targets:[a-f0-9]{64}$/);
+  for(const targets of [[],['*.example'],['10.0.0.0/24'],['EXAMPLE.','example']])assert.throws(()=>routing.scannerBindingScope('A',p,{...evidence,proposal:{...evidence.proposal,targets}}));
+  assert.throws(()=>routing.scannerBindingScope('A',p,{...evidence,proposal:{...evidence.proposal,tenantId:provider==='artemis'?null:'FakeTenant'}}));
+  if(provider==='spiderfoot')for(const key of ['SPIDERFOOT_TLS_INSECURE','SPIDERFOOT_USECASE'])assert.throws(()=>routing.scannerBindingScope('A',build(metadata,{...osintEnv,[key]:'changed'}),evidence));
+ }
 });

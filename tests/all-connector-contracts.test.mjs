@@ -267,3 +267,53 @@ test('reviewed Nessus transport scopes requests, rejects changed/foreign results
   assert.ok(calls.every(c=>c.url!=='/scans'||c.method==='POST'));
  }finally{await new Promise(r=>server.close(r));}
 });
+
+test('reviewed SpiderFoot transport verifies finished scan identity and every exported event before mapping',async()=>{
+ const calls=[];let mode='valid',rosterReads=0;
+ const server=createServer((req,res)=>{calls.push(req.url);const url=new URL(req.url,'http://fixture');res.setHeader('Content-Type','application/json');let data;
+  if(url.pathname==='/scanlist'){
+   rosterReads++;data=[['scan-1','Fixture','acme.example','created','started',mode==='changed'&&rosterReads>1?'changed':'finished',mode==='unfinished'?'UNFINISHED':'FINISHED',2,{}]];
+   if(mode==='duplicate')data.push(data[0]);if(mode==='malformed')data={error:'bad'};
+  }else if(url.pathname==='/scanexportjsonmulti'){
+   assert.equal(url.searchParams.get('ids'),'scan-1');data=[{event_type:'VULNERABILITY_CVE_HIGH',data:'CVE-2026-1234',source_data:'related.external.example',scan_target:'acme.example',scan_name:'Fixture'}];
+   if(mode==='foreign')data.push({event_type:'IGNORED_INFO',scan_target:'another.example',scan_name:'Fixture'});
+   if(mode==='missing')delete data[0].scan_target;if(mode==='wrong-name')data[0].scan_name='Foreign';
+  }else if(url.pathname==='/startscan')data=['SUCCESS','started-1'];
+  else throw Error('Unexpected request');res.end(JSON.stringify(data));
+ });await new Promise(r=>server.listen(0,'127.0.0.1',r));
+ try{
+  const spider=await load('spiderfoot'),config={url:'http://127.0.0.1:'+server.address().port,auth:null,insecure:false};
+  const scan=(await spider.spiderfootListScans(config))[0],scope={config,scan,targets:['acme.example']};rosterReads=0;
+  const findings=await spider.spiderfootImportFindings('scan-1',scope);assert.equal(findings.length,1);assert.equal(findings[0].asset,'related.external.example');
+  for(mode of ['foreign','missing','wrong-name','duplicate','malformed','changed','unfinished']){rosterReads=0;await assert.rejects(()=>spider.spiderfootImportFindings('scan-1',scope));}
+  mode='valid';let before=calls.length;await assert.rejects(()=>spider.spiderfootStartScan('Fixture','another.example','Footprint',scope),/outside/);assert.equal(calls.length,before);
+  assert.equal(await spider.spiderfootStartScan('Fixture','ACME.example.','Footprint',scope),'started-1');
+ }finally{await new Promise(r=>server.close(r));}
+});
+test('reviewed Artemis transport filters exact tag and analysis ID, rejects mixed/incomplete pages and validates launches',async()=>{
+ const calls=[],bodies=[];let mode='valid',rosterReads=0;
+ const server=createServer((req,res)=>{let body='';req.on('data',d=>body+=d);req.on('end',()=>{
+  const url=new URL(req.url,'http://fixture');calls.push(req.url);res.setHeader('Content-Type','application/json');let data;
+  if(url.pathname==='/api/analyses'){
+   assert.equal(url.searchParams.get('tag'),'ExactTag');rosterReads++;
+   data=[{id:'analysis-1',tag:mode==='wrong-tag'?'Other':'ExactTag',target:mode==='foreign-target'?'other.example':'acme.example',stopped:false,num_pending_tasks:mode==='pending'||mode==='changed'&&rosterReads>1?1:0}];
+   if(mode==='duplicate-analysis')data.push(data[0]);if(mode==='missing-pending')delete data[0].num_pending_tasks;
+  }else if(url.pathname==='/api/task-results'){
+   assert.equal(url.searchParams.get('analysis_id'),'analysis-1');assert.equal(url.searchParams.get('only_interesting'),'true');
+   const row={id:'result-1',analysis_id:mode==='foreign-analysis'?'other':'analysis-1',tag:mode==='foreign-tag'?'Other':'ExactTag',target_string:'related.external.example',receiver:'nuclei',status_reason:'CVE-2026-1234'};
+   data=[row];if(mode==='missing-id')delete row.id;
+   if(mode==='duplicate-results')data=[row,row];
+   if(mode==='limit')data=Array.from({length:200},(_,i)=>({...row,id:url.searchParams.get('page')+'-'+i}));
+  }else if(url.pathname==='/api/add'){bodies.push(JSON.parse(body));data={ok:true,ids:mode==='bad-launch'?[]:['created-1']};}
+  else throw Error('Unexpected request');res.end(JSON.stringify(data));
+ });});await new Promise(r=>server.listen(0,'127.0.0.1',r));
+ try{
+  const ar=await load('artemis'),config={url:'http://127.0.0.1:'+server.address().port,token:'fixture'},scope={config,tag:'ExactTag',targets:['acme.example']};
+  const findings=await ar.artemisImportFindings(scope);assert.equal(findings.length,1);assert.equal(findings[0].asset,'related.external.example');
+  for(mode of ['wrong-tag','foreign-target','duplicate-analysis','missing-pending','foreign-analysis','foreign-tag','missing-id','duplicate-results','changed','limit']){rosterReads=0;await assert.rejects(()=>ar.artemisImportFindings(scope));}
+  mode='pending';rosterReads=0;let count=calls.filter(c=>c.startsWith('/api/task-results')).length;assert.deepEqual(await ar.artemisCollectReviewedFindings(scope),{findings:[],incompleteAnalyses:1});assert.equal(calls.filter(c=>c.startsWith('/api/task-results')).length,count);
+  mode='valid';count=calls.length;await assert.rejects(()=>ar.artemisAddTargets(['foreign.example'],'ExactTag',scope),/exceeds/);await assert.rejects(()=>ar.artemisAddTargets(['acme.example'],'Other',scope),/exceeds/);assert.equal(calls.length,count);
+  assert.equal((await ar.artemisAddTargets(['acme.example'],'ExactTag',scope)).ok,true);assert.deepEqual(bodies.at(-1),{targets:['acme.example'],tag:'ExactTag'});
+  mode='bad-launch';await assert.rejects(()=>ar.artemisAddTargets(['acme.example'],'ExactTag',scope),/inspect the scanner/);
+ }finally{await new Promise(r=>server.close(r));}
+});

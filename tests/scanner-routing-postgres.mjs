@@ -18,7 +18,7 @@ try{
  await db.query('CREATE TABLE vuln_store(key text PRIMARY KEY,data jsonb)');
  await db.query("INSERT INTO vuln_store VALUES('meta',$1)",[JSON.stringify({companies:[['A',{id:'A',name:'Alpha'}],['B',{id:'B',name:'Beta'}]]})]);
  const url=new URL(`postgresql://codex@localhost/${name}`);url.searchParams.set('host',socket);url.searchParams.set('port','55483');
- const env={DATABASE_URL:url.href,NESSUS_URL:'https://fixture.invalid',NESSUS_ACCESS_KEY:'fixture',NESSUS_SECRET_KEY:'fixture'};
+ const env={DATABASE_URL:url.href,NESSUS_URL:'https://fixture.invalid',NESSUS_ACCESS_KEY:'fixture',NESSUS_SECRET_KEY:'fixture',SPIDERFOOT_URL:'https://sf.fixture.invalid',ARTEMIS_API_URL:'https://ar.fixture.invalid',ARTEMIS_API_TOKEN:'fixture'};
  const build=await loadConnectorPreview(),routing=(await loadScannerRouting()).createScannerRoutingStore(pool),bindings=(await loadConnectorBindingStore())(pool);
  const collect=async()=>build({...await readApplicationConnectorMetadata(db),connections:[],tiles:[]},env),run=args=>runRegistry(args,env);
  const command=async(cmd,input)=>{const file=join(dir,randomUUID()+'.json');await writeFile(file,JSON.stringify(input),{mode:0o600});return run([cmd,'--input',file]);};
@@ -56,6 +56,38 @@ try{
  const exported=JSON.parse(await readFile(file,'utf8'));assert.equal(exported.routes.length,1);assert.equal(exported.routes[0].expectedRevision,2);
  assert.doesNotMatch(JSON.stringify(exported),/10.0.0|fixture.invalid|secret|companyId":"B/);await assert.rejects(()=>run(['export-scanner-routes','--company','A','--output',file]),e=>e.code==='EEXIST');
  ok('scoped private exports exclude targets and other customers and never overwrite a prior file');
+ await db.query(await readFile('docs/sql/customer-scanner-osint-routes.sql','utf8'));
+ assert.equal((await routing.read('nessus',collect)).length,2);
+ assert.deepEqual(await routing.read('spiderfoot',collect),[]);assert.deepEqual(await routing.read('artemis',collect),[]);
+ ok('OSINT extension preserves existing Nessus routes and starts with no OSINT approvals');
+ async function osintBind(provider,company,targets,tag=null){
+  const input=structuredClone((await bindings.list(company,collect)).items.find(i=>i.provider===provider).assignmentRequest);
+  Object.assign(input,{decision:'reviewed',note:'Fixture source targets',proposal:{companyId:company,tenantId:tag,authority:'findings-primary',targets,datasets:[]}});
+  const saved=await command('assign',input);return {candidateId:input.candidateId,companyId:company,bindingRevision:saved.revision,expectedRevision:0,enabled:true,note:'Fixture OSINT approval'};
+ }
+ const sfA=await osintBind('spiderfoot','A',['a.example']),sfB=await osintBind('spiderfoot','B',['b.example']);
+ await command('route-scanner',sfA);await command('route-scanner',sfB);
+ assert.deepEqual((await routing.read('spiderfoot',collect)).map(r=>[r.companyId,r.targets]),[['A',['a.example']],['B',['b.example']]]);
+ ok('actual CLI approves separate SpiderFoot target sets without changing binding activation');
+ const beforeAudit=(await db.query('SELECT count(*)::int n FROM customer_scanner_route_audit')).rows[0].n;
+ const overlapping=await osintBind('spiderfoot','B',['A.EXAMPLE.','b.example']);
+ await assert.rejects(()=>command('route-scanner',{...overlapping,expectedRevision:1}),/conflicting/);
+ assert.equal((await db.query('SELECT count(*)::int n FROM customer_scanner_route_audit')).rows[0].n,beforeAudit);
+ assert.equal((await db.query("SELECT revision FROM customer_scanner_routes WHERE provider='spiderfoot' AND company_id='B'")).rows[0].revision,1);
+ await assert.rejects(()=>routing.read('spiderfoot',collect),/changed/);
+ const sfRepaired=await osintBind('spiderfoot','B',['b.example']);await command('route-scanner',{...sfRepaired,expectedRevision:1});
+ ok('overlapping SpiderFoot target sets roll back approval and audit; prior bindings still need review');
+ const arA=await osintBind('artemis','A',['a.example'],'ExactTag'),arB=await osintBind('artemis','B',['b.example'],'OtherTag');
+ await command('route-scanner',arA);await command('route-scanner',arB);
+ assert.deepEqual((await routing.read('artemis',collect)).map(r=>r.sourceScope),['ExactTag','OtherTag']);
+ const arDup=await osintBind('artemis','B',['b.example'],'ExactTag');await assert.rejects(()=>command('route-scanner',{...arDup,expectedRevision:1}),e=>e.code==='23505');
+ const arRepaired=await osintBind('artemis','B',['b.example'],'OtherTag');await command('route-scanner',{...arRepaired,expectedRevision:1});
+ ok('exact Artemis tags have one customer owner; target sets and tag case are preserved');
+ env.SPIDERFOOT_USECASE='Passive';await assert.rejects(()=>routing.read('spiderfoot',collect),/review/);delete env.SPIDERFOOT_USECASE;
+ assert.equal((await routing.read('spiderfoot',collect)).length,2);
+ const sfExport=join(dir,'sf-routes.json');await run(['export-scanner-routes','--company','A','--output',sfExport]);
+ assert.doesNotMatch(await readFile(sfExport,'utf8'),/a.example|ExactTag|fixture.invalid|secret/);
+ ok('SpiderFoot launch-setting changes invalidate review and exports omit targets, tags and credentials');
  env.NESSUS_TLS_INSECURE='1';await assert.rejects(()=>routing.read('nessus',collect),/review/);delete env.NESSUS_TLS_INSECURE;
  assert.equal((await routing.read('nessus',collect)).length,2);
  await db.query("UPDATE vuln_store SET data=jsonb_set(data,'{companies}',$1) WHERE key='meta'",[JSON.stringify([['B',{id:'B',name:'Beta'}]])]);

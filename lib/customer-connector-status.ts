@@ -112,10 +112,10 @@ export function customerConnectorStatus(companyId: string, preview: ReturnType<t
     if (item.data) item.data.routing = hasInventory ? `${item.data.routing} ${status.routing}` : status.routing;
   }
   for (const status of scanner) {
-    const item = items.find(i => i.id === status.id && i.provider === "nessus");
+    const item = items.find(i => i.id === status.id && ["nessus", "spiderfoot", "artemis"].includes(i.provider));
     if (!item) continue;
     item.review = status.review;
-    item.scope = "A separate scanner folder and target approval is recorded. See routing details for its current state.";
+    item.scope = "A separate scanner source and target approval is recorded. See routing details for its current state.";
     if (item.data) item.data.routing = status.routing;
   }
   return { companyId, companyName: company.name, checkedAt, registryAvailable, items };

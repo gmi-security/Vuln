@@ -11,6 +11,8 @@ globalThis.fetch=fail;
 const ROOT=resolve('.'),modules=new Map();
 let sfScans=[],sfReads=0,arFindings=[],folders=[],scans=[],clients=[],deviceReads=0,configs=[];
 let routes=null,routeError=false,clientReads=0,requestedClients=[],afterDevices=()=>{},intuneReads=0,intuneConfigUsed;
+let arIncomplete=0;
+let osintRoutes={spiderfoot:null,artemis:null},osintError=false,osintLaunches=[],sfFindings=[],arReads=[],sfScopes=[],afterOsint=()=>{};
 let scannerRouteLoads=0,nessusRosterReads=0,nessusStatusReads=0,nessusStatus="completed";
 let scannerRoutes=null,scannerError=false,nessusResults={findings:[],scannedHosts:[]},nessusReads=[],nessusLaunches=[],nessusControls=[],afterNessus=()=>{};
 let spotlightRoutes=null,spotlightFailure=false,spotlightRuns=[],afterSpotlight=()=>{},spotlightPromotions=0;
@@ -26,9 +28,9 @@ const mocks={
   nessusImportFindings:async(id,_budget,scope)=>{nessusReads.push({id,scope});afterNessus();return nessusResults;},
   nessusLaunchScan:async(name,targets,profile,scope)=>{nessusLaunches.push({name,targets,profile,scope});return {nessusScanId:10};},
   nessusScanControl:async(id,action)=>{nessusControls.push({id,action});},nessusScanStatus:async()=>{nessusStatusReads++;return {status:nessusStatus,progress:50};}},
- 'lib/customer-scanner-routing-server.ts':{loadReviewedScannerRoutes:async()=>{scannerRouteLoads++;if(scannerError)throw Error('Scanner route unavailable');return scannerRoutes;}},
- 'lib/spiderfoot.ts':{spiderfootConfig:()=>({}),spiderfootListScans:async()=>sfScans,spiderfootImportFindings:async()=>{sfReads++;return[];}},
- 'lib/artemis.ts':{artemisConfig:()=>({}),artemisImportFindings:async()=>arFindings},
+ 'lib/customer-scanner-routing-server.ts':{loadReviewedScannerRoutes:async(provider)=>{if(provider!=="nessus"){if(osintError)throw Error("OSINT routing unavailable");return osintRoutes[provider];}scannerRouteLoads++;if(scannerError)throw Error('Scanner route unavailable');return scannerRoutes;}},
+ 'lib/spiderfoot.ts':{spiderfootConfig:()=>({url:'https://sf.fixture.invalid',insecure:false}),spiderfootListScans:async()=>sfScans,spiderfootImportFindings:async(id,scope)=>{sfReads++;sfScopes.push(scope);afterOsint();return sfFindings;},spiderfootStartScan:async(name,target,usecase,scope)=>{osintLaunches.push({provider:'spiderfoot',target,scope});afterOsint();return 'launched';}},
+ 'lib/artemis.ts':{artemisCollectReviewedFindings:async(scope)=>{arReads.push(scope);afterOsint();return {findings:arFindings.filter(f=>f.tag===scope.tag),incompleteAnalyses:arIncomplete};},artemisConfig:()=>({url:'https://ar.fixture.invalid'}),artemisImportFindings:async(scope)=>{arReads.push(scope);afterOsint();return scope?arFindings.filter(f=>f.tag===scope.tag):arFindings;},artemisAddTargets:async(targets,tag,scope)=>{osintLaunches.push({provider:'artemis',targets,tag,scope});afterOsint();return {ok:true,ids:['launched']};}},
  'lib/customer-inventory-routing-server.ts':{loadReviewedInventoryRoutes:async()=>{if(routeError)throw Error('Routing needs renewed approval');return routes;}},
  'lib/connectwise-automate.ts':{automateConfig:()=>({}),automateListClients:async()=>{clientReads++;return clients;},automateListComputers:async(_config,id)=>{deviceReads++;requestedClients.push(id);afterDevices();return[device];}},
  'lib/intune.ts':{intuneConfig:()=>({tenantId}),intuneListAssets:async(config)=>{intuneReads++;intuneConfigUsed=config;afterDevices();return[device];}},
@@ -57,6 +59,7 @@ const module=await getModule('lib/store.ts');await module.link(linker);await mod
 const company=(id,name,kind='client')=>({id,name,kind,industry:'Test',createdAt:'2026-10-01T00:00:00Z',contactName:'',contactEmail:''});
 const acme=company('CO-A','Acme'),beacon=company('CO-B','Beacon');
 function fixture(companies=[acme,beacon]){
+ arIncomplete=0;osintRoutes={spiderfoot:null,artemis:null};osintError=false;osintLaunches=[];sfFindings=[];arReads=[];sfScopes=[];afterOsint=()=>{};
  scannerRouteLoads=0;nessusRosterReads=0;nessusStatusReads=0;nessusStatus="completed";
  scannerRoutes=null;scannerError=false;nessusResults={findings:[],scannedHosts:[]};nessusReads=[];nessusLaunches=[];nessusControls=[];afterNessus=()=>{};
  spotlightRoutes=null;spotlightFailure=false;spotlightRuns=[];afterSpotlight=()=>{};spotlightPromotions=0;
@@ -285,4 +288,46 @@ test('reviewed Nessus repeated sync reuses a pending scan and imports each compl
  assert.equal((await store.importFromNessus()).scansImported,0);assert.equal(nessusReads.length,1);
  scans[0].lastModified=300;assert.equal((await store.importFromNessus()).scansImported,1);assert.equal(s.scans.size,2);assert.equal(nessusReads.length,2);
  assert.equal((await store.importFromNessus()).scansImported,0);assert.equal(s.scans.size,2);assert.equal(nessusReads.length,2);
+});
+
+const osintRoute=(provider,companyId=acme.id)=>({...scannerRoute(),provider,companyId,sourceScope:provider==='artemis'?'ExactTag':'targets:fixture',connectionRef:'environment:scanner:'+provider,targets:['acme.example']});
+test('reviewed SpiderFoot routes by exact approved root, preserves existing scan ownership and ignores misleading names',async()=>{
+ const s=fixture();osintRoutes.spiderfoot=[osintRoute('spiderfoot')];sfScans=[{id:'sf-1',name:'Beacon',target:'ACME.example.',status:'FINISHED'}];sfFindings=[{...arItem('unused','third-party.example'),module:'fixture'}];
+ assert.equal((await store.importFromSpiderfoot()).findingsImported,1);assert.equal([...s.findings.values()][0].companyId,acme.id);assert.equal(sfScopes[0].scan.id,'sf-1');
+ assert.equal((await store.importFromSpiderfoot()).scansImported,0);assert.equal(sfReads,1);
+ osintRoutes.spiderfoot=[osintRoute('spiderfoot',beacon.id)];assert.match((await store.importFromSpiderfoot()).skipped[0].reason,/different company/);assert.equal(sfReads,1);
+ sfScans=[{id:'sf-2',name:'Acme',target:'other.acme.example',status:'FINISHED'}];assert.equal((await store.importFromSpiderfoot()).scansImported,0);assert.equal(sfReads,1);
+});
+test('OSINT imports fail closed on missing, revoked or changed assignments without moving or applying findings',async()=>{
+ for(const provider of ['spiderfoot','artemis'])for(const failure of ['empty','error','revoked','revision','deleted']){
+  const s=fixture();osintRoutes[provider]=failure==='empty'?[]:[osintRoute(provider)];osintError=failure==='error';
+  sfScans=[{id:'sf-1',name:'Acme',target:'acme.example',status:'FINISHED'}];sfFindings=[arItem('unused')];arFindings=[arItem('ExactTag')];
+  afterOsint=()=>{if(failure==='revoked')osintRoutes[provider]=[];if(failure==='revision')osintRoutes[provider][0]={...osintRoutes[provider][0],revision:2};if(failure==='deleted')s.companies.delete(acme.id);};
+  const result=await store[provider==='spiderfoot'?'importFromSpiderfoot':'importFromArtemis']();
+  assert.ok(result.error||result.skipped.length);unchanged(s);if(['empty','error'].includes(failure))assert.equal(sfReads+arReads.length,0);
+ }
+});
+test('reviewed Artemis uses its exact tag owner and never reassigns an existing tag scan',async()=>{
+ const s=fixture();osintRoutes.artemis=[osintRoute('artemis',beacon.id)];arFindings=[arItem('ExactTag','third-party.example'),arItem('other')];
+ assert.equal((await store.importFromArtemis()).findingsImported,1);assert.equal([...s.findings.values()][0].companyId,beacon.id);assert.equal(arReads[0].tag,'ExactTag');
+ assert.deepEqual(arReads[0].targets,['acme.example']);assert.equal(s.scans.size,1);
+ osintRoutes.artemis=[osintRoute('artemis')];assert.match((await store.importFromArtemis()).skipped[0].reason,/different company/);assert.equal(s.findings.size,1);
+});
+test('reviewed OSINT preview and launch use approved roots/tags only; per-target revocation stops further launches',async()=>{
+ fixture();osintRoutes={spiderfoot:[osintRoute('spiderfoot')],artemis:[osintRoute('artemis',beacon.id)]};
+ const preview=await store.previewOsintTargets();assert.equal(preview.companies,2);assert.equal(preview.domainsTotal,2);assert.equal(osintLaunches.length,0);
+ const result=await store.launchOsintScans();assert.equal(result.spiderfoot.launched,1);assert.equal(result.artemis.launched,1);assert.equal(osintLaunches.find(c=>c.provider==='artemis').tag,'ExactTag');assert.ok(osintLaunches.every(c=>c.scope));
+ fixture();osintRoutes={spiderfoot:[{...osintRoute('spiderfoot'),targets:['acme.example','second.example']}],artemis:[osintRoute('artemis',beacon.id)]};
+ afterOsint=()=>{osintRoutes.spiderfoot=[];};const revoked=await store.launchOsintScans();assert.equal(revoked.spiderfoot.launched,1);assert.equal(revoked.spiderfoot.failed,1);
+ osintError=true;await assert.rejects(()=>store.previewOsintTargets());const count=osintLaunches.length;assert.ok((await store.launchOsintScans()).errors.length);assert.equal(osintLaunches.length,count);
+});
+test('reviewed OSINT cannot auto-pivot related hosts without separate Nessus approval',async()=>{
+ const s=fixture();s.settings.autoScanNewAssets=true;osintRoutes.spiderfoot=[osintRoute('spiderfoot')];sfScans=[{id:'sf-1',name:'Acme',target:'acme.example',status:'FINISHED'}];sfFindings=[{...arItem('unused','third-party.example'),category:'SpiderFoot: TCP_PORT_OPEN'}];
+ assert.equal((await store.importFromSpiderfoot()).findingsImported,1);assert.equal(nessusLaunches.length,0);assert.equal(s.scans.size,1);
+});
+
+test('reviewed Artemis explicitly reports pending analyses while retaining existing and completed observations',async()=>{
+ const s=fixture();osintRoutes.artemis=[osintRoute('artemis')];arFindings=[arItem('ExactTag')];arIncomplete=2;
+ const old={id:'old',companyId:acme.id,connector:'artemis',status:'Open',cve:'OLD',asset:'previous.example',title:'Previous'};s.findings.set('old',old);
+ const result=await store.importFromArtemis();assert.equal(result.findingsImported,1);assert.match(result.skipped[0].reason,/2 pending or stopped/);assert.equal(old.status,'Open');assert.equal(s.findings.size,2);
 });

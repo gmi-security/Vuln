@@ -190,6 +190,7 @@ function OsintLaunchBanner() {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [preview, setPreview] = useState<OsintPreview | null>(null);
+  const [previewError, setPreviewError] = useState(false);
   const [showTargets, setShowTargets] = useState(false);
   const [enriching, setEnriching] = useState(false);
   const [enrichMsg, setEnrichMsg] = useState<{ ok: boolean; text: string } | null>(null);
@@ -221,9 +222,9 @@ function OsintLaunchBanner() {
 
   useEffect(() => {
     void fetch("/api/osint/preview", { cache: "no-store" })
-      .then((r) => r.json())
-      .then((j) => setPreview(j.preview ?? null))
-      .catch(() => undefined);
+      .then(async (r) => { const json = await r.json(); if (!r.ok || !json.preview) throw new Error("Preview unavailable"); return json; })
+      .then((j) => { setPreview(j.preview); setPreviewError(false); })
+      .catch(() => setPreviewError(true));
   }, []);
 
   async function run() {
@@ -255,7 +256,7 @@ function OsintLaunchBanner() {
             OSINT sweep &amp; threat intel
           </h2>
           <p className="mt-1 text-sm text-zinc-400">
-            Launch Artemis + SpiderFoot against every customer&apos;s root domains
+            Launch Artemis + SpiderFoot against the configured customer targets
             for supplemental attack-surface context, and refresh CISA KEV + EPSS to
             re-score every finding. Run either on demand.
           </p>
@@ -274,15 +275,16 @@ function OsintLaunchBanner() {
           <button
             type="button"
             onClick={run}
-            disabled={busy || (preview != null && preview.companies === 0)}
+            disabled={busy || previewError || preview == null || preview.companies === 0}
             className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.14)] px-4 py-2 text-sm font-medium text-[#ff4d57] transition hover:bg-[rgba(179,14,20,0.24)] disabled:cursor-not-allowed disabled:opacity-40"
           >
             <RefreshCw size={15} className={busy ? "animate-spin" : ""} />
-            {busy ? "Launching…" : "Run OSINT scans (all customers)"}
+            {busy ? "Launching…" : "Run OSINT scans"}
           </button>
         </div>
       </div>
 
+      {previewError ? <p role="alert" className="mt-3 text-sm text-[#ff8a8a]">OSINT target preview is unavailable. Check connector routing and refresh this page before launching scans.</p> : null}
       {enrichMsg ? (
         <div
           className={`mt-3 rounded-lg border px-3 py-2 text-xs ${

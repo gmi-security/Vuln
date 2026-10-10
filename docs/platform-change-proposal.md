@@ -138,7 +138,7 @@ Acceptance requires customer isolation across shared CVEs; correct deduplication
 
 ### Current position and next steps
 
-**Latest implementation (checkpoint 43):** Nessus now has reviewed numeric-folder/target routing across bulk import, polling and native scan/control paths, behind its own separate approval and runtime switch. Whole-result validation and route rechecks precede finding application. The operational approval/audit code is shared with inventory and Spotlight while retaining separate provider rules and tables. No production activation occurred. Other scanner consumers, FQL/patch routing, live scope/API verification, SQL reporting replacement and authoritative writer handoff remain outstanding.
+**Latest implementation (checkpoint 44):** SpiderFoot and Artemis now extend the scanner approval model with exact root/tag/analysis routing, response provenance checks and current-approval rechecks. Their preview and launch action share the same approved target plan; incomplete Artemis analyses report partial coverage. Existing source classifications, scoring, permissions and data remain. No production activation occurred. ZAP/Vulners and FQL/patch consumers, live acceptance, SQL reporting integration and authoritative writer handoff remain outstanding.
 
 **October 10 UI component candidate:** `release/remediation-ui` contains the isolated UI component over `main` at `a6c485b`. Commit `23a5da0` isolates manual-draft automation protections; `ba46eae` adds the layout, shared CVE workflow, tests and `docs/remediation-ui-release.md`. It excludes shadow schemas/readers, summary workers, connector registry activation and authoritative-write prototypes. It has not been pushed, merged or deployed. Preserve its fixes/tests when assembling the combined candidate; its prior UI-only release instructions are superseded by the combined rollout decision.
 
@@ -1057,6 +1057,18 @@ Validation: **207 distinct local regression tests**, **34 isolated PostgreSQL gr
 The [Nessus operation guide](customer-scanner-routing.md) records approved target grammar, migration order, actual-server acceptance requirements and rollback limits. The underlying mutable platform store remains authoritative; there is no distributed write fence or atomic SQL findings publication in this step. Drain jobs before changing assignments or modes. Independent approved folders can succeed while failed scopes report errors. Source-provided aliases and before/after run timestamps are not an atomic upstream snapshot or independent host-ownership proof.
 
 Next: SpiderFoot/Artemis/ZAP/Vulners consumers, FQL and patch routing, actual customer source verification, SQL reporting integration and authoritative writer handoff, then combined release and recovery rehearsal. Burp, Nmap, Intune, IntelOwl and n8n remain disabled.
+
+### Implementation checkpoint 44 - SpiderFoot and Artemis source ownership
+
+Added opt-in SpiderFoot exact-root ownership and Artemis exact-tag/root/analysis routing through the existing scanner approval service. The explicit additive migration preserves Nessus route/audit records. Scanner approval transactions reject overlapping SpiderFoot target sets and duplicate Artemis tag ownership. Source review fingerprints now include SpiderFoot transport/user/use-case configuration without copying secrets.
+
+Collectors validate the relevant raw source identities before mapping. Changed, foreign or truncated results are withheld, and the store rechecks the current customer/binding before applying them. Pending/stopped Artemis analyses generate a partial-import warning. Independent valid scopes can still succeed; prior data is preserved. Existing OSINT classification, scoring and finding deduplication remain; related third-party assets are not ownership proof.
+
+The OSINT preview and existing launch action use the same provider-specific plan, with reviewed targets and the approved Artemis tag. Preview failures are visible; launches recheck approval and validate acknowledgements. A reviewed OSINT import can auto-pivot only through a separately reviewed Nessus route and its target checks. No new scan trigger or permission was added.
+
+Validation: **216 distinct local regression tests**, **39 isolated PostgreSQL groups**, **nine browser groups**, and a production build/TypeScript pass. The full regression run passed 215 tests; the final partial-coverage change passed 58 focused tests, including one additional test (reruns are not added twice). HTTP and browser transports were fixture responses; guarded private-cluster databases were discarded and the cluster stopped. No production configuration, source data, real scan or ticket changed. See [OSINT operation, migration and rollback](customer-osint-routing.md). Actual server-version acceptance, Artemis connectivity, full-scale collection cost and atomic SQL publication remain unverified or unfinished.
+
+Next: ZAP/Vulners runtime consumers, FQL/patch routing, live scope verification, SQL reporting/write handoff and combined release/recovery rehearsal. Previously disabled integrations stay disabled.
 
 ## How the system works today
 

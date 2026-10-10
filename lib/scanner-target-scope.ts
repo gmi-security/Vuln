@@ -41,6 +41,12 @@ export function scannerTargetMatcher(approved: readonly string[]) {
       !("hostname" in requested) && scope.family === requested.family && scope.low <= requested.low && scope.high >= requested.high);
   };
 }
+// OSINT launch roots are explicit hosts, not wildcard domains or networks.
+export function scannerExactTargetKey(value: string): string {
+  if (value.includes("/")) throw new Error("OSINT routing requires exact hostnames or IP addresses.");
+  const parsed = target(value);
+  return "hostname" in parsed ? parsed.hostname : `ip${parsed.family}:${parsed.low.toString(16)}`;
+}
 // Host aliases are trusted only within an already verified scanner folder. No DNS lookups.
 export function assertScannerResultScope(approved: readonly string[], result: {
   scannedHosts: { hostname: string; assetAliases: string[] }[];

@@ -24,6 +24,7 @@ export function createOperationalRoutingStore<P extends string, R>(db: Pick<Pool
   bindingScope: (companyId: string, preview: Preview, row: any) => { provider: P; sourceScope: string };
   validateRoute: (row: any, preview: Preview) => R;
   checkRoutes: (routes: R[], provider: P) => void;
+  validatePeersOnSave?: boolean;
 }) {
   const label = policy.kind[0].toUpperCase() + policy.kind.slice(1);
   const prefix = operationalTablePrefix(policy.kind);
@@ -46,8 +47,9 @@ export function createOperationalRoutingStore<P extends string, R>(db: Pick<Pool
       if ((before?.revision ?? 0) !== input.expectedRevision) fail(`${label} routing changed; export current state before approval.`);
       if (!input.enabled && !before) fail(`No ${policy.kind} route exists to disable.`);
       let provider = before?.provider, sourceScope = before?.source_scope, candidateHash = before?.candidate_hash;
+      let preview: Preview | undefined;
       if (input.enabled) {
-        const preview = await collect(); validatePreview(preview);
+        preview = await collect(); validatePreview(preview);
         const row = (await client.query(`SELECT b.*,d.candidate_hash AS imported_hash,d.source_present FROM public.customer_connector_bindings b
           JOIN public.customer_connector_drafts d ON d.id=b.candidate_id WHERE b.candidate_id=$1 AND b.company_id=$2 FOR SHARE OF b,d`,
           [input.candidateId, input.companyId])).rows[0];
@@ -61,6 +63,11 @@ export function createOperationalRoutingStore<P extends string, R>(db: Pick<Pool
         provider=EXCLUDED.provider,source_scope=EXCLUDED.source_scope,binding_revision=EXCLUDED.binding_revision,candidate_hash=EXCLUDED.candidate_hash,
         revision=${prefix}_routes.revision+1,enabled=EXCLUDED.enabled,updated_at=now() RETURNING *`,
         [input.candidateId, input.companyId, provider, sourceScope, input.enabled ? input.bindingRevision : before!.binding_revision, candidateHash, input.enabled])).rows[0];
+      if (input.enabled && policy.validatePeersOnSave) {
+        const peers = (await client.query(`${operationalRouteEvidenceSelect(policy.kind)} WHERE r.provider=$1 AND r.enabled LIMIT 1001`, [provider])).rows;
+        if (peers.length > 1000) fail(`${label} routing limit exceeded.`);
+        policy.checkRoutes(peers.map(row => policy.validateRoute(row, preview!)), provider as P);
+      }
       await client.query(`INSERT INTO public.${prefix}_route_audit(candidate_id,company_id,revision,actor,before_state,after_state,note)
         VALUES($1,$2,$3,$4,$5,$6,$7)`, [input.candidateId, input.companyId, after.revision, actor, before ?? null, after, input.note]);
       await client.query("COMMIT");

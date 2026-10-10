@@ -89,6 +89,6 @@ Drain import and scan operations before changing assignments, flags or builds. T
 
 Approvals are rechecked before applying collected findings; application still uses the mutable platform store. Revocation does not cancel an in-flight provider request or roll back an application that has already begun. No distributed write fence or atomic SQL findings publication is claimed. An older binary ignores these routing approvals, so a rollback requires a reviewed compatible build and reconciled writer ownership.
 
-SpiderFoot, Artemis, ZAP and Vulners runtime routing remain separate follow-ups. This checkpoint does not enable Burp, Nmap, Intune, IntelOwl or n8n. It does not resolve earlier Artemis/ZAP connectivity failures or complete FQL/patch routing and the platform database migration.
+SpiderFoot and Artemis now extend this approval model; see [OSINT routing](customer-osint-routing.md) for their separate source scopes and additive migration. ZAP and Vulners runtime routing remain separate follow-ups. This checkpoint does not enable Burp, Nmap, Intune, IntelOwl or n8n. It does not resolve earlier Artemis/ZAP connectivity failures or complete FQL/patch routing and the platform database migration.
 
 Validation is recorded in the [rollout status](connector-rollout-status.md). Tests use fixture HTTP responses, mocked operational effects and guarded disposable PostgreSQL databases. No real customer scan was launched or import performed.
