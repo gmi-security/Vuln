@@ -11,7 +11,7 @@ import * as metadata from '../lib/db/connector-metadata.mjs';
 
 async function loadConnectorModule(entry) {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-  const allowed = new Set(['customer-query-routing', 'customer-scanner-routing', 'scanner-target-scope', 'customer-operational-routing', 'customer-spotlight-routing', 'customer-inventory-routing', 'customer-connector-routing', 'connector-data-contracts', 'customer-connector-preview', 'customer-connector-drafts', 'customer-connector-bindings', 'customer-connector-status', 'customer-saved-source-bindings', 'customer-saved-sources', 'connectors', 'company-name', 'reporting-direct-sources']
+  const allowed = new Set(['customer-elastic-scope', 'customer-query-routing', 'customer-scanner-routing', 'scanner-target-scope', 'customer-operational-routing', 'customer-spotlight-routing', 'customer-inventory-routing', 'customer-connector-routing', 'connector-data-contracts', 'customer-connector-preview', 'customer-connector-drafts', 'customer-connector-bindings', 'customer-connector-status', 'customer-saved-source-bindings', 'customer-saved-sources', 'connectors', 'company-name', 'reporting-direct-sources']
     .map(name => resolve(root, `lib/${name}.ts`)));
   const cache = new Map();
   async function load(file) {
@@ -64,3 +64,5 @@ export const loadScannerRouting = () => loadConnectorModule('customer-scanner-ro
 export const loadScannerTargets = () => loadConnectorModule('scanner-target-scope');
 
 export const loadQueryRouting = () => loadConnectorModule("customer-query-routing");
+
+export const loadElasticScope = () => loadConnectorModule("customer-elastic-scope");

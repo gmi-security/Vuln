@@ -88,7 +88,7 @@ export default function CustomerConnectorsPage({ initialCompanyId = "" }: { init
       <Link className={styles.button} href={customerConnectorsHref(companyId, true)}>Shared connector tools</Link></div>}>
     <ReportingCustomer key={`selector-${refresh}`} companyId={companyId} onCompanyChange={selectCustomer} refreshToken={refresh} showReport={false} setupPath="customer-connectors?setup=1"/>
     <p className="rounded-xl border border-zinc-800 bg-zinc-950 p-4 text-sm leading-relaxed text-zinc-300">
-      This view reads saved configuration. It does not test live access or start imports and scans. Reviewing an assignment does not enable it. Inventory, Spotlight, supported scanners and saved CrowdStrike queries require separate operational approvals and provider switches; other imports continue through existing configuration.
+      This view reads saved configuration. It does not test live access or start imports and scans. Reviewing an assignment does not enable it. Inventory, Spotlight, supported scanners and saved CrowdStrike/Elasticsearch queries require separate operational approvals and provider switches; other imports continue through existing configuration.
     </p>
     {companyId ? <Status key={companyId} companyId={companyId} refresh={refresh}/> : <p className="text-sm text-zinc-300">Choose a customer to see its source configuration. Shared connections are not automatically assigned to every customer.</p>}
   </VulnShell>;

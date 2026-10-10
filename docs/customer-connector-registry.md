@@ -194,3 +194,5 @@ The [Nessus routing workflow](customer-scanner-routing.md) adds `route-scanner` 
 SpiderFoot and Artemis use the same scanner approval commands with separate exact-target/tag policies and an explicit additive migration. See [OSINT routing and rollback](customer-osint-routing.md). Reviewing a binding alone still cannot start imports or scans.
 
 The [ZAP and Vulners bridge extension](customer-active-scanner-routing.md) uses the same operational approval commands with exact origins/hosts and an additive migration. Cloud enrichment is separate; source completeness and live acceptance limits are documented there.
+
+The [Elastic saved-query extension](customer-elastic-query-routing.md) reuses `route-query` and `export-query-routes` with exclusive exact datasets and the additive query-routes v2 migration. CrowdStrike approvals remain independent; neither review nor query approval publishes findings.

@@ -119,12 +119,12 @@ export function customerConnectorStatus(companyId: string, preview: ReturnType<t
     if (item.data) item.data.routing = status.routing;
   }
   for (const status of queries) {
-    const item = items.find(i => i.id === status.id && i.provider === "crowdstrike");
+    const item = items.find(i => i.id === status.id && ["crowdstrike", "elastic"].includes(i.provider));
     if (!item) continue;
     item.review = status.review;
     item.scope = "A separate saved-query approval is recorded. See routing details for its current state.";
-    item.data = { domains: ["saved-queries"], storage: "Customer query cache, daily observations and prepared live patch reports",
-      lifecycle: "Refresh within the approved CID; this approval does not publish platform findings", routing: status.routing };
+    item.data = { domains: ["saved-queries"], storage: item.provider === "elastic" ? "Customer saved-query cache" : "Customer query cache, daily observations and prepared live patch reports",
+      lifecycle: `Refresh within the approved ${item.provider === "elastic" ? "datasets" : "CID"}; this approval does not publish platform findings`, routing: status.routing };
   }
   return { companyId, companyName: company.name, checkedAt, registryAvailable, items };
 }

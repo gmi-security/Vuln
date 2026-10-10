@@ -9,7 +9,7 @@ const row={candidate_id:c.id,company_id:'A',provider:'crowdstrike',source_scope:
 test('saved-query approvals require the exact saved connection, CID and query-only authority',()=>{
  for(const v of ['',undefined,' '])assert.equal(routing.reviewedQueryRouting(v),false);
  assert.equal(routing.reviewedQueryRouting('crowdstrike'),true);
- for(const v of ['all','elastic','crowdstrike,','CrowdStrike'])assert.throws(()=>routing.reviewedQueryRouting(v));
+ for(const v of ['all','crowdstrike,','CrowdStrike'])assert.throws(()=>routing.reviewedQueryRouting(v));
  assert.equal(routing.queryBindingScope('A',preview,row).sourceScope,cid);
  for(const edit of [{source_present:false},{review_state:'pending-review'},{imported_hash:'0'.repeat(64)},
   ...[{tenantId:'Alpha'},{tenantId:null},{targets:['example.com']},{authority:'findings-primary'},{datasets:['vulnerabilities']}].map(p=>({proposal:{...row.proposal,...p}}))])

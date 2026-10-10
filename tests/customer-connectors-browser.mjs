@@ -25,7 +25,7 @@ const artifacts = await mkdtemp(join(tmpdir(), 'vuln2-connectors-browser-'));
 const companies = [{ id: 'CO-A', name: 'Fixture Alpha' }, { id: 'CO-B', name: 'Fixture Beta' }, { id: 'CO-EMPTY', name: 'Fixture Empty' }];
 const calls = [], errors = [], unexpected = []; let fail = false, pending = false, release;
 let previewFailure=false;
-let shared = false, partial = true, inventoryRouting = false, inventoryProvider = "automate", spotlightRouting = false, scannerRouting = false, scannerProvider = "nessus", queryRouting = false;
+let shared = false, partial = true, inventoryRouting = false, inventoryProvider = "automate", spotlightRouting = false, scannerRouting = false, scannerProvider = "nessus", queryRouting = false, queryProvider = "crowdstrike";
 function status(id) {
   const result = { companyId: id, companyName: companies.find(c => c.id === id).name, checkedAt: '2026-10-09T19:00:00Z', registryAvailable: id !== 'CO-A',
     items: id === 'CO-EMPTY' ? [] : [{ id: id+'-record', provider: inventoryRouting ? inventoryProvider : id === 'CO-A' ? 'defender' : 'crowdstrike', evidence: 'Saved customer connection', configuration: 'Configuration recorded',
@@ -38,7 +38,7 @@ function status(id) {
   if(scannerRouting && result.items.length){result.items[0].provider=scannerProvider;result.items[0].review='Scanner route approved';
     result.items[0].scope='A separate scanner source and target approval is recorded. See routing details for its current state.';
     result.items[0].data={domains:['endpoint-findings'],storage:'Existing platform findings',lifecycle:'Reviewed folder and target ownership',routing:'Approved for scanner routing; the provider switch is on. This does not confirm a successful import.'};}
-  if(queryRouting && result.items.length){result.items[0].provider="crowdstrike";result.items[0].review="Query route approved";result.items[0].scope="A separate saved-query approval is recorded. See routing details for its current state.";result.items[0].data={domains:["saved-queries"],storage:"Customer query cache, daily observations and prepared live patch reports",lifecycle:"Refresh within the approved CID; this approval does not publish platform findings",routing:"Customer-scoped query routing is on. Results and patch collection recheck this approval; this does not confirm source health."};}
+  if(queryRouting && result.items.length){result.items[0].provider=queryProvider;result.items[0].review="Query route approved";result.items[0].scope="A separate saved-query approval is recorded. See routing details for its current state.";result.items[0].data={domains:["saved-queries"],storage:"Customer query cache, daily observations and prepared live patch reports",lifecycle:`Refresh within the approved ${queryProvider === "elastic" ? "datasets" : "CID"}; this approval does not publish platform findings`,routing:"Customer-scoped query routing is on. Results and patch collection recheck this approval; this does not confirm source health."};}
   return result;
 }
 try {
@@ -155,7 +155,15 @@ try {
   assert.equal(await page.getByRole('combobox').count(),1);
   assert.equal(await page.getByRole('button',{name:/Approve|Enable|Configure|Sync|Scan/}).count(),0);
   await page.screenshot({path:join(artifacts,'query-route-status-mobile.png'),fullPage:true});
-  pass('saved-query routing status uses the existing customer selector without new privileges or health claims');
+  queryProvider="elastic";await page.getByRole('button',{name:'Refresh status',exact:true}).click();
+  await page.getByRole('heading',{name:'Elasticsearch',exact:true}).waitFor();
+  await page.getByText('How this source is used',{exact:true}).click();
+  await page.getByText('Refresh within the approved datasets',{exact:false}).waitFor();
+  assert.equal(await page.getByRole('combobox').count(),1);
+  assert.equal(await page.getByRole('button',{name:/Approve|Enable|Configure|Sync|Scan/}).count(),0);
+  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+  await page.screenshot({path:join(artifacts,'elastic-query-status-mobile.png'),fullPage:true});
+  pass('CrowdStrike and Elastic query approvals use the existing customer selector without new privileges or health claims');
 
   shared = true; await page.setViewportSize({width:1440,height:1050});
   await page.goto(base+'/connectors?view=shared&companyId=CO-B');

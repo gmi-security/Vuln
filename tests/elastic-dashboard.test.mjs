@@ -157,6 +157,7 @@ test("HTTP client rejects metadata and loopback endpoints before sending a key",
 test("async queries wait for completion, reject partial data, and clean up owned queries", async () => {
   const calls = [];
   let replies = [];
+  overrides.set("./customer-elastic-query", {checkReviewedElasticConnection:async()=>{}, executeCustomerEsql:async(_connection,_query,_background,datasets)=>{lastElasticDatasets=datasets;return fakeQuery();}});
   overrides.set("./elastic-query-client", { elasticJsonRequest: async (_connection, path, method, body) => {
     calls.push({ path, method, body });
     if (method === "DELETE") return { body: { acknowledged: true }, warning: false };
@@ -217,19 +218,21 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
   }});
   overrides.set("./persist", { applicationDatabase: () => null });
   overrides.set("./store", {getCompany:id=>["CO-A","CO-B","CO-1"].includes(id)?{id,name:id}:undefined});
-  let reviewedRoutes = null;
+  let reviewedRoutes = null, elasticRoutes = null;
   const routeModule = await load("lib/customer-query-routing-server.ts"); await routeModule.evaluate();
   const selectRoute = routeModule.namespace.selectQueryRoute;
   overrides.set("./customer-query-routing-server", {
-    loadReviewedQueryRoutes: async()=>reviewedRoutes, selectQueryRoute:selectRoute,
-    recheckQueryRoute:async(_db,route)=>{if(route && !reviewedRoutes?.some(r=>r.bindingKey===route.bindingKey))throw new contract.DashboardError("Customer query approval changed.",409);}
+    loadReviewedQueryRoutes: async(_db,source="crowdstrike")=>source==="elastic"?elasticRoutes:reviewedRoutes, selectQueryRoute:selectRoute,
+    recheckQueryRoute:async(_db,route)=>{if(route && !(route.provider==="elastic"?elasticRoutes:reviewedRoutes)?.some(r=>r.bindingKey===route.bindingKey))throw new contract.DashboardError("Customer query approval changed.",409);}
   });
   overrides.set("./elastic-vuln-server", { elasticVulnEnabled: () => true });
+  let lastElasticDatasets;
   const fakeQuery = async () => {
       if (hold) { const wait = hold; hold = null; return await wait; }
       if (fail) throw new contract.DashboardError("Simulated Elastic outage.");
       return response;
   };
+  overrides.set("./customer-elastic-query", {checkReviewedElasticConnection:async()=>{}, executeCustomerEsql:async(_connection,_query,_background,datasets)=>{lastElasticDatasets=datasets;return fakeQuery();}});
   overrides.set("./elastic-query-client", { ...client, executeEsql: fakeQuery });
   overrides.set("./elastic-async-client", { executeEsqlAsync: fakeQuery });
   const falconModule = await load("lib/crowdstrike-dashboard-client.ts");
@@ -651,7 +654,7 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
     await db.query("UPDATE elastic_dashboard_queries SET next_attempt=now()+interval '1 day'");
     process.env.VULN_REVIEWED_QUERY_PROVIDERS='crowdstrike';
     const cid='a'.repeat(32), revision=await store.dashboardConnectionRevision('crowdstrike');
-    reviewedRoutes=[{companyId:'CO-A',sourceScope:cid,connectionRevision:revision,bindingKey:'proof-a'}];
+    reviewedRoutes=[{provider:'crowdstrike',companyId:'CO-A',sourceScope:cid,connectionRevision:revision,bindingKey:'proof-a'}];
     const reviewed={...falconDefinition,id:'reviewed',companyId:'CO-A',enabled:false};
     await assert.rejects(()=>store.previewQuery({...reviewed,companyId:'CO-B'},'wrong-owner'),/approved/);
     assert.equal(selectRoute(null,'CO-B'),null);
@@ -694,7 +697,30 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
     assert.equal((await jobs.readDashboardJob(reviewedJob.jobId,'reviewed-job')).result.scopeKey,'proof-d');
     reviewedRoutes=[{...reviewedRoutes[0],bindingKey:'proof-e'}];
     await assert.rejects(()=>jobs.readDashboardJob(reviewedJob.jobId,'reviewed-job'),/approval changed/);
-    reviewedRoutes=null;delete process.env.VULN_REVIEWED_QUERY_PROVIDERS;
+    process.env.VULN_REVIEWED_QUERY_PROVIDERS='crowdstrike,elastic';
+    const elasticRevision=await store.dashboardConnectionRevision('elastic');
+    elasticRoutes=[{provider:'elastic',companyId:'CO-A',sourceScope:'["logs-alpha"]',connectionRevision:elasticRevision,bindingKey:'elastic-a'}];
+    const esTile={...contract.DEFAULT_COVERAGE,id:'elastic-reviewed',companyId:'CO-A',enabled:false};
+    const immediate=await store.addDashboardTile(esTile,'es-add');assert.equal(immediate.query.result,null);
+    await assert.rejects(()=>store.previewQuery({...esTile,companyId:'CO-B'},'es-wrong'),/approved/);
+    await store.saveQuery(esTile,'es-save');assert.deepEqual(lastElasticDatasets,['logs-alpha']);
+    const inheritedJob=await jobs.enqueueDashboardJob('preview',{...esTile,companyId:undefined},'es-inherited');await waitFor(()=>!globalThis.__elasticJobs.working);
+    assert.equal((await jobs.readDashboardJob(inheritedJob.jobId,'es-inherited')).result.scopeKey,'elastic-a');
+    assert.equal((await store.readDashboard(true,'CO-A')).queries.find(q=>q.id===esTile.id).result.scopeKey,'elastic-a');
+    assert.equal((await store.readDashboard(true,'CO-B')).availableSources.elastic,false);
+    elasticRoutes=[{...elasticRoutes[0],bindingKey:'elastic-b'}];
+    assert.equal((await store.readDashboard(true,'CO-A')).queries.find(q=>q.id===esTile.id).result,null);
+    assert.ok((await db.query('SELECT result FROM elastic_dashboard_queries WHERE id=$1',[esTile.id])).rows[0].result,'old cache remains stored');
+    let finishEs;hold=new Promise(resolve=>finishEs=resolve);
+    const pendingEs=store.previewQuery(esTile,'es-race');await delay(100);elasticRoutes=[];finishEs(numeric);
+    await assert.rejects(()=>pendingEs,/approval changed/);
+    elasticRoutes=[{provider:'elastic',companyId:'CO-A',sourceScope:'["logs-alpha"]',connectionRevision:elasticRevision,bindingKey:'elastic-c'}];
+    const esJob=await jobs.enqueueDashboardJob('preview',esTile,'es-job');await waitFor(()=>!globalThis.__elasticJobs.working);
+    assert.equal((await jobs.readDashboardJob(esJob.jobId,'es-job')).result.scopeKey,'elastic-c');
+    elasticRoutes=[{...elasticRoutes[0],bindingKey:'elastic-d'}];
+    await assert.rejects(()=>jobs.readDashboardJob(esJob.jobId,'es-job'),/approval changed/);
+    assert.equal((await store.readDashboard(true,'CO-A')).queries.find(q=>q.id==='reviewed').result,null,'separate CrowdStrike stale proof remains withheld');
+    reviewedRoutes=null;elasticRoutes=null;delete process.env.VULN_REVIEWED_QUERY_PROVIDERS;
     // Leave the isolated DB unconnected for the subsequent HTTP authorization checks.
     await db.query("DELETE FROM elastic_dashboard_connection");
     await db.query("DELETE FROM dashboard_source_connections; DELETE FROM dashboard_daily_history; DELETE FROM elastic_dashboard_queries WHERE definition->>'source' = 'crowdstrike'");

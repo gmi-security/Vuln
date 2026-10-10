@@ -1,5 +1,7 @@
 # Customer-scoped saved CrowdStrike queries and patch requests
 
+For the checkpoint 47 Elasticsearch extension, see [customer dataset routing](customer-elastic-query-routing.md). Its provider switch can enable Elastic and CrowdStrike independently.
+
 This is the checkpoint 46 implementation guide for Vuln2.0. It is not a production activation instruction. The new behavior is opt-in; existing credentials, roles, tiles, findings, tickets and source storage are preserved.
 
 ## What changes

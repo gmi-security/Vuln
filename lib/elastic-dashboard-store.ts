@@ -1,3 +1,4 @@
+import { checkReviewedElasticConnection } from "./customer-elastic-query";
 import { assertPatchCid, type QueryScopeProof } from "./customer-query-scope";
 import { parsePatchInput, parseConsolidationInput } from "./patch-request";
 import { loadReviewedQueryRoutes, selectQueryRoute, recheckQueryRoute } from "./customer-query-routing-server";
@@ -123,29 +124,35 @@ export async function readDashboard(canManage: boolean, companyId?: string): Pro
     const definitions = companyId && canManage ? (await db.query("SELECT id, definition FROM elastic_dashboard_queries WHERE deleted_at IS NULL AND definition->>'companyId' IS NULL")).rows : [];
     const unassignedTiles = definitions.filter(row=>!reportingTileCompanyId({...row.definition,id:row.id},configured,atlasIds))
       .map(row=>({id:row.id,title:row.definition.title,source:querySource(row.definition)}));
-    let queryRoutes: QueryRoute[] | null = null, routeError = "";
-    try { queryRoutes = await loadReviewedQueryRoutes(db); }
-    catch { routeError = "Customer query routing needs renewed approval. Cached CrowdStrike results are withheld."; }
+    const routeSets: Record<DashboardSource, { routes: QueryRoute[] | null; error: string }> = {
+      elastic: { routes: null, error: "" }, crowdstrike: { routes: null, error: "" },
+    };
+    for (const source of ["elastic", "crowdstrike"] as const) {
+      try { routeSets[source].routes = await loadReviewedQueryRoutes(db, source); }
+      catch { routeSets[source].error = `Customer query routing needs renewed approval. Cached ${DASHBOARD_CONNECTORS[source].label} results are withheld.`; }
+    }
     const queries = rows.rows.map(row => {
       const owner = reportingTileCompanyId({ ...row.definition, id: row.id }, configured, atlasIds);
+      const source = querySource(row.definition), { routes, error: routeError } = routeSets[source], active = source === "elastic" ? saved : falcon;
       let result = row.result, error = row.last_error;
-      if (querySource(row.definition) === "crowdstrike") {
-        try {
-          if (routeError) throw new DashboardError(routeError, 503);
-          if (queryRoutes !== null && !falcon) throw new DashboardError("Connect the approved CrowdStrike connection before showing results.", 409);
-          const route = selectQueryRoute(queryRoutes, owner, undefined, falcon?.revision);
-          if (route && result?.scopeKey !== route.bindingKey) { result = null; error = "Waiting for results collected under this customer's current query approval."; }
-        } catch (cause) { result = null; error = cause instanceof DashboardError ? cause.message : "Customer query routing is unavailable."; }
-      }
+      try {
+        if (routeError) throw new DashboardError(routeError, 503);
+        if (routes !== null && !active) throw new DashboardError(`Connect the approved ${DASHBOARD_CONNECTORS[source].label} connection before showing results.`, 409);
+        const route = selectQueryRoute(routes, owner, undefined, active?.revision, source);
+        if (route && result?.scopeKey !== route.bindingKey) { result = null; error = "Waiting for results collected under this customer's current query approval."; }
+      } catch (cause) { result = null; error = cause instanceof DashboardError ? cause.message : "Customer query routing is unavailable."; }
       return { ...row.definition, companyId: owner, result, refreshedAt: result ? row.refreshed_at?.toISOString() ?? null : null,
         attemptedAt: row.attempted_at?.toISOString() ?? null, error };
     });
-    const scopedFalcon = Boolean(falcon) && !routeError && (queryRoutes === null || queryRoutes.some(r => r.companyId === companyId));
+    const available = (source: DashboardSource) => {
+      const active = source === "elastic" ? saved : falcon, { routes, error } = routeSets[source];
+      return Boolean(active) && !error && (routes === null || routes.some(r => r.companyId === companyId && r.connectionRevision === active?.revision));
+    };
     return {
       canManage, storageReady: true, connected: Boolean(saved),
       ...(canManage && saved ? { endpoint: (saved.value as ElasticConnection).endpoint } : {}),
       crowdstrike: { connected: Boolean(falcon), ...(canManage && falcon ? { region: (falcon.value as CrowdStrikeConnection).region } : {}) },
-      ...(companyId && canManage ? {availableSources:{elastic:Boolean(saved),crowdstrike:scopedFalcon},unassignedTiles} : {}),
+      ...(companyId && canManage ? {availableSources:{elastic:available("elastic"),crowdstrike:available("crowdstrike")},unassignedTiles} : {}),
       queries,
     };
   } catch {
@@ -159,8 +166,10 @@ async function limitedQuery(saved: unknown, query: string | QueryInput, async = 
   const input = typeof query === "string" ? { query } : query;
   try {
     const db = await database();
-    const route = querySource(input) === "crowdstrike" ? selectQueryRoute(await loadReviewedQueryRoutes(db), input.companyId, undefined, revision) : null;
-    const result = await DASHBOARD_CONNECTORS[querySource(input)].execute(saved, input, async, route?.sourceScope);
+    const source = querySource(input);
+    const route = selectQueryRoute(await loadReviewedQueryRoutes(db, source), input.companyId, undefined, revision, source);
+    const result = await DASHBOARD_CONNECTORS[source].execute(saved, input, async, source === "crowdstrike" ? route?.sourceScope : undefined,
+      source === "elastic" && route ? JSON.parse(route.sourceScope) : undefined);
     await recheckQueryRoute(db, route);
     return route ? { ...result, scopeKey: route.bindingKey } : result;
   } finally { state.running--; }
@@ -232,8 +241,10 @@ export async function saveConnection(value: unknown, actor: string): Promise<voi
   if (!apiKey || apiKey.length > 8192 || /\s/.test(apiKey)) throw new DashboardError("Enter the encoded API key for this endpoint.");
   const candidate = { endpoint, apiKey };
   throttlePreview(actor);
-  // Verify the actual first query, including required index access, before saving.
-  await limitedQuery(candidate, DEFAULT_COVERAGE.query, false);
+  // Reviewed connections are saved before dataset approval. Check authentication
+  // and deployment metadata without reading an unassigned customer's findings.
+  if (reviewedQueryRouting(process.env.VULN_REVIEWED_QUERY_PROVIDERS, "elastic")) await checkReviewedElasticConnection(candidate);
+  else await limitedQuery(candidate, DEFAULT_COVERAGE.query, false);
   const sealed = sealConnection(candidate);
   const db = await database();
   const client = await db.connect();
@@ -273,9 +284,16 @@ export async function saveCrowdStrikeConnection(value: unknown, actor: string): 
   triggerRefresh();
 }
 
-export async function assertQueryResultScope(input: QueryInput, result: QueryResult) {
-  if (querySource(input) !== "crowdstrike") return;
-  const route = selectQueryRoute(await loadReviewedQueryRoutes(await database()), input.companyId);
+export async function assertQueryResultScope(input: QueryInput & { id?: string }, result: QueryResult) {
+  const source = querySource(input);
+  const db = await database(), routes = await loadReviewedQueryRoutes(db, source);
+  if (routes === null) return;
+  let companyId = input.companyId;
+  if (companyId === undefined && input.id) {
+    const row = (await db.query("SELECT definition FROM elastic_dashboard_queries WHERE id=$1 AND deleted_at IS NULL", [input.id])).rows[0];
+    if (row) companyId = reportingTileCompanyId({ ...row.definition, id: input.id }, process.env.REPORTING_CUSTOMER_TILE_IDS, process.env.ATLAS_REPORTING_TILE_IDS);
+  }
+  const route = selectQueryRoute(routes, companyId, undefined, undefined, source);
   if (route && result.scopeKey !== route.bindingKey) throw new DashboardError("Customer query approval changed. Preview again.", 409);
 }
 
@@ -347,7 +365,7 @@ export async function addDashboardTile(value: unknown, actor: string, customerSc
   const body = value as Record<string, unknown>;
   const id = typeof body?.id === "string" ? body.id : randomUUID();
   const definition = parseDefinition(customerScope ? {...body,companyId:customerScope} : body, id), source = querySource(definition);
-  const withheld = source === "crowdstrike" && reviewedQueryRouting(process.env.VULN_REVIEWED_QUERY_PROVIDERS);
+  const withheld = reviewedQueryRouting(process.env.VULN_REVIEWED_QUERY_PROVIDERS, source);
   if (definition.companyId) await validateDashboardCustomer(definition.companyId);
   const db = await database(), client = await db.connect();
   let tile: DashboardQuery;

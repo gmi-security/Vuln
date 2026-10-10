@@ -72,5 +72,43 @@ try{
  await command('route-query',{...a,expectedRevision:2,enabled:false});await command('route-query',{...repaired,expectedRevision:2,enabled:false});
  assert.deepEqual(await routing.read('crowdstrike',collect),[]);
  ok('credential revision changes fail closed and stale approvals remain revocable');
+ // Elastic v2 upgrades in place and allows one approval per provider/customer.
+ await db.query("UPDATE dashboard_source_connections SET revision=1");
+ await command('route-query',{...a,expectedRevision:3});
+ const csBefore=await routing.read('crowdstrike',collect);
+ await db.query(await readFile('docs/sql/customer-query-routes-v2.sql','utf8'));
+ assert.deepEqual(await routing.read('crowdstrike',collect),csBefore);
+ assert.deepEqual(await routing.read('elastic',collect),[]);
+ await db.query('CREATE TABLE elastic_dashboard_connection(id integer PRIMARY KEY,revision integer); INSERT INTO elastic_dashboard_connection VALUES(1,1)');
+ await run(['import','--fingerprint',(await collect()).fingerprint]);
+ async function elasticBind(company,datasets){
+  const input=structuredClone((await bindings.list(company,collect)).items.find(i=>i.provider==='elastic').assignmentRequest);
+  Object.assign(input,{decision:'reviewed',note:'Fixture exclusive dataset ownership',proposal:{companyId:company,tenantId:null,authority:'query-only',targets:[],datasets}});
+  const result=await command('assign',input);return {candidateId:input.candidateId,companyId:company,bindingRevision:result.revision,expectedRevision:0,enabled:true,note:'Fixture Elastic query approval'};
+ }
+ const ea=await elasticBind('A',['logs-alpha','assets-alpha']),eb=await elasticBind('B',['logs-beta']);
+ await command('route-query',ea);await command('route-query',eb);
+ assert.deepEqual((await routing.read('elastic',collect)).map(r=>[r.companyId,JSON.parse(r.sourceScope)]),[['A',['assets-alpha','logs-alpha']],['B',['logs-beta']]]);
+ assert.deepEqual(await routing.read('crowdstrike',collect),csBefore);
+ ok('v2 preserves CrowdStrike proof and audit while allowing separate Elastic approvals per customer');
+ await assert.rejects(()=>db.query(`UPDATE customer_query_routes SET source_scope='["logs-alpha","extra"]' WHERE provider='elastic' AND company_id='B'`),e=>e.code==='23505');
+ for(const scope of ['[]','["logs-*"]','["a","a"]','[1]','{}','[".ds-stream-000001"]','not-json'])
+  await assert.rejects(()=>db.query("UPDATE customer_query_routes SET source_scope=$1 WHERE provider='elastic' AND company_id='B'",[scope]));
+ ok('database constraints reject overlapping subsets, wildcard scopes, duplicates and malformed dataset values');
+ const conflicting=await elasticBind('B',['logs-alpha','logs-beta']);
+ await assert.rejects(()=>command('route-query',{...conflicting,expectedRevision:1}),e=>e.code==='23505');
+ await assert.rejects(()=>routing.read('elastic',collect),/changed/);
+ const repairedElastic=await elasticBind('B',['logs-beta']);await command('route-query',{...repairedElastic,expectedRevision:1});
+ const elasticProof=(await routing.read('elastic',collect))[0].bindingKey;
+ const race=await Promise.allSettled([command('route-query',{...ea,expectedRevision:1}),command('route-query',{...ea,expectedRevision:1})]);
+ assert.equal(race.filter(r=>r.status==='fulfilled').length,1);assert.notEqual((await routing.read('elastic',collect))[0].bindingKey,elasticProof);
+ ok('actual CLI rejects cross-customer dataset ownership and preserves revision fencing');
+ const exportBoth=join(dir,'both-routes.json');await run(['export-query-routes','--company','A','--output',exportBoth]);
+ const both=JSON.parse(await readFile(exportBoth,'utf8'));assert.equal(both.routes.length,2);assert.doesNotMatch(JSON.stringify(both),/logs-alpha|assets-alpha/);
+ await db.query('UPDATE elastic_dashboard_connection SET revision=2');await assert.rejects(()=>routing.read('elastic',collect),/review/);
+ assert.deepEqual(await routing.read('crowdstrike',collect),csBefore);
+ await command('route-query',{...ea,expectedRevision:2,enabled:false});await command('route-query',{...repairedElastic,expectedRevision:2,enabled:false});
+ assert.deepEqual(await routing.read('elastic',collect),[]);
+ ok('exports hide dataset names; Elastic credential changes withhold only Elastic; stale approvals remain revocable');
  console.log(`PASS ${checks} isolated query routing groups`);
 }finally{await pool?.end();await db?.end();if(created)await admin.query(`DROP DATABASE ${name} WITH (FORCE)`);await admin.end();}

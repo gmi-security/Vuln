@@ -1,3 +1,4 @@
+import { elasticDatasets } from "./customer-elastic-scope";
 import { createHash } from "node:crypto";
 import type { Pool } from "pg";
 import type { buildConnectorPreview } from "./customer-connector-preview";
@@ -6,18 +7,28 @@ import { checkCustomerConnectorBinding } from "./customer-connector-routing";
 import { createOperationalRoutingStore, operationalRouteEvidenceSelect } from "./customer-operational-routing";
 
 type Preview = ReturnType<typeof buildConnectorPreview>;
-export type QueryRoute = { candidateId: string; companyId: string; provider: "crowdstrike"; sourceScope: string;
+export type QueryRoute = { candidateId: string; companyId: string; provider: QueryProvider; sourceScope: string;
   connectionRef: string; connectionRevision: number; revision: number; bindingRevision: number; bindingKey: string };
-export function reviewedQueryRouting(raw?: string): boolean {
+export type QueryProvider = "crowdstrike" | "elastic";
+export function reviewedQueryRouting(raw?: string, provider: QueryProvider = "crowdstrike"): boolean {
   if (!raw?.trim()) return false;
-  if (raw.trim() !== "crowdstrike") throw new Error("Invalid reviewed query routing configuration.");
-  return true;
+  const names = raw.split(",").map(s => s.trim());
+  if (names.some(s => !["crowdstrike", "elastic"].includes(s)) || new Set(names).size !== names.length)
+    throw new Error("Invalid reviewed query routing configuration.");
+  return names.includes(provider);
 }
 export function queryBindingScope(companyId: string, preview: Preview, row: SpotlightRouteEvidence) {
   const checked = checkCustomerConnectorBinding(companyId, preview, { id: row.candidate_id, candidateHash: row.candidate_hash,
     importedHash: row.imported_hash, sourcePresent: row.source_present, reviewState: row.review_state, reviewedAt: row.reviewed_at, proposal: row.proposal });
   if (!checked.ready) throw new Error("Query source assignment needs a current review.");
   const { candidate, scope } = checked.binding;
+  if (candidate.provider === "elastic") {
+    if (candidate.evidence !== "shared-configuration" || candidate.connectionRef !== "dashboard:elastic_dashboard_connection:1" ||
+        scope.authority !== "query-only" || scope.tenantId || scope.targets.length || !candidate.revision)
+      throw new Error("Elastic query routing requires the saved connection and exclusive exact datasets with query-only authority.");
+    return { provider: "elastic" as const, sourceScope: JSON.stringify(elasticDatasets(scope.datasets)),
+      connectionRef: candidate.connectionRef, connectionRevision: candidate.revision };
+  }
   if (candidate.provider !== "crowdstrike" || candidate.evidence !== "shared-configuration" ||
       candidate.connectionRef !== "dashboard:dashboard_source_connections:crowdstrike" ||
       scope.authority !== "query-only" || scope.targets.length || scope.datasets.length ||
@@ -37,16 +48,23 @@ function validateRoute(row: SpotlightRouteEvidence, preview: Preview): QueryRout
 }
 export const queryRouteEvidenceSelect = operationalRouteEvidenceSelect("query");
 export function createQueryRoutingStore(db: Pick<Pool, "connect">) {
-  return createOperationalRoutingStore<"crowdstrike", QueryRoute>(db, { kind: "query", providers: ["crowdstrike"],
+  return createOperationalRoutingStore<QueryProvider, QueryRoute>(db, { kind: "query", providers: ["crowdstrike", "elastic"],
     bindingScope: queryBindingScope, validateRoute, validatePeersOnSave: true,
     checkRoutes(routes) {
-      if (new Set(routes.map(r => r.sourceScope)).size !== routes.length || new Set(routes.map(r => r.companyId)).size !== routes.length)
-        throw new Error("Query customer/CID ownership conflicts.");
+      if (new Set(routes.map(r => r.companyId)).size !== routes.length) throw new Error("Query customer/source ownership conflicts.");
+      const owned = new Set<string>();
+      for (const route of routes) {
+        const names = route.provider === "elastic" ? elasticDatasets(JSON.parse(route.sourceScope)) : [route.sourceScope];
+        for (const name of names) {
+          if (owned.has(name)) throw new Error("Query customer/source ownership conflicts.");
+          owned.add(name);
+        }
+      }
     } });
 }
 export function queryRoutingStatus(row: SpotlightRouteEvidence, preview: Preview, raw?: string) {
   if (!row.enabled) return { id: row.candidate_id, review: "Query route disabled", routing: "This query approval is disabled. Legacy routing may apply when the provider switch is off." };
-  try { validateRoute(row, preview); return { id: row.candidate_id, review: "Query route approved", routing: reviewedQueryRouting(raw) ?
+  try { validateRoute(row, preview); return { id: row.candidate_id, review: "Query route approved", routing: reviewedQueryRouting(raw, row.provider as QueryProvider) ?
     "Customer-scoped query routing is on. Results and patch collection recheck this approval; this does not confirm source health." :
     "Approval recorded; the query routing switch is off. Existing query behavior still applies." }; }
   catch { return { id: row.candidate_id, review: "Query routing needs review", routing: "Current source/customer approval is unavailable. Reviewed queries and new patch collection are withheld." }; }
