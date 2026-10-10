@@ -3,9 +3,13 @@ import {resolve,dirname} from 'node:path';
 import {SourceTextModule,SyntheticModule} from 'node:vm';
 import ts from 'typescript';
 // Actual existing projector/scorer/publication code, without application startup.
-export async function refreshModules(){
+export async function refreshModules({persist}={}){
   const modules=new Map();
-  async function load(path){path=resolve(path);if(!modules.has(path))modules.set(path,new SourceTextModule(ts.transpileModule(await readFile(path,'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText,{identifier:path}));return modules.get(path);}
+  async function load(path){path=resolve(path);
+    if(persist&&path===resolve('lib/persist.ts')){
+      if(!modules.has(path))modules.set(path,new SyntheticModule(Object.keys(persist),function(){for(const key of Object.keys(persist))this.setExport(key,persist[key]);}));return modules.get(path);
+    }
+    if(!modules.has(path))modules.set(path,new SourceTextModule(ts.transpileModule(await readFile(path,'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText,{identifier:path}));return modules.get(path);}
   async function link(name,parent){
     if(name.startsWith('.'))return load(resolve(dirname(parent.identifier),`${name}.ts`));
     if(name.startsWith('@/'))return load(resolve(`${name.slice(2)}.ts`));
