@@ -173,6 +173,30 @@ test("the enrichment lookup is keyed by the app's own companyId, not CrowdStrike
   assert.deepEqual(riskDb.calls[0].params, ["CO-147284", ["CVE-2024-1234"]]);
 });
 
+test("when device_cves are present the enrichment lookup is scoped to those exact hosts, not all hosts in the tenant", async () => {
+  // The bug: MIN(effective_swath) with only tenant+CVE would let a single
+  // KEV-listed host elsewhere in the tenant pull Swath to 1 for a group that
+  // covers 199 devices with no enrichment yet. With device_cves, only the
+  // specific (host_key, cve) pairs in the draft's packet are checked.
+  const scope = [{ cid: "cs-cid-xyz", hostId: "device-aaa", cve: "CVE-2024-1234" }];
+  const db = fakeDb({
+    eligible: [{ id: "a", cves: ["CVE-2024-1234"], app_company_id: "CO-147284", source: "crowdstrike", device_cves: scope }],
+    routings: [{ app_company_id: "CO-147284", company_id: 55, board_id: 9, team_id: null }],
+  });
+  const riskDb = fakeRiskDb(1);
+  await (await loadAutoCreate({
+    db, riskDb,
+    reviewGroupTicket: async () => {},
+    readGroupTicket: async () => ({ group: { ticketTitle: "T", ticketBody: "B" } }),
+    createGroupTicket: async () => {},
+  })).autoCreateHighSeverityTickets();
+  assert.equal(riskDb.calls.length, 1);
+  // params[0] = tenant_key (appCompanyId for CrowdStrike, not "defender:" prefixed)
+  // params[1] = JSON-serialised deviceCves -- the host-scoped path, not the cves array
+  assert.equal(riskDb.calls[0].params[0], "CO-147284");
+  assert.deepEqual(JSON.parse(riskDb.calls[0].params[1]), scope);
+});
+
 test("a draft for a customer with no known routing yet is left alone -- never guessed", async () => {
   const db = fakeDb({ eligible: [{ id: "a", cves: ["CVE-1"], app_company_id: "CO-147284" }], routings: [] });
   let called = false;
