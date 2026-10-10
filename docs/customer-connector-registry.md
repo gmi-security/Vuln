@@ -1,6 +1,6 @@
 # Customer connector registry: preview and disabled drafts
 
-The Vuln2.0 registry now has a read-only preview, transactional storage for disabled draft proposals, and a gated customer status view. It has not been deployed. It does not migrate credentials, change customer access, activate bindings or switch findings readers/workers to a new source.
+The Vuln2.0 registry has a read-only preview, transactional storage for disabled draft proposals, a gated customer status view, and an operator import/export/review command. It has not been deployed. It does not migrate credentials, change customer access, activate bindings or switch findings readers/workers to a new source. The latest plan prepares these capabilities for one coordinated production rollout.
 
 ## What is collected
 
@@ -46,12 +46,13 @@ Preview entries stay disabled and pending review. The fingerprint is determinist
 
 ## Draft storage and review service
 
-The explicit migration is `docs/sql/customer-connector-drafts.sql`. It creates three application-database tables: import batches, connector drafts and audit history. It is not an automatic migration and has only been run in disposable test databases. There is no production write command or endpoint in this checkpoint. The read-only preview command above remains read-only.
+The explicit migration is `docs/sql/customer-connector-drafts.sql`. It creates three application-database tables: import batches, connector drafts and audit history. It is not an automatic migration and has only been run in disposable test databases. The operator command below can write these proposals when explicitly run with the database owner's existing access. There is no HTTP mutation endpoint. The read-only preview command above remains read-only.
 
 `createConnectorDraftStore(db)` provides backend methods for a future authorized adapter:
 
 - `importPreview(expectedFingerprint, actor, collect)`: recollect through a trusted server-side metadata collector, verify the reviewed fingerprint, and atomically record new/changed/missing evidence. Replaying the same current fingerprint creates no duplicate batch or audit entries. Do not supply an uploaded JSON file or client-controlled callback as the collector.
 - `reviewDraft(input, actor, resolveCompany)`: save, mark reviewed or dismiss a proposal with the expected revision and source evidence hash. Resolve company IDs through an existing trusted customer service. Record scope, proposed authority and a review note. Do not put credentials into notes or scope fields.
+- `reviewCurrentDraft(input, actor, collect)`: operator entry point. Recollect trusted source metadata under the registry transaction lock, verify the current candidate and connection-dependency hash, and resolve the proposed customer from that fresh preview before applying the review. Use this method for operator commands; the original method alone is not evidence that upstream metadata is still current.
 - `listCustomerDrafts(companyId)`: return only proposals for an explicit customer, with a bounded result. Missing customer selection never becomes a global read. The future route must still perform the existing authentication and customer checks.
 
 All mutation methods serialize on a registry-only transaction lock. Draft changes and audit writes commit together; an audit failure rolls back the change. Unknown credential fields are rejected, while existing credential references are retained. The service does not initialize schema, start a worker, test an API or alter source tables.
@@ -71,7 +72,42 @@ Each saved tile retains its own ownership evidence plus the revision of its shar
 
 Review requires supported authority and an explicitly recorded vendor tenant, Elastic dataset or scanner targets as applicable. It rejects existing customer/tenant reassignment, configuration conflicts and historical-only pointers. These are proposal validation checks, not proof that the operator's entered scope is correct or vendor credentials can access it. Activation needs separate upstream verification, source-authority/mirror reconciliation, current credential versions and reader parity. In particular, environment secret rotation is not detected by the sanitized fingerprint.
 
-No existing member/admin capabilities are changed: there is currently no UI or API through which accounts can mutate these drafts. Future wiring must use existing permissions and server-generated actor identity. Reviewed proposals cannot be treated as active sources; PostgreSQL currently enforces `enabled=false`. Roll back code by retaining unused draft/audit tables, not by dropping review history.
+No existing member/admin capabilities are changed: there is no UI or HTTP API through which accounts can mutate these drafts. The operator command requires existing server configuration/database access and derives its audit actor from the OS user and hostname; it is not a GitHub user identity. Future web wiring must use existing permissions and server-generated actor identity. Reviewed proposals cannot be treated as active sources; PostgreSQL currently enforces `enabled=false`. Roll back code by retaining unused draft/audit tables, not by dropping review history.
+
+## Operator import, export and review
+
+These commands are prepared for the reviewed rollout, not an instruction to run the migration on production now. First collect and inspect the read-only preview above. Source data is recollected by the tool; an uploaded report is never accepted as trusted source evidence. Use the resulting fingerprint for the explicitly global metadata import:
+
+```sh
+node --experimental-vm-modules scripts/customer-connector-registry.mjs import \
+  --env-file /opt/vuln/.env.local --fingerprint REVIEWED_PREVIEW_FINGERPRINT
+```
+
+This creates or updates inactive proposals for the collected existing connections, with audit history. It does not import findings or move secrets. A repeated current fingerprint is a no-op. Missing registry tables cause failure; no command installs schema automatically.
+
+Export one customer's proposals, plus unassigned shared connections available for review, to a new private file:
+
+```sh
+node --experimental-vm-modules scripts/customer-connector-registry.mjs export \
+  --env-file /opt/vuln/.env.local --company CO-230784 \
+  --output /home/codex/vuln-recovery/footprint-connector-proposals.json
+```
+
+No other customer's assigned proposal is exported. The file contains customer/vendor tenant IDs and scope fields, so retain it outside Git and the web root. The file is created exclusively with mode 0600 on Linux; existing paths are not overwritten. On Windows, use a directory with appropriate access controls. The export uses a read-only database connection and does not assign the shared connections it lists.
+
+Copy a single `reviewRequest` object into a separate private JSON file. Verify `companyId`, vendor `tenantId`, `datasets`, `targets` and `authority` as applicable. Use `decision: "save-draft"`, `"reviewed"` or `"dismissed"` and add a short non-secret `note`. Keep the exported ID, revision and candidate hash. Do not add credentials, actor or activation fields.
+
+```sh
+node --experimental-vm-modules scripts/customer-connector-registry.mjs review \
+  --env-file /opt/vuln/.env.local \
+  --input /home/codex/vuln-recovery/footprint-one-connector-review.json
+```
+
+The command rechecks current metadata, including separately stored saved-query connection revisions, before saving. Changed source metadata requires a fresh preview/import; an old editor revision requires a fresh export. A removed source can be dismissed after its absence has been imported. Review never tests vendor reachability or enables data collection. Environment secret rotation still is not represented by the sanitized fingerprint; activation needs credential-version and actual scope verification.
+
+The command prints counts/review state only. Raw database errors and input contents are not echoed. A timeout or connection loss is an unconfirmed outcome: inspect a fresh export before retrying. Application and dashboard metadata are collected in separate read-only snapshots, not a globally atomic source snapshot. The command loads no application workers and never calls provider APIs or a ticket endpoint.
+
+**Remaining model boundary:** the current draft has one proposed customer per evidence entry. A shared connection serving several customers needs separate customer bindings; do not repeatedly move this one proposal between customers and call that completed assignment support. Binding activation, mirror rules and consumer routing remain the next implementation work.
 
 ## Customer status view
 
@@ -97,4 +133,6 @@ node --experimental-vm-modules --test tests/customer-connector-preview.test.mjs
 
 Status tests: `node --experimental-vm-modules --test tests/customer-connector-status.test.mjs`. For the actual UI, build in a clean checkout without `.env` files, then run `node tests/customer-connectors-browser.mjs` with `PLAYWRIGHT_MODULE` pointing to an installed Playwright module. The browser test runs a credential-free local server with synthetic intercepted source data; it does not test live vendor connections.
 
-Next: a shared customer-source read contract and the first adapter/parity checks over retained data. Mutation adapter authorization, actual scope verification and activation are separate release gates. Existing stores, schedulers, permissions and source routing remain authoritative.
+Additional command checks: `node --experimental-vm-modules --test tests/customer-connector-registry.test.mjs`. The isolated integration test is `tests/connector-registry-command-postgres.mjs PRIVATE_RESTORE_SOCKET`; it exercises the actual command implementation against fixture source metadata and a disposable registry database, including stale-source rejection and private file export. It does not load production configuration.
+
+Next: separate customer bindings for shared connections, verified scope/authority and integration with the common customer-source readers. Actual scope verification and activation remain combined-release gates. Existing stores, schedulers, permissions and source routing remain authoritative.

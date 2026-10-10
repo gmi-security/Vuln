@@ -73,9 +73,9 @@ function snapshot(row: Draft) {
     enabled: row.enabled, reviewedBy: row.reviewed_by, reviewedAt: row.reviewed_at };
 }
 
-// Backend only; no production singleton, schema initializer, route or worker.
-// The future HTTP adapter must retain existing authentication/permissions and
-// supply a trusted collector and customer resolver. Uploaded JSON is not a collector.
+// No production singleton, schema initializer, HTTP mutation route or worker.
+// Operator commands use reviewCurrentDraft with a trusted metadata collector.
+// Uploaded JSON is never source evidence or an authenticated actor.
 export function createConnectorDraftStore(db: Pick<Pool, "connect" | "query">) {
   async function transaction<T>(work: (client: PoolClient) => Promise<T>): Promise<T> {
     const client = await db.connect();
@@ -145,7 +145,9 @@ export function createConnectorDraftStore(db: Pick<Pool, "connect" | "query">) {
   }
   async function reviewDraft(input: { id: string; expectedRevision: number; candidateHash: string;
     decision: "save-draft" | "reviewed" | "dismissed"; proposal: ConnectorProposal; note: string },
-    actor: string, resolveCompany: (id: string) => Promise<{ id: string; isDemo?: boolean }>) {
+    actor: string, resolveCompany: (id: string) => Promise<{ id: string; isDemo?: boolean }>, collect?: () => Promise<Preview>) {
+    assert(input && typeof input === "object", "Invalid review request.");
+    exactKeys(input, ["id", "expectedRevision", "candidateHash", "decision", "proposal", "note"]);
     assert(short(actor, 160) && digestPattern.test(input.id) && digestPattern.test(input.candidateHash) &&
       Number.isSafeInteger(input.expectedRevision) && input.expectedRevision > 0, "Valid actor and draft revision required.");
     assert(["save-draft", "reviewed", "dismissed"].includes(input.decision) && short(input.note, 1000), "Decision and review note required.");
@@ -154,6 +156,17 @@ export function createConnectorDraftStore(db: Pick<Pool, "connect" | "query">) {
       const before: Draft | undefined = (await client.query("SELECT * FROM customer_connector_drafts WHERE id=$1 FOR UPDATE", [input.id])).rows[0];
       assert(before && before.revision === input.expectedRevision && before.candidate_hash === input.candidateHash, "Draft changed; reload before reviewing.");
       const draft = before!;
+      if (collect) {
+        // Recollect while holding the same registry lock used by imports/reviews.
+        // This detects source changes even when nobody has rerun the import tool.
+        const fresh = await collect();
+        validatePreview(fresh);
+        const candidate = fresh.candidates.find(c => c.id === draft.id);
+        assert(candidate ? draft.source_present &&
+          connectorDraftEvidence(candidate, fresh.candidates).candidateHash === draft.candidate_hash : !draft.source_present,
+        "Source metadata changed; import a fresh preview before reviewing.");
+        if (next.companyId !== null) assert(fresh.companies.some(c => c.id === next.companyId), "Choose an existing non-demo customer.");
+      }
       if (next.companyId !== null) {
         const company = await resolveCompany(next.companyId);
         assert(company?.id === next.companyId && !company.isDemo, "Choose an existing non-demo customer.");
@@ -186,11 +199,18 @@ export function createConnectorDraftStore(db: Pick<Pool, "connect" | "query">) {
       return after;
     });
   }
-  async function listCustomerDrafts(companyId: string) {
+  async function listCustomerDrafts(companyId: string, includeUnassigned = false) {
     assert(short(companyId, 100), "Explicit customer required.");
-    const rows = (await db.query("SELECT * FROM customer_connector_drafts WHERE proposal->>'companyId'=$1 ORDER BY id LIMIT 1001", [companyId])).rows as Draft[];
+    const rows = (await db.query(`SELECT * FROM customer_connector_drafts WHERE proposal->>'companyId'=$1
+      ${includeUnassigned ? "OR (proposal->>'companyId' IS NULL AND candidate->>'companyId' IS NULL)" : ""}
+      ORDER BY id LIMIT 1001`, [companyId])).rows as Draft[];
     assert(rows.length <= 1000, "Customer draft limit exceeded; refine the review before reading.");
     return rows;
   }
-  return { importPreview, reviewDraft, listCustomerDrafts };
+  async function reviewCurrentDraft(input: Parameters<typeof reviewDraft>[0], actor: string, collect: () => Promise<Preview>) {
+    assert(typeof collect === "function", "Trusted metadata collector required.");
+    // The fresh preview resolves company identity inside the registry transaction.
+    return reviewDraft(input, actor, async id => ({ id }), collect);
+  }
+  return { importPreview, reviewDraft, reviewCurrentDraft, listCustomerDrafts };
 }

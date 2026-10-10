@@ -122,6 +122,11 @@ try {
   ok('tile ownership needs query scope and scanners need approved targets; neither review enables execution');
 
   metadata.connections[0].revision++;
+  await assert.rejects(() => store.reviewCurrentDraft({
+    id: tileReviewed.id, expectedRevision: tileReviewed.revision, candidateHash: tileReviewed.candidate_hash,
+    decision: 'reviewed', proposal: tileReviewed.proposal, note: 'Synthetic stale connection check.',
+  }, actor, collect), /Source metadata changed/);
+  assert.equal((await get(tile.id)).revision, tileReviewed.revision);
   await store.importPreview(build(metadata, env).fingerprint, actor, collect);
   const changedTile = await get(tile.id);
   assert.equal(changedTile.review_state, 'needs-review');
@@ -188,6 +193,6 @@ try {
   console.log(JSON.stringify({ passed: checks, fixtureDatabaseRemovedOnExit: true, enabledBindings: 0 }));
 } finally {
   await db?.end();
-  if (created) await admin.query(`DROP DATABASE ${name} WITH (FORCE)`);
+  if (created) await admin.query(`DROP DATABASE ${name}`);
   await admin.end();
 }
