@@ -25,7 +25,8 @@ function score(value: unknown): number | null {
 }
 
 /** No singleton, schema initialization, hydration, publication or vendor calls.
- * Inject a pool only after customer authorization; kept disconnected from routes during parity work.
+ * Inject a pool only after customer authorization. Registry preview callers also
+ * pin the reviewed tenant/revision; default platform reporting is unchanged.
  */
 export function createDefenderSourceReader(db: Pick<Pool, "connect">) {
   return async function read(request: CustomerSourceReadRequest): Promise<CustomerSourceRead> {
@@ -49,7 +50,7 @@ export function createDefenderSourceReader(db: Pick<Pool, "connect">) {
       if (!installed) result = unavailable("not-installed");
       else {
         // Repeatable-read pins metadata and aggregates without locking the importer/pruner.
-        const saved = (await client.query(`SELECT c.current_run, c.revision AS connection_revision,
+        const saved = (await client.query(`SELECT c.current_run, c.tenant_id, c.revision AS connection_revision,
           r.id AS run_id, r.revision AS import_revision, r.status, r.finished_at, r.summary,
           latest.status AS latest_status, latest.started_at AS latest_started_at, latest.finished_at AS latest_finished_at
           FROM public.defender_connections c
@@ -57,7 +58,14 @@ export function createDefenderSourceReader(db: Pick<Pool, "connect">) {
           LEFT JOIN LATERAL (SELECT status,started_at,finished_at FROM public.defender_import_runs
             WHERE company_id=c.company_id ORDER BY started_at DESC,id DESC LIMIT 1) latest ON true
           WHERE c.company_id=$1`, [companyId])).rows[0];
-        if (!saved) result = unavailable("not-configured");
+        if (request.defenderConnection && (!saved || saved.tenant_id !== request.defenderConnection.tenantId ||
+            Number(saved.connection_revision) !== request.defenderConnection.revision ||
+            (saved.current_run && Number(saved.import_revision) !== request.defenderConnection.revision))) {
+          // Check before reading CVE rows, in the same snapshot as the generation.
+          // A previous tenant's completed import must not satisfy a new binding.
+          result = unavailable("inconsistent");
+        }
+        else if (!saved) result = unavailable("not-configured");
         else {
           if (["queued", "running", "succeeded", "failed"].includes(saved.latest_status)) {
             base.latestAttempt = { status: saved.latest_status, startedAt: timestamp(saved.latest_started_at),

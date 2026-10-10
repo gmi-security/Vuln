@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { dashboardRequest } from "@/lib/dashboard-browser-client";
-import type { SavedSource } from "@/lib/customer-saved-sources";
+import type { SavedSource, SavedSourceSelection } from "@/lib/customer-saved-sources";
 import type { CustomerSourceRead } from "@/lib/customer-source-read-model";
 import { useCustomerCve } from "./customer-cve-context";
 
@@ -68,10 +68,11 @@ function SourcePanel({companyId,source,showCves}:{companyId:string;source:SavedS
 }
 export default function CustomerSavedSources({companyId,showCves}:{companyId:string;showCves:boolean}) {
   const [sources,setSources]=useState<SavedSource[]|null>(null),[error,setError]=useState(""),[retry,setRetry]=useState(0);
+  const [blocked,setBlocked]=useState<SavedSourceSelection["blocked"]>([]);
   useEffect(()=>{
-    let active=true;setSources(null);setError("");
-    dashboardRequest<{companyId:string;sources:SavedSource[]}>(`customer-saved-sources?companyId=${encodeURIComponent(companyId)}`)
-      .then(result=>{if(result.companyId!==companyId)throw new Error("The returned sources do not match this customer.");if(active)setSources(result.sources);})
+    let active=true;setSources(null);setBlocked([]);setError("");
+    dashboardRequest<{companyId:string;sources:SavedSource[];blocked?:SavedSourceSelection["blocked"]}>(`customer-saved-sources?companyId=${encodeURIComponent(companyId)}`)
+      .then(result=>{if(result.companyId!==companyId)throw new Error("The returned sources do not match this customer.");if(active){setSources(result.sources);setBlocked(result.blocked??[]);}})
       .catch(cause=>{if(active)setError(cause instanceof Error?cause.message:"Saved sources are unavailable.");});
     return()=>{active=false;};
   },[companyId,retry]);
@@ -79,7 +80,8 @@ export default function CustomerSavedSources({companyId,showCves}:{companyId:str
     <h2 className="text-xl font-semibold text-white">Saved source results</h2>
     {!sources && !error && <p role="status" className="text-sm text-zinc-300">Loading this customer's sources…</p>}
     {error && <div role="alert" className="text-sm text-red-300"><p>{error}</p><button className={button} onClick={()=>setRetry(v=>v+1)}>Retry saved sources</button></div>}
-    {sources?.length===0 && <p className="text-sm text-zinc-300">Saved source preview is not enabled for this customer. Existing reporting remains available.</p>}
+    {sources?.length===0 && blocked.length===0 && <p className="text-sm text-zinc-300">Saved source preview is not enabled for this customer. Existing reporting remains available.</p>}
+    {blocked.map(item=><p key={item.source} role="status" className="text-sm text-amber-200">{names[item.source]}: {item.reason}</p>)}
     {sources?.map(source=><SourcePanel key={`${companyId}:${source}`} companyId={companyId} source={source} showCves={showCves}/>)}
   </section>;
 }

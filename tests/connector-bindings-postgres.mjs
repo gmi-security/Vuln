@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { runRegistry } from '../scripts/customer-connector-registry.mjs';
-import { loadConnectorPreview,loadConnectorBindingStore } from '../scripts/connector-preview-loader.mjs';
+import { loadConnectorPreview,loadConnectorBindingStore,loadSavedSourceBindings } from '../scripts/connector-preview-loader.mjs';
+import { loadDefenderSourceReader } from '../scripts/source-read-model-loader.mjs';
 import { readApplicationConnectorMetadata,readDashboardConnectorMetadata } from '../lib/db/connector-metadata.mjs';
 
 const socket=await realpath(process.argv[2]||'.');assert.ok(socket.startsWith('/home/codex/vuln-recovery/')&&socket.endsWith('/socket'));
@@ -97,5 +98,44 @@ try {
   assert.doesNotMatch(JSON.stringify(moved),/companyId|datasets|tenantId/);
   assert.equal((await db.query('SELECT count(*)::int n FROM customer_connector_bindings WHERE enabled')).rows[0].n,0);
   ok('changed tile ownership hides the new owner and cannot become an active source');
+
+  const select=(await loadSavedSourceBindings()).createSavedSourceBindingSelector(pool,env);
+  assert.deepEqual((await select('A')).sources,[]);
+  const da=request(await exported('A'),'defender');da.note='Synthetic saved Defender scope';da.decision='reviewed';da.proposal.authority='findings-primary';
+  await store.save(da,'fixture',collect);
+  assert.deepEqual((await select('A')).sources,['defender']);
+  assert.deepEqual((await select('B')).sources,[]);
+  await assert.rejects(()=>select('UNKNOWN'),e=>e.status===404);
+  ok('reviewed customer binding selects the real saved reader without selecting another customer or query');
+
+  await db.query(`ALTER TABLE defender_connections ADD COLUMN current_run uuid;
+    CREATE TABLE defender_import_runs(id uuid PRIMARY KEY,company_id text,revision int,status text,summary jsonb,started_at timestamptz,finished_at timestamptz);
+    CREATE TABLE defender_cves(run_id uuid,cve text,severity text,severity_rank int,cvss double precision,devices int,findings int,PRIMARY KEY(run_id,cve));`);
+  const importId=randomUUID();
+  await db.query("INSERT INTO defender_import_runs VALUES($1,'A',1,'succeeded',$2,now(),now())",[importId,{findings:1,cves:1,affectedDevices:1,inventoryDevices:1,severity:{CRITICAL:1}}]);
+  await db.query("INSERT INTO defender_cves VALUES($1,'CVE-2026-1000','CRITICAL',6,9.8,1,1)",[importId]);
+  await db.query("UPDATE defender_connections SET current_run=$1 WHERE company_id='A'",[importId]);
+  const reader=(await loadDefenderSourceReader())(pool),selection=await select('A');
+  const read=()=>reader({companyId:'A',now:new Date(),staleAfterMs:3600000,defenderConnection:selection.defenderConnection});
+  assert.equal((await read()).state,'available');
+  await db.query("UPDATE defender_connections SET tenant_id='private-new',revision=2 WHERE company_id='A'");
+  assert.equal((await read()).state,'inconsistent');
+  const staleSelection=await select('A');assert.deepEqual(staleSelection.sources,[]);
+  assert.doesNotMatch(JSON.stringify(staleSelection),/private-new|private-a/);
+  ok('tenant change between selection and SQL read withholds old results; next selection requires review');
+
+  await run(['import','--fingerprint',(await collect()).fingerprint]);
+  const reviewed=request(await exported('A'),'defender');reviewed.note='Synthetic new connection review';reviewed.decision='reviewed';
+  reviewed.proposal.tenantId='private-new';reviewed.proposal.authority='findings-primary';
+  await store.save(reviewed,'fixture',collect);
+  const nextSelection=await select('A');assert.deepEqual(nextSelection.sources,['defender']);
+  const nextRequest={companyId:'A',now:new Date(),staleAfterMs:3600000,defenderConnection:nextSelection.defenderConnection};
+  assert.equal((await reader(nextRequest)).state,'inconsistent');
+  const freshId=randomUUID();
+  await db.query("INSERT INTO defender_import_runs VALUES($1,'A',2,'succeeded',$2,now(),now())",[freshId,{findings:0,cves:0,affectedDevices:0,inventoryDevices:1,severity:{}}]);
+  await db.query("UPDATE defender_connections SET current_run=$1 WHERE company_id='A'",[freshId]);
+  const fresh=await reader(nextRequest);assert.equal(fresh.state,'available');assert.equal(fresh.summary.sourceInstances,0);
+  assert.equal((await db.query('SELECT count(*)::int n FROM customer_connector_bindings WHERE enabled')).rows[0].n,0);
+  ok('reviewing a new connection cannot reuse its old import; a matching completed generation becomes readable');
   console.log(JSON.stringify({checks,passed:true,productionWrites:false,externalCalls:false}));
 }finally{await pool?.end();await db?.end();if(created)await admin.query(`DROP DATABASE ${name}`);await admin.end();}

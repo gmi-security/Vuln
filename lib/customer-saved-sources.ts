@@ -1,5 +1,10 @@
 import type { CustomerSourceRead, CustomerSourceReadRequest } from "./customer-source-read-model";
 export type SavedSource = "defender" | "crowdstrike";
+export type SavedSourceSelection = {
+  sources: SavedSource[];
+  blocked: { source: SavedSource; reason: string }[];
+  defenderConnection?: CustomerSourceReadRequest["defenderConnection"];
+};
 export class SavedSourceError extends Error { constructor(message: string, readonly status: number) { super(message); } }
 export function savedSourcePolicy(raw: string | undefined): Record<string, SavedSource[]> {
   if (!raw) return {};
@@ -19,6 +24,7 @@ export function createCustomerSavedSources(deps: {
   companies: () => Promise<{id: string; name: string; isDemo?: boolean}[]>;
   read: Record<SavedSource, (request: CustomerSourceReadRequest) => Promise<CustomerSourceRead>>;
   policy: Record<string, SavedSource[]>;
+  select?: (companyId: string) => Promise<SavedSourceSelection>;
 }) {
   async function get(params: URLSearchParams) {
     const setup = params.get("setup") === "1";
@@ -33,10 +39,12 @@ export function createCustomerSavedSources(deps: {
     if (setup) return { companies: companies.map(({id, name}) => ({id, name})) };
     const company = companies.find(c => c.id === companyId);
     if (!company) throw new SavedSourceError("Customer not found.", 404);
-    const sources = Object.hasOwn(deps.policy, company.id) ? deps.policy[company.id] : [];
-    if (!source) return { companyId: company.id, sources };
+    const selection = deps.select ? await deps.select(company.id) : null;
+    const sources = selection ? selection.sources : Object.hasOwn(deps.policy, company.id) ? deps.policy[company.id] : [];
+    if (!source) return { companyId: company.id, sources, ...(selection ? { blocked: selection.blocked } : {}) };
     if (!sources.includes(source)) throw new SavedSourceError("This saved source is not enabled for this customer.", 404);
-    const result = await deps.read[source]({companyId: company.id, now: new Date(), staleAfterMs: 36 * 3600000, offset: Number(rawOffset), limit: 50});
+    const result = await deps.read[source]({companyId: company.id, now: new Date(), staleAfterMs: 36 * 3600000, offset: Number(rawOffset), limit: 50,
+      ...(source === "defender" && selection ? { defenderConnection: selection.defenderConnection } : {})});
     if (result.companyId !== company.id || result.source !== source) throw new SavedSourceError("Saved source scope is inconsistent.", 503);
     return result;
   }

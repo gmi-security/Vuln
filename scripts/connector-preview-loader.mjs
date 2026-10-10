@@ -6,10 +6,11 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 import * as crypto from 'node:crypto';
+import * as metadata from '../lib/db/connector-metadata.mjs';
 
 async function loadConnectorModule(entry) {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-  const allowed = new Set(['customer-connector-preview', 'customer-connector-drafts', 'customer-connector-bindings', 'customer-connector-status', 'connectors', 'company-name', 'reporting-direct-sources']
+  const allowed = new Set(['customer-connector-preview', 'customer-connector-drafts', 'customer-connector-bindings', 'customer-connector-status', 'customer-saved-source-bindings', 'customer-saved-sources', 'connectors', 'company-name', 'reporting-direct-sources']
     .map(name => resolve(root, `lib/${name}.ts`)));
   const cache = new Map();
   async function load(file) {
@@ -21,6 +22,9 @@ async function loadConnectorModule(entry) {
     const mod = new SourceTextModule(code, { identifier: file });
     cache.set(file, mod);
     await mod.link(spec => {
+      if (spec === './db/connector-metadata.mjs') return new SyntheticModule(Object.keys(metadata), function () {
+        for (const key of Object.keys(metadata)) this.setExport(key, metadata[key]);
+      });
       if (spec === 'node:crypto') return new SyntheticModule(Object.keys(crypto), function () {
         for (const key of Object.keys(crypto)) this.setExport(key, crypto[key]);
       });
@@ -46,3 +50,4 @@ export async function loadConnectorStatus() {
 export async function loadConnectorBindingStore() {
   return (await loadConnectorModule('customer-connector-bindings')).createConnectorBindingStore;
 }
+export const loadSavedSourceBindings = () => loadConnectorModule('customer-saved-source-bindings');

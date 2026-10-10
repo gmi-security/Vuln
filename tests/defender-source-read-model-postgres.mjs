@@ -27,11 +27,11 @@ try {
   assert.equal((await read(request)).state, 'not-installed');
   assert.equal((await db.query("SELECT count(*)::int n FROM pg_tables WHERE schemaname='public'")).rows[0].n, 0);
   ok('missing tables are reported without initializing a schema');
-  await db.query(`CREATE TABLE defender_connections(company_id text PRIMARY KEY,revision int,current_run uuid);
+  await db.query(`CREATE TABLE defender_connections(company_id text PRIMARY KEY,revision int,current_run uuid,tenant_id text DEFAULT 'tenant-a');
     CREATE TABLE defender_import_runs(id uuid PRIMARY KEY,company_id text,revision int,status text,summary jsonb,started_at timestamptz,finished_at timestamptz);
     CREATE TABLE defender_cves(run_id uuid,cve text,severity text,severity_rank int,cvss double precision,devices int,findings int,PRIMARY KEY(run_id,cve));`);
   const summary = { findings: 3, cves: 2, affectedDevices: 1, inventoryDevices: 5, severity: { CRITICAL: 2, HIGH: 1 } };
-  await db.query("INSERT INTO defender_connections VALUES ('CO-A',1,$1),('CO-B',1,$2),('CO-EMPTY',1,NULL)", [a,b]);
+  await db.query("INSERT INTO defender_connections(company_id,revision,current_run) VALUES ('CO-A',1,$1),('CO-B',1,$2),('CO-EMPTY',1,NULL)", [a,b]);
   for (const [id,companyId] of [[a,'CO-A'],[b,'CO-B']]) await db.query(`INSERT INTO defender_import_runs VALUES($1,$2,1,'succeeded',$3,'2026-10-09T00:00:00Z','2026-10-09T01:00:00Z')`, [id,companyId,summary]);
   await db.query(`INSERT INTO defender_cves VALUES($1,'CVE-2026-1000','CRITICAL',6,9.8,1,2),($1,'CVE-2026-2000','HIGH',5,NULL,1,1),
     ($2,'CVE-2026-9000','CRITICAL',6,10,99,99)`, [a,b]);

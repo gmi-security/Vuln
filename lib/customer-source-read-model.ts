@@ -12,6 +12,8 @@ export type CustomerSourceReadRequest = {
   staleAfterMs: number;
   offset?: number;
   limit?: number;
+  // Server-selected binding only; never populated from query parameters.
+  defenderConnection?: { tenantId: string; revision: number };
 };
 export type SourceGeneration = {
   id: string;
@@ -76,6 +78,9 @@ export function validateSourceRead(request: CustomerSourceReadRequest) {
       !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
     throw new Error("Invalid customer source read request.");
   }
+  if (request.defenderConnection && (!request.defenderConnection.tenantId ||
+      !Number.isSafeInteger(request.defenderConnection.revision) || request.defenderConnection.revision < 1))
+    throw new Error("Invalid saved connection guard.");
   return { companyId, now, staleAfterMs, offset, limit };
 }
 

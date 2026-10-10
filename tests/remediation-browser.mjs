@@ -78,7 +78,9 @@ try{
     if(p==='customer-saved-sources'){
       if(url.searchParams.get('setup')==='1')return json({companies});
       const source=url.searchParams.get('source');
-      if(!source)return json({companyId,sources:[companyId===companies[0].id?'defender':'crowdstrike']});
+      if(!source)return sourceState==='blocked' && companyId===companies[1].id
+        ?json({companyId,sources:[],blocked:[{source:'crowdstrike',reason:'The saved CrowdStrike import still needs vendor-tenant provenance before registry routing can use it.'}]})
+        :json({companyId,sources:[companyId===companies[0].id?'defender':'crowdstrike']});
       const result=savedResult(companyId,source,Number(url.searchParams.get('offset')||0));
       if(delaySource && companyId===companies[0].id){delaySource=false;await new Promise(r=>releaseSource=r);}
       return failSource?json({error:'Fixture saved read failed'},400):json(result);
@@ -194,6 +196,14 @@ try{
     await page.screenshot({path:join(artifacts,'saved-source-mobile.png'),fullPage:true});
     await page.setViewportSize({width:1440,height:1000});await page.screenshot({path:join(artifacts,'saved-source-desktop.png'),fullPage:true});
     pass('saved result cards fit mobile and CVE rows scroll inside the panel');
+    sourceState='blocked';await page.goto(base+`/remediation?companyId=${companies[1].id}&view=prioritize`);
+    const savedRegion=page.getByRole('region',{name:'Saved source preview',exact:true});
+    await savedRegion.getByText('vendor-tenant provenance',{exact:false}).waitFor();
+    assert.equal(await falcon.count(),0);assert.equal(await savedRegion.locator('dd').count(),0);
+    await page.getByLabel('Customer',{exact:true}).selectOption(companies[0].id);
+    await saved.getByRole('button',{name:cve,exact:true}).waitFor();
+    assert.equal(await savedRegion.getByText('vendor-tenant provenance',{exact:false}).count(),0);
+    pass('blocked registry selection explains missing source without zero counts or another customer message');
   }
   if(shadowReads){
     await page.setViewportSize({width:1440,height:1000});

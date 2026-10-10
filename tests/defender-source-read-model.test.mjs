@@ -4,7 +4,7 @@ import { loadDefenderSourceReader } from '../scripts/source-read-model-loader.mj
 
 const create = await loadDefenderSourceReader();
 const request = { companyId: 'CO-A', now: new Date('2026-10-09T12:00:00Z'), staleAfterMs: 86400000 };
-const saved = () => ({ current_run: 'run-a', run_id: 'run-a', connection_revision: 1, import_revision: 1,
+const saved = () => ({ current_run: 'run-a', run_id: 'run-a', tenant_id: 'tenant-a', connection_revision: 1, import_revision: 1,
   status: 'succeeded', finished_at: '2026-10-09T00:00:00Z', latest_status: 'succeeded',
   latest_started_at: '2026-10-08T23:00:00Z', latest_finished_at: '2026-10-09T00:00:00Z',
   summary: { findings: 3, cves: 1, affectedDevices: 2, inventoryDevices: 5, severity: { HIGH: 3 } } });
@@ -89,4 +89,17 @@ test('database failures roll back, release, and propagate rather than returning 
   const f = fixture({ fail: 'GROUP BY severity' });
   await assert.rejects(f.read, /database unavailable/);
   assert.equal(f.calls.at(-1).sql, 'ROLLBACK'); assert.ok(f.released());
+});
+
+test('registry guard prevents old tenant and revision results before any CVE read', async () => {
+  const defenderConnection = {tenantId:'tenant-a',revision:1};
+  assert.equal((await fixture().read({defenderConnection})).state,'available');
+  for(const change of [{tenant_id:'tenant-b'},{connection_revision:2},{import_revision:2}]) {
+    const f=fixture({saved:{...saved(),...change}});
+    const result=await f.read({defenderConnection});
+    assert.equal(result.state,'inconsistent');assert.equal(result.summary,null);
+    assert.ok(f.calls.every(c=>!c.sql.includes('FROM public.defender_cves')));
+  }
+  const f=fixture();await assert.rejects(()=>f.read({defenderConnection:{tenantId:'',revision:0}}));
+  assert.equal(f.calls.length,0);
 });

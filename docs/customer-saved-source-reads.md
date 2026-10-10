@@ -16,6 +16,20 @@ There is no additional customer selector. The existing selector is reused; in pr
 
 ## Request path
 
+### Reviewed registry selection
+
+The additional server setting `VULN_SAVED_SOURCE_SELECTION=registry` replaces the temporary allowlist for this preview. It still requires both existing feature gates and authentication. The default remains `allowlist`; an unknown mode fails closed. Registry mode never falls back to the allowlist when assignments are missing or blocked, and it adds no configuration permissions.
+
+The selector reads only the selected customer's binding rows, checks current source evidence against both imported and reviewed hashes, and requires a reviewed findings-primary assignment. Duplicate endpoint assignments, mirrors, stale reviews, conflicting customer ownership and additional target/dataset restrictions that the adapter cannot enforce are withheld with a short explanation. Inventory and query-only roles do not become endpoint findings. Private tenant IDs, hashes and proposals are not returned to the browser.
+
+The first supported registry path is a saved Defender connection. Its customer, tenant and revision must match the assignment. The adapter checks that tenant/revision again inside the same read-only snapshot as the completed import; the import must also match the reviewed revision. A connection change between selection and reading cannot expose an old tenant's CVEs. Reviewing a new connection alone does not authorize its previous import. Normal freshness and missing-result states remain visible.
+
+CrowdStrike registry routing remains blocked: the current saved import pointer records the app customer but does not prove its vendor tenant. A declared tenant in an operator review is insufficient. Existing allowlisted Spotlight preview remains available under its original explicit mode. Saved Elastic/Falcon query tiles retain their separate existing customer-ownership path; this selector does not execute those queries or use them as fallback findings.
+
+This is a read-preview bridge, not binding activation or authoritative platform routing. It leaves the registry's `enabled=false` constraints intact and does not select platform authority, change ingestion, sum multiple source counts, or replace legacy reports. Metadata collection and binding reads are separate snapshots; the Defender reader's guard covers the connection/import boundary. Live provider-side verification and environment credential versioning remain outstanding.
+
+Verification for the bridge: 19 focused local tests plus 29 existing connector tests passed; 19 isolated PostgreSQL scenario groups passed, including actual binding assignment through SQL selection and the real Defender adapter. Ten browser groups passed with intercepted data, including blocked-source explanations and customer switching; the production build and type check passed. No live vendor calls or production database changes were used.
+
 `GET /api/elastic-dashboard/customer-saved-sources` uses existing organization-member authentication and private/no-store responses. It has no mutation handler.
 
 - `?setup=1`: bounded saved company metadata, excluding demo companies. It does not collect connector credentials or findings.
