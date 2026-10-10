@@ -43,7 +43,16 @@ export async function readCustomerConnectorStatus(companyId: string | null) {
       const drafts: ConnectorStatusDraft[] = available ? (await client.query(`SELECT id,candidate,candidate_hash,proposal,source_present,review_state,reviewed_at
         FROM public.customer_connector_drafts WHERE proposal->>'companyId'=$1 ORDER BY id LIMIT 1001`, [companyId])).rows : [];
       if (drafts.length > 1000) throw new DashboardError("Too many connector proposals to display. Refine the registry review.", 503);
-      const result = customerConnectorStatus(companyId, preview, drafts, available);
+      const bindingsAvailable = Boolean((await client.query("SELECT to_regclass('public.customer_connector_bindings') AS name")).rows[0].name);
+      const bindings: ConnectorStatusDraft[] = bindingsAvailable ? (await client.query(`SELECT d.id,d.candidate,b.candidate_hash,b.proposal,
+        d.source_present,b.review_state,b.reviewed_at FROM public.customer_connector_bindings b
+        JOIN public.customer_connector_drafts d ON d.id=b.candidate_id WHERE b.company_id=$1 ORDER BY d.id LIMIT 1001`,[companyId])).rows : [];
+      if (bindings.length > 1000) throw new DashboardError("Too many customer bindings to display.",503);
+      // A scoped binding overrides the legacy single proposal for this customer
+      // only. Other customers' assignments never enter this projection.
+      const scoped = new Map(drafts.map(row => [row.id,row]));
+      for (const binding of bindings) scoped.set(binding.id,binding);
+      const result = customerConnectorStatus(companyId, preview, [...scoped.values()], available);
       await client.query("COMMIT");
       return result;
     } catch (error) { await client.query("ROLLBACK").catch(() => {}); throw error; }

@@ -30,7 +30,7 @@ function short(value: unknown, max = 256): value is string {
 function exactKeys(value: object, keys: string[]) {
   assert(Object.keys(value).length === keys.length && Object.keys(value).every(key => keys.includes(key)), "Unexpected registry fields.");
 }
-function validatePreview(preview: Preview) {
+export function validatePreview(preview: Preview) {
   assert(preview && typeof preview === "object", "Invalid connector preview.");
   exactKeys(preview, ["version", "mode", "companies", "candidates", "limitations", "fingerprint"]);
   assert(preview.version === 1 && preview.mode === "preview-only", "Unsupported connector preview.");
@@ -56,7 +56,7 @@ function validatePreview(preview: Preview) {
     assert(typeof c.configured === "boolean" && c.state === "pending-review" && c.enabled === false && c.authority === "unassigned", "Import candidates must be disabled and unreviewed.");
   }
 }
-function proposal(value: ConnectorProposal): ConnectorProposal {
+export function proposal(value: ConnectorProposal): ConnectorProposal {
   assert(value && typeof value === "object", "Invalid connector proposal.");
   exactKeys(value, ["companyId", "tenantId", "datasets", "targets", "authority"]);
   assert(value.companyId === null || short(value.companyId, 100), "Invalid proposal customer.");
@@ -66,6 +66,25 @@ function proposal(value: ConnectorProposal): ConnectorProposal {
   assert(["unassigned", "findings-primary", "inventory", "enrichment", "query-only", "mirror"].includes(value.authority), "Invalid proposed authority.");
   return { companyId: value.companyId, tenantId: value.tenantId,
     datasets: [...new Set(value.datasets)].sort(), targets: [...new Set(value.targets)].sort(), authority: value.authority };
+}
+export function validateReviewScope(candidate: ConnectorCandidate, sourcePresent: boolean, sourceEvidence: ConnectorCandidate[], next: ConnectorProposal) {
+  assert(sourcePresent && candidate.configured && candidate.connectionRef !== null &&
+    candidate.evidence !== "completed-import", "Only present configured connections can be reviewed as bindings.");
+  assert(next.companyId && (!candidate.companyId || candidate.companyId === next.companyId), "Resolve existing customer ownership before review.");
+  assert(!candidate.review.some(code => ["saved-environment-tenant-conflict", "vendor-tenant-has-multiple-customers",
+    "legacy-loader-stops-before-this-entry", "legacy-loader-ignores-without-tenant", "adapter-planned", "unrecognized-cloud"].includes(code)),
+  "Resolve source configuration conflicts before review.");
+  if (candidate.tenantId) assert(next.tenantId === candidate.tenantId, "Resolve the saved tenant mapping before review.");
+  if (candidate.evidence === "saved-tile") assert(sourceEvidence.length > 0 && sourceEvidence.every(c => c.configured), "Saved query connection evidence is missing.");
+  const allowed = candidate.capabilities.flatMap(capability => ({
+    "vulnerability-import": ["findings-primary", "mirror"], "scan": ["findings-primary"],
+    "inventory": ["inventory"], "enrichment": ["enrichment"], "saved-query": ["query-only", "mirror"],
+  }[capability]));
+  assert(allowed.includes(next.authority), "Choose authority supported by this source capability.");
+  if (next.authority !== "enrichment") assert(next.tenantId || next.datasets.length || next.targets.length, "Record the verified tenant, dataset or targets before review.");
+  if (candidate.provider === "defender" || candidate.provider === "crowdstrike") assert(next.tenantId, "Vendor tenant verification is required.");
+  if (candidate.provider === "elastic") assert(next.datasets.length > 0, "Elasticsearch dataset verification is required.");
+  if (candidate.capabilities.includes("scan")) assert(next.targets.length > 0, "Approved scanner targets are required.");
 }
 function snapshot(row: Draft) {
   return { candidate: row.candidate, candidateHash: row.candidate_hash, sourceEvidence: row.source_evidence, proposal: row.proposal,
@@ -171,26 +190,7 @@ export function createConnectorDraftStore(db: Pick<Pool, "connect" | "query">) {
         const company = await resolveCompany(next.companyId);
         assert(company?.id === next.companyId && !company.isDemo, "Choose an existing non-demo customer.");
       }
-      if (input.decision === "reviewed") {
-        const candidate = draft.candidate;
-        assert(draft.source_present && candidate.configured && candidate.connectionRef !== null &&
-          candidate.evidence !== "completed-import", "Only present configured connections can be reviewed as bindings.");
-        assert(next.companyId && (!candidate.companyId || candidate.companyId === next.companyId), "Resolve existing customer ownership before review.");
-        assert(!candidate.review.some(code => ["saved-environment-tenant-conflict", "vendor-tenant-has-multiple-customers",
-          "legacy-loader-stops-before-this-entry", "legacy-loader-ignores-without-tenant", "adapter-planned", "unrecognized-cloud"].includes(code)),
-        "Resolve source configuration conflicts before review.");
-        if (candidate.tenantId) assert(next.tenantId === candidate.tenantId, "Resolve the saved tenant mapping before review.");
-        if (candidate.evidence === "saved-tile") assert(draft.source_evidence.length > 0 && draft.source_evidence.every(c => c.configured), "Saved query connection evidence is missing.");
-        const allowed = candidate.capabilities.flatMap(capability => ({
-          "vulnerability-import": ["findings-primary", "mirror"], "scan": ["findings-primary"],
-          "inventory": ["inventory"], "enrichment": ["enrichment"], "saved-query": ["query-only", "mirror"],
-        }[capability]));
-        assert(allowed.includes(next.authority), "Choose authority supported by this source capability.");
-        if (next.authority !== "enrichment") assert(next.tenantId || next.datasets.length || next.targets.length, "Record the verified tenant, dataset or targets before review.");
-        if (candidate.provider === "defender" || candidate.provider === "crowdstrike") assert(next.tenantId, "Vendor tenant verification is required.");
-        if (candidate.provider === "elastic") assert(next.datasets.length > 0, "Elasticsearch dataset verification is required.");
-        if (candidate.capabilities.includes("scan")) assert(next.targets.length > 0, "Approved scanner targets are required.");
-      }
+      if (input.decision === "reviewed") validateReviewScope(draft.candidate, draft.source_present, draft.source_evidence, next);
       const state = input.decision === "save-draft" ? "pending-review" : input.decision;
       const after: Draft = (await client.query(`UPDATE customer_connector_drafts SET proposal=$2,review_state=$3,revision=revision+1,
         reviewed_by=$4,reviewed_at=CASE WHEN $4::text IS NULL THEN NULL ELSE now() END,updated_at=now() WHERE id=$1 RETURNING *`,

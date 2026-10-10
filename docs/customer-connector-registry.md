@@ -107,7 +107,33 @@ The command rechecks current metadata, including separately stored saved-query c
 
 The command prints counts/review state only. Raw database errors and input contents are not echoed. A timeout or connection loss is an unconfirmed outcome: inspect a fresh export before retrying. Application and dashboard metadata are collected in separate read-only snapshots, not a globally atomic source snapshot. The command loads no application workers and never calls provider APIs or a ticket endpoint.
 
-**Remaining model boundary:** the current draft has one proposed customer per evidence entry. A shared connection serving several customers needs separate customer bindings; do not repeatedly move this one proposal between customers and call that completed assignment support. Binding activation, mirror rules and consumer routing remain the next implementation work.
+### Separate customer bindings for a shared connection
+
+`docs/sql/customer-connector-bindings.sql` adds customer bindings and their audit records after the draft migration. This migration is explicit and has only been applied in disposable test databases. It does not rewrite existing drafts, credentials, tiles or findings.
+
+Each binding is keyed by the source evidence ID and customer ID. The same shared connection can therefore have one independent scope, revision and review history for Alpha and another for Beta. Editing or dismissing Alpha does not change Beta or move the underlying shared evidence. Customer-owned connections and tiles cannot be assigned to a different customer. Historical import pointers cannot be converted into connections. A binding is still inactive even when reviewed.
+
+The original `export`/`review` commands retain the old evidence proposal workflow. Use the new commands for customer assignments:
+
+```sh
+node --experimental-vm-modules scripts/customer-connector-registry.mjs export-bindings \
+  --env-file /opt/vuln/.env.local --company CO-230784 \
+  --output /home/codex/vuln-recovery/footprint-bindings.json
+```
+
+Copy one `assignmentRequest` from the export into a new private JSON file. Confirm customer, tenant/dataset/targets and authority, add a non-secret note, and choose `save-draft`, `reviewed` or `dismissed`. Revision zero means no binding exists for that customer yet. The export includes available unassigned connections without automatically creating their bindings. It never includes another customer's assigned scope.
+
+```sh
+node --experimental-vm-modules scripts/customer-connector-registry.mjs assign \
+  --env-file /opt/vuln/.env.local \
+  --input /home/codex/vuln-recovery/footprint-one-assignment.json
+```
+
+Source changes require reimporting a fresh preview before reviewing the changed assignment. Each customer's old review is independently stale until rechecked; a reviewed parent proposal does not grant all customers a binding. Concurrent edits accept only the expected revision. Assignment and audit commit together, and an audit failure rolls both back. All source/tenant/target review rules are shared with the existing draft validator.
+
+The read-only Connectors status view now prefers a customer's binding when present and otherwise preserves the older proposal display. Tenant IDs, exact targets/datasets, credential references and audit notes remain outside its public response. Moved source ownership is shown as needing review without exposing the new owner's details. Missing binding tables preserve the existing view rather than creating schema during a request.
+
+**Still required before activation:** actual vendor tenant/dataset/target verification; detection and resolution of overlapping customer scopes; primary-versus-mirror source decisions; credential-version tracking; and verified consumer/worker routing. The same connection may legitimately serve multiple customers, but recorded scopes alone do not prove isolation at the upstream provider. PostgreSQL enforces `enabled=false` for this checkpoint. It does not claim the customer assignment migration is complete or launch any scans/imports.
 
 ## Customer status view
 
@@ -135,4 +161,6 @@ Status tests: `node --experimental-vm-modules --test tests/customer-connector-st
 
 Additional command checks: `node --experimental-vm-modules --test tests/customer-connector-registry.test.mjs`. The isolated integration test is `tests/connector-registry-command-postgres.mjs PRIVATE_RESTORE_SOCKET`; it exercises the actual command implementation against fixture source metadata and a disposable registry database, including stale-source rejection and private file export. It does not load production configuration.
 
-Next: separate customer bindings for shared connections, verified scope/authority and integration with the common customer-source readers. Actual scope verification and activation remain combined-release gates. Existing stores, schedulers, permissions and source routing remain authoritative.
+`tests/connector-bindings-postgres.mjs PRIVATE_RESTORE_SOCKET` exercises the actual assignment/export commands, two customers sharing a scanner, optimistic edit conflicts, source changes, scope rules, transactional audit rollback and moved tile ownership in a disposable database. The source metadata is synthetic and provider APIs are never contacted.
+
+Next: verified scope/authority and integration with the common customer-source readers. Actual scope verification and activation remain combined-release gates. Existing stores, schedulers, permissions and source routing remain authoritative.

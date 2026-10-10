@@ -6,7 +6,9 @@ test('operator command requires explicit scope and rejects activation, credentia
   const hash='a'.repeat(64);
   assert.equal(parseRegistryArgs(['import','--fingerprint',hash]).command,'import');
   assert.equal(parseRegistryArgs(['export','--company','CO-A','--output','private.json']).options['--company'],'CO-A');
-  for(const args of [[],['activate'],['import'],['export','--output','private.json'],['review'],
+  assert.equal(parseRegistryArgs(['export-bindings','--company','CO-A','--output','private.json']).command,'export-bindings');
+  assert.equal(parseRegistryArgs(['assign','--input','review.json']).command,'assign');
+  for(const args of [[],['activate'],['import'],['export','--output','private.json'],['review'],['assign'],['export-bindings','--output','private.json'],
     ['review','--input','a','--input','b'],['import','--fingerprint',hash,'--actor','admin'],
     ['review','--input','a','--private-key','SECRET']]) assert.throws(()=>parseRegistryArgs(args));
 });

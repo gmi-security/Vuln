@@ -9,7 +9,7 @@ import * as crypto from 'node:crypto';
 
 async function loadConnectorModule(entry) {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-  const allowed = new Set(['customer-connector-preview', 'customer-connector-drafts', 'customer-connector-status', 'connectors', 'company-name', 'reporting-direct-sources']
+  const allowed = new Set(['customer-connector-preview', 'customer-connector-drafts', 'customer-connector-bindings', 'customer-connector-status', 'connectors', 'company-name', 'reporting-direct-sources']
     .map(name => resolve(root, `lib/${name}.ts`)));
   const cache = new Map();
   async function load(file) {
@@ -42,4 +42,7 @@ export async function loadConnectorDraftStore() {
 }
 export async function loadConnectorStatus() {
   return (await loadConnectorModule('customer-connector-status')).customerConnectorStatus;
+}
+export async function loadConnectorBindingStore() {
+  return (await loadConnectorModule('customer-connector-bindings')).createConnectorBindingStore;
 }

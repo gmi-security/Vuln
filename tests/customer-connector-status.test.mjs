@@ -123,3 +123,35 @@ test('read service skips schema initialization, preserves customer filters and f
     assert.ok(statements.every(sql => !/^(INSERT|UPDATE|DELETE|CREATE|ALTER)/.test(sql)));
   } finally { if (old === undefined) delete process.env.ELASTIC_VULN_DATABASE_URL; else process.env.ELASTIC_VULN_DATABASE_URL = old; }
 });
+
+test('status reads each customer binding over the legacy proposal without exporting private scope', async () => {
+  const data=metadata(),preview=build(data),source=preview.candidates.find(c=>c.evidence==='shared-configuration');
+  const legacy=draft(source,preview);legacy.proposal.companyId='A';
+  const queries=[];
+  const client={release(){},async query(sql,params){
+    queries.push(sql);
+    if(sql.includes('to_regclass'))return {rows:[{name:'present'}]};
+    if(sql.includes('FROM public.customer_connector_bindings')){
+      assert.ok(['A','B'].includes(params[0]));assert.match(sql,/WHERE b.company_id=\$1/);
+      const row=draft(source,preview);row.proposal.companyId=params[0];
+      row.proposal.targets=params[0]==='A'?['PRIVATE_ALPHA']:['PRIVATE_BETA'];
+      row.review_state=params[0]==='A'?'dismissed':'reviewed';return {rows:[row]};
+    }
+    if(sql.includes('FROM public.customer_connector_drafts'))return {rows:params[0]==='A'?[legacy]:[]};
+    return {rows:[]};
+  }};
+  const old=process.env.ELASTIC_VULN_DATABASE_URL;delete process.env.ELASTIC_VULN_DATABASE_URL;
+  try {
+    const service=await load('lib/customer-connector-status-service.ts',{
+      'pg':{Pool:class{constructor(){throw Error('Unexpected pool');}}},
+      './persist':{applicationDatabase:()=>({connect:async()=>client})},'./elastic-dashboard':{DashboardError},
+      './customer-connector-preview':{buildConnectorPreview:build},'./customer-connector-status':{customerConnectorStatus:project},
+      './db/connector-metadata.mjs':{readApplicationConnectorMetadata:async()=>data,readDashboardConnectorMetadata:async()=>data},
+    });
+    const a=await service.readCustomerConnectorStatus('A'),b=await service.readCustomerConnectorStatus('B');
+    assert.match(a.items.find(i=>i.id===source.id).review,/Dismissed/);
+    assert.match(b.items.find(i=>i.id===source.id).review,/Reviewed/);
+    assert.doesNotMatch(JSON.stringify([a,b]),/PRIVATE_|dashboard:/);
+    assert.ok(queries.every(sql=>!/^(INSERT|UPDATE|DELETE|CREATE|ALTER)/.test(sql)));
+  }finally{if(old===undefined)delete process.env.ELASTIC_VULN_DATABASE_URL;else process.env.ELASTIC_VULN_DATABASE_URL=old;}
+});

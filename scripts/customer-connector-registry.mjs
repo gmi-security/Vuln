@@ -6,13 +6,15 @@ import { userInfo, hostname } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
 import nextEnv from '@next/env';
-import { loadConnectorPreview, loadConnectorDraftStore } from './connector-preview-loader.mjs';
+import { loadConnectorPreview, loadConnectorDraftStore, loadConnectorBindingStore } from './connector-preview-loader.mjs';
 import { readApplicationConnectorMetadata, readDashboardConnectorMetadata } from '../lib/db/connector-metadata.mjs';
 
 const commands = {
   import: ['--fingerprint', '--env-file'],
   export: ['--company', '--output', '--env-file'],
   review: ['--input', '--env-file'],
+  assign: ['--input', '--env-file'],
+  'export-bindings': ['--company', '--output', '--env-file'],
 };
 export function parseRegistryArgs(args) {
   const [command, ...rest] = args;
@@ -24,8 +26,8 @@ export function parseRegistryArgs(args) {
     options[key] = value;
   }
   if (command === 'import' && !/^[a-f0-9]{64}$/.test(options['--fingerprint'] ?? '')) throw new Error('A reviewed preview fingerprint is required.');
-  if (command === 'export' && (!options['--company'] || options['--company'].length > 100 || !options['--output'])) throw new Error('Export requires a customer and private output path.');
-  if (command === 'review' && !options['--input']) throw new Error('Review requires a private input file.');
+  if (command.startsWith('export') && (!options['--company'] || options['--company'].length > 100 || !options['--output'])) throw new Error('Export requires a customer and private output path.');
+  if (['review','assign'].includes(command) && !options['--input']) throw new Error('Review requires a private input file.');
   return { command, options };
 }
 export function registryReviewInput(value) {
@@ -64,7 +66,7 @@ export async function runRegistry(args, runtimeEnv = process.env) {
     // Export is read-only at the connection level, including list queries.
     const poolOptions = { connectionString: env.DATABASE_URL, max: 2, connectionTimeoutMillis: 5000,
       statement_timeout: 15000, application_name: 'vuln2-connector-registry',
-      ...(command === 'export' ? { options: '-c default_transaction_read_only=on' } : {}) };
+      ...(command.startsWith('export') ? { options: '-c default_transaction_read_only=on' } : {}) };
     pool = new pg.Pool(poolOptions);
     pool.on('error', () => {}); // Caller reports a redacted failure, never a raw connection URL.
     async function metadataClient(url) {
@@ -81,12 +83,20 @@ export async function runRegistry(args, runtimeEnv = process.env) {
     const build = await loadConnectorPreview(), store = (await loadConnectorDraftStore())(pool);
     const collect = async () => build({ ...await readApplicationConnectorMetadata(app), ...await readDashboardConnectorMetadata(dashboard) }, env);
     if (command === 'import') return { action: command, ...await store.importPreview(options['--fingerprint'], actor, collect), enabledBindings: 0 };
-    if (command === 'review') {
+    if (['review','assign'].includes(command)) {
       const path = resolve(options['--input']);
       if ((await stat(path)).size > 32 * 1024) throw new Error('Review file exceeds 32 KiB.');
-      const input = registryReviewInput(JSON.parse(await readFile(path, 'utf8')));
-      const result = await store.reviewCurrentDraft(input, actor, collect);
-      return { action: command, revision: result.revision, reviewState: result.review_state, enabledBindings: 0 };
+      const value = JSON.parse(await readFile(path, 'utf8'));
+      const result = command === 'assign'
+        ? await (await loadConnectorBindingStore())(pool).save(value,actor,collect)
+        : await store.reviewCurrentDraft(registryReviewInput(value), actor, collect);
+      return { action: command, revision: result.revision, reviewState: result.reviewState ?? result.review_state, enabledBindings: 0 };
+    }
+    if(command === 'export-bindings') {
+      const result = await (await loadConnectorBindingStore())(pool).list(options['--company'],collect);
+      file = await open(resolve(options['--output']),'wx',0o600);
+      await file.writeFile(JSON.stringify(result,null,2)+'\n');
+      return { action:command, bindings:result.items.length, enabledBindings:0 };
     }
     const preview = await collect();
     if (!preview.companies.some(c => c.id === options['--company'])) throw new Error('Choose an existing non-demo customer.');
@@ -114,6 +124,10 @@ const safeMessages = new Set([
   'Choose authority supported by this source capability.', 'Record the verified tenant, dataset or targets before review.',
   'Vendor tenant verification is required.', 'Elasticsearch dataset verification is required.',
   'Approved scanner targets are required.', 'Decision and review note required.', 'Unexpected registry fields.',
+  'Unexpected binding fields.', 'Binding customer cannot be changed.', 'This source belongs to a different customer.',
+  'Binding changed; export current assignments before reviewing.', 'Historical data cannot be assigned as a connection.',
+  'Valid customer and source evidence are required.', 'Valid binding revision required.', 'Invalid binding decision.',
+  'A non-secret binding review note is required.', 'Customer binding limit exceeded.',
 ]);
 export function registryFailure(error) {
   if (safeMessages.has(error?.message)) return error.message;
