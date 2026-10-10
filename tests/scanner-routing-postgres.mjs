@@ -18,7 +18,7 @@ try{
  await db.query('CREATE TABLE vuln_store(key text PRIMARY KEY,data jsonb)');
  await db.query("INSERT INTO vuln_store VALUES('meta',$1)",[JSON.stringify({companies:[['A',{id:'A',name:'Alpha'}],['B',{id:'B',name:'Beta'}]]})]);
  const url=new URL(`postgresql://codex@localhost/${name}`);url.searchParams.set('host',socket);url.searchParams.set('port','55483');
- const env={DATABASE_URL:url.href,NESSUS_URL:'https://fixture.invalid',NESSUS_ACCESS_KEY:'fixture',NESSUS_SECRET_KEY:'fixture',SPIDERFOOT_URL:'https://sf.fixture.invalid',ARTEMIS_API_URL:'https://ar.fixture.invalid',ARTEMIS_API_TOKEN:'fixture'};
+ const env={DATABASE_URL:url.href,NESSUS_URL:'https://fixture.invalid',NESSUS_ACCESS_KEY:'fixture',NESSUS_SECRET_KEY:'fixture',SPIDERFOOT_URL:'https://sf.fixture.invalid',ARTEMIS_API_URL:'https://ar.fixture.invalid',ARTEMIS_API_TOKEN:'fixture',ZAP_URL:'https://zap.fixture.invalid',ZAP_API_KEY:'fixture',GMI_SCANNER_URL:'https://bridge.fixture.invalid',GMI_SCANNER_API_KEY:'fixture'};
  const build=await loadConnectorPreview(),routing=(await loadScannerRouting()).createScannerRoutingStore(pool),bindings=(await loadConnectorBindingStore())(pool);
  const collect=async()=>build({...await readApplicationConnectorMetadata(db),connections:[],tiles:[]},env),run=args=>runRegistry(args,env);
  const command=async(cmd,input)=>{const file=join(dir,randomUUID()+'.json');await writeFile(file,JSON.stringify(input),{mode:0o600});return run([cmd,'--input',file]);};
@@ -88,6 +88,25 @@ try{
  const sfExport=join(dir,'sf-routes.json');await run(['export-scanner-routes','--company','A','--output',sfExport]);
  assert.doesNotMatch(await readFile(sfExport,'utf8'),/a.example|ExactTag|fixture.invalid|secret/);
  ok('SpiderFoot launch-setting changes invalidate review and exports omit targets, tags and credentials');
+ await db.query(await readFile('docs/sql/customer-scanner-active-routes.sql','utf8'));
+ assert.equal((await routing.read('nessus',collect)).length,2);assert.equal((await routing.read('spiderfoot',collect)).length,2);assert.equal((await routing.read('artemis',collect)).length,2);
+ ok('active-scanner schema extension preserves all existing approvals and audit');
+ for(const provider of ['zap','vulners']){
+  const first=provider==='zap'?'https://a.example':'10.0.0.1',second=provider==='zap'?'https://b.example':'10.0.0.2';
+  const a=await osintBind(provider,'A',[first]),b=await osintBind(provider,'B',[second]);
+  await command('route-scanner',a);await command('route-scanner',b);assert.equal((await routing.read(provider,collect)).length,2);
+  const beforeAudit=(await db.query('SELECT count(*)::int n FROM customer_scanner_route_audit')).rows[0].n;
+  const conflict=await osintBind(provider,'B',[second,provider==='zap'?'https://A.example:443/':first]);
+  await assert.rejects(()=>command('route-scanner',{...conflict,expectedRevision:1}),/conflicting/);
+  assert.equal((await db.query('SELECT count(*)::int n FROM customer_scanner_route_audit')).rows[0].n,beforeAudit);
+  const repaired=await osintBind(provider,'B',[second]);await command('route-scanner',{...repaired,expectedRevision:1});
+  assert.equal((await routing.read(provider,collect)).length,2);
+  ok(provider+' approvals enforce one customer per exact target and roll back overlapping scopes');
+ }
+ env.VULNERS_BRIDGE_URL='https://fallback.fixture.invalid';env.VULNERS_BRIDGE_API_KEY='fixture';
+ await assert.rejects(()=>routing.read('vulners',collect),/review/);delete env.VULNERS_BRIDGE_URL;delete env.VULNERS_BRIDGE_API_KEY;
+ assert.equal((await routing.read('vulners',collect)).length,2);
+ ok('bridge deployment configuration changes require a renewed source review');
  env.NESSUS_TLS_INSECURE='1';await assert.rejects(()=>routing.read('nessus',collect),/review/);delete env.NESSUS_TLS_INSECURE;
  assert.equal((await routing.read('nessus',collect)).length,2);
  await db.query("UPDATE vuln_store SET data=jsonb_set(data,'{companies}',$1) WHERE key='meta'",[JSON.stringify([['B',{id:'B',name:'Beta'}]])]);

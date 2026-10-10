@@ -13,6 +13,7 @@ let sfScans=[],sfReads=0,arFindings=[],folders=[],scans=[],clients=[],deviceRead
 let routes=null,routeError=false,clientReads=0,requestedClients=[],afterDevices=()=>{},intuneReads=0,intuneConfigUsed;
 let arIncomplete=0;
 let osintRoutes={spiderfoot:null,artemis:null},osintError=false,osintLaunches=[],sfFindings=[],arReads=[],sfScopes=[],afterOsint=()=>{};
+let activeRoutes={zap:null,vulners:null},activeLaunches=[],activeResults=[],activeStatus=100,activeFail=false,afterActive=()=>{},activeConfig={baseUrl:'https://active.fixture.invalid',apiKey:'fixture'};
 let scannerRouteLoads=0,nessusRosterReads=0,nessusStatusReads=0,nessusStatus="completed";
 let scannerRoutes=null,scannerError=false,nessusResults={findings:[],scannedHosts:[]},nessusReads=[],nessusLaunches=[],nessusControls=[],afterNessus=()=>{};
 let spotlightRoutes=null,spotlightFailure=false,spotlightRuns=[],afterSpotlight=()=>{},spotlightPromotions=0;
@@ -20,6 +21,11 @@ let tidalReads=0,tidalOptions,tidalResult,crowdstrikeReads=[],falconFailure;
 const tenantId='11111111-1111-1111-1111-111111111111';
 const device={externalId:'device-1',hostname:'managed-host',ipAddresses:[],os:'Windows',owner:'',tags:[],criticality:'Normal',exposure:'Internal'};
 const mocks={
+ 'lib/zap.ts':{zapConfig:()=>activeConfig,zapCreateScope:async(config,target)=>({config,origin:target,name:'fixture',id:'1'}),zapRemoveScope:async()=>{},
+  zapStartSpider:async(target,scope)=>{activeLaunches.push({provider:'zap',target,scope});return '1';},zapSpiderStatus:async()=>{if(activeFail)throw Error('Fixture failed');return activeStatus;},
+  zapStartActiveScan:async()=> '2',zapActiveScanStatus:async()=>activeStatus,zapFetchReport:async()=>{afterActive();return activeResults;}},
+ 'lib/vulners.ts':{vulnersBridgeConfig:()=>activeConfig,vulnersBridgeStartScan:async(target,name,scope)=>{activeLaunches.push({provider:'vulners',target,scope});if(activeFail)throw Error('Fixture failed');return {jobId:'job',status:'complete'};},
+  vulnersBridgeJobStatus:async()=>({status:'complete'}),vulnersBridgeJobFindings:async()=>{afterActive();return activeResults;}},
  'lib/customer-spotlight-routing-server.ts':{loadReviewedSpotlightRoutes:async()=>{if(spotlightFailure)throw Error('Spotlight route unavailable');return spotlightRoutes;}},
  'lib/spotlight-resumable-import.ts':{runPartitionedSpotlightImport:async(selection,_partitions,deps)=>{spotlightRuns.push(selection);afterSpotlight();return {...await deps.complete('fixture',selection.tenantKey,selection.reviewedScope),skipped:0};}},
  'lib/spotlight-record-store.ts':{completeResumableSpotlightRun:async()=>{spotlightPromotions++;return {findingsImported:1,hostsAffected:1};}},
@@ -28,7 +34,7 @@ const mocks={
   nessusImportFindings:async(id,_budget,scope)=>{nessusReads.push({id,scope});afterNessus();return nessusResults;},
   nessusLaunchScan:async(name,targets,profile,scope)=>{nessusLaunches.push({name,targets,profile,scope});return {nessusScanId:10};},
   nessusScanControl:async(id,action)=>{nessusControls.push({id,action});},nessusScanStatus:async()=>{nessusStatusReads++;return {status:nessusStatus,progress:50};}},
- 'lib/customer-scanner-routing-server.ts':{loadReviewedScannerRoutes:async(provider)=>{if(provider!=="nessus"){if(osintError)throw Error("OSINT routing unavailable");return osintRoutes[provider];}scannerRouteLoads++;if(scannerError)throw Error('Scanner route unavailable');return scannerRoutes;}},
+ 'lib/customer-scanner-routing-server.ts':{loadReviewedScannerRoutes:async(provider)=>{if(provider==="zap"||provider==="vulners")return activeRoutes[provider];if(provider!=="nessus"){if(osintError)throw Error("OSINT routing unavailable");return osintRoutes[provider];}scannerRouteLoads++;if(scannerError)throw Error('Scanner route unavailable');return scannerRoutes;}},
  'lib/spiderfoot.ts':{spiderfootConfig:()=>({url:'https://sf.fixture.invalid',insecure:false}),spiderfootListScans:async()=>sfScans,spiderfootImportFindings:async(id,scope)=>{sfReads++;sfScopes.push(scope);afterOsint();return sfFindings;},spiderfootStartScan:async(name,target,usecase,scope)=>{osintLaunches.push({provider:'spiderfoot',target,scope});afterOsint();return 'launched';}},
  'lib/artemis.ts':{artemisCollectReviewedFindings:async(scope)=>{arReads.push(scope);afterOsint();return {findings:arFindings.filter(f=>f.tag===scope.tag),incompleteAnalyses:arIncomplete};},artemisConfig:()=>({url:'https://ar.fixture.invalid'}),artemisImportFindings:async(scope)=>{arReads.push(scope);afterOsint();return scope?arFindings.filter(f=>f.tag===scope.tag):arFindings;},artemisAddTargets:async(targets,tag,scope)=>{osintLaunches.push({provider:'artemis',targets,tag,scope});afterOsint();return {ok:true,ids:['launched']};}},
  'lib/customer-inventory-routing-server.ts':{loadReviewedInventoryRoutes:async()=>{if(routeError)throw Error('Routing needs renewed approval');return routes;}},
@@ -59,6 +65,7 @@ const module=await getModule('lib/store.ts');await module.link(linker);await mod
 const company=(id,name,kind='client')=>({id,name,kind,industry:'Test',createdAt:'2026-10-01T00:00:00Z',contactName:'',contactEmail:''});
 const acme=company('CO-A','Acme'),beacon=company('CO-B','Beacon');
 function fixture(companies=[acme,beacon]){
+ activeRoutes={zap:null,vulners:null};activeLaunches=[];activeResults=[];activeStatus=100;activeFail=false;afterActive=()=>{};activeConfig={baseUrl:'https://active.fixture.invalid',apiKey:'fixture'};
  arIncomplete=0;osintRoutes={spiderfoot:null,artemis:null};osintError=false;osintLaunches=[];sfFindings=[];arReads=[];sfScopes=[];afterOsint=()=>{};
  scannerRouteLoads=0;nessusRosterReads=0;nessusStatusReads=0;nessusStatus="completed";
  scannerRoutes=null;scannerError=false;nessusResults={findings:[],scannedHosts:[]};nessusReads=[];nessusLaunches=[];nessusControls=[];afterNessus=()=>{};
@@ -330,4 +337,54 @@ test('reviewed Artemis explicitly reports pending analyses while retaining exist
  const s=fixture();osintRoutes.artemis=[osintRoute('artemis')];arFindings=[arItem('ExactTag')];arIncomplete=2;
  const old={id:'old',companyId:acme.id,connector:'artemis',status:'Open',cve:'OLD',asset:'previous.example',title:'Previous'};s.findings.set('old',old);
  const result=await store.importFromArtemis();assert.equal(result.findingsImported,1);assert.match(result.skipped[0].reason,/2 pending or stopped/);assert.equal(old.status,'Open');assert.equal(s.findings.size,2);
+});
+
+const activeRoute=provider=>({...scannerRoute(),provider,sourceScope:'targets:fixture',connectionRef:'environment:scanner:'+provider,targets:[provider==='zap'?'https://app.example':'10.0.0.1']});
+const activeInput=provider=>({companyId:acme.id,connector:provider,profile:'standard',name:'Active fixture',targets:activeRoute(provider).targets});
+async function settleActive(s,id){for(let i=0;i<100;i++){if(s.scans.get(id)?.completedAt)return s.scans.get(id);await new Promise(r=>setImmediate(r));}assert.fail('Fixture worker did not settle');}
+for(const provider of ['zap','vulners']){
+ test(`${provider}: reviewed scope blocks unauthorized launches before local or remote changes`,async()=>{
+  for(const mode of ['none','other','invalid']){
+   const s=fixture();activeRoutes[provider]=mode==='none'?[]:[activeRoute(provider)];
+   const input=activeInput(provider);if(mode==='other')input.companyId=beacon.id;if(mode==='invalid')input.targets=[provider==='zap'?'https://app.example.evil':'10.0.0.2'];
+   assert.ok((await store.startScan(input)).error);assert.equal(activeLaunches.length,0);unchanged(s);assert.equal(s.folders.size,0);
+  }
+ });
+ test(`${provider}: native job completes for approved customer, keeps prior evidence and rechecks before publication`,async()=>{
+  for(const mode of ['success','revoked','changed-config','failed']){
+   const s=fixture();activeRoutes[provider]=[activeRoute(provider)];
+   const target=activeInput(provider).targets[0];
+   activeResults=[{cve:'CVE-2026-1234',cvss:8,component:'Service',target,asset:target,severity:'High',title:'Fixture',description:'Fixture',remediation:'Patch',category:'Test'}];
+   if(mode==='revoked')afterActive=()=>{activeRoutes[provider]=[];};
+   if(mode==='changed-config')afterActive=()=>{activeConfig={...activeConfig,baseUrl:'https://changed.invalid'};};
+   if(mode==='failed')activeFail=true;
+   s.findings.set('prior',{id:'prior',companyId:acme.id,connector:provider,cve:'CVE-2026-9999',asset:target,status:'Open',severity:'High',cvss:8});
+   const scan=await store.startScan(activeInput(provider));assert.ok(scan.id);const done=await settleActive(s,scan.id);
+   assert.equal(done.status,mode==='success'?'Completed':'Failed');assert.equal(done.hostsScanned,mode==='success'?1:0);
+   assert.equal(s.findings.size,mode==='success'?2:1);assert.equal(s.findings.get('prior').status,'Open');
+   if(mode==='success')assert.equal([...s.findings.values()].find(f=>f.id!=='prior').companyId,acme.id);
+  }
+ });
+ test(`${provider}: real jobs reject simulated controls; rescan launches a fresh checked job`,async()=>{
+  const s=fixture();activeRoutes[provider]=[activeRoute(provider)];const first=await store.startScan(activeInput(provider));
+  for(const action of ['pause','resume','stop'])assert.ok((await store.scanAction(first.id,action)).error);
+  await settleActive(s,first.id);const second=await store.scanAction(first.id,'rescan');assert.notEqual(second.id,first.id);await settleActive(s,second.id);assert.equal(activeLaunches.length,2);
+  activeRoutes[provider]=[];assert.ok((await store.scanAction(second.id,'rescan')).error);assert.equal(activeLaunches.length,2);
+ });
+}
+test('bridge inventory sweep uses approved customer ownership and never closes prior findings without completeness evidence',async()=>{
+ const s=fixture();activeRoutes.vulners=[activeRoute('vulners')];
+ for(const c of [acme,beacon])s.assets.set(c.id,{...device,id:c.id,identifier:c.id,hostname:c.id,ipAddresses:['10.0.0.1'],companyId:c.id,companyName:c.name,source:'manual'});
+ s.findings.set('prior',{id:'prior',companyId:acme.id,connector:'vulners',cve:'CVE-2026-9999',asset:'10.0.0.1',status:'Open',severity:'High',cvss:8});
+ const result=await store.importFromVulnersBridge();assert.equal(result.hostsScanned,1);assert.equal(activeLaunches.length,1);assert.equal(result.skipped,1);assert.equal(s.findings.get('prior').status,'Open');
+ activeRoutes.vulners=[];assert.ok((await store.importFromVulnersBridge()).error);assert.equal(activeLaunches.length,1);
+});
+
+test('ZAP polling exhaustion is failed coverage and never starts an active scan or publishes a report',async()=>{
+ const s=fixture();activeRoutes.zap=[activeRoute('zap')];activeStatus=99;
+ const original=globalThis.setTimeout;globalThis.setTimeout=(fn,ms,...args)=>original(fn,ms===5000?0:ms,...args);
+ try{const scan=await store.startScan(activeInput('zap'));
+  for(let i=0;i<150&&!s.scans.get(scan.id)?.completedAt;i++)await new Promise(r=>original(r,2));
+  const done=s.scans.get(scan.id);assert.equal(done.status,'Failed');assert.equal(done.hostsScanned,0);assert.equal(done.zapScan.activeScanId,undefined);assert.equal(s.findings.size,0);
+ }finally{globalThis.setTimeout=original;}
 });

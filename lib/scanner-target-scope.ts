@@ -47,6 +47,21 @@ export function scannerExactTargetKey(value: string): string {
   const parsed = target(value);
   return "hostname" in parsed ? parsed.hostname : `ip${parsed.family}:${parsed.low.toString(16)}`;
 }
+// ZAP ownership is an entire HTTP(S) origin. Path-shared customer ownership is
+// deliberately unsupported: ZAP's retained report is grouped by site.
+export function scannerWebOrigin(value: string, rootOnly = false): string {
+  if (typeof value !== "string" || value !== value.trim() || /[\\\s\x00-\x1f\x7f]/.test(value))
+    throw new Error("ZAP requires an explicit HTTP(S) origin.");
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error("ZAP requires an explicit HTTP(S) origin."); }
+  if (!/^https?:$/.test(url.protocol) || url.username || url.password || url.hash ||
+      (rootOnly && (url.pathname !== "/" || url.search)))
+    throw new Error("ZAP customer targets must be whole HTTP(S) origins without credentials, paths or query strings.");
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  scannerExactTargetKey(host);
+  if (url.hostname.endsWith(".")) throw new Error("Use the ZAP hostname without a trailing dot.");
+  return url.origin;
+}
 // Host aliases are trusted only within an already verified scanner folder. No DNS lookups.
 export function assertScannerResultScope(approved: readonly string[], result: {
   scannedHosts: { hostname: string; assetAliases: string[] }[];

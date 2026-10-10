@@ -190,3 +190,5 @@ The separate [Spotlight routing workflow](customer-spotlight-routing.md) adds `r
 The [Nessus routing workflow](customer-scanner-routing.md) adds `route-scanner` and `export-scanner-routes`. It requires a primary-findings binding with the numeric folder ID and approved targets, a separate operational approval, and its own provider switch. The shared approval service retains optimistic revisions and transactional audits for inventory, Spotlight and scanners. Review alone still cannot activate an import or launch a scan.
 
 SpiderFoot and Artemis use the same scanner approval commands with separate exact-target/tag policies and an explicit additive migration. See [OSINT routing and rollback](customer-osint-routing.md). Reviewing a binding alone still cannot start imports or scans.
+
+The [ZAP and Vulners bridge extension](customer-active-scanner-routing.md) uses the same operational approval commands with exact origins/hosts and an additive migration. Cloud enrichment is separate; source completeness and live acceptance limits are documented there.

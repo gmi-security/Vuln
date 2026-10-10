@@ -138,7 +138,7 @@ Acceptance requires customer isolation across shared CVEs; correct deduplication
 
 ### Current position and next steps
 
-**Latest implementation (checkpoint 44):** SpiderFoot and Artemis now extend the scanner approval model with exact root/tag/analysis routing, response provenance checks and current-approval rechecks. Their preview and launch action share the same approved target plan; incomplete Artemis analyses report partial coverage. Existing source classifications, scoring, permissions and data remain. No production activation occurred. ZAP/Vulners and FQL/patch consumers, live acceptance, SQL reporting integration and authoritative writer handoff remain outstanding.
+**Latest implementation (checkpoint 45):** ZAP and the Vulners bridge now enforce separately approved customer origin/host routes across native launches, polling and result publication. Failed targets no longer masquerade as successful empty scans; real rescans recheck ownership. The bridge's complete-report contract remains unverified, so reviewed mode preserves old findings instead of automatically resolving them. ZAP labels retained session evidence. Existing source classifications, scores, permissions and storage remain. No production activation occurred. FQL/patch consumers, live acceptance, SQL reporting integration and authoritative writer handoff remain outstanding.
 
 **October 10 UI component candidate:** `release/remediation-ui` contains the isolated UI component over `main` at `a6c485b`. Commit `23a5da0` isolates manual-draft automation protections; `ba46eae` adds the layout, shared CVE workflow, tests and `docs/remediation-ui-release.md`. It excludes shadow schemas/readers, summary workers, connector registry activation and authoritative-write prototypes. It has not been pushed, merged or deployed. Preserve its fixes/tests when assembling the combined candidate; its prior UI-only release instructions are superseded by the combined rollout decision.
 
@@ -1069,6 +1069,20 @@ The OSINT preview and existing launch action use the same provider-specific plan
 Validation: **216 distinct local regression tests**, **39 isolated PostgreSQL groups**, **nine browser groups**, and a production build/TypeScript pass. The full regression run passed 215 tests; the final partial-coverage change passed 58 focused tests, including one additional test (reruns are not added twice). HTTP and browser transports were fixture responses; guarded private-cluster databases were discarded and the cluster stopped. No production configuration, source data, real scan or ticket changed. See [OSINT operation, migration and rollback](customer-osint-routing.md). Actual server-version acceptance, Artemis connectivity, full-scale collection cost and atomic SQL publication remain unverified or unfinished.
 
 Next: ZAP/Vulners runtime consumers, FQL/patch routing, live scope verification, SQL reporting/write handoff and combined release/recovery rehearsal. Previously disabled integrations stay disabled.
+
+
+### Implementation checkpoint 45 - ZAP and Vulners bridge customer scope
+
+ZAP and the Vulners bridge extend the existing scanner approval/audit model. ZAP binds whole HTTP(S) origins; the bridge binds exact hostname/IP targets. Overlapping customer target sets are rejected within the approval transaction. An additive migration preserves all prior scanner approvals. Cloud-only Vulners enrichment cannot authorize active bridge scanning, and credential selection never mixes two deployments. Preferred-deployment changes invalidate source evidence without exposing secrets.
+
+Native/manual/scheduled launches and the bridge inventory sweep check reviewed customer ownership; polling and collection recheck current approval and pinned configuration. ZAP uses a private context for crawl/active scan and exact origin checks for report instances. Progress/ID validation and polling exhaustion prevent false completion. Bridge collection validates job identity, completion and raw target/CVE/score evidence; malformed or visibly truncated responses fail explicitly. Approved routes remain opt-in and no source mapping was activated.
+
+Coverage limits are explicit: ZAP's report remains retained session evidence, not a fresh per-job snapshot, and its findings say so. Deployed bridge report completeness is not attested; reviewed mode adds/updates but does not auto-resolve older bridge findings. Source endpoint/version/permission checks are still required. Both scanners show partial/failed target counts. Unsupported remote pause/resume/stop no longer pretends to control the vendor by changing local status; rescans create real newly checked jobs and retain the previous record. No source scoring, role permission, tile, ticket or platform writer migration is included.
+
+Validation: **238 distinct local regression tests**, **43 isolated PostgreSQL groups**, **nine browser groups**, mobile visual review and a production build/TypeScript pass. The broad run passed 233 tests, with five additional bridge authentication/status tests. SQL checks used disposable private-cluster databases; they were removed and the cluster stopped. All source responses were synthetic. Production code, configuration, data, PM2 and live integrations were unchanged; nothing was pushed, merged or deployed. See [active scanner operation and rollback](customer-active-scanner-routing.md).
+
+Next: FQL/patch runtime routing and source authority, live customer/source verification, SQL reporting integration and authoritative writer handoff, then the combined release/recovery rehearsal. Historical Artemis/ZAP connectivity failures remain unresolved. The five integrations the user chose to leave disabled remain disabled.
+
 
 ## How the system works today
 

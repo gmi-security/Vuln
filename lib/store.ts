@@ -1,6 +1,6 @@
 import { loadReviewedScannerRoutes } from "@/lib/customer-scanner-routing-server";
 import type { ScannerRoute } from "@/lib/customer-scanner-routing";
-import { scannerTargetMatcher, assertScannerResultScope, scannerExactTargetKey } from "@/lib/scanner-target-scope";
+import { scannerTargetMatcher, assertScannerResultScope, scannerExactTargetKey, scannerWebOrigin } from "@/lib/scanner-target-scope";
 import type { NessusConfig, NessusImportFindingsResult } from "@/lib/nessus";
 import { loadReviewedSpotlightRoutes } from "@/lib/customer-spotlight-routing-server";
 import { DEMO_ASSETS, DEMO_PORTS, VULN_CATALOG } from "@/lib/catalog";
@@ -70,6 +70,9 @@ import {
 } from "@/lib/nmap";
 import {
   zapConfig,
+  zapCreateScope,
+  zapRemoveScope,
+  type ZapScope,
   zapStartSpider,
   zapSpiderStatus,
   zapStartActiveScan,
@@ -5402,6 +5405,9 @@ export async function importFromVulnersBridge(): Promise<
         "Vulners bridge is not configured. Set VULNERS_BRIDGE_URL and VULNERS_BRIDGE_API_KEY.",
     };
   }
+  let routes: ScannerRoute[] | null;
+  try { routes = await reviewedActiveRoutes("vulners"); }
+  catch (error) { return { error: error instanceof Error ? error.message : "Bridge scope is unavailable." }; }
   const s = store();
   const nowIso = new Date().toISOString();
   let hostsScanned = 0;
@@ -5420,9 +5426,17 @@ export async function importFromVulnersBridge(): Promise<
 
   // Collect unique IPs from asset inventory — scan each once.
   const targets = new Map<string, { companyId: string; companyName: string; asset: InternalAsset }>();
+  const conflicted = new Set<string>();
   for (const asset of s.assets.values()) {
     for (const ip of asset.ipAddresses ?? []) {
-      if (!ip || targets.has(ip)) continue;
+      if (!ip) continue;
+      if (routes !== null) {
+        try { activeScannerContext("vulners", routes, asset.companyId, [ip]); } catch { skipped++; continue; }
+      }
+      if (targets.has(ip)) {
+        if (targets.get(ip)!.companyId !== asset.companyId) conflicted.add(ip);
+        continue;
+      }
       targets.set(ip, {
         companyId: asset.companyId,
         companyName: asset.companyName,
@@ -5431,6 +5445,7 @@ export async function importFromVulnersBridge(): Promise<
     }
   }
 
+  for (const ip of conflicted) { targets.delete(ip); skipped++; }
   for (const [ip, { companyId, companyName, asset }] of Array.from(targets.entries())) {
     let results: VulnersBridgeFinding[];
     try {
@@ -5450,7 +5465,8 @@ export async function importFromVulnersBridge(): Promise<
       //
       // Bulk inventory sweep — many targets, so cap each one at ~5 minutes
       // (30 * 10s) rather than the analyst-launched path's 70-minute cap.
-      results = await runBridgeScanToCompletion(ip, `${ip} [Vulners Bridge sync ${nowIso}]`, 30);
+      const context = activeScannerContext("vulners", routes, companyId, [ip]);
+      results = await runBridgeScanToCompletion(ip, `${ip} [Vulners Bridge sync ${nowIso}]`, 30, 10_000, context);
     } catch (err) {
       console.error(`[vulners-bridge] sync target ${ip} (${companyName}) failed:`, err);
       skipped += 1;
@@ -5557,7 +5573,8 @@ export async function importFromVulnersBridge(): Promise<
     }
   }
 
-  for (const [companyId, covered] of coveredByCompany) {
+  // Until the deployed bridge attests report completeness, reviewed imports only add/update.
+  for (const [companyId, covered] of routes === null ? coveredByCompany : []) {
     await closeStaleFindings(s, companyId, "vulners", covered, touchedKeys, nowIso);
   }
 
@@ -7279,6 +7296,37 @@ export async function getScan(id: string): Promise<Scan | undefined> {
   return scan ? toPublic(scan, Date.now()) : undefined;
 }
 
+type ActiveScannerProvider = "zap" | "vulners";
+type ReviewedActiveScanner = { provider: ActiveScannerProvider; route: ScannerRoute; config: { baseUrl: string; apiKey: string } };
+function activeScannerConfig(provider: ActiveScannerProvider) {
+  return provider === "zap" ? zapConfig() : vulnersBridgeConfig();
+}
+function activeTargetKey(provider: ActiveScannerProvider, target: string) {
+  return provider === "zap" ? scannerWebOrigin(target, true) : scannerExactTargetKey(target);
+}
+async function reviewedActiveRoutes(provider: ActiveScannerProvider) {
+  const routes = await loadReviewedScannerRoutes(provider);
+  if (routes !== null && (!routes.length || routes.some(route => route.provider !== provider ||
+      !store().companies.has(route.companyId) || demoCompanyIds(store()).has(route.companyId))))
+    throw new Error("Active scanner requires reviewed routes to existing non-demo customers.");
+  return routes;
+}
+function activeScannerContext(provider: ActiveScannerProvider, routes: ScannerRoute[] | null, companyId?: string, targets?: string[]): ReviewedActiveScanner | null {
+  if (routes === null) return null;
+  const matches = routes.filter(route => route.companyId === companyId), config = activeScannerConfig(provider);
+  if (matches.length !== 1 || !config) throw new Error("Customer has no unique approved active scanner connection.");
+  const route = matches[0], approved = new Set(route.targets.map(target => activeTargetKey(provider, target)));
+  if (targets?.some(target => !approved.has(activeTargetKey(provider, target))))
+    throw new Error("Requested scanner target is outside the customer's approved scope.");
+  return { provider, route, config };
+}
+async function recheckActiveScanner(context: ReviewedActiveScanner | null) {
+  if (!context) return;
+  const current = activeScannerContext(context.provider, await reviewedActiveRoutes(context.provider), context.route.companyId);
+  if (!current || JSON.stringify(current) !== JSON.stringify(context))
+    throw new Error("Active scanner approval or connection changed; results were withheld.");
+}
+
 // Launches a Vulners Bridge job for one target and polls it to completion,
 // returning the imported-ready findings. Throws on failure or on exhausting
 // maxPolls (still "running"/"queued") — callers decide whether to skip the
@@ -7288,19 +7336,30 @@ async function runBridgeScanToCompletion(
   scanName: string | undefined,
   maxPolls: number,
   pollMs = 10_000,
+  context: ReviewedActiveScanner | null = null,
 ): Promise<VulnersBridgeFinding[]> {
-  const job = await vulnersBridgeStartScan(target, scanName);
+  await recheckActiveScanner(context);
+  const scope = context ? { config: context.config, target, verify: () => recheckActiveScanner(context) } : undefined;
+  const job = await vulnersBridgeStartScan(target, scanName, scope);
   let terminal = job.status;
   for (let i = 0; i < maxPolls && (terminal === "queued" || terminal === "running"); i++) {
     await new Promise((r) => setTimeout(r, pollMs));
-    const polled = await vulnersBridgeJobStatus(job.jobId);
+    await recheckActiveScanner(context);
+    const polled = await vulnersBridgeJobStatus(job.jobId, scope);
     terminal = polled.status;
     if (terminal === "failed") throw new Error(polled.error ?? "Bridge scan failed.");
   }
   if (terminal !== "complete") {
     throw new Error(`Bridge scan timed out waiting for completion (status: ${terminal}).`);
   }
-  return vulnersBridgeJobFindings(job.jobId, target);
+  await recheckActiveScanner(context);
+  if (scope && (await vulnersBridgeJobStatus(job.jobId, scope)).status !== "complete")
+    throw new Error("Bridge job is not confirmed complete.");
+  const findings = await vulnersBridgeJobFindings(job.jobId, target, scope);
+  if (scope && (await vulnersBridgeJobStatus(job.jobId, scope)).status !== "complete")
+    throw new Error("Bridge job changed during collection.");
+  await recheckActiveScanner(context);
+  return findings;
 }
 
 // Runs Vulners Bridge scans per target asynchronously after startScan() returns.
@@ -7309,6 +7368,7 @@ async function runVulnersBridgeScanAsync(
   scanId: string,
   targets: string[],
   companyId: string,
+  context: ReviewedActiveScanner | null = null,
 ): Promise<void> {
   const s = store();
   const scan = s.scans.get(scanId);
@@ -7318,6 +7378,7 @@ async function runVulnersBridgeScanAsync(
   const company = s.companies.get(companyId);
   const companyName = company?.name ?? scan.companyName;
 
+  let completedTargets = 0, failedTargets = 0;
   try {
     for (const target of targets) {
       let results: VulnersBridgeFinding[];
@@ -7342,7 +7403,9 @@ async function runVulnersBridgeScanAsync(
         //
         // Analyst-launched, small target list — server's own job timeout is
         // 1 hour, so poll comfortably past that (420 * 10s = 70 min).
-        results = await runBridgeScanToCompletion(target, `[${scanId}] ${target} ${scan.name}`, 420);
+        if (s.scans.get(scanId) !== scan || scan.status !== "Running") throw new Error("Local bridge scan changed.");
+        results = await runBridgeScanToCompletion(target, `[${scanId}] ${target} ${scan.name}`, 420, 10_000, context);
+        if (s.scans.get(scanId) !== scan || scan.status !== "Running") throw new Error("Local bridge scan changed.");
       } catch (err) {
         // Deliberately still skip-and-continue (one bad target shouldn't
         // abort the whole scan) but LOG it — a bare `catch { continue }`
@@ -7350,8 +7413,10 @@ async function runVulnersBridgeScanAsync(
         // indistinguishable from "this host is just clean," discoverable
         // only via manual curl against the bridge directly.
         console.error(`[vulners-bridge] scan ${scanId} target ${target} failed:`, err);
+        failedTargets++;
         continue;
       }
+      completedTargets++;
       for (const v of results) {
         const existing = Array.from(s.findings.values()).find(
           (f) =>
@@ -7412,7 +7477,9 @@ async function runVulnersBridgeScanAsync(
       // among this round's results is stale (the CVE it flagged is gone).
       const currentCves = new Set(results.map((v) => v.cve));
       let closedHere = 0;
-      for (const f of s.findings.values()) {
+      // Reviewed bridge completeness is not yet attested by the deployed API.
+      // Preserve prior findings until that source contract is verified.
+      for (const f of context ? [] : s.findings.values()) {
         if (
           f.companyId === companyId &&
           f.connector === "vulners" &&
@@ -7441,16 +7508,17 @@ async function runVulnersBridgeScanAsync(
   }
 
   const current = s.scans.get(scanId);
-  if (!current || !current.bridgeScan) return;
+  if (!current || current !== scan || !current.bridgeScan) return;
   const all = Array.from(s.findings.values()).filter((f) => f.scanId === scanId);
   current.findingsCount = all.length;
   const counts = emptySeverityCounts();
   for (const f of all) counts[f.severity] = (counts[f.severity] ?? 0) + 1;
   current.severityCounts = counts;
-  current.hostsScanned = new Set(all.map((f) => f.asset)).size || targets.length;
-  current.status = "Completed";
+  current.hostsScanned = completedTargets;
+  current.status = failedTargets ? "Failed" : "Completed";
+  if (failedTargets) current.error = `${failedTargets} of ${targets.length} targets failed or were withheld; ${completedTargets} completed. Inspect remote jobs before retrying.`;
   current.completedAt = new Date().toISOString();
-  current.progressFrozenAt = 100;
+  current.progressFrozenAt = failedTargets ? Math.round(completedTargets / targets.length * 100) : 100;
   current.bridgeScan.done = true;
   void flushNow();
 }
@@ -7472,6 +7540,7 @@ async function runZapScanAsync(
   scanId: string,
   targets: string[],
   companyId: string,
+  context: ReviewedActiveScanner | null = null,
 ): Promise<void> {
   const s = store();
   const scan = s.scans.get(scanId);
@@ -7481,54 +7550,50 @@ async function runZapScanAsync(
   const company = s.companies.get(companyId);
   const companyName = company?.name ?? scan.companyName;
 
+  let completedTargets = 0, failedTargets = 0;
   try {
     for (const target of targets) {
       try {
         const current = s.scans.get(scanId);
-        if (!current || !current.zapScan) break; // scan was removed mid-flight
-
+        if (current !== scan || !current.zapScan || current.status !== "Running") throw new Error("Local ZAP scan changed.");
+        await recheckActiveScanner(context);
+        const scope: ZapScope | undefined = context ? await zapCreateScope(context.config, target) : undefined;
+        await recheckActiveScanner(context);
         current.zapScan.phase = "spidering";
         current.progressFrozenAt = 5;
-        const spiderScanId = await zapStartSpider(target);
+        const spiderScanId = await zapStartSpider(target, scope);
         current.zapScan.spiderScanId = spiderScanId;
-
+        let crawled = false;
         for (let i = 0; i < 60; i++) {
-          const progress = await zapSpiderStatus(spiderScanId);
-          current.progressFrozenAt = 5 + Math.round((progress / 100) * 35); // 5..40
-          if (progress >= 100) break;
+          await recheckActiveScanner(context);
+          const progress = await zapSpiderStatus(spiderScanId, scope?.config);
+          current.progressFrozenAt = 5 + Math.round((progress / 100) * 35);
+          if (progress === 100) { crawled = true; break; }
           await new Promise((r) => setTimeout(r, 5000));
         }
-
+        if (!crawled) throw new Error("ZAP crawl timed out; remote scan may still be running.");
+        await recheckActiveScanner(context);
         current.zapScan.phase = "scanning";
         current.progressFrozenAt = 40;
-        const activeScanId = await zapStartActiveScan(target);
+        const activeScanId = await zapStartActiveScan(target, scope);
         current.zapScan.activeScanId = activeScanId;
-
+        let scanned = false;
         for (let i = 0; i < 120; i++) {
-          const progress = await zapActiveScanStatus(activeScanId);
-          current.progressFrozenAt = 40 + Math.round((progress / 100) * 55); // 40..95
-          if (progress >= 100) break;
+          await recheckActiveScanner(context);
+          const progress = await zapActiveScanStatus(activeScanId, scope?.config);
+          current.progressFrozenAt = 40 + Math.round((progress / 100) * 55);
+          if (progress === 100) { scanned = true; break; }
           await new Promise((r) => setTimeout(r, 5000));
         }
+        if (!scanned) throw new Error("ZAP active scan timed out; remote scan may still be running.");
         current.progressFrozenAt = 95;
-
-        let report: ZapFinding[];
-        try {
-          report = await zapFetchReport();
-        } catch {
-          continue; // skip unreachable report; don't abort the whole scan
-        }
-        // The report covers every site ZAP currently holds — keep only the
-        // one matching this target (tolerate a trailing-slash mismatch).
-        const targetNorm = target.replace(/\/+$/, "").toLowerCase();
-        const siteFindings = report.filter((f) => {
-          const assetNorm = f.asset.replace(/\/+$/, "").toLowerCase();
-          return (
-            assetNorm === targetNorm ||
-            assetNorm.startsWith(targetNorm) ||
-            targetNorm.startsWith(assetNorm)
-          );
-        });
+        const report = await zapFetchReport(scope);
+        const siteFindings = report.filter(v => scannerWebOrigin(v.asset) === scannerWebOrigin(target));
+        await recheckActiveScanner(context);
+        if (s.scans.get(scanId) !== scan || scan.status !== "Running") throw new Error("Local ZAP scan changed.");
+        if (scope) await zapRemoveScope(scope);
+        await recheckActiveScanner(context);
+        completedTargets++;
 
         for (const v of siteFindings) {
           const existing = Array.from(s.findings.values()).find(
@@ -7579,8 +7644,10 @@ async function runZapScanAsync(
           rescoreFinding(s, f);
           s.findings.set(fid, f);
         }
-      } catch {
-        continue; // skip a failing target; don't abort the whole scan
+      } catch (error) {
+        console.error(`[zap] scan ${scanId} target failed:`, error);
+        failedTargets++;
+        continue;
       }
     }
   } catch (err) {
@@ -7597,16 +7664,17 @@ async function runZapScanAsync(
   }
 
   const current = s.scans.get(scanId);
-  if (!current || !current.zapScan) return;
+  if (!current || current !== scan || !current.zapScan) return;
   const all = Array.from(s.findings.values()).filter((f) => f.scanId === scanId);
   current.findingsCount = all.length;
   const counts = emptySeverityCounts();
   for (const f of all) counts[f.severity] = (counts[f.severity] ?? 0) + 1;
   current.severityCounts = counts;
-  current.hostsScanned = new Set(all.map((f) => f.asset)).size || targets.length;
-  current.status = "Completed";
+  current.hostsScanned = completedTargets;
+  current.status = failedTargets ? "Failed" : "Completed";
+  if (failedTargets) current.error = `${failedTargets} of ${targets.length} targets failed or were withheld; ${completedTargets} completed. Inspect remote jobs before retrying.`;
   current.completedAt = new Date().toISOString();
-  current.progressFrozenAt = 100;
+  current.progressFrozenAt = failedTargets ? Math.round(completedTargets / targets.length * 100) : 100;
   current.zapScan.phase = "done";
   void flushNow();
 }
@@ -7632,6 +7700,11 @@ export async function startScan(input: {
   if (input.connector === "nessus") {
     try { nessusContext = await reviewedNessusContext(input.companyId, input.targets); }
     catch (error) { return { error: error instanceof Error ? error.message : "Nessus scope is unavailable." }; }
+  }
+  let activeContext: ReviewedActiveScanner | null = null;
+  if (input.connector === "zap" || input.connector === "vulners") {
+    try { activeContext = activeScannerContext(input.connector, await reviewedActiveRoutes(input.connector), input.companyId, input.targets); }
+    catch (error) { return { error: error instanceof Error ? error.message : "Active scanner scope is unavailable." }; }
   }
   const { company, folder } = resolveScanLocation(s, input);
 
@@ -7691,10 +7764,10 @@ export async function startScan(input: {
   s.scans.set(id, scan);
 
   if (isBridgeScan) {
-    void runVulnersBridgeScanAsync(id, input.targets, company.id);
+    void runVulnersBridgeScanAsync(id, [...input.targets], company.id, activeContext);
   }
   if (isZapScan) {
-    void runZapScanAsync(id, input.targets, company.id);
+    void runZapScanAsync(id, [...input.targets], company.id, activeContext);
   }
 
   return toPublic(scan, Date.now());
@@ -7709,6 +7782,15 @@ export async function scanAction(
   const scan = s.scans.get(id);
   if (!scan) return { error: "Scan not found." };
   const now = Date.now();
+
+  if (scan.bridgeScan || scan.zapScan) {
+    if (["pause", "resume", "stop"].includes(action))
+      return { error: "Remote scanner controls are not available here. Use the scanner console; local status alone cannot stop a remote job." };
+    if ((action === "delete" || action === "rescan") && ["Running", "Queued", "Paused"].includes(scan.status))
+      return { error: "This remote scan is still active. Inspect the scanner before retrying or deleting it." };
+    if (action === "rescan") return startScan({ name: scan.name, connector: scan.connector, profile: scan.profile,
+      targets: [...scan.targets], companyId: scan.companyId, folderId: scan.folderId, requestedBy: scan.requestedBy });
+  }
 
   // Vendor-backed scans forward lifecycle controls to the scanner; local
   // state converges on the next poll.

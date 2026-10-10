@@ -1,13 +1,13 @@
 import { createHash } from "node:crypto";
-import { scannerTargetMatcher, scannerExactTargetKey } from "./scanner-target-scope";
+import { scannerTargetMatcher, scannerExactTargetKey, scannerWebOrigin } from "./scanner-target-scope";
 import { createOperationalRoutingStore, operationalRouteEvidenceSelect } from "./customer-operational-routing";
 import type { Pool } from "pg";
 import type { buildConnectorPreview } from "./customer-connector-preview";
 import { type ConnectorProposal } from "./customer-connector-drafts";
 import { checkCustomerConnectorBinding } from "./customer-connector-routing";
 
-export type RoutedScannerProvider = "nessus" | "spiderfoot" | "artemis";
-const providers = ["nessus", "spiderfoot", "artemis"];
+export type RoutedScannerProvider = "nessus" | "spiderfoot" | "artemis" | "zap" | "vulners";
+const providers = ["nessus", "spiderfoot", "artemis", "zap", "vulners"];
 type Preview = ReturnType<typeof buildConnectorPreview>;
 export type ScannerRoute = { candidateId: string; companyId: string; provider: RoutedScannerProvider; sourceScope: string; connectionRef: string; revision: number; bindingRevision: number; targets: string[] };
 type RouteRow = {
@@ -38,11 +38,13 @@ export function scannerBindingScope(companyId: string, preview: Preview, row: {
       candidate.connectionRef !== `environment:scanner:${candidate.provider}` || scope.authority !== "findings-primary" || scope.datasets.length)
     return fail("Scanner routing requires a primary findings assignment for a supported scanner.");
   if (candidate.provider !== "nessus") {
-    if (!scope.targets.length) return fail("OSINT routing requires explicit approved targets.");
-    const keys = scope.targets.map(scannerExactTargetKey).sort();
-    if (new Set(keys).size !== keys.length) return fail("OSINT targets contain duplicate host identities.");
+    if (!scope.targets.length) return fail("Scanner routing requires explicit approved targets.");
+    const keys = scope.targets.map(value => candidate.provider === "zap" ? scannerWebOrigin(value, true) : scannerExactTargetKey(value)).sort();
+    if (new Set(keys).size !== keys.length) return fail("Scanner targets contain duplicate identities.");
     const tag = scope.tenantId;
-    if (candidate.provider === "spiderfoot" && tag !== null) return fail("SpiderFoot uses exact target ownership, not a tenant or scan name.");
+    if (candidate.provider !== "artemis" && tag !== null) return fail("This scanner uses exact target ownership, not a tenant or scan name.");
+    if (candidate.provider === "vulners" && candidate.review.includes("bridge-not-configured"))
+      return fail("Vulners cloud enrichment cannot authorize an active bridge scanner.");
     if (candidate.provider === "artemis" && (!tag || tag.length > 160 || tag !== tag.trim() || /[\x00-\x1f\x7f]/.test(tag)))
       return fail("Artemis routing requires its exact source tag.");
     return { provider: candidate.provider as RoutedScannerProvider, sourceScope: candidate.provider === "artemis" ? tag! :
@@ -87,11 +89,11 @@ export function createScannerRoutingStore(db: Pick<Pool, "connect">) {
     providers: providers as RoutedScannerProvider[], bindingScope: scannerBindingScope, validateRoute,
     checkRoutes(routes, provider) {
       if (new Set(routes.map(r => r.sourceScope)).size !== routes.length) fail("Scanner source has conflicting customer routes.");
-      if (provider === "spiderfoot") {
+      if (["spiderfoot", "zap", "vulners"].includes(provider)) {
         const owners = new Set<string>();
         for (const route of routes) for (const value of route.targets) {
-          const key = scannerExactTargetKey(value);
-          if (owners.has(key)) fail("SpiderFoot target has conflicting customer routes.");
+          const key = provider === "zap" ? scannerWebOrigin(value, true) : scannerExactTargetKey(value);
+          if (owners.has(key)) fail("Scanner target has conflicting customer routes.");
           owners.add(key);
         }
       }

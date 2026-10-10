@@ -92,3 +92,5 @@ Approvals are rechecked before applying collected findings; application still us
 SpiderFoot and Artemis now extend this approval model; see [OSINT routing](customer-osint-routing.md) for their separate source scopes and additive migration. ZAP and Vulners runtime routing remain separate follow-ups. This checkpoint does not enable Burp, Nmap, Intune, IntelOwl or n8n. It does not resolve earlier Artemis/ZAP connectivity failures or complete FQL/patch routing and the platform database migration.
 
 Validation is recorded in the [rollout status](connector-rollout-status.md). Tests use fixture HTTP responses, mocked operational effects and guarded disposable PostgreSQL databases. No real customer scan was launched or import performed.
+
+The [ZAP and Vulners bridge extension](customer-active-scanner-routing.md) uses the same operational approval commands with exact origins/hosts and an additive migration. Cloud enrichment is separate; source completeness and live acceptance limits are documented there.

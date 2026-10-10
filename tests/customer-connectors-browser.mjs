@@ -139,13 +139,13 @@ try {
   assert.equal(await page.getByRole('combobox').count(),1);
   await page.screenshot({path:join(artifacts,'scanner-route-status-mobile.png'),fullPage:true});
   pass('Nessus approval displays without private targets, another selector or new operational controls');
-  for(const provider of ['spiderfoot','artemis']){
+  for(const provider of ['spiderfoot','artemis','zap','vulners']){
     scannerProvider=provider;await page.getByRole('button',{name:'Refresh status',exact:true}).click();
     await page.getByText(provider==='spiderfoot'?'SpiderFoot':provider,{exact:true}).waitFor();await page.getByText('Scanner route approved',{exact:true}).waitFor();
     assert.equal(await page.getByRole('combobox').count(),1);
   }
   await page.screenshot({path:join(artifacts,'osint-route-status-mobile.png'),fullPage:true});
-  pass('SpiderFoot and Artemis approvals display within the same customer selector and permissions');
+  pass('SpiderFoot, Artemis, ZAP and Vulners approvals display within the same customer selector and permissions');
 
   shared = true; await page.setViewportSize({width:1440,height:1050});
   await page.goto(base+'/connectors?view=shared&companyId=CO-B');

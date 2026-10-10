@@ -1,6 +1,28 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
-import { vulnersStatus, vulnersBridgeStartScan, vulnersBridgeJobStatus } from "../lib/vulners.ts";
+// Run with node --experimental-vm-modules --test. Use the same TS module
+// resolution as the application without executing its store or workers.
+import { readFile } from "node:fs/promises";
+import { resolve, dirname } from "node:path";
+import { SourceTextModule, SyntheticModule } from "node:vm";
+import ts from "typescript";
+const modules = new Map();
+async function getModule(path) {
+  path = resolve(path);
+  assert.ok([resolve('lib/vulners.ts'), resolve('lib/scanner-target-scope.ts')].includes(path));
+  if (!modules.has(path)) modules.set(path, new SourceTextModule(ts.transpileModule(await readFile(path, 'utf8'),
+    { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText, { identifier: path }));
+  return modules.get(path);
+}
+const adapter = await getModule('lib/vulners.ts');
+await adapter.link(async (name, parent) => {
+  if (name.startsWith('.')) return getModule(resolve(dirname(parent.identifier), name + '.ts'));
+  assert.equal(name, 'node:net');
+  const values = await import(name);
+  return new SyntheticModule(Object.keys(values), function () { for (const [key, value] of Object.entries(values)) this.setExport(key, value); });
+});
+await adapter.evaluate();
+const { vulnersStatus, vulnersBridgeStartScan, vulnersBridgeJobStatus } = adapter.namespace;
 
 const originalFetch = globalThis.fetch;
 const originalBridgeUrl = process.env.VULNERS_BRIDGE_URL;

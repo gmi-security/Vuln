@@ -10,7 +10,7 @@ const row={candidate_id:c.id,company_id:'A',provider:'nessus',source_scope:'17',
 test('scanner routing requires explicit Nessus opt-in and complete current folder/target approval',()=>{
  for(const v of ['',undefined,' '])assert.deepEqual(routing.reviewedScannerProviders(v),[]);
  assert.deepEqual(routing.reviewedScannerProviders('nessus'),['nessus']);
- for(const v of ['all','zap','nessus,','nessus,nessus'])assert.throws(()=>routing.reviewedScannerProviders(v));
+ for(const v of ['all','burp','nessus,','nessus,nessus'])assert.throws(()=>routing.reviewedScannerProviders(v));
  assert.equal(routing.scannerBindingScope('A',preview,row).sourceScope,'17');
  for(const edit of [{source_present:false},{review_state:'pending-review'},{imported_hash:'0'.repeat(64)},
   ...[{tenantId:'Alpha'},{tenantId:'017'},{tenantId:'0'},{targets:[]},{targets:['*.example.com']},{authority:'mirror'},{datasets:['data']}].map(p=>({proposal:{...row.proposal,...p}}))])
@@ -54,4 +54,28 @@ test('OSINT scanner scope requires explicit roots, an exact Artemis tag and fres
   assert.throws(()=>routing.scannerBindingScope('A',p,{...evidence,proposal:{...evidence.proposal,tenantId:provider==='artemis'?null:'FakeTenant'}}));
   if(provider==='spiderfoot')for(const key of ['SPIDERFOOT_TLS_INSECURE','SPIDERFOOT_USECASE'])assert.throws(()=>routing.scannerBindingScope('A',build(metadata,{...osintEnv,[key]:'changed'}),evidence));
  }
+});
+
+for(const provider of ['zap','vulners'])test(`${provider}: active scanner scope, source mode and safe customer status`,async()=>{
+ const activeEnv={ZAP_URL:'https://zap.fixture.invalid',ZAP_API_KEY:'fixture',GMI_SCANNER_URL:'https://bridge.fixture.invalid',GMI_SCANNER_API_KEY:'fixture'};
+ const p=build(metadata,activeEnv),c=p.candidates.find(c=>c.provider===provider),hash=review.connectorDraftEvidence(c,p.candidates).candidateHash;
+ const evidence={...row,candidate_id:c.id,provider,candidate_hash:hash,binding_hash:hash,imported_hash:hash,proposal:{...row.proposal,tenantId:null,targets:provider==='zap'?['https://app.example']:['host.example','10.0.0.1']}};
+ const scope=routing.scannerBindingScope('A',p,evidence);assert.match(scope.sourceScope,/^targets:[a-f0-9]{64}$/);evidence.source_scope=scope.sourceScope;
+ for(const values of provider==='zap'?[['https://app.example/a'],['https://app.example?tenant=other'],['https://user:pass@app.example'],['ftp://app.example'],['https://APP.example:443/','https://app.example']]:[['10.0.0.0/24'],['host.EXAMPLE.','host.example'],['https://app.example']])
+  assert.throws(()=>routing.scannerBindingScope('A',p,{...evidence,proposal:{...evidence.proposal,targets:values}}));
+ const project=await loadConnectorStatus(),status=routing.scannerRoutingStatus(evidence,p,provider);
+ const result=project('A',p,[{id:c.id,candidate:c,candidate_hash:hash,proposal:evidence.proposal,source_present:true,review_state:'reviewed',reviewed_at:evidence.reviewed_at}],true,undefined,[],[],[status]);
+ assert.equal(result.items[0].review,'Scanner route approved');assert.doesNotMatch(JSON.stringify(result),/host.example|app.example|10.0.0.1|fixture.invalid/);
+ if(provider==='vulners'){
+  assert.throws(()=>routing.scannerBindingScope('A',build(metadata,{VULNERS_API_KEY:'fixture'}),evidence));
+  // Adding the preferred deployment key changes selected mode even if both URLs already existed.
+  const both={...activeEnv,GMI_SCANNER_API_KEY:'',VULNERS_BRIDGE_URL:'https://other.invalid',VULNERS_BRIDGE_API_KEY:'fixture'};
+  assert.notEqual(build(metadata,both).candidates.find(c=>c.provider==='vulners').revision,build(metadata,{...both,GMI_SCANNER_API_KEY:'fixture'}).candidates.find(c=>c.provider==='vulners').revision);
+ }
+});
+test('web origin comparison is exact across scheme, port, host and URL parser edge cases',()=>{
+ assert.equal(targets.scannerWebOrigin('https://APP.example:443/'), 'https://app.example');
+ assert.notEqual(targets.scannerWebOrigin('https://app.example:8443'), targets.scannerWebOrigin('https://app.example'));
+ for(const v of ['https://app.example.evil','http://app.example'])assert.notEqual(targets.scannerWebOrigin(v), 'https://app.example');
+ for(const v of ['https://app.example\\evil','https://app.example./','https://app.example/#x','https://*.example','//app.example','https://app.example/ path'])assert.throws(()=>targets.scannerWebOrigin(v));
 });

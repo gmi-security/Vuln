@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { scannerWebOrigin } from "./scanner-target-scope";
 import type { Severity } from "@/lib/types";
 
 // OWASP ZAP adapter — dynamic application security testing (DAST) against a
@@ -51,6 +53,7 @@ async function zapFetch(
   const res = await fetch(`${cfg.baseUrl}${path}?${qs.toString()}`, {
     headers: { Host: "zap" },
     cache: "no-store",
+    redirect: "error",
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) {
@@ -98,48 +101,54 @@ export async function zapStatus(): Promise<{
 }
 
 // --- Spider (crawl) ----------------------------------------------------------
-export async function zapStartSpider(targetUrl: string): Promise<string> {
-  const config = zapConfig();
+export async function zapStartSpider(targetUrl: string, scope?: ZapScope): Promise<string> {
+  const config = scope?.config ?? zapConfig();
   if (!config) throw new Error("ZAP is not configured. Set ZAP_URL and ZAP_API_KEY.");
+  if (scope && scannerWebOrigin(targetUrl, true) !== scope.origin) throw new Error("ZAP target is outside its approved origin.");
   const data = await zapFetch(config, "/JSON/spider/action/scan/", {
     url: targetUrl,
+    ...(scope ? { contextName: scope.name, subtreeOnly: "true", recurse: "true" } : {}),
   });
   const scanId = data?.scan;
-  if (scanId === undefined || scanId === null) {
+  if (!validZapId(scanId)) {
     throw new Error("ZAP spider scan: no scan id returned.");
   }
   return String(scanId);
 }
 
-export async function zapSpiderStatus(scanId: string): Promise<number> {
-  const config = zapConfig();
+export async function zapSpiderStatus(scanId: string, pinned?: ZapConfig): Promise<number> {
+  const config = pinned ?? zapConfig();
   if (!config) throw new Error("ZAP is not configured. Set ZAP_URL and ZAP_API_KEY.");
+  if (!validZapId(scanId)) throw new Error("ZAP scan ID is invalid.");
   const data = await zapFetch(config, "/JSON/spider/view/status/", { scanId });
   const status = Number(data?.status);
-  if (Number.isNaN(status)) throw new Error("ZAP spider status: malformed response.");
+  if (!/^(?:[0-9]|[1-9][0-9]|100)$/.test(String(data?.status)) || !Number.isInteger(status)) throw new Error("ZAP spider status: malformed response.");
   return status;
 }
 
 // --- Active scan --------------------------------------------------------------
-export async function zapStartActiveScan(targetUrl: string): Promise<string> {
-  const config = zapConfig();
+export async function zapStartActiveScan(targetUrl: string, scope?: ZapScope): Promise<string> {
+  const config = scope?.config ?? zapConfig();
   if (!config) throw new Error("ZAP is not configured. Set ZAP_URL and ZAP_API_KEY.");
+  if (scope && scannerWebOrigin(targetUrl, true) !== scope.origin) throw new Error("ZAP target is outside its approved origin.");
   const data = await zapFetch(config, "/JSON/ascan/action/scan/", {
     url: targetUrl,
+    ...(scope ? { contextId: scope.id, recurse: "true", inScopeOnly: "true" } : {}),
   });
   const scanId = data?.scan;
-  if (scanId === undefined || scanId === null) {
+  if (!validZapId(scanId)) {
     throw new Error("ZAP active scan: no scan id returned.");
   }
   return String(scanId);
 }
 
-export async function zapActiveScanStatus(scanId: string): Promise<number> {
-  const config = zapConfig();
+export async function zapActiveScanStatus(scanId: string, pinned?: ZapConfig): Promise<number> {
+  const config = pinned ?? zapConfig();
   if (!config) throw new Error("ZAP is not configured. Set ZAP_URL and ZAP_API_KEY.");
+  if (!validZapId(scanId)) throw new Error("ZAP scan ID is invalid.");
   const data = await zapFetch(config, "/JSON/ascan/view/status/", { scanId });
   const status = Number(data?.status);
-  if (Number.isNaN(status)) throw new Error("ZAP active scan status: malformed response.");
+  if (!/^(?:[0-9]|[1-9][0-9]|100)$/.test(String(data?.status)) || !Number.isInteger(status)) throw new Error("ZAP active scan status: malformed response.");
   return status;
 }
 
@@ -189,22 +198,33 @@ export type ZapFinding = {
 // explosion of near-duplicate rows per crawled instance. Read defensively:
 // the report shape is large and any field may be missing or differently
 // typed than documented.
-export async function zapFetchReport(): Promise<ZapFinding[]> {
-  const config = zapConfig();
+export async function zapFetchReport(scope?: ZapScope): Promise<ZapFinding[]> {
+  const config = scope?.config ?? zapConfig();
   if (!config) throw new Error("ZAP is not configured. Set ZAP_URL and ZAP_API_KEY.");
   const data = await zapFetch(config, "/OTHER/core/other/jsonreport/", {}, 30_000);
 
   const out: ZapFinding[] = [];
   if (!Array.isArray(data?.site)) throw new Error("ZAP returned an invalid report site list.");
   const sites = data.site;
+  let matched = false;
   for (const site of sites) {
     const siteUrl = String(site?.["@name"] ?? "");
+    if (scope) {
+      // The report is retained session evidence, not a fresh per-run snapshot.
+      // Other customers' sites are deliberately ignored, never prefix-matched.
+      if (scannerWebOrigin(siteUrl, true) !== scope.origin) continue;
+      if (matched) throw new Error("ZAP report contains duplicate customer sites.");
+      matched = true;
+    }
     if (!Array.isArray(site?.alerts)) throw new Error("ZAP returned an invalid report alert list.");
     const alerts = site.alerts;
     for (const alert of alerts) {
       const severity = zapMapRiskToSeverity(alert?.riskcode);
       const cweid = String(alert?.cweid ?? "").trim();
       const instances = Array.isArray(alert?.instances) ? alert.instances : [];
+      if (scope && (!Array.isArray(alert?.instances) || !instances.length || instances.some((item: any) =>
+          typeof item?.uri !== "string" || scannerWebOrigin(item.uri) !== scope.origin)))
+        throw new Error("ZAP alert evidence is missing or outside the customer origin.");
       const name = String(alert?.name ?? "ZAP finding");
       const instanceNote =
         instances.length > 1 ? ` Observed on ${instances.length} instances.` : "";
@@ -215,7 +235,7 @@ export async function zapFetchReport(): Promise<ZapFinding[]> {
         cvss: severityCvss(severity),
         asset: siteUrl,
         category: "Web Vulnerability",
-        description: `${String(alert?.desc ?? "Reported by OWASP ZAP.")}${instanceNote}`,
+        description: `${String(alert?.desc ?? "Reported by OWASP ZAP.")}${instanceNote}${scope ? " Retained ZAP session evidence; this report can include earlier scans of this origin." : ""}`,
         remediation: String(alert?.solution ?? "See the ZAP alert detail for remediation."),
         cve:
           cve ??
@@ -223,5 +243,27 @@ export async function zapFetchReport(): Promise<ZapFinding[]> {
       });
     }
   }
+  if (scope && !matched) throw new Error("ZAP returned no report for the approved origin; coverage is unknown.");
   return out;
+}
+
+function validZapId(value: unknown): boolean {
+  return (typeof value === "string" || typeof value === "number") && /^(0|[1-9][0-9]*)$/.test(String(value)) && Number.isSafeInteger(Number(value));
+}
+export type ZapScope = { config: ZapConfig; origin: string; name: string; id: string };
+// A private context prevents a shared session from broadening this launch.
+// Contexts are retained on error so an operator can inspect any uncertain job.
+export async function zapCreateScope(config: ZapConfig, target: string): Promise<ZapScope> {
+  const origin = scannerWebOrigin(target, true), name = `gmi-${randomUUID()}`;
+  const created = await zapFetch(config, "/JSON/context/action/newContext/", { contextName: name });
+  if (!validZapId(created?.contextId)) throw new Error("ZAP context creation was not confirmed; inspect the scanner before retrying.");
+  const id = String(created.contextId);
+  const escaped = origin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const included = await zapFetch(config, "/JSON/context/action/includeInContext/", { contextName: name, regex: `^${escaped}(?:/.*)?$` });
+  if (included?.Result !== "OK") throw new Error("ZAP did not confirm the approved context scope.");
+  return { config, origin, name, id };
+}
+export async function zapRemoveScope(scope: ZapScope): Promise<void> {
+  const result = await zapFetch(scope.config, "/JSON/context/action/removeContext/", { contextName: scope.name });
+  if (result?.Result !== "OK") throw new Error("ZAP context cleanup was not confirmed.");
 }

@@ -130,9 +130,14 @@ export function buildConnectorPreview(metadata: ConnectorMetadata, env: Partial<
     if (!present) continue;
     add({ ...base(connector.id, `environment:scanner:${connector.id}`, [...(connectorDataContract(connector.id)?.capabilities ?? [])]),
       evidence: "shared-configuration", configured: connector.configured,
-      revision: environmentRevision(connector.id,env,[...connector.envVars.filter(key=>/URL$/.test(key)), ...(connector.id === "nessus" ? ["NESSUS_TLS_INSECURE"] : []),
+      revision: environmentRevision(connector.id,connector.id === "vulners" ? { ...env, VULNERS_ACTIVE_BRIDGE:
+        text(env.GMI_SCANNER_URL) && text(env.GMI_SCANNER_API_KEY) ? "gmi" :
+        text(env.VULNERS_BRIDGE_URL) && text(env.VULNERS_BRIDGE_API_KEY) ? "legacy" : "none" } : env,
+        [...connector.envVars.filter(key=>/URL$/.test(key)), ...(connector.id === "vulners" ? ["VULNERS_ACTIVE_BRIDGE", "VULNERS_URL"] : []), ...(connector.id === "nessus" ? ["NESSUS_TLS_INSECURE"] : []),
         ...(connector.id === "spiderfoot" ? ["SPIDERFOOT_TLS_INSECURE", "SPIDERFOOT_USECASE", "SPIDERFOOT_USER"] : [])]),
       review: ["customer-target-scope-not-assigned", ...(connector.status === "Planned" ? ["adapter-planned"] : []),
+        ...(connector.id === "vulners" && !((text(env.GMI_SCANNER_URL) && text(env.GMI_SCANNER_API_KEY)) ||
+          (text(env.VULNERS_BRIDGE_URL) && text(env.VULNERS_BRIDGE_API_KEY))) ? ["bridge-not-configured"] : []),
         ...(!connector.configured ? ["incomplete-credentials"] : []),
         ...(connector.id === "spiderfoot" ? ["scan-to-customer-mapping-needs-review"] : [])],
     });

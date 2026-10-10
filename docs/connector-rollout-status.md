@@ -134,3 +134,14 @@ The additive OSINT route migration preserves Nessus approvals. Scanner approvals
 Validation: **216 distinct local regression tests**, **39 isolated PostgreSQL groups**, **nine browser groups**, and a production build/TypeScript pass. The full regression run passed 215 tests; the final partial-coverage change passed 58 focused tests, including one additional test (reruns are not added twice). All API transports were synthetic; SQL checks used disposable private-cluster databases which were removed, and the cluster was stopped. No real source import, remote scan, ticket, production configuration change or deployment occurred. See [operation and rollback](customer-osint-routing.md).
 
 Next: ZAP/Vulners consumers, FQL/patch routing, actual source/customer verification, SQL reporting and authoritative writer handoff, then the combined release/recovery rehearsal. Live Artemis/ZAP connectivity still needs resolution. Burp, Nmap, Intune, IntelOwl and n8n stay disabled.
+
+
+## ZAP and Vulners bridge routing follow-up
+
+Both active scanners now use separately approved customer targets: whole origins for ZAP and exact hostnames/IPs for the bridge. Launch, polling and publication recheck ownership. ZAP context/report scope prevents loose URL-prefix matches; bridge result checks reject foreign hosts, malformed bodies and known incomplete responses. The migration preserves existing scanner approvals and audits. Vulners cloud enrichment stays separate from active bridge scanning.
+
+Failed or incomplete targets no longer count as completed scans. Rescan starts a real newly checked job. Unsupported remote pause/resume/stop controls now report that they must be performed in the scanner console. Existing data and permissions remain. The bridge completeness contract is still unverified, so reviewed mode does not auto-resolve older findings; ZAP reports remain labeled retained session evidence.
+
+Validation: **238 distinct local tests**, **43 isolated PostgreSQL groups**, **nine browser groups**, mobile visual review and production build/TypeScript checks passed. Disposable databases were removed and the private cluster stopped. No production configuration, import, remote scan, ticket, push or deployment occurred. See [operation, limitations and rollback](customer-active-scanner-routing.md).
+
+Next: saved FQL/patch consumers, source authority and live customer/source verification, SQL reporting/write migration and combined release/recovery rehearsal. Earlier Artemis/ZAP connectivity failures still require resolution. Burp, Nmap, Intune, IntelOwl and n8n remain available but disabled.

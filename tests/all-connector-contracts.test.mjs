@@ -317,3 +317,68 @@ test('reviewed Artemis transport filters exact tag and analysis ID, rejects mixe
   mode='bad-launch';await assert.rejects(()=>ar.artemisAddTargets(['acme.example'],'ExactTag',scope),/inspect the scanner/);
  }finally{await new Promise(r=>server.close(r));}
 });
+
+
+test('reviewed ZAP uses a private origin context, gateway authentication and strict report evidence',async()=>{
+ const zap=await load('zap'),before=globalThis.fetch,calls=[];
+ const config={baseUrl:'https://zap.fixture.invalid',apiKey:'fixture-key'};
+ const own={"@name":'https://app.example',alerts:[{riskcode:'3',cweid:'79',name:'XSS',desc:'Test',solution:'Encode',instances:[{uri:'https://app.example/login'}]}]};
+ let report={site:[{...own,"@name":'https://app.example.evil'},own]},status='100';
+ globalThis.fetch=async(url,options)=>{
+  url=new URL(url);calls.push(url);assert.equal(url.origin,config.baseUrl);assert.equal(url.searchParams.get('apikey'),config.apiKey);assert.equal(options.headers.Host,'zap');assert.equal(options.redirect,'error');
+  if(url.pathname.includes('newContext'))return Response.json({contextId:'1'});
+  if(url.pathname.includes('includeInContext')||url.pathname.includes('removeContext'))return Response.json({Result:'OK'});
+  if(url.pathname.includes('/action/scan/'))return Response.json({scan:'2'});
+  if(url.pathname.includes('/view/status/'))return Response.json({status});
+  if(url.pathname.includes('jsonreport'))return Response.json(report);
+  assert.fail('Unexpected ZAP endpoint '+url.pathname);
+ };
+ try{
+  const scope=await zap.zapCreateScope(config,'https://app.example');
+  const regex=new RegExp(calls.find(c=>c.pathname.includes('includeInContext')).searchParams.get('regex'));
+  assert.ok(regex.test('https://app.example/path'));for(const v of ['https://app.example.evil','https://appXexample','http://app.example','https://app.example:8443'])assert.equal(regex.test(v),false);
+  await zap.zapStartSpider('https://app.example',scope);await zap.zapStartActiveScan('https://app.example',scope);
+  assert.equal(calls.find(c=>c.pathname.includes('/spider/action/scan')).searchParams.get('contextName'),scope.name);
+  assert.equal(calls.find(c=>c.pathname.includes('/ascan/action/scan')).searchParams.get('contextId'),scope.id);
+  const count=calls.length;await assert.rejects(()=>zap.zapStartSpider('https://other.example',scope),/outside/);assert.equal(calls.length,count);
+  const results=await zap.zapFetchReport(scope);assert.equal(results.length,1);assert.equal(results[0].cve,'ZAP-79');assert.match(results[0].description,/Retained ZAP session/);
+  report={site:[{...own,alerts:[{...own.alerts[0],instances:[{uri:'https://app.example.evil/x'}]}]}]};await assert.rejects(()=>zap.zapFetchReport(scope),/outside/);
+  report={site:[]};await assert.rejects(()=>zap.zapFetchReport(scope),/coverage is unknown/);
+  for(const value of [null,'',101,-1,'unknown',100.5]){status=value;await assert.rejects(()=>zap.zapSpiderStatus('2',config),/malformed/);await assert.rejects(()=>zap.zapActiveScanStatus('2',config),/malformed/);}
+  await zap.zapRemoveScope(scope);
+ }finally{globalThis.fetch=before;}
+});
+
+test('reviewed bridge keeps deployment credentials together and rejects foreign or incomplete job evidence',async()=>{
+ const bridge=await load('vulners'),before=globalThis.fetch;
+ const keys=['GMI_SCANNER_URL','GMI_SCANNER_API_KEY','VULNERS_BRIDGE_URL','VULNERS_BRIDGE_API_KEY'],prior=keys.map(k=>process.env[k]);
+ const config={baseUrl:'https://bridge.fixture.invalid',apiKey:'fixture-key'},scope={config,target:'10.0.0.1'};
+ let calls=[],job={id:'job-1',status:'Done'},data={findings:[{host:'10.0.0.1',cves:['CVE-2026-1234'],severity:8,name:'Service',port:'443/tcp'}]};
+ globalThis.fetch=async(url,options)=>{
+  calls.push([url,options]);assert.equal(new URL(url).origin,config.baseUrl);assert.equal(options.headers['X-API-Key'],config.apiKey);assert.equal(options.redirect,'error');
+  if(url.endsWith('/start'))return Response.json({id:'job-1',status:'Requested'});
+  if(options.method==='POST')return Response.json({task_id:'job-1'});
+  return Response.json(url.endsWith('/findings')?data:job);
+ };
+ try{
+  process.env.GMI_SCANNER_URL='https://preferred.invalid';delete process.env.GMI_SCANNER_API_KEY;
+  process.env.VULNERS_BRIDGE_URL='https://fallback.invalid/api';process.env.VULNERS_BRIDGE_API_KEY='fallback';
+  assert.deepEqual(bridge.vulnersBridgeConfig(),{baseUrl:'https://fallback.invalid',apiKey:'fallback'});
+  delete process.env.VULNERS_BRIDGE_URL;assert.equal(bridge.vulnersBridgeConfig(),null);
+  assert.equal((await bridge.vulnersBridgeStartScan('10.0.0.1','Fixture',scope)).jobId,'job-1');
+  assert.deepEqual(JSON.parse(calls[0][1].body).hosts,['10.0.0.1']);assert.equal(JSON.parse(calls[1][1].body).authorization_confirmed,true);
+  calls=[];await assert.rejects(()=>bridge.vulnersBridgeStartScan('10.0.0.2','Fixture',scope),/outside/);assert.equal(calls.length,0);
+  await assert.rejects(()=>bridge.vulnersBridgeStartScan('10.0.0.1','Fixture',{...scope,verify:async()=>{throw Error('revoked');}}),/revoked/);assert.equal(calls.length,1,'no start request after approval revocation');
+  assert.equal((await bridge.vulnersBridgeJobStatus('job-1',scope)).status,'complete');
+  job={id:'other',status:'Done'};await assert.rejects(()=>bridge.vulnersBridgeJobStatus('job-1',scope),/identity/);
+  const results=await bridge.vulnersBridgeJobFindings('job-1','10.0.0.1',scope);assert.equal(results.length,1);assert.equal(results[0].cvss,8);
+  const good=structuredClone(data);
+  for(const bad of [{},{findings:null},{...good,total:2},{...good,has_more:true},
+    {findings:[{...good.findings[0],host:'10.0.0.2'}]},{findings:[{...good.findings[0],host:null}]},
+    {findings:[{...good.findings[0],cves:undefined}]},{findings:[{...good.findings[0],cves:['invalid']}]},
+    {findings:[{...good.findings[0],severity:'NaN'}]}]){
+   data=bad;await assert.rejects(()=>bridge.vulnersBridgeJobFindings('job-1','10.0.0.1',scope));
+  }
+  data={findings:[]};assert.deepEqual(await bridge.vulnersBridgeJobFindings('job-1','10.0.0.1',scope),[]);
+ }finally{globalThis.fetch=before;keys.forEach((k,i)=>prior[i]===undefined?delete process.env[k]:process.env[k]=prior[i]);}
+});
