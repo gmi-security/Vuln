@@ -178,3 +178,8 @@ Environment evidence now includes a non-secret revision fingerprint for configur
 Customer review can record inventory, enrichment and AppSec scopes independently. AppSec review requires datasets and repositories; scan roles require targets. Delivery and orchestration cannot claim findings authority. The common read-plan checker rejects missing, stale, wrong-customer or unsupported scope and overlapping same-provider data roles. It does not resolve cross-provider overlap, enforce upstream scan scope or activate workers. The registry still enforces `enabled=false`.
 
 User decision, October 10: Burp, Nmap, Intune, IntelOwl and n8n remain available but disabled. Qualys remains planned. No missing credentials should be synthesized, and no active worker or scan should be created for these sources as part of rollout.
+
+
+## Spotlight operational approval
+
+The separate [Spotlight routing workflow](customer-spotlight-routing.md) adds `route-spotlight` and `export-spotlight-routes`. It requires a current primary-findings binding and an independent runtime switch. Inventory permission alone is insufficient. Review/assignment commands still cannot activate workers. The source pin, exact migration ordering, empty-result limit and compatible rollback requirement are documented in that workflow.

@@ -399,3 +399,25 @@ test("a worker that loses its database lock cannot mark another worker's run fai
   await assert.rejects(() => runResumableSpotlightImport(selection, deps, () => {}), /lost its database lock/i);
   assert.equal(failed, false);
 });
+
+
+test("reviewed import passes its immutable scope to begin, session and promotion", async()=>{
+ const scope={bindingKey:'a'.repeat(64),companyId:selection.companyId,cid:'b'.repeat(32)};const calls=[];
+ const deps={acquire:async()=>({assertHeld(){},release:async()=>{}}),
+  begin:async(_key,_parts,pin)=>{assert.equal(pin,scope);calls.push('begin');return {id:'reviewed',phase:'hydrating',hydrationCursor:'',hydratedCount:0};},
+  createSession:async(_config,expected)=>{assert.deepEqual(expected,{expectedCid:scope.cid});calls.push('session');return{};},nextIds:async()=>[],
+  complete:async(_run,_tenant,pin)=>{assert.equal(pin,scope);calls.push('complete');return{findingsImported:0,hostsAffected:0};},prune:async()=>{},fail:async()=>{}};
+ await runPartitionedSpotlightImport({...selection,reviewedScope:scope},[{key:'open',filter:'open'}],deps,()=>{});
+ assert.deepEqual(calls,['begin','session','complete']);
+});
+test("failed concurrent discovery drains sibling requests before releasing the worker lock",async()=>{
+ let unblock,started,release=false,saves=0;const gate=new Promise(r=>unblock=r),ready=new Promise(r=>started=r);
+ const deps={acquire:async()=>({assertHeld(){assert.equal(release,false);},release:async()=>{release=true;}}),
+  begin:async()=>({id:'failure',phase:'discovering',partitions:[{key:'open',done:false,queryCursor:''},{key:'reopen',done:false,queryCursor:''}]}),
+  createSession:async()=>({queryPage:async(_cursor,filter)=>{if(filter==='open')throw Error('Fixture discovery rejected');started();await gate;assert.equal(release,false);return{ids:['late'],next:'',total:1};}}),
+  savePartitionPage:async()=>{saves++;},fail:async()=>{assert.equal(release,false);},prune:async()=>{}};
+ const pending=runPartitionedSpotlightImport(selection,[{key:'open',filter:'open'},{key:'reopen',filter:'reopen'}],deps,()=>{});
+ const rejected=assert.rejects(()=>pending,/discovery rejected/);
+ await ready;await new Promise(r=>setImmediate(r));assert.equal(release,false);unblock();await rejected;
+ assert.equal(release,true);assert.equal(saves,0);
+});

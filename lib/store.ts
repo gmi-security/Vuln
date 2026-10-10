@@ -1,3 +1,4 @@
+import { loadReviewedSpotlightRoutes } from "@/lib/customer-spotlight-routing-server";
 import { DEMO_ASSETS, DEMO_PORTS, VULN_CATALOG } from "@/lib/catalog";
 import { normalizeCompanyName, findNearDuplicateCompanyName } from "@/lib/company-name";
 import { connectorImportWarnings } from "@/lib/connector-import-result";
@@ -47,7 +48,7 @@ import {
   type AutomateAsset,
 } from "@/lib/connectwise-automate";
 import { falconConfigs, falconListAssets, createSpotlightSession, SPOTLIGHT_DISCOVERY_PARTITIONS } from "@/lib/crowdstrike";
-import { selectSpotlightTenant, type SpotlightTenantSelection } from "@/lib/spotlight-import";
+import { selectSpotlightTenant, selectReviewedSpotlightTenant, type SpotlightTenantSelection } from "@/lib/spotlight-import";
 import { runPartitionedSpotlightImport } from "@/lib/spotlight-resumable-import";
 import { acquireSpotlightWorkerLock, nextSpotlightHydrationIds,
   writeSpotlightHydrationBatch, completeResumableSpotlightRun,
@@ -5608,7 +5609,7 @@ export async function syncAllConnectors(): Promise<SyncAllEntry[]> {
       connector: "CrowdStrike Spotlight",
       ready: falconConfigs().length > 0,
       run: async () => {
-        const r = startCsSpotlightSync();
+        const r = await startCsSpotlightSync();
         if (!r.started) return { error: r.error ?? "Could not start sync." };
         return { message: "Sync started in background." };
       },
@@ -6410,10 +6411,17 @@ export function startAutomateSync(): { started: boolean; error?: string } {
   return { started: true };
 }
 
-export function startCsSpotlightSync(companyId?: string): { started: boolean; error?: string } {
+async function resolveSpotlightSelection(companyId?: string): Promise<SpotlightTenantSelection> {
+  const routes = await loadReviewedSpotlightRoutes("crowdstrike");
+  const companies = [...store().companies.values()];
+  if (routes === null) return selectSpotlightTenant(falconConfigs(), companies, companyId);
+  const demos = demoCompanyIds(store());
+  return selectReviewedSpotlightTenant(falconConfigs(), companies.filter(c => !demos.has(c.id)), routes, companyId);
+}
+export async function startCsSpotlightSync(companyId?: string): Promise<{ started: boolean; error?: string }> {
   let selection: SpotlightTenantSelection;
   try {
-    selection = selectSpotlightTenant(falconConfigs(), [...store().companies.values()], companyId);
+    selection = await resolveSpotlightSelection(companyId);
   } catch (error) {
     return { started: false, error: error instanceof Error ? error.message : "CrowdStrike tenant selection failed." };
   }
@@ -6753,7 +6761,7 @@ export async function importFromCrowdstrikeSpotlight(
 ): Promise<SpotlightImportResult | { error: string }> {
   let selection: SpotlightTenantSelection;
   try {
-    selection = selected ?? selectSpotlightTenant(falconConfigs(), [...store().companies.values()]);
+    selection = await resolveSpotlightSelection(selected?.companyId);
   } catch (error) {
     return { error: error instanceof Error ? error.message : "CrowdStrike tenant selection failed." };
   }
@@ -6770,7 +6778,14 @@ export async function importFromCrowdstrikeSpotlight(
       resetPartition: resetPartitionCursor,
       nextIds: nextSpotlightHydrationIds,
       write: writeSpotlightHydrationBatch,
-      complete: completeResumableSpotlightRun,
+      complete: async (runId, tenantKey, scope) => {
+        if (scope) {
+          const current = await resolveSpotlightSelection(scope.companyId);
+          if (current.reviewedScope?.bindingKey !== scope.bindingKey)
+            throw new Error("Spotlight approval changed during import; completed results were not promoted.");
+        }
+        return completeResumableSpotlightRun(runId, tenantKey, scope);
+      },
       fail: failSpotlightRun,
       prune: pruneSpotlightRuns,
     }, (progress) => {

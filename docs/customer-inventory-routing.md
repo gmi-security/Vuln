@@ -130,3 +130,6 @@ The empty default preserves legacy behavior and skips routing database reads. A 
 The focused local suites exercise real import entrypoints and adapters with mocked vendor transports, exact source routing, no fallback, customer deletion, legacy behavior, status redaction and provider-switch parsing. `tests/inventory-source-scopes.test.mjs` covers CID/host batch consistency and Tidal session IDs. `tests/inventory-routing-postgres.mjs` verifies both actual migrations and operator commands, unique source/connection ownership, optimistic revisions, atomic audit rollback, stale reviews, disabling and deleted/demo destinations on a disposable recovery-cluster database. It refuses normal network/production database targets. No real import, scan or ticket is used in these tests.
 
 Remaining consumers still require their own reviewed runtime scope enforcement. This inventory step does not authorize scanner targets, reroute Spotlight findings, reinterpret Elastic mirrors or replace the platform database writer.
+
+
+Spotlight follow-up: a separate [reviewed Spotlight import path](customer-spotlight-routing.md) is now implemented but remains off in production. It does not inherit the host inventory approval. The earlier host-only scope described above still applies to the inventory switch.

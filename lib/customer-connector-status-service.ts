@@ -1,3 +1,4 @@
+import { spotlightRouteEvidenceSelect, spotlightRoutingStatus, type SpotlightRouteEvidence } from "./customer-spotlight-routing";
 import { Pool } from "pg";
 import { applicationDatabase } from "./persist";
 import { DashboardError } from "./elastic-dashboard";
@@ -57,8 +58,13 @@ export async function readCustomerConnectorStatus(companyId: string | null) {
       const routes: InventoryRouteEvidence[] = routingAvailable ? (await client.query(`${inventoryRouteEvidenceSelect}
         WHERE r.company_id=$1 ORDER BY r.candidate_id LIMIT 1001`,[companyId])).rows : [];
       if (routes.length > 1000) throw new DashboardError("Too many inventory routes to display.",503);
+      const spotlightAvailable = Boolean((await client.query("SELECT to_regclass('public.customer_spotlight_routes') AS name")).rows[0].name);
+      const spotlight: SpotlightRouteEvidence[] = spotlightAvailable ? (await client.query(`${spotlightRouteEvidenceSelect}
+        WHERE r.company_id=$1 ORDER BY r.candidate_id LIMIT 1001`,[companyId])).rows : [];
+      if (spotlight.length > 1000) throw new DashboardError("Too many Spotlight routes to display.",503);
       const result = customerConnectorStatus(companyId, preview, [...scoped.values()], available, undefined,
-        routes.map(row=>inventoryRoutingStatus(row,preview,process.env.VULN_REVIEWED_INVENTORY_PROVIDERS)));
+        routes.map(row=>inventoryRoutingStatus(row,preview,process.env.VULN_REVIEWED_INVENTORY_PROVIDERS)),
+        spotlight.map(row=>spotlightRoutingStatus(row,preview,process.env.VULN_REVIEWED_SPOTLIGHT_PROVIDERS)));
       await client.query("COMMIT");
       return result;
     } catch (error) { await client.query("ROLLBACK").catch(() => {}); throw error; }

@@ -1,3 +1,4 @@
+import type { SpotlightRunScope } from "./spotlight-import";
 import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 import { applicationDatabase } from "./persist";
@@ -246,7 +247,7 @@ export function createSpotlightRecordStore(db: Database) {
       result = await db.query(`SELECT id, tenant_key, phase, query_cursor,
       hydration_cursor, discovered_count, expected_count, hydrated_count,
       status, started_at, finished_at, error FROM spotlight_import_runs
-      WHERE checkpoint_version IN (2, 3) AND phase IN ('discovering', 'hydrating')
+      WHERE checkpoint_version IN (2, 3, 4) AND phase IN ('discovering', 'hydrating')
       ORDER BY started_at DESC LIMIT 1`);
     } catch (error) {
       if (error && typeof error === "object" && "code" in error &&
@@ -384,7 +385,9 @@ export function createSpotlightRecordStore(db: Database) {
         AND phase = 'discovering' AND status = 'running'`, [runId, tenantKey, reason]);
   }
 
-  async function beginOrResumePartitionedSpotlightRun(tenantKey: string, partitionKeys: string[]): Promise<SpotlightPartitionedRunCheckpoint> {
+  async function beginOrResumePartitionedSpotlightRun(tenantKey: string, partitionKeys: string[], scope?: SpotlightRunScope): Promise<SpotlightPartitionedRunCheckpoint> {
+    if (scope && (scope.companyId !== tenantKey || !/^[a-f0-9]{64}$/.test(scope.bindingKey) || !/^[a-f0-9]{32}$/.test(scope.cid)))
+      throw new Error("Invalid Spotlight import scope.");
     await ensureSchema();
     const client = await db.connect();
     try {
@@ -392,12 +395,14 @@ export function createSpotlightRecordStore(db: Database) {
       await client.query("SELECT pg_advisory_xact_lock(1700, hashtext($1))", [tenantKey]);
       const existing = await client.query(`SELECT id, phase, hydration_cursor,
         discovered_count, expected_count, hydrated_count
-        FROM spotlight_import_runs WHERE tenant_key = $1 AND checkpoint_version = 3
+        FROM spotlight_import_runs WHERE tenant_key = $1 AND checkpoint_version = ${scope ? 4 : 3}
+          ${scope ? `AND EXISTS (SELECT 1 FROM spotlight_import_run_scopes pin WHERE pin.run_id=spotlight_import_runs.id
+            AND pin.binding_key=$2 AND pin.company_id=$1 AND pin.cid=$3)` : ""}
           AND status IN ('running', 'failed') AND phase IN ('discovering', 'hydrating')
           AND started_at > COALESCE((SELECT active.started_at FROM spotlight_import_current current_run
             JOIN spotlight_import_runs active ON active.id = current_run.run_id
             WHERE current_run.tenant_key = $1), '-infinity'::timestamptz)
-        ORDER BY started_at DESC LIMIT 1 FOR UPDATE`, [tenantKey]);
+        ORDER BY started_at DESC LIMIT 1 FOR UPDATE`, scope ? [tenantKey, scope.bindingKey, scope.cid] : [tenantKey]);
       let runRow;
       if (existing.rows.length) {
         const resumed = await client.query(`UPDATE spotlight_import_runs
@@ -411,10 +416,12 @@ export function createSpotlightRecordStore(db: Database) {
           WHERE tenant_key = $1 AND status = 'running'`, [tenantKey]);
         const created = await client.query(`INSERT INTO spotlight_import_runs
           (id, tenant_key, status, checkpoint_version, phase)
-          VALUES ($1::uuid, $2, 'running', 3, 'discovering')
+          VALUES ($1::uuid, $2, 'running', ${scope ? 4 : 3}, 'discovering')
           RETURNING id, phase, hydration_cursor, discovered_count, expected_count, hydrated_count`,
           [randomUUID(), tenantKey]);
         runRow = created.rows[0];
+        if (scope) await client.query(`INSERT INTO spotlight_import_run_scopes(run_id,binding_key,company_id,cid)
+          VALUES($1::uuid,$2,$3,$4)`,[runRow.id,scope.bindingKey,scope.companyId,scope.cid]);
         await client.query(`INSERT INTO spotlight_import_partitions (run_id, tenant_key, partition_key)
           SELECT $1::uuid, $2, p.key FROM jsonb_array_elements_text($3::jsonb) AS p(key)`,
           [runRow.id, tenantKey, JSON.stringify(partitionKeys)]);
@@ -422,6 +429,9 @@ export function createSpotlightRecordStore(db: Database) {
       const partitionRows = await client.query(`SELECT partition_key, query_cursor, discovered_count, done
         FROM spotlight_import_partitions WHERE run_id = $1::uuid AND tenant_key = $2 ORDER BY partition_key`,
         [runRow.id, tenantKey]);
+      if (scope && (partitionRows.rows.length !== partitionKeys.length ||
+          partitionRows.rows.some(r => !partitionKeys.includes(r.partition_key))))
+        throw new Error("Spotlight discovery partitions changed; do not resume this generation.");
       await client.query("COMMIT");
       return partitionedCheckpoint(runRow, partitionRows.rows, tenantKey);
     } catch (error) {
@@ -518,21 +528,50 @@ export function createSpotlightRecordStore(db: Database) {
     console.error(`[spotlight] partition "${partitionKey}" cursor reset: ${reason}`);
   }
 
-  async function completeResumableSpotlightRun(runId: string, tenantKey: string): Promise<{
+  async function completeResumableSpotlightRun(runId: string, tenantKey: string, scope?: SpotlightRunScope): Promise<{
     findingsImported: number; hostsAffected: number;
   }> {
     await ensureSchema();
     const client = await db.connect();
     try {
       await client.query("BEGIN");
-      const run = await client.query(`SELECT phase, expected_count, hydrated_count
+      // Serialize final approval checks with operator review/revoke transactions.
+      if (scope) await client.query("SELECT pg_advisory_xact_lock(716301,1)");
+      const run = await client.query(`SELECT phase, expected_count, hydrated_count, checkpoint_version
         FROM spotlight_import_runs WHERE id = $1::uuid AND tenant_key = $2
           AND status = 'running' FOR UPDATE`, [runId, tenantKey]);
       if (run.rows[0]?.phase !== "hydrating" || run.rows[0]?.expected_count == null)
         throw new Error("Spotlight run has not finished ID discovery.");
+      if ((Number(run.rows[0].checkpoint_version) === 4) !== Boolean(scope))
+        throw new Error("Spotlight generation requires its original reviewed scope.");
+      if (scope) {
+        const approval = (await client.query(`SELECT r.revision,r.binding_revision,r.candidate_hash,r.source_scope,
+          b.revision AS current_binding_revision,b.candidate_hash AS current_hash,b.review_state,b.reviewed_at,b.proposal,
+          d.source_present,d.candidate_hash AS imported_hash
+          FROM customer_spotlight_routes r
+          JOIN customer_connector_bindings b ON b.candidate_id=r.candidate_id AND b.company_id=r.company_id
+          JOIN customer_connector_drafts d ON d.id=r.candidate_id
+          JOIN spotlight_import_run_scopes pin ON pin.run_id=$1::uuid AND pin.company_id=r.company_id
+            AND pin.cid=r.source_scope AND pin.binding_key=$4
+          WHERE r.candidate_id=$2 AND r.company_id=$3 AND r.enabled`,
+          [runId,scope.candidateId,tenantKey,scope.bindingKey])).rows[0];
+        if (scope.companyId !== tenantKey || !approval || approval.revision !== scope.revision ||
+            approval.binding_revision !== scope.bindingRevision || approval.current_binding_revision !== scope.bindingRevision ||
+            approval.candidate_hash !== scope.candidateHash || approval.current_hash !== scope.candidateHash ||
+            approval.imported_hash !== scope.candidateHash || approval.source_scope !== scope.cid ||
+            !approval.source_present || approval.review_state !== "reviewed" || !approval.reviewed_at ||
+            approval.proposal?.companyId !== tenantKey || approval.proposal?.authority !== "findings-primary" ||
+            approval.proposal?.tenantId?.toLowerCase() !== scope.cid || approval.proposal?.datasets?.length || approval.proposal?.targets?.length)
+          throw new Error("Spotlight approval changed; previous completed results were retained.");
+      }
       const counts = await client.query(`SELECT
         (SELECT COUNT(*) FROM spotlight_import_ids WHERE run_id = $1::uuid AND tenant_key = $2)::text AS ids,
         COUNT(*)::text AS records,
+        ${scope ? `COUNT(*) FILTER (WHERE company_id IS DISTINCT FROM $3 OR ((
+          (jsonb_typeof(raw->'cid')='string' AND lower(raw->>'cid')=$4 AND raw->>'id'=source_id)
+          OR (status='closed' AND cve='CS-'||source_id AND raw=jsonb_build_object('id',source_id,'unresolved',true))
+        ) IS NOT TRUE))::text AS wrong_scope,
+        COUNT(*) FILTER (WHERE jsonb_typeof(raw->'cid')='string' AND lower(raw->>'cid')=$4)::text AS verified_scope,` : ""}
         COUNT(DISTINCT NULLIF(hostname, ''))::text AS hosts,
         (SELECT COUNT(*) FROM spotlight_import_ids i
           WHERE i.run_id = $1::uuid AND i.tenant_key = $2
@@ -544,7 +583,9 @@ export function createSpotlightRecordStore(db: Database) {
             AND NOT EXISTS (SELECT 1 FROM spotlight_import_ids i
               WHERE i.run_id = r.run_id AND i.tenant_key = r.tenant_key
                 AND i.source_id = r.source_id))::text AS extra
-        FROM spotlight_import_records WHERE run_id = $1::uuid AND tenant_key = $2`, [runId, tenantKey]);
+        FROM spotlight_import_records WHERE run_id = $1::uuid AND tenant_key = $2`, scope ? [runId, tenantKey, scope.companyId, scope.cid] : [runId, tenantKey]);
+      if (scope && (Number(counts.rows[0]?.wrong_scope) !== 0 || !(Number(counts.rows[0]?.verified_scope) > 0)))
+        throw new Error("Spotlight generation cannot prove reviewed customer ownership; previous results were retained.");
       const ids = Number(counts.rows[0]?.ids ?? 0);
       const records = Number(counts.rows[0]?.records ?? 0);
       if (ids !== Number(run.rows[0].expected_count) || records !== ids ||
@@ -781,8 +822,8 @@ export const writeSpotlightHydrationBatch = (runId: string, tenantKey: string, i
   configuredStore().writeSpotlightHydrationBatch(runId, tenantKey, ids, rows);
 export const abandonSpotlightDiscovery = (runId: string, tenantKey: string, reason: string) =>
   configuredStore().abandonSpotlightDiscovery(runId, tenantKey, reason);
-export const beginOrResumePartitionedSpotlightRun = (tenantKey: string, partitionKeys: string[]) =>
-  configuredStore().beginOrResumePartitionedSpotlightRun(tenantKey, partitionKeys);
+export const beginOrResumePartitionedSpotlightRun = (tenantKey: string, partitionKeys: string[], scope?: SpotlightRunScope) =>
+  configuredStore().beginOrResumePartitionedSpotlightRun(tenantKey, partitionKeys, scope);
 export const getPartitionedRunCheckpoint = (runId: string, tenantKey: string) =>
   configuredStore().getPartitionedRunCheckpoint(runId, tenantKey);
 export const savePartitionPage = (runId: string, tenantKey: string, partitionKey: string, priorCursor: string,
@@ -790,8 +831,8 @@ export const savePartitionPage = (runId: string, tenantKey: string, partitionKey
   configuredStore().savePartitionPage(runId, tenantKey, partitionKey, priorCursor, ids, nextCursor, reportedTotal);
 export const resetPartitionCursor = (runId: string, tenantKey: string, partitionKey: string, reason: string) =>
   configuredStore().resetPartitionCursor(runId, tenantKey, partitionKey, reason);
-export const completeResumableSpotlightRun = (runId: string, tenantKey: string) =>
-  configuredStore().completeResumableSpotlightRun(runId, tenantKey);
+export const completeResumableSpotlightRun = (runId: string, tenantKey: string, scope?: SpotlightRunScope) =>
+  configuredStore().completeResumableSpotlightRun(runId, tenantKey, scope);
 export const writeSpotlightBatch = (runId: string, tenantKey: string, rows: SpotlightRecord[]) =>
   configuredStore().writeSpotlightBatch(runId, tenantKey, rows);
 export const completeSpotlightRun = (runId: string, tenantKey: string, expectedCount: number) =>

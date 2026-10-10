@@ -46,7 +46,32 @@ export type SpotlightTenantSelection = {
   config: FalconTenant;
   companyId: string;
   tenantKey: string;
+  reviewedScope?: SpotlightRunScope;
 };
+
+// Pinned operational approval for a version-4 run. Never contains credentials.
+export type SpotlightRunScope = { bindingKey: string; companyId: string; cid: string;
+  candidateId: string; revision: number; bindingRevision: number; candidateHash: string };
+export function selectReviewedSpotlightTenant(
+  configs: FalconTenant[], companies: CompanyBinding[],
+  routes: { companyId: string; connectionRef: string; sourceScope: string; bindingKey: string; candidateId: string; revision: number; bindingRevision: number; candidateHash: string }[],
+  requestedCompanyId?: string,
+): SpotlightTenantSelection {
+  if (!routes.length || new Set(routes.map(r => r.companyId)).size !== routes.length ||
+      new Set(routes.map(r => r.connectionRef)).size !== routes.length || new Set(routes.map(r => r.sourceScope)).size !== routes.length)
+    throw new Error("Spotlight requires unambiguous approved customer routes.");
+  const selections = routes.map(route => {
+    const matches = configs.filter(c => c.sourceRef === route.connectionRef);
+    if (matches.length !== 1 || companies.filter(c => c.id === route.companyId).length !== 1 ||
+        !/^[a-f0-9]{32}$/.test(route.sourceScope) || !/^[a-f0-9]{64}$/.test(route.bindingKey))
+      throw new Error("Spotlight route no longer matches an existing customer and Falcon connection.");
+    return { config: matches[0], companyId: route.companyId, tenantKey: route.companyId,
+      reviewedScope: { bindingKey: route.bindingKey, companyId: route.companyId, cid: route.sourceScope, candidateId: route.candidateId, revision: route.revision, bindingRevision: route.bindingRevision, candidateHash: route.candidateHash } };
+  });
+  const selected = requestedCompanyId ? selections.filter(s => s.companyId === requestedCompanyId) : selections;
+  if (selected.length !== 1) throw new Error("Choose one approved Spotlight customer to import.");
+  return selected[0];
+}
 
 // An empty-body connector sync targets the sole named customer tenant. The
 // unnamed primary tenant is never implicitly included in a customer import.

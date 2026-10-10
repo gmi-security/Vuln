@@ -1,3 +1,4 @@
+import type { SpotlightRoutingStatus } from "./customer-spotlight-routing";
 import type { ConnectorCandidate, buildConnectorPreview } from "./customer-connector-preview";
 import type { ConnectorProposal } from "./customer-connector-drafts";
 import { connectorDraftEvidence } from "./customer-connector-drafts";
@@ -57,7 +58,7 @@ const reasons: Record<string, string> = {
 // Public projection: never spread SQL rows, references, raw tenants, target lists,
 // audit notes or another customer's candidates into the browser response.
 export function customerConnectorStatus(companyId: string, preview: ReturnType<typeof buildConnectorPreview>,
-  drafts: ConnectorStatusDraft[], registryAvailable: boolean, checkedAt = new Date().toISOString(), inventory: InventoryRoutingStatus[] = []): CustomerConnectorStatus {
+  drafts: ConnectorStatusDraft[], registryAvailable: boolean, checkedAt = new Date().toISOString(), inventory: InventoryRoutingStatus[] = [], spotlight: SpotlightRoutingStatus[] = []): CustomerConnectorStatus {
   const company = preview.companies.find(c => c.id === companyId);
   if (!company) throw new Error("Customer not found.");
   const current = new Map(preview.candidates.map(c => [c.id, c]));
@@ -99,6 +100,15 @@ export function customerConnectorStatus(companyId: string, preview: ReturnType<t
     item.review = status.review;
     item.scope = "A separate inventory import approval is recorded. See routing details for its current state.";
     if (item.data) item.data.routing = status.routing;
+  }
+  for (const status of spotlight) {
+    const item = items.find(i => i.id === status.id && i.provider === "crowdstrike");
+    if (!item) continue;
+    const hasInventory = inventory.some(i => i.id === status.id);
+    item.review = hasInventory ? `${item.review}; ${status.review}` : status.review;
+    item.scope = hasInventory ? "Separate inventory and Spotlight approvals are recorded. See routing details for each state." :
+      "A separate Spotlight import approval is recorded. See routing details for its current state.";
+    if (item.data) item.data.routing = hasInventory ? `${item.data.routing} ${status.routing}` : status.routing;
   }
   return { companyId, companyName: company.name, checkedAt, registryAvailable, items };
 }

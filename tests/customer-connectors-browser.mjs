@@ -24,13 +24,17 @@ let browser, page, checks = 0; const pass = message => { checks++; console.log('
 const artifacts = await mkdtemp(join(tmpdir(), 'vuln2-connectors-browser-'));
 const companies = [{ id: 'CO-A', name: 'Fixture Alpha' }, { id: 'CO-B', name: 'Fixture Beta' }, { id: 'CO-EMPTY', name: 'Fixture Empty' }];
 const calls = [], errors = [], unexpected = []; let fail = false, pending = false, release;
-let shared = false, partial = true, inventoryRouting = false, inventoryProvider = "automate";
+let shared = false, partial = true, inventoryRouting = false, inventoryProvider = "automate", spotlightRouting = false;
 function status(id) {
-  return { companyId: id, companyName: companies.find(c => c.id === id).name, checkedAt: '2026-10-09T19:00:00Z', registryAvailable: id !== 'CO-A',
+  const result = { companyId: id, companyName: companies.find(c => c.id === id).name, checkedAt: '2026-10-09T19:00:00Z', registryAvailable: id !== 'CO-A',
     items: id === 'CO-EMPTY' ? [] : [{ id: id+'-record', provider: inventoryRouting ? inventoryProvider : id === 'CO-A' ? 'defender' : 'crowdstrike', evidence: 'Saved customer connection', configuration: 'Configuration recorded',
       review: inventoryRouting ? 'Inventory route approved' : id === 'CO-A' ? 'Not imported for review' : 'Needs review', scope: inventoryRouting ? 'A separate inventory import approval is recorded. See routing details for its current state.' : 'Tenant recorded; scope verification pending.', reviewedAt: null,
       data: {domains:inventoryRouting?['inventory']:['endpoint-findings'],storage:inventoryRouting?'Existing platform inventory':'Completed source SQL generations',lifecycle:inventoryRouting?'Reviewed customer ownership':'Only complete imports',routing:inventoryRouting ? 'Approved for inventory routing; the provider switch is on. All routes are checked again when an import starts. This does not confirm a successful import.' : 'Customer scope has not been reviewed.'},
       reasons: ['Verify the vendor tenant and how this source contributes data.', 'Source evidence has changed since the saved review.'] }] };
+  if(spotlightRouting && result.items.length){result.items[0].review='Inventory route approved; Spotlight route approved';
+    result.items[0].scope='Separate inventory and Spotlight approvals are recorded. See routing details for each state.';
+    result.items[0].data.routing+=' Approval recorded; the Spotlight routing switch is off. Existing import routing still applies.';}
+  return result;
 }
 try {
   let ready = false;
@@ -118,6 +122,13 @@ try {
   }
   await page.screenshot({path:join(artifacts,'inventory-route-status-mobile.png'),fullPage:true});
   pass('Automate, Tidal and CrowdStrike inventory approvals display without implying import health or granting new controls');
+  spotlightRouting=true;await page.getByRole('button',{name:'Refresh status'}).click();
+  await page.getByText('Inventory route approved; Spotlight route approved',{exact:true}).waitFor();
+  await page.getByText('Separate inventory and Spotlight approvals are recorded.',{exact:false}).waitFor();
+  await page.getByText('the Spotlight routing switch is off.',{exact:false}).waitFor();
+  assert.equal(await page.getByRole('combobox').count(),1);
+  await page.screenshot({path:join(artifacts,'spotlight-route-status-mobile.png'),fullPage:true});
+  pass('Spotlight approval displays separately from host inventory with no extra selector or import control');
   shared = true; await page.setViewportSize({width:1440,height:1050});
   await page.goto(base+'/connectors?view=shared&companyId=CO-B');
   await page.getByRole('heading',{name:'Fixture Nessus',exact:true}).click();

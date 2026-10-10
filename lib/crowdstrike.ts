@@ -359,7 +359,8 @@ export const SPOTLIGHT_HYDRATION_ROUND_SIZE = SPOTLIGHT_HYDRATION_CONCURRENCY * 
 
 // Discovery and hydration are separate so a large import can persist the ID
 // set before fetching full records and resume either phase independently.
-export async function createSpotlightSession(config: FalconTenant) {
+export async function createSpotlightSession(config: FalconTenant, scope?: { expectedCid: string }) {
+  if (scope && !/^[a-f0-9]{32}$/i.test(scope.expectedCid)) throw new Error("Spotlight requires a valid reviewed CID.");
   let token = await falconToken(config);
   let renewal: Promise<string> | undefined;
   async function request(url: string): Promise<Response> {
@@ -386,6 +387,8 @@ export async function createSpotlightSession(config: FalconTenant) {
     const response = await request(url.toString());
     if (!response.ok) throw new Error(`Spotlight query ${response.status}: ${await response.text().catch(() => response.statusText)}`);
     const json: any = await response.json();
+    if (scope && json?.errors != null && (!Array.isArray(json.errors) || json.errors.length))
+      throw new Error("Spotlight returned errors; reviewed import withheld.");
     if (!Array.isArray(json?.resources) || json.resources.some((id: unknown) => typeof id !== "string" || !id))
       throw new Error(`Spotlight query returned invalid IDs for ${config.label}.`);
     const next = json?.meta?.pagination?.after ?? "";
@@ -404,12 +407,17 @@ export async function createSpotlightSession(config: FalconTenant) {
       const response = await request(url.toString());
       if (!response.ok) throw new Error(`Spotlight entities ${response.status}: ${await response.text().catch(() => response.statusText)}`);
       const json: any = await response.json();
+      if (scope && json?.errors != null && (!Array.isArray(json.errors) || json.errors.length))
+        throw new Error("Spotlight returned errors; reviewed import withheld.");
       if (!Array.isArray(json?.resources) || json.resources.length > group.length)
         throw new Error(`Spotlight entity hydration returned an invalid response for ${config.label}.`);
       const requested = new Set(group);
       const returnedIds = new Set<string>(json.resources.map((item: any) => String(item?.id ?? "").trim()));
       if (returnedIds.has("") || returnedIds.size !== json.resources.length || Array.from(returnedIds).some(id => !requested.has(id)))
         throw new Error(`Spotlight entity hydration IDs mismatch for ${config.label}.`);
+      if (scope && json.resources.some((v: any) => typeof v?.cid !== "string" || v.cid.toLowerCase() !== scope.expectedCid.toLowerCase() ||
+          v.unresolved === true))
+        throw new Error("Spotlight returned a missing or different customer CID; reviewed import withheld.");
       const findings = json.resources.map((item: any) => parseSpotlightResource(config, item));
       // A multi-hour scan walks a live, constantly-changing dataset -- an ID
       // discovered hours ago can legitimately stop resolving by the time

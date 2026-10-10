@@ -11,10 +11,14 @@ globalThis.fetch=fail;
 const ROOT=resolve('.'),modules=new Map();
 let sfScans=[],sfReads=0,arFindings=[],folders=[],scans=[],clients=[],deviceReads=0,configs=[];
 let routes=null,routeError=false,clientReads=0,requestedClients=[],afterDevices=()=>{},intuneReads=0,intuneConfigUsed;
+let spotlightRoutes=null,spotlightFailure=false,spotlightRuns=[],afterSpotlight=()=>{},spotlightPromotions=0;
 let tidalReads=0,tidalOptions,tidalResult,crowdstrikeReads=[],falconFailure;
 const tenantId='11111111-1111-1111-1111-111111111111';
 const device={externalId:'device-1',hostname:'managed-host',ipAddresses:[],os:'Windows',owner:'',tags:[],criticality:'Normal',exposure:'Internal'};
 const mocks={
+ 'lib/customer-spotlight-routing-server.ts':{loadReviewedSpotlightRoutes:async()=>{if(spotlightFailure)throw Error('Spotlight route unavailable');return spotlightRoutes;}},
+ 'lib/spotlight-resumable-import.ts':{runPartitionedSpotlightImport:async(selection,_partitions,deps)=>{spotlightRuns.push(selection);afterSpotlight();return {...await deps.complete('fixture',selection.tenantKey,selection.reviewedScope),skipped:0};}},
+ 'lib/spotlight-record-store.ts':{completeResumableSpotlightRun:async()=>{spotlightPromotions++;return {findingsImported:1,hostsAffected:1};}},
  'lib/persist.ts':{persistenceEnabled:()=>false,applicationDatabase:()=>null},
  'lib/nessus.ts':{nessusConfig:()=>({}),nessusListFolders:async()=>folders,nessusListScans:async()=>scans},
  'lib/spiderfoot.ts':{spiderfootConfig:()=>({}),spiderfootListScans:async()=>sfScans,spiderfootImportFindings:async()=>{sfReads++;return[];}},
@@ -47,6 +51,7 @@ const module=await getModule('lib/store.ts');await module.link(linker);await mod
 const company=(id,name,kind='client')=>({id,name,kind,industry:'Test',createdAt:'2026-10-01T00:00:00Z',contactName:'',contactEmail:''});
 const acme=company('CO-A','Acme'),beacon=company('CO-B','Beacon');
 function fixture(companies=[acme,beacon]){
+ spotlightRoutes=null;spotlightFailure=false;spotlightRuns=[];afterSpotlight=()=>{};spotlightPromotions=0;
  sfScans=[];sfReads=0;arFindings=[];folders=[];scans=[];clients=[];deviceReads=0;configs=[];
  routes=null;routeError=false;clientReads=0;requestedClients=[];afterDevices=()=>{};intuneReads=0;intuneConfigUsed=undefined;
  tidalReads=0;tidalOptions=undefined;tidalResult={assets:[],errors:[],skippedCompanies:0};crowdstrikeReads=[];falconFailure=undefined;
@@ -200,4 +205,26 @@ test('Nessus refuses ambiguous folder names and a scan moved to a different cust
  const existing={id:'SCAN-OLD',companyId:beacon.id,vendor:{nessusScanId:10,nessusLastModified:5}};s.scans.set(existing.id,existing);
  result=await store.importFromNessus();assert.equal(result.scansImported,0);assert.equal(result.skipped,1);assert.match(result.errors[0],/different company/);
  assert.equal(s.scans.size,1);assert.equal(existing.vendor.nessusLastModified,5);assert.equal(s.findings.size,0);
+});
+
+const spotlightRoute=()=>({companyId:acme.id,connectionRef:'environment:FALCON',sourceScope:'a'.repeat(32),bindingKey:'a'.repeat(64),candidateId:'b'.repeat(64),candidateHash:'c'.repeat(64),bindingRevision:1,revision:1});
+test('actual Spotlight entrypoint selects explicit reviewed customer and rechecks approval before publication',async()=>{
+ const s=fixture();configs=[{sourceRef:'environment:FALCON',customerName:'Beacon',label:'Fixture'}];spotlightRoutes=[spotlightRoute()];
+ assert.equal((await store.importFromCrowdstrikeSpotlight()).findingsImported,1);assert.equal(spotlightRuns[0].companyId,acme.id);assert.equal(spotlightPromotions,1);unchanged(s);
+ afterSpotlight=()=>{spotlightRoutes=[{...spotlightRoute(),bindingKey:'d'.repeat(64)}];};
+ assert.match((await store.importFromCrowdstrikeSpotlight()).error,/approval changed/);assert.equal(spotlightPromotions,1);
+});
+test('actual Spotlight entrypoints cannot bypass missing/stale routes, deleted customers or ambiguity with a supplied selection',async()=>{
+ for(const failure of ['empty','stale','deleted','wrong-ref','two']){
+  fixture(failure==='deleted'?[beacon]:[acme,beacon]);configs=[{sourceRef:'environment:FALCON',customerName:'Acme',label:'Fixture'}];spotlightRoutes=[spotlightRoute()];
+  if(failure==='empty')spotlightRoutes=[];if(failure==='stale')spotlightFailure=true;
+  if(failure==='wrong-ref')spotlightRoutes[0].connectionRef='environment:FALCON_2';
+  if(failure==='two')spotlightRoutes.push(spotlightRoute());
+  assert.ok((await store.importFromCrowdstrikeSpotlight({config:configs[0],companyId:acme.id,tenantKey:acme.id})).error);
+  assert.equal((await store.startCsSpotlightSync(acme.id)).started,false);assert.equal(spotlightRuns.length,0);assert.equal(spotlightPromotions,0);
+ }
+});
+test('Spotlight switch off preserves the existing named-tenant selection',async()=>{
+ fixture();configs=[{customerName:'Beacon',label:'Legacy'}];assert.equal((await store.importFromCrowdstrikeSpotlight()).findingsImported,1);
+ assert.equal(spotlightRuns[0].companyId,beacon.id);assert.equal(spotlightRuns[0].reviewedScope,undefined);
 });
