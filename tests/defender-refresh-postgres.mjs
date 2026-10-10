@@ -11,6 +11,7 @@ import {refreshModules,company,when,snapshot,storeFixture,inputFrom} from './def
 import {verifyRefreshBaseline} from './defender-refresh-baseline-validation.mjs';
 import {verifyDefenderWorkflow} from './defender-workflow-validation.mjs';
 import {verifyLegacyHandoff} from './defender-handoff-validation.mjs';
+import {verifyWriterOwnership} from './defender-ownership-validation.mjs';
 const socket=await realpath(process.argv[2]||'.');assert.ok(socket.startsWith('/home/codex/vuln-recovery/')&&socket.endsWith('/socket'));
 const options={host:socket,port:55483,user:'codex',connectionTimeoutMillis:5000,statement_timeout:15000,query_timeout:20000};
 const suffix=randomUUID().replaceAll('-',''),sourceName=`vuln2_shadow_source_test_${suffix}`,targetName=`vuln2_shadow_test_${suffix}`;
@@ -63,6 +64,9 @@ try{
   await verifyRefreshBaseline({source,target,writer,baseline,when,company,run,modules,pass});
   await verifyLegacyHandoff({source,target,pool,baseline,company,run,pass});
   await verifyDefenderWorkflow({source,target,editor,company,first,modules,pass});
+  await verifyWriterOwnership({source,target,peer:editor,company,pass,newClient:async()=>{
+    const c=new pg.Client({...options,database:targetName});await c.connect();return c;
+  }});
   const pinned=await readDefenderRefreshSource(source,company.id,{afterSelected:async selected=>{
     assert.equal(selected,run);await writer.query('UPDATE defender_connections SET current_run=$1 WHERE company_id=$2',[nextRun,company.id]);
     await writer.query('DELETE FROM defender_records WHERE run_id=$1',[run]);await writer.query('DELETE FROM defender_devices WHERE run_id=$1',[run]);

@@ -63,4 +63,6 @@ These are small fixtures, not a production pause-duration or full-size memory be
 
 ## Next bounded step
 
-Build and test the durable customer ownership/epoch state machine in disposable SQL, including stale attempts, process restart, interrupted transitions and explicit reversal preconditions. It must refuse an incomplete writer inventory or unacknowledged process drain. Keep it offline; do not remove the publication block or add live mutation routing until the protocol and full consumer coverage are proven.
+The next ownership checkpoint is now implemented offline; see `docs/defender-writer-ownership.md`. It adds durable phases/epochs, participant acknowledgements, same-database transaction locks and reversal preconditions. Eighteen SQL groups, 42 local tests and build/type checks pass. A fresh client retains the paused state, and terminating a backend before commit rolls back state/audit. This does not install an application startup guard or discover unregistered writers.
+
+Next compose that ownership transaction with the actual isolated workflow editor and bind handoff evidence to verified candidate records rather than caller-declared digests. Keep it offline; do not remove the publication block or add live mutation routing until the protocol and full consumer coverage are proven.
