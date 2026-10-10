@@ -9,10 +9,11 @@ import {buildDefenderShadowReads} from '../lib/db/defender-shadow-reads.mjs';
 import {publishDefenderShadow,readDefenderPublication} from '../lib/db/defender-shadow-publication.mjs';
 import {refreshModules,company,when,snapshot,storeFixture,inputFrom} from './defender-refresh-fixture.mjs';
 import {verifyRefreshBaseline} from './defender-refresh-baseline-validation.mjs';
+import {verifyDefenderWorkflow} from './defender-workflow-validation.mjs';
 const socket=await realpath(process.argv[2]||'.');assert.ok(socket.startsWith('/home/codex/vuln-recovery/')&&socket.endsWith('/socket'));
 const options={host:socket,port:55483,user:'codex',connectionTimeoutMillis:5000,statement_timeout:15000,query_timeout:20000};
 const suffix=randomUUID().replaceAll('-',''),sourceName=`vuln2_shadow_source_test_${suffix}`,targetName=`vuln2_shadow_test_${suffix}`;
-const admin=new pg.Client({...options,database:'postgres'}),created=[];let source,target,writer,pool,checks=0;
+const admin=new pg.Client({...options,database:'postgres'}),created=[];let source,target,writer,editor,pool,checks=0;
 const pass=message=>{checks++;console.log('PASS '+message);};
 const modules=await refreshModules();
 const {store,candidate:{prepareDefenderRefreshCandidate:prepare},source:{createDefenderStore}}=modules;
@@ -20,7 +21,8 @@ const run=randomUUID(),nextRun=randomUUID();
 try{
   await admin.connect();for(const name of [sourceName,targetName]){await admin.query(`CREATE DATABASE ${name}`);created.push(name);}
   source=new pg.Client({...options,database:sourceName});target=new pg.Client({...options,database:targetName});writer=new pg.Client({...options,database:sourceName});
-  await Promise.all([source.connect(),target.connect(),writer.connect()]);
+  editor=new pg.Client({...options,database:targetName});
+  await Promise.all([source.connect(),target.connect(),writer.connect(),editor.connect()]);
   pool=new pg.Pool({...options,database:sourceName,max:1});const legacy=createDefenderStore(pool);await legacy.schema();
   for(const file of ['defender-platform-shadow','defender-shadow-reads','defender-shadow-publication','defender-shadow-refresh'])await target.query(await readFile(`docs/sql/${file}.sql`,'utf8'));
   await source.query(`INSERT INTO defender_connections(company_id,tenant_id,client_id,secret,updated_by,current_run,last_success_at) VALUES($1,'fixture-tenant','fixture-client','unused','fixture',$2,$3)`,[company.id,run,when]);
@@ -58,6 +60,7 @@ try{
   await target.query(await readFile('docs/sql/defender-shadow-refresh-publication-block.sql','utf8'));
   baseline.meta.defenderGenerations[company.id]='old-run';
   await verifyRefreshBaseline({source,target,writer,baseline,when,company,run,modules,pass});
+  await verifyDefenderWorkflow({source,target,editor,company,first,modules,pass});
   const pinned=await readDefenderRefreshSource(source,company.id,{afterSelected:async selected=>{
     assert.equal(selected,run);await writer.query('UPDATE defender_connections SET current_run=$1 WHERE company_id=$2',[nextRun,company.id]);
     await writer.query('DELETE FROM defender_records WHERE run_id=$1',[run]);await writer.query('DELETE FROM defender_devices WHERE run_id=$1',[run]);
@@ -74,6 +77,6 @@ try{
   pass('revision drift, failed imports and incomplete retained rows fail closed; verified empty imports remain valid');
   console.log(JSON.stringify({checks,passed:true,productionWrites:0,sourceApiCalls:0,ticketsSent:0}));
 }finally{
-  await pool?.end();for(const c of [source,target,writer])await c?.end().catch(()=>{});
+  await pool?.end();for(const c of [source,target,writer,editor])await c?.end().catch(()=>{});
   for(const name of created.reverse())await admin.query(`DROP DATABASE ${name} WITH(FORCE)`);await admin.end();
 }
