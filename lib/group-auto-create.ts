@@ -97,9 +97,33 @@ async function waitForTicketId(id: string, timeoutMs = 60_000): Promise<number |
 // Null means "no finding_risk row yet for any of these CVEs" -- enrichment
 // hasn't caught up, not "definitely low risk" -- the caller must treat that
 // as ineligible, the same as an unmapped customer.
-async function enrichedSwathFor(appCompanyId: string, cves: string[]): Promise<number | null> {
+type DeviceCve = { cid: string; hostId: string; cve: string };
+async function enrichedSwathFor(
+  appCompanyId: string,
+  cves: string[],
+  deviceCves?: DeviceCve[] | null,
+  source?: string | null,
+): Promise<number | null> {
   if (!cves?.length) return null;
   const riskDb = await riskScoringDatabase();
+  if (deviceCves?.length) {
+    // Host-scoped path: only finding_risk rows for the exact (host_key, cve)
+    // pairs in this draft's packet matter. Without this, a single KEV-listed
+    // host elsewhere in the tenant that happens to share a CVE with this
+    // draft would pull the whole group's swath to 1 and auto-create a ticket
+    // for 199 unrelated devices that may never have been enriched at all.
+    // Defender findings use a "defender:" tenant_key prefix; CrowdStrike
+    // findings use the plain companyId.
+    const tenantKey = source === "stored-findings" ? `defender:${appCompanyId}` : appCompanyId;
+    const row = (await riskDb.query(
+      `SELECT min(effective_swath) AS swath FROM finding_risk
+       WHERE tenant_key=$1 AND source_open AND verification_status != 'verified_remediated'
+       AND (host_key,cve) IN (SELECT "hostId",cve FROM jsonb_to_recordset($2::jsonb) s(cid TEXT,"hostId" TEXT,cve TEXT))`,
+      [tenantKey, JSON.stringify(deviceCves)],
+    )).rows[0] as { swath: number | null };
+    return row.swath;
+  }
+  // No per-host data available in the packet: fall back to CVE-only lookup.
   const row = (await riskDb.query(
     `SELECT min(effective_swath) AS swath FROM finding_risk
      WHERE tenant_key=$1 AND cve = ANY($2::text[]) AND source_open AND verification_status != 'verified_remediated'`,
@@ -123,14 +147,15 @@ export async function autoCreateHighSeverityTickets(): Promise<Counts> {
   const rows = (await db.query(`
     WITH ranked AS (
       SELECT id, cves, packet->>'appCompanyId' AS app_company_id,
+        packet->>'source' AS source, packet->'deviceCves' AS device_cves,
         ROW_NUMBER() OVER (
         PARTITION BY remediation_id, tenant_id, packet->>'appCompanyId' ORDER BY prepared_at DESC
       ) AS rn
       FROM patch_group_ticket_requests
       WHERE state='prepared' AND review_state='pending' AND packet->>'appCompanyId' = ANY($1::text[])
     )
-    SELECT id, cves, app_company_id FROM ranked WHERE rn = 1
-  `, [Array.from(PILOT_COMPANY_IDS)])).rows as { id: string; cves: string[]; app_company_id: string | null }[];
+    SELECT id, cves, app_company_id, source, device_cves FROM ranked WHERE rn = 1
+  `, [Array.from(PILOT_COMPANY_IDS)])).rows as { id: string; cves: string[]; app_company_id: string | null; source?: string | null; device_cves?: DeviceCve[] | null }[];
   if (!rows.length) return { checked: 0, created: 0, errors: 0, notYetEnriched: 0 };
   const routings = (await db.query("SELECT app_company_id, company_id, board_id, team_id FROM patch_customer_routing"))
     .rows as { app_company_id: string; company_id: number; board_id: number; team_id: number | null }[];
@@ -153,7 +178,7 @@ export async function autoCreateHighSeverityTickets(): Promise<Counts> {
     if (!row.app_company_id || !PILOT_COMPANY_IDS.has(row.app_company_id)) return; // defensive; SQL above already scopes to the pilot
     const routing = routingByCompany.get(row.app_company_id);
     if (!routing) return; // no known-good routing for this customer yet -- leave it for a human
-    const swath = await enrichedSwathFor(row.app_company_id, row.cves).catch(() => null);
+    const swath = await enrichedSwathFor(row.app_company_id, row.cves, row.device_cves, row.source).catch(() => null);
     if (swath == null || swath > ELIGIBLE_SWATH) { if (swath == null) notYetEnriched++; return; } // not enriched yet, or enriched but not urgent -- leave it for a human
     try {
       await reviewGroupTicket(row.id, "approve", ACTOR);
