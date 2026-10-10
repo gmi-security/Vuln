@@ -1,6 +1,6 @@
 // Test-only protocol rehearsal. No application imports this file. The gate is
 // not installed around live writers and cannot grant production ownership.
-import {createHash} from 'node:crypto';
+import {handoffBaselineDigest} from '../lib/db/defender-handoff-evidence.mjs';
 import {isDeepStrictEqual} from 'node:util';
 import {privateShadowDatabase} from '../lib/db/defender-platform-shadow.mjs';
 import {buildDefenderRefresh} from '../lib/db/defender-refresh-coordinator.mjs';
@@ -31,7 +31,7 @@ export function captureLegacyCustomer(s,companyId){
     findings:[...s.findings.values()].filter(f=>f.companyId===companyId),assets:[...s.assets.values()].filter(a=>a.companyId===companyId)},
     controls:[...s.compensatingControls.values()].filter(c=>c.companyId===companyId)});
 }
-export async function rehearseDefenderHandoff({source,target,companyId,gate,captureMemory,flush,prepare,capture,afterCollect,afterPlan,afterBatch}){
+export async function rehearseDefenderHandoff({source,target,companyId,gate,captureMemory,flush,prepare,capture,afterCollect,afterPlan,afterBatch,handoffAttemptId}){
   // Do this before invoking any supplied writer, even a flush callback.
   await privateShadowDatabase(source,'source');await privateShadowDatabase(target,'target');
   let lease,stage='pause',built;
@@ -41,14 +41,14 @@ export async function rehearseDefenderHandoff({source,target,companyId,gate,capt
     const unchanged=()=>requireValue(lease.valid()&&isDeepStrictEqual(before,captureMemory()),'Memory changed during handoff');
     stage='flush';await flush({throwOnError:true});unchanged();
     stage='verify-and-build';
-    built=await buildDefenderRefresh(source,target,companyId,{prepare,capture,
+    built=await buildDefenderRefresh(source,target,companyId,{prepare,capture,...(handoffAttemptId?{handoffAttemptId,withWorkflow:true}:{}),
       afterCollect:async input=>{requireValue(isDeepStrictEqual(before,comparable(input)),'Saved customer state differs from memory');await afterCollect?.();unchanged();},
       afterPlan:async()=>{await afterPlan?.();unchanged();},
       afterBatch:async event=>{await afterBatch?.(event);unchanged();},
     });
     unchanged();requireValue(built.state==='comparison-only','Saved source or baseline changed during handoff');
     return {state:'rehearsed',handoffAllowed:false,publicationAllowed:false,projectionId:built.projectionId,
-      capturedFindings:before.findings.length,memoryDigest:createHash('sha256').update(JSON.stringify(before)).digest('hex')};
+      capturedFindings:before.findings.length,memoryDigest:handoffBaselineDigest(before)};
   }catch(error){return {state:'refused',stage,reason:error.message,handoffAllowed:false,publicationAllowed:false,...(built?{projectionId:built.projectionId}:{})};}
   finally{lease?.release();}
 }

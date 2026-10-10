@@ -64,7 +64,7 @@ try{
   await verifyRefreshBaseline({source,target,writer,baseline,when,company,run,modules,pass});
   await verifyLegacyHandoff({source,target,pool,baseline,company,run,pass});
   await verifyDefenderWorkflow({source,target,editor,company,first,modules,pass});
-  await verifyWriterOwnership({source,target,peer:editor,company,pass,newClient:async()=>{
+  await verifyWriterOwnership({source,target,peer:editor,company,modules,first,pass,newClient:async()=>{
     const c=new pg.Client({...options,database:targetName});await c.connect();return c;
   }});
   const pinned=await readDefenderRefreshSource(source,company.id,{afterSelected:async selected=>{

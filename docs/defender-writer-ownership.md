@@ -9,7 +9,7 @@ Implemented October 10, 2026 on Vuln2.0. This is an offline protocol in disposab
 | `legacy` | Registered legacy process at the current epoch | Begin forward handoff to `draining` |
 | `draining` | None | Finish to `sql` after all registered processes acknowledge; or abort to `legacy` |
 | `sql` | Registered SQL process at the current epoch | Begin reverse handoff to `reversing` |
-| `reversing` | None | Finish to `legacy` after drain and reverse-export evidence; or abort to `sql` |
+| `reversing` | None | Abort to `sql`; reverse completion is blocked until a verified export service exists |
 
 `defender_writer_ownership` stores one customer row containing its phase, revision, epoch, registered processes, current attempt and acknowledgement evidence. `defender_writer_ownership_audit` automatically records each before/after change, including actor, reason and database timestamp from the state row. The explicit migration depends on the existing shadow schema; completion also requires the isolated workflow-head table.
 
@@ -21,19 +21,27 @@ Registration requires inventory version 1 and all nine writer categories found i
 
 Beginning an attempt snapshots the registered process IDs and pauses admission. Every ID must acknowledge the same attempt with zero pending writes, a strict-save acknowledgement and a SHA-256 baseline digest. Completion requires matching digests from all processes, candidate digest evidence and a workflow revision matching the current SQL workflow head under a row lock. An unacknowledged crashed process cannot be silently ignored. There is deliberately no timeout that automatically returns ownership to legacy.
 
-Reverse completion additionally requires a reverse-export digest matching the acknowledged baseline. This represents the required export of current SQL workflow back to a recoverable legacy baseline; it does not perform or independently verify that export yet. Aborting retains the previous owner type but increments the epoch and clears registration, so processes must re-register rather than reuse pre-attempt tokens.
+The pure transition model defines reverse-export prerequisites, but the service now blocks reverse completion entirely until it can verify an actual export. A declared checksum is not sufficient. Aborting retains the previous owner type but increments the epoch and clears registration, so processes must re-register rather than reuse pre-attempt tokens.
 
 ## Transaction boundary
 
 `withOwnershipWrite` holds a shared ownership-row lock for the entire admitted SQL callback. Transitions acquire an exclusive row lock, so a handoff waits for a transaction already writing under the current owner. After the transition commits, a waiting old token is rejected. Callback changes and transaction failures commit or roll back together. A preflight ownership read followed by an unlocked write would not provide this protection.
 
-The helper is restricted to disposable target databases. Its callback is a same-database transaction operation, not a place for network calls, separate commits or nested transactions. The existing workflow editor and live snapshot writer are not wired through this helper yet. Cross-database snapshot saves and in-memory changes are not fenced by this row lock.
+The helper is restricted to disposable target databases. Its callback is a same-database transaction operation, not a place for network calls, separate commits or nested transactions. `editOwnedDefenderWorkflow` now composes the actual isolated editor with this transaction: ownership, workflow revision, state and audit commit together. The edit core is private and does not start or commit a nested transaction. The older isolated entry point refuses customers with an ownership record. A customer-specific transaction advisory lock serializes the first ownership initialization with any previously admitted unguarded edit. The live snapshot writer remains unchanged; cross-database saves and memory changes are not fenced by this row lock.
+
+## Verified forward completion
+
+The coordinator accepts an explicit handoff attempt ID only with workflow snapshotting enabled. It records a versioned baseline digest, attempt ID and workflow revision in immutable candidate provenance. The digest is stable across PostgreSQL JSONB key order and snapshot bucket order; it includes the company, applied run, complete baseline findings, inventory and controls. Records are hashed individually rather than creating another whole-customer JSON string. The handoff rehearsal uses the same digest function for its detached memory capture.
+
+`transitionWriterOwnership` no longer accepts `finish`. `completeVerifiedOwnership` takes a candidate UUID, refuses caller-supplied completion digests/revisions, and loads the scoped candidate evidence itself. It requires the current attempt, a verified model-v2 generation with sealed version-1 saved reads and matching counts, a matching workflow revision, and an unchanged source/baseline token checked against the private source database. The workflow head is locked through commit. The selected candidate ID and its stored record digest are retained in ownership audit/state.
+
+This proves consistency against the candidate builder's immutable verification record; it does not rescan all candidate rows at completion or authenticate process drain acknowledgements. The source check is a point-in-time observation across separate databases, so it is not an atomic production handoff. The real publication block remains in force.
 
 SQL triggers enforce monotonic revisions/epochs, basic permitted phase transitions and append-only audit. They prevent direct stable-owner jumps, deletion and truncation. Detailed acknowledgement/evidence validation lives in the trusted service, not a database security boundary: a database owner or unrestricted direct SQL writer could bypass the service's data checks. Production roles, authenticated actor/process registration and boot-time enforcement remain unimplemented.
 
 ## Evidence
 
-The integrated PostgreSQL runner now passes 18 groups, including four ownership groups:
+The thirtieth checkpoint passed 18 groups, including four ownership groups:
 
 - Missing ownership, unknown customer and incomplete inventory refuse writes; initialization is restart-safe.
 - A real active writer holds the transition waiting on a PostgreSQL lock; it commits before the phase advances. Old tokens then fail.
@@ -47,6 +55,8 @@ Forty-two local regression/contract tests and the Next.js production build, incl
 
 ## What this does not prove yet
 
-The service checks declarations and records evidence; it cannot discover an unregistered process or prove a caller actually installed every writer hook. A supplied digest is not independent proof that the candidate or reverse export matches data. Those proofs must come from the tested capture/comparison services, bound to an immutable generation and transaction. Acknowledgement caller identity is trusted here because there is no public endpoint. The real app still writes memory and does not consult ownership on startup. Setting an isolated row to `sql` is therefore not permission to remove the publication block.
+The service cannot discover an unregistered process or prove that it installed every writer hook. Candidate completion evidence now comes from immutable saved records; reverse export remains unavailable and reverse completion is blocked. Acknowledgement caller identity is still trusted because there is no public endpoint. The real app still writes memory and does not consult ownership on startup. Setting an isolated row to `sql` is therefore not permission to remove the publication block.
 
-The next step is to compose the ownership lock with the actual isolated workflow-edit transaction and bind completion evidence to verified candidate records from the handoff rehearsal. Test rollback without nested transactions, stale workflow evidence, new-process registration and continued publication refusal. Keep live routing disabled. Complete writer coverage, full-size new-import behavior, assets/scans/history and operational cutover/reversal remain separate gates.
+The thirty-first checkpoint passed 21 PostgreSQL groups, 44 local tests and build/type checks. It additionally tests initialization versus a pending unguarded edit, actual workflow edits under ownership, rollback of state/head/audit, old-entry-point bypass refusal, absence of nested transactions, stale source/workflow evidence, mismatched candidate/attempt and rejection of declared checksums. An ownership transition demonstrably waits for the actual workflow edit before invalidating its token. Evidence is private at `owned-edit-test-Cbelfrwd/fixture-final.log`; disposable databases were removed and the private cluster stopped. No production changes occurred.
+
+Next build a bounded reverse-export artifact and validate it against the existing snapshot reader in disposable storage, preserving workflow timestamps and refusing conflicting source/generation evidence. Keep reverse completion and live routing blocked until export verification and full consumer coverage are proven. Complete writer coverage, full-size new-import behavior, assets/scans/history and operational cutover/reversal remain separate gates.
