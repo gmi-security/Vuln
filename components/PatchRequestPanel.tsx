@@ -8,7 +8,7 @@ import styles from "./QueryDashboard.module.css";
 
 type Job = { jobId: string; status: string; error?: string; patchRequest?: PatchRequest; patchRequestId?: string };
 
-export default function PatchRequestPanel({ cve }: { cve: string }) {
+export default function PatchRequestPanel({ cve, companyId }: { cve: string; companyId?: string }) {
   const [packet, setPacket] = useState<PatchRequest | null>(null);
   const [requestId, setRequestId] = useState<string>();
   const [tenantId, setTenantId] = useState("");
@@ -24,7 +24,7 @@ export default function PatchRequestPanel({ cve }: { cve: string }) {
     const current = ++generation.current;
     setBusy(true); setError(""); setMessage("Collecting all matching CrowdStrike pages. This can take several minutes.");
     try {
-      let job = await dashboardRequest<Job>("patch-requests", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cve, ...(tenantId ? { tenantId } : {}) }) });
+      let job = await dashboardRequest<Job>("patch-requests", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cve, ...(companyId ? { appCompanyId: companyId } : {}), ...(tenantId ? { tenantId } : {}) }) });
       const deadline = Date.now() + 15 * 60_000;
       while (["queued", "running"].includes(job.status)) {
         await new Promise((resolve) => setTimeout(resolve, 2000));

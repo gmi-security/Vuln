@@ -153,8 +153,8 @@ test('manual draft cannot be automatically sent; equivalent legacy ticket is che
       return{rows:[]};
     };
     const api=await loadModule('lib/patch-group-ticket-store.ts',{
-      './patch-ticket-store':{patchTicketDatabase:async()=>({connect:async()=>({query,release(){}})}),savedConnection:async()=>({revision:1,target:'test'})},
-      './elastic-dashboard-store':{verifyAgainstCrowdStrike:()=>{throw Error('No live CS calls');}},
+      './patch-ticket-store':{patchTicketDatabase:async()=>({query,connect:async()=>({query,release(){}})}),savedConnection:async()=>({revision:1,target:'test'})},
+      './elastic-dashboard-store':{assertPatchRequestScope:async()=>{},verifyAgainstCrowdStrike:()=>{throw Error('No live CS calls');}},
       './reporting-tenant-scope':{customerFalconTenantIds:()=>[]},
       './reporting-direct-sources':{atlasFalconReviewPacket:()=>false},
     });

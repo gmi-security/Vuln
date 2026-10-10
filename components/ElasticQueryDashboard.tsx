@@ -105,7 +105,7 @@ export default function ElasticQueryDashboard({ initial, companyId = "" }: { ini
   }
   async function background(path: "preview", body: unknown) {
     const sequence = actionSequence.current;
-    const job = await post(path, body);
+    const job = await post(path, { ...(body as Record<string, unknown>), ...(companyId ? { companyId } : {}) });
     if (sequence !== actionSequence.current) return null;
     if (!job.jobId) return job; // Also tolerates a fast response from an older deployment.
     const deadline = Date.now() + 15 * 60_000;

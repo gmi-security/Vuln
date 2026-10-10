@@ -9,18 +9,20 @@ import ts from "typescript";
 
 const ROOT = resolve(".");
 const modules = new Map();
-async function load(path) {
+async function moduleFor(path) {
   path = resolve(path);
-  if (modules.has(path)) return modules.get(path);
-  const source = await readFile(path, "utf8");
-  if (modules.has(path)) return modules.get(path);
-  const code = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
-  const module = new SourceTextModule(code, { identifier: path }); modules.set(path, module);
-  await module.link(async (name) => {
-    if (name.startsWith(".")) return load(resolve(dirname(path), `${name}.ts`));
-    if (name.startsWith("@/")) return load(resolve(ROOT, `${name.slice(2)}.ts`));
+  if (!modules.has(path)) modules.set(path, (async () => {
+    const code = ts.transpileModule(await readFile(path, "utf8"), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
+    return new SourceTextModule(code, { identifier: path });
+  })());
+  return modules.get(path);
+}
+async function load(path) {
+  const module = await moduleFor(path);
+  if (module.status === "unlinked") await module.link(async (name, parent) => {
+    if (name.startsWith(".")) return moduleFor(resolve(dirname(parent.identifier), `${name}.ts`));
+    if (name.startsWith("@/")) return moduleFor(resolve(ROOT, `${name.slice(2)}.ts`));
     const imported = await import(name);
-    // rrule is CommonJS; expose its actual named API to the VM test linker.
     const values = name === "rrule" ? { ...imported.default, ...imported } : imported;
     return new SyntheticModule(Object.keys(values), function () { for (const key of Object.keys(values)) this.setExport(key, values[key]); });
   });
@@ -41,7 +43,7 @@ async function mockHttp(replies, work) {
   globalThis.fetch = async (url, init) => {
     if (new URL(url).pathname === "/spotlight/combined/vulnerabilities/v1") {
       const facets = new URL(url).searchParams.getAll("facet");
-      assert.ok(JSON.stringify(facets) === '["cve","host_info"]' || JSON.stringify(facets) === '["cve"]' || JSON.stringify(facets) === '["cve","host_info","remediation"]',
+      assert.ok((facets.length === 0 && new URL(url).searchParams.get("limit") === "1") || JSON.stringify(facets) === '["cve","host_info"]' || JSON.stringify(facets) === '["cve"]' || JSON.stringify(facets) === '["cve","host_info","remediation"]',
         "CrowdStrike requires separate facet parameters; CVE summaries omit host detail");
     }
     calls.push({ url: new URL(url), init });
@@ -546,4 +548,44 @@ test("finding-level recommendations work without applications and same recommend
   const packet = patchModel.buildPatchRequest(patchCve, rows.map(r => patchModel.normalizePatchFinding(r, patchCve)), "us-1", "start", "end");
   assert.equal(packet.csvRows, 2); assert.equal(packet.hostCount, 1);
   assert.match(packet.csv, /Recommended finding-level remediation/); assert.doesNotMatch(packet.csv, /min-a/);
+});
+
+const scopedCid = 'a'.repeat(32);
+const scopeModule = await load("lib/customer-query-scope.ts"); await scopeModule.evaluate();
+const scoped = scopeModule.namespace;
+test("server CID conjunction preserves valid filters and rejects scope escape attempts before authentication", async () => {
+  for (const query of ["status:['open','reopen']", "(status:'open',status:'reopen')+cve.severity:'HIGH'", "host_info.hostname:'a(b),c'"])
+    assert.equal(scoped.customerFql(query, scopedCid), `cid:'${scopedCid}'+(${query})`);
+  for (const query of ["status:'open'),cid:'foreign'", "status:'open", "status:['open')", "status:'open';bad", "status:'open'\n,bad"])
+    await mockHttp([],async()=>assert.rejects(()=>client.executeCrowdStrike(connection,{...input,query},30000,scopedCid)));
+  scoped.assertPatchCid([JSON.stringify([scopedCid,'host'])],[scopedCid],scopedCid);
+  for(const host of ['not-json',JSON.stringify(['other','host']),JSON.stringify([scopedCid,''])])assert.throws(()=>scoped.assertPatchCid([host],[scopedCid],scopedCid));
+});
+test("reviewed FQL validates every entity CID across pagination and keeps the full filter", async () => {
+  await mockHttp([auth,page([raw('a',{cid:scopedCid})],'next',2),page([raw('b',{cid:scopedCid})],'',2)],async calls=>{
+    await client.executeCrowdStrike(connection,input,30000,scopedCid);
+    for(const call of calls.slice(1))assert.equal(call.url.searchParams.get('filter'),`cid:'${scopedCid}'+(${input.query})`);
+  });
+  for(const returned of ['b'.repeat(32),undefined])await mockHttp([auth,page([raw('a',{cid:scopedCid})],'next',2),page([raw('b',{cid:returned})],'',2)],async()=>{
+    await assert.rejects(()=>client.executeCrowdStrike(connection,input,30000,scopedCid),/CID/);
+  });
+});
+test("reviewed totals use scoped combined count evidence without collecting the entire population",async()=>{
+  const history={...input,crowdstrike:{...options,history:true,measure:'findings',groupBy:'none'}};
+  await mockHttp([auth,page([raw('a',{cid:scopedCid})],'',2000000)],async calls=>{
+    const result=await client.executeCrowdStrike(connection,history,30000,scopedCid);assert.equal(result.rows[0][0],2000000);
+    assert.equal(calls.length,2);assert.equal(calls[1].url.pathname,'/spotlight/combined/vulnerabilities/v1');
+    assert.equal(calls[1].url.searchParams.get('filter'),`cid:'${scopedCid}'+(${input.query})`);
+  });
+  for(const response of [page([raw('bad')],'',1),page([],'',1),page([raw('a',{cid:scopedCid})],'',0)])
+    await mockHttp([auth,response],async()=>assert.rejects(()=>client.executeCrowdStrike(connection,history,30000,scopedCid)));
+  await mockHttp([auth,page([],'',0)],async()=>assert.equal((await client.executeCrowdStrike(connection,history,30000,scopedCid)).rows[0][0],0));
+});
+test("all six reviewed severity buckets carry CID and reject a mismatched later bucket",async()=>{
+  const severity={...input,crowdstrike:{...options,view:'severity-counts'}};
+  await mockHttp([auth,...Array.from({length:6},()=>page([raw('a',{cid:scopedCid})],'',10))],async calls=>{
+    assert.deepEqual((await client.executeCrowdStrike(connection,severity,30000,scopedCid)).rows[0],[10,10,10,10,10,10]);
+    for(const call of calls.slice(1))assert.ok(call.url.searchParams.get('filter').includes(`cid:'${scopedCid}'`));
+  });
+  await mockHttp([auth,page([raw('a',{cid:scopedCid})],'',10),page([raw('b')],'',10)],async()=>assert.rejects(()=>client.executeCrowdStrike(connection,severity,30000,scopedCid),/CID/));
 });

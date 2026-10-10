@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { DashboardError } from "./elastic-dashboard";
-import { dashboardDatabase, verifyAgainstCrowdStrike } from "./elastic-dashboard-store";
+import { dashboardDatabase, verifyAgainstCrowdStrike, assertPatchRequestScope } from "./elastic-dashboard-store";
 import { parsePatchInput, type PatchRequest } from "./patch-request";
 import { automatedTicketBody, type PatchTicketSummary } from "./patch-ticket-types";
 import { cwId, cwOptions, cwRequest, cwTarget, CWRequestError, findCWRequest, normalizeCWEndpoint, openCWConnection, parseCWConnection, parseRouting,
@@ -230,7 +230,10 @@ export async function createPatchTicket(id: string, value: unknown, actor: strin
   requestId(id); const body = value as CWRecord;
   const routing = parseRouting(body?.routing);
   if (typeof body.title !== "string" || !body.title.trim() || body.title.length > 100 || typeof body.body !== "string" || !body.body.trim() || body.body.length > 200000) throw new DashboardError("Provide a ticket title of at most 100 characters and ticket contents of at most 200,000 characters.");
-  const saved = await savedConnection(), db = await patchTicketDatabase(), client = await db.connect();
+  const saved = await savedConnection(), db = await patchTicketDatabase();
+  const preflight = (await db.query("SELECT packet,crowdstrike_revision,state FROM patch_ticket_requests WHERE id=$1", [id])).rows[0];
+  if (preflight && !["creating", "uncertain", "created"].includes(preflight.state)) await assertPatchRequestScope(preflight.packet, preflight.crowdstrike_revision);
+  const client = await db.connect();
   let start = false;
   try {
     await client.query("BEGIN"); await client.query("SELECT pg_advisory_xact_lock(804205)");
@@ -271,6 +274,7 @@ async function runCreation(id: string) {
     // Check again after routing reads, before the only ticket-creation POST.
     const current = await savedConnection();
     if (current.revision !== saved.revision) throw new DashboardError("ConnectWise connection changed before sending. Review and submit again.");
+    await assertPatchRequestScope(row.packet, row.crowdstrike_revision);
     writeStarted = true;
     const ticket = await cwRequest(saved.value, "/service/tickets", "POST", { summary: row.title, initialDescription: row.body, recordType: "ServiceTicket",
       board: { id: row.routing.boardId }, company: { id: row.routing.companyId },
@@ -315,7 +319,7 @@ export async function verifyPatchTicketFix(id: string, actor: string, revision: 
   const packet = row.packet as PatchRequest;
   const tenantId = packet.tenantIds?.[0];
   if (!tenantId || !packet.hostScope?.length) throw new DashboardError("This saved report has no device scope to verify. Prepare a fresh request.");
-  const result = await verifyAgainstCrowdStrike([row.cve], packet.hostScope, tenantId, revision);
+  const result = await verifyAgainstCrowdStrike([row.cve], packet.hostScope, tenantId, revision, packet);
   const verifiedState = result.stillOpenHosts.length === 0 ? "verified" : "still_open";
   await db.query("UPDATE patch_ticket_requests SET fix_verified_at=$2,fix_verified_state=$3,fix_still_open_count=$4,updated_at=now() WHERE id=$1",
     [id, result.checkedAt, verifiedState, result.stillOpenHosts.length]);

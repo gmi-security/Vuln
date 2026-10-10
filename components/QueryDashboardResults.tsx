@@ -71,7 +71,7 @@ export default function QueryDashboardResults({ result, display, chart, prepareP
         <h2 id={titleId}>{selected?.cve ?? "CVE details"}</h2>
         <p className={styles.resultNote}>{selected?.row ? "Snapshot of the result selected from this tile." : "CVE selected from this tile. Prepare a request for current CrowdStrike details."}</p>
         <dl className={styles.detailFields}>{selected?.row && result.columns.map((column, index) => String(selected.row![index]).toUpperCase() !== selected.cve && <div key={column.name}><dt>{columnLabel(column.name)}</dt><dd>{cell(selected.row![index], column.name)}</dd></div>)}</dl>
-        {preparePatch && selected && <PatchRequestPanel key={selected.cve} cve={selected.cve} />}
+        {preparePatch && selected && <PatchRequestPanel key={`${companyId ?? ""}:${selected.cve}`} cve={selected.cve} companyId={companyId} />}
       </div>
     </dialog>
   );

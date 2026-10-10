@@ -216,6 +216,14 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
     if (!["CO-A","CO-B"].includes(id)) throw new contract.DashboardError("Customer not found.",404);
   }});
   overrides.set("./persist", { applicationDatabase: () => null });
+  overrides.set("./store", {getCompany:id=>["CO-A","CO-B","CO-1"].includes(id)?{id,name:id}:undefined});
+  let reviewedRoutes = null;
+  const routeModule = await load("lib/customer-query-routing-server.ts"); await routeModule.evaluate();
+  const selectRoute = routeModule.namespace.selectQueryRoute;
+  overrides.set("./customer-query-routing-server", {
+    loadReviewedQueryRoutes: async()=>reviewedRoutes, selectQueryRoute:selectRoute,
+    recheckQueryRoute:async(_db,route)=>{if(route && !reviewedRoutes?.some(r=>r.bindingKey===route.bindingKey))throw new contract.DashboardError("Customer query approval changed.",409);}
+  });
   overrides.set("./elastic-vuln-server", { elasticVulnEnabled: () => true });
   const fakeQuery = async () => {
       if (hold) { const wait = hold; hold = null; return await wait; }
@@ -228,7 +236,7 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
   await falconModule.evaluate();
   let falconFail = false, falconHold = null;
   const falconResult = { columns: [{ name: "findings", type: "long" }], rows: [[7]], truncated: false };
-  let patchHold = null;
+  let patchHold = null, lastPatchInput, lastQueryCid;
   const patchPacket = { cve: "CVE-2026-12345", hostCount: 104, findingCount: 108, body: "All hosts and remediations", csv: "test csv",
     tenantIds: ["test-tenant"], hostScope: ["test-tenant:host-1"], collectedAt: new Date().toISOString(), worstSeverity: "Critical" };
   // This suite exercises dashboard jobs, not ticket persistence or live CW operations.
@@ -240,10 +248,12 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
     persistPreparedGroups: async () => { throw new Error("Unexpected consolidation"); },
     verifyGroupTicketFix: async () => { throw new Error("Unexpected group verification"); },
   });
-  overrides.set("./crowdstrike-dashboard-client", { ...falconModule.namespace, executePatchRequest: async () => {
+  overrides.set("./crowdstrike-dashboard-client", { ...falconModule.namespace, executePatchRequest: async (_connection,input) => {
+    lastPatchInput=input;
     if (patchHold) { const wait = patchHold; patchHold = null; return wait; }
-    return patchPacket;
-  }, testCrowdStrikeConnection: async () => {}, executeCrowdStrike: async () => {
+    return structuredClone(patchPacket);
+  }, testCrowdStrikeConnection: async () => {}, executeCrowdStrike: async (_connection,_input,_budget,cid) => {
+    lastQueryCid=cid;
     if (falconHold) { const wait = falconHold; falconHold = null; return wait; }
     if (falconFail) throw new contract.DashboardError("Simulated CrowdStrike outage.");
     return falconResult;
@@ -636,8 +646,57 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
     await store.deleteDashboardTile(exprt.id, "delete-exprt");
     await installExprtRankedCveTile(db);
     assert.ok(!(await store.readDashboard(true)).queries.some(q => q.id === exprt.id));
+    // Reviewed routing: transport is mocked; real cache/history/job persistence is exercised.
+    await waitFor(() => !globalThis.__elasticDashboard.ticking && !globalThis.__elasticJobs.working);
+    await db.query("UPDATE elastic_dashboard_queries SET next_attempt=now()+interval '1 day'");
+    process.env.VULN_REVIEWED_QUERY_PROVIDERS='crowdstrike';
+    const cid='a'.repeat(32), revision=await store.dashboardConnectionRevision('crowdstrike');
+    reviewedRoutes=[{companyId:'CO-A',sourceScope:cid,connectionRevision:revision,bindingKey:'proof-a'}];
+    const reviewed={...falconDefinition,id:'reviewed',companyId:'CO-A',enabled:false};
+    await assert.rejects(()=>store.previewQuery({...reviewed,companyId:'CO-B'},'wrong-owner'),/approved/);
+    assert.equal(selectRoute(null,'CO-B'),null);
+    assert.throws(()=>selectRoute(reviewedRoutes,'CO-A','b'.repeat(32),revision),/approved/);
+    assert.throws(()=>selectRoute(reviewedRoutes,'CO-A',cid,revision+1),/approved/);
+    await store.saveQuery(reviewed,'reviewed-save');assert.equal(lastQueryCid,cid);
+    const scopedView=await store.readDashboard(true,'CO-A');
+    assert.equal(scopedView.queries.find(q=>q.id==='reviewed').result.scopeKey,'proof-a');
+    assert.notEqual(store.historySignature(reviewed,'proof-a'),store.historySignature(reviewed,'proof-b'));
+    assert.notEqual(store.historySignature(reviewed,'proof-a'),store.historySignature({...reviewed,companyId:'CO-B'},'proof-a'));
+    assert.equal(store.historySignature(reviewed),store.historySignature({...reviewed,companyId:'CO-B'}),'legacy history signatures unchanged');
+    const rawResult=(await db.query("SELECT result FROM elastic_dashboard_queries WHERE id='reviewed'")).rows[0].result;
+    globalThis.__elasticDashboard.running=2;
+    try {
+      const renamed=await store.addDashboardTile({...reviewed,title:'Renamed reviewed tile'},'rename-reviewed');
+      assert.equal(renamed.query.result,null,'fast save response withholds unverified cache');
+      assert.deepEqual((await db.query("SELECT result FROM elastic_dashboard_queries WHERE id='reviewed'")).rows[0].result,rawResult,'cosmetic edits retain stored cache');
+    }finally{globalThis.__elasticDashboard.running=0;}
+
+    reviewedRoutes=[{...reviewedRoutes[0],bindingKey:'proof-b'}];
+    assert.equal((await store.readDashboard(true,'CO-A')).queries.find(q=>q.id==='reviewed').result,null);
+    assert.deepEqual((await db.query("SELECT result FROM elastic_dashboard_queries WHERE id='reviewed'")).rows[0].result,rawResult,'old results retained');
+    await assert.rejects(()=>store.assertQueryResultScope(reviewed,rawResult),/approval changed/);
+    let finishReviewed;falconHold=new Promise(resolve=>finishReviewed=resolve);
+    const pendingPreview=store.previewQuery(reviewed,'scope-race',true);
+    await waitFor(()=>falconHold===null);reviewedRoutes=[{...reviewedRoutes[0],bindingKey:'proof-c'}];finishReviewed(falconResult);
+    await assert.rejects(()=>pendingPreview,/approval changed/);
+    patchPacket.tenantIds=[cid];patchPacket.hostScope=[JSON.stringify([cid,'host-1'])];
+    const prepared=await store.preparePatchRequest({cve:patchPacket.cve,appCompanyId:'CO-A'},revision);
+    assert.equal(lastPatchInput.tenantId,cid);assert.equal(prepared.queryScope.bindingKey,'proof-c');assert.equal(prepared.appCompanyId,'CO-A');
+    await store.assertPatchRequestScope(prepared,revision);
+    await assert.rejects(()=>store.assertPatchRequestScope({...prepared,queryScope:undefined},revision),/fresh/);
+    await assert.rejects(()=>store.assertPatchRequestScope({...prepared,hostScope:[JSON.stringify(['foreign','host'])]},revision),/different customer/);
+    await assert.rejects(()=>store.preparePatchRequest({cve:patchPacket.cve,appCompanyId:'CO-B'},revision),/approved/);
+    reviewedRoutes=[{...reviewedRoutes[0],bindingKey:'proof-d'}];
+    await assert.rejects(()=>store.assertPatchRequestScope(prepared,revision),/approval changed/);
+    await store.assertPatchRequestScope({source:'stored-findings'},revision);
+    // Jobs cannot return previously completed results under a replacement approval.
+    const reviewedJob=await jobs.enqueueDashboardJob('preview',reviewed,'reviewed-job');await waitFor(()=>!globalThis.__elasticJobs.working);
+    assert.equal((await jobs.readDashboardJob(reviewedJob.jobId,'reviewed-job')).result.scopeKey,'proof-d');
+    reviewedRoutes=[{...reviewedRoutes[0],bindingKey:'proof-e'}];
+    await assert.rejects(()=>jobs.readDashboardJob(reviewedJob.jobId,'reviewed-job'),/approval changed/);
+    reviewedRoutes=null;delete process.env.VULN_REVIEWED_QUERY_PROVIDERS;
     // Leave the isolated DB unconnected for the subsequent HTTP authorization checks.
     await db.query("DELETE FROM elastic_dashboard_connection");
     await db.query("DELETE FROM dashboard_source_connections; DELETE FROM dashboard_daily_history; DELETE FROM elastic_dashboard_queries WHERE definition->>'source' = 'crowdstrike'");
-  } finally { await db.end(); }
+  } finally { delete process.env.VULN_REVIEWED_QUERY_PROVIDERS; await db.end(); }
 });

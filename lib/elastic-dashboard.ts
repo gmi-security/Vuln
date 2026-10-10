@@ -3,6 +3,7 @@ export type QueryResult = {
   rows: (string | number | boolean | null)[][];
   truncated: boolean;
   note?: string;
+  scopeKey?: string; // Server-issued result provenance, never accepted from query input.
 };
 
 export class DashboardError extends Error {
@@ -23,7 +24,7 @@ export const DEFAULT_CROWDSTRIKE: CrowdStrikeOptions = {
 export function crowdStrikeTopOptions(view?: CrowdStrikeOptions["view"]): number[] {
   return view === "cve-devices" || view === "exprt-cves" ? [10, 25, 50, 100, 250, 500] : [10, 25, 50, 100];
 }
-export type QueryInput = { query: string; source?: DashboardSource; crowdstrike?: CrowdStrikeOptions };
+export type QueryInput = { companyId?: string | null; query: string; source?: DashboardSource; crowdstrike?: CrowdStrikeOptions };
 export type QueryDefinition = QueryInput & {
   id: string;
   title: string;
@@ -61,7 +62,11 @@ export function querySource(value: { source?: unknown }): DashboardSource {
 export function parseQueryInput(value: unknown): QueryInput {
   if (!value || typeof value !== "object") throw new DashboardError("Invalid query input.");
   const body = value as Record<string, unknown>;
-  if (querySource(body) === "elastic") return { query: validateQuery(body.query) };
+  if (body.companyId !== undefined && body.companyId !== null &&
+      (typeof body.companyId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(body.companyId)))
+    throw new DashboardError("Choose an existing customer.");
+  const owner = body.companyId === undefined ? {} : { companyId: body.companyId as string | null };
+  if (querySource(body) === "elastic") return { query: validateQuery(body.query), ...owner };
   if (typeof body.query !== "string" || !body.query.trim() || body.query.length > 4000 || /[\x00-\x1f\x7f]/.test(body.query)) {
     throw new DashboardError("Enter an FQL filter on one line, up to 4,000 characters.");
   }
@@ -83,7 +88,7 @@ export function parseQueryInput(value: unknown): QueryInput {
   if ((options.view === "cve-devices" || options.view === "exprt-cves") && (options.history || options.groupBy !== "cve" || options.measure !== "hosts")) {
     throw new DashboardError("The CVE device table uses unique hosts grouped by CVE, with no daily history.");
   }
-  return { source: "crowdstrike", query: body.query.trim(), crowdstrike: {
+  return { ...owner, source: "crowdstrike", query: body.query.trim(), crowdstrike: {
     dataset: options.dataset, measure: options.measure, groupBy: options.groupBy, top: options.top, history: options.history,
     ...(options.view && options.view !== "summary" ? { view: options.view } : {}),
   } };

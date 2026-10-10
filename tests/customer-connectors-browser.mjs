@@ -25,7 +25,7 @@ const artifacts = await mkdtemp(join(tmpdir(), 'vuln2-connectors-browser-'));
 const companies = [{ id: 'CO-A', name: 'Fixture Alpha' }, { id: 'CO-B', name: 'Fixture Beta' }, { id: 'CO-EMPTY', name: 'Fixture Empty' }];
 const calls = [], errors = [], unexpected = []; let fail = false, pending = false, release;
 let previewFailure=false;
-let shared = false, partial = true, inventoryRouting = false, inventoryProvider = "automate", spotlightRouting = false, scannerRouting = false, scannerProvider = "nessus";
+let shared = false, partial = true, inventoryRouting = false, inventoryProvider = "automate", spotlightRouting = false, scannerRouting = false, scannerProvider = "nessus", queryRouting = false;
 function status(id) {
   const result = { companyId: id, companyName: companies.find(c => c.id === id).name, checkedAt: '2026-10-09T19:00:00Z', registryAvailable: id !== 'CO-A',
     items: id === 'CO-EMPTY' ? [] : [{ id: id+'-record', provider: inventoryRouting ? inventoryProvider : id === 'CO-A' ? 'defender' : 'crowdstrike', evidence: 'Saved customer connection', configuration: 'Configuration recorded',
@@ -38,6 +38,7 @@ function status(id) {
   if(scannerRouting && result.items.length){result.items[0].provider=scannerProvider;result.items[0].review='Scanner route approved';
     result.items[0].scope='A separate scanner source and target approval is recorded. See routing details for its current state.';
     result.items[0].data={domains:['endpoint-findings'],storage:'Existing platform findings',lifecycle:'Reviewed folder and target ownership',routing:'Approved for scanner routing; the provider switch is on. This does not confirm a successful import.'};}
+  if(queryRouting && result.items.length){result.items[0].provider="crowdstrike";result.items[0].review="Query route approved";result.items[0].scope="A separate saved-query approval is recorded. See routing details for its current state.";result.items[0].data={domains:["saved-queries"],storage:"Customer query cache, daily observations and prepared live patch reports",lifecycle:"Refresh within the approved CID; this approval does not publish platform findings",routing:"Customer-scoped query routing is on. Results and patch collection recheck this approval; this does not confirm source health."};}
   return result;
 }
 try {
@@ -146,6 +147,15 @@ try {
   }
   await page.screenshot({path:join(artifacts,'osint-route-status-mobile.png'),fullPage:true});
   pass('SpiderFoot, Artemis, ZAP and Vulners approvals display within the same customer selector and permissions');
+
+  queryRouting=true;await page.getByRole('button',{name:'Refresh status',exact:true}).click();
+  await page.getByText('Query route approved',{exact:true}).waitFor();
+  await page.getByText('How this source is used',{exact:true}).click();
+  await page.getByText('Customer-scoped query routing is on.',{exact:false}).waitFor();
+  assert.equal(await page.getByRole('combobox').count(),1);
+  assert.equal(await page.getByRole('button',{name:/Approve|Enable|Configure|Sync|Scan/}).count(),0);
+  await page.screenshot({path:join(artifacts,'query-route-status-mobile.png'),fullPage:true});
+  pass('saved-query routing status uses the existing customer selector without new privileges or health claims');
 
   shared = true; await page.setViewportSize({width:1440,height:1050});
   await page.goto(base+'/connectors?view=shared&companyId=CO-B');

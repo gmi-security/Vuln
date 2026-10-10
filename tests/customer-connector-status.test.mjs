@@ -1,3 +1,5 @@
+import {loadQueryRouting} from '../scripts/connector-preview-loader.mjs';
+const queryRouting=await loadQueryRouting();
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createHash } from 'node:crypto';
@@ -111,7 +113,7 @@ test('read service skips schema initialization, preserves customer filters and f
     const service = await load('lib/customer-connector-status-service.ts', {
       'pg': { Pool: class { constructor() { throw new Error('Unexpected new database'); } } },
       './persist': { applicationDatabase: () => app }, './elastic-dashboard': { DashboardError },
-      './customer-scanner-routing':scanner, './customer-spotlight-routing':spotlight, './customer-inventory-routing': inventory, './customer-connector-preview': { buildConnectorPreview: build }, './customer-connector-status': { customerConnectorStatus: project },
+      './customer-query-routing':queryRouting, './customer-scanner-routing':scanner, './customer-spotlight-routing':spotlight, './customer-inventory-routing': inventory, './customer-connector-preview': { buildConnectorPreview: build }, './customer-connector-status': { customerConnectorStatus: project },
       './db/connector-metadata.mjs': { readApplicationConnectorMetadata: async () => data, readDashboardConnectorMetadata: async () => data },
     });
     assert.equal((await service.readCustomerConnectorStatus('A')).registryAvailable, false);
@@ -145,7 +147,7 @@ test('status reads each customer binding over the legacy proposal without export
     const service=await load('lib/customer-connector-status-service.ts',{
       'pg':{Pool:class{constructor(){throw Error('Unexpected pool');}}},
       './persist':{applicationDatabase:()=>({connect:async()=>client})},'./elastic-dashboard':{DashboardError},
-      './customer-scanner-routing':scanner, './customer-spotlight-routing':spotlight, './customer-inventory-routing':inventory, './customer-connector-preview':{buildConnectorPreview:build},'./customer-connector-status':{customerConnectorStatus:project},
+      './customer-query-routing':queryRouting, './customer-scanner-routing':scanner, './customer-spotlight-routing':spotlight, './customer-inventory-routing':inventory, './customer-connector-preview':{buildConnectorPreview:build},'./customer-connector-status':{customerConnectorStatus:project},
       './db/connector-metadata.mjs':{readApplicationConnectorMetadata:async()=>data,readDashboardConnectorMetadata:async()=>data},
     });
     const a=await service.readCustomerConnectorStatus('A'),b=await service.readCustomerConnectorStatus('B');

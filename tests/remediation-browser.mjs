@@ -69,6 +69,13 @@ try{
     const p=url.pathname.replace('/api/elastic-dashboard/',''),companyId=url.searchParams.get('companyId')||companies[0].id;
     const body=req.method()==='POST'?req.postDataJSON():null;calls.push({path:p,companyId:url.searchParams.get('companyId'),method:req.method(),body});
     const json=(data,status=200)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(data)});
+    if(p==='preview'){
+      assert.equal(body.companyId,companies[0].id);assert.equal(body.source,'crowdstrike');
+      return json({jobId:id,status:'queued'});
+    }
+    if(p===`jobs/${id}`){
+      return json({jobId:id,status:'succeeded',result:{columns:[{name:'cve',type:'keyword'},{name:'devices',type:'long'}],rows:[[cve,2]],truncated:false}});
+    }
     if(p==='customer-platform-comparison')return published.handle({req,url,json});
     if(p==='/api/auth/session')return json({user:{name:'Fixture member'},expires:'2099-01-01T00:00:00Z'});
     if(p==='/api/settings')return json({settings:{sla:null}});
@@ -119,6 +126,15 @@ try{
   });
   await page.goto(base+`/remediation?companyId=${companies[0].id}&view=overview`);
   const tile=page.getByRole('region',{name:'Fixture table',exact:true});
+  await tile.getByRole('button',{name:'Edit',exact:true}).click();
+  await page.getByRole('button',{name:'Preview (optional)',exact:true}).click();
+  await page.getByRole('button',{name:'Preview (optional)',exact:true}).waitFor();
+  await page.getByText('Preview',{exact:true}).waitFor();
+  assert.equal(calls.filter(c=>c.path==='preview').length,1);
+  assert.equal(calls.filter(c=>c.path===`jobs/${id}`).length,1);
+  assert.equal(calls.find(c=>c.path==='preview').body.companyId,companies[0].id);
+  await page.getByRole('button',{name:'Cancel',exact:true}).click();
+  pass('optional preview carries the existing selected customer to the queued query without another selector');
   const opener=tile.getByRole('button',{name:`View ${cve} details`});await opener.click();
   const panel=page.getByRole('dialog',{name:cve,exact:true});await panel.getByText(`${companies[0].id}-device`,{exact:true}).waitFor();
   assert.equal(await panel.getByRole('button',{name:'Compare database read',exact:true}).count(),shadowReads?1:0);

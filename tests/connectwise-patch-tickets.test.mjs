@@ -115,12 +115,13 @@ test('durable ticket lifecycle and duplicate protection in PostgreSQL', { skip: 
   assert.ok(['localhost', '127.0.0.1'].includes(url.hostname) && url.pathname === '/patch_ticket_test', 'Only the disposable local test database is allowed');
   const db = new pg.Pool({ connectionString: url.toString() });
   let mode = 'ok', uploads = 0, posts = 0, ticketSequence = 1000, uploadFail = false, pausePost;
+  let scopeAllowed = true, revokeDuringRouting = false;
   const tickets = new Map();
   const store = await loader({
-    './elastic-dashboard-store': { dashboardDatabase: async () => db, verifyAgainstCrowdStrike:async()=>{throw new Error('No live CrowdStrike calls allowed in ticket tests');} },
+    './elastic-dashboard-store': { dashboardDatabase: async () => db, assertPatchRequestScope:async()=>{if(!scopeAllowed)throw new Error('Fixture customer approval revoked');}, verifyAgainstCrowdStrike:async()=>{throw new Error('No live CrowdStrike calls allowed in ticket tests');} },
     './connectwise-client': { ...client,
       cwOptions: async () => ({ options: [{ id: 10, name: 'Customer patching' }], more: false, page: 1 }),
-      validateCWRouting: async (_c, r) => ({ company: { id: r.companyId, name: 'Actual customer' }, board: { id: r.boardId, name: 'Customer patching' } }),
+      validateCWRouting: async (_c, r) => {if(revokeDuringRouting)scopeAllowed=false;return { company: { id: r.companyId, name: 'Actual customer' }, board: { id: r.boardId, name: 'Customer patching' } };},
       cwRequest: async (_c, path, method, body) => {
         if (method === 'POST') { assert.ok(!('status' in body), 'ConnectWise must choose the initial status'); assert.ok(!('priority' in body), 'ConnectWise must choose the priority'); posts++; if (pausePost) await pausePost;
           if (mode === 'rejected') throw new client.CWRequestError('Bad routing', false);
@@ -145,6 +146,16 @@ test('durable ticket lifecycle and duplicate protection in PostgreSQL', { skip: 
     const settings = await store.readCWSettings(); assert.equal(settings.revision, 1); assert.ok(!JSON.stringify(settings).includes('test-private')); assert.ok(!('publicKey' in settings));
     await store.saveCWDefaults({ boardId: 10, statusId: 11, priorityId: 12 }, 'member');
     assert.deepEqual((await store.readCWSettings()).defaults, { boardId: 10 }, 'Old status/priority choices must not override ConnectWise defaults');
+    await t.test('revoked customer approval stops delivery before queueing and before the creation POST', async () => {
+      const before = posts, rejected = await draft({hostScope:['tenant:scope-check']});
+      scopeAllowed=false;
+      await assert.rejects(()=>store.createPatchTicket(rejected,submit,'member'),/approval revoked/);
+      assert.equal((await store.readPatchTicket(rejected)).request.state,'prepared');assert.equal(posts,before);
+      scopeAllowed=true;revokeDuringRouting=true;
+      await store.createPatchTicket(rejected,submit,'member');
+      await waitFor(rejected,r=>r.state==='failed');assert.equal(posts,before);
+      scopeAllowed=true;revokeDuringRouting=false;
+    });
     await t.test('concurrent same scope and repeated same ID create exactly one ticket', async () => {
       const first = await draft(), second = await draft(); let release; pausePost = new Promise(r => release = r);
       const results = await Promise.allSettled([store.createPatchTicket(first, submit, 'member'), store.createPatchTicket(second, submit, 'member')]);

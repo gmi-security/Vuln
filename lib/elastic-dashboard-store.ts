@@ -1,3 +1,7 @@
+import { assertPatchCid, type QueryScopeProof } from "./customer-query-scope";
+import { parsePatchInput, parseConsolidationInput } from "./patch-request";
+import { loadReviewedQueryRoutes, selectQueryRoute, recheckQueryRoute } from "./customer-query-routing-server";
+import { reviewedQueryRouting, type QueryRoute } from "./customer-query-routing";
 import { validateDashboardCustomer } from "./dashboard-customer";
 import { customerReportingTileIds, reportingTileCompanyId } from "./reporting-direct-sources";
 import { Pool, type PoolClient } from "pg";
@@ -119,25 +123,47 @@ export async function readDashboard(canManage: boolean, companyId?: string): Pro
     const definitions = companyId && canManage ? (await db.query("SELECT id, definition FROM elastic_dashboard_queries WHERE deleted_at IS NULL AND definition->>'companyId' IS NULL")).rows : [];
     const unassignedTiles = definitions.filter(row=>!reportingTileCompanyId({...row.definition,id:row.id},configured,atlasIds))
       .map(row=>({id:row.id,title:row.definition.title,source:querySource(row.definition)}));
+    let queryRoutes: QueryRoute[] | null = null, routeError = "";
+    try { queryRoutes = await loadReviewedQueryRoutes(db); }
+    catch { routeError = "Customer query routing needs renewed approval. Cached CrowdStrike results are withheld."; }
+    const queries = rows.rows.map(row => {
+      const owner = reportingTileCompanyId({ ...row.definition, id: row.id }, configured, atlasIds);
+      let result = row.result, error = row.last_error;
+      if (querySource(row.definition) === "crowdstrike") {
+        try {
+          if (routeError) throw new DashboardError(routeError, 503);
+          if (queryRoutes !== null && !falcon) throw new DashboardError("Connect the approved CrowdStrike connection before showing results.", 409);
+          const route = selectQueryRoute(queryRoutes, owner, undefined, falcon?.revision);
+          if (route && result?.scopeKey !== route.bindingKey) { result = null; error = "Waiting for results collected under this customer's current query approval."; }
+        } catch (cause) { result = null; error = cause instanceof DashboardError ? cause.message : "Customer query routing is unavailable."; }
+      }
+      return { ...row.definition, companyId: owner, result, refreshedAt: result ? row.refreshed_at?.toISOString() ?? null : null,
+        attemptedAt: row.attempted_at?.toISOString() ?? null, error };
+    });
+    const scopedFalcon = Boolean(falcon) && !routeError && (queryRoutes === null || queryRoutes.some(r => r.companyId === companyId));
     return {
       canManage, storageReady: true, connected: Boolean(saved),
       ...(canManage && saved ? { endpoint: (saved.value as ElasticConnection).endpoint } : {}),
       crowdstrike: { connected: Boolean(falcon), ...(canManage && falcon ? { region: (falcon.value as CrowdStrikeConnection).region } : {}) },
-      ...(companyId && canManage ? {availableSources:{elastic:Boolean(saved),crowdstrike:Boolean(falcon)},unassignedTiles} : {}),
-      queries: rows.rows.map((row) => ({ ...row.definition, companyId:reportingTileCompanyId({...row.definition,id:row.id},configured,atlasIds), result: row.result,
-        refreshedAt: row.refreshed_at?.toISOString() ?? null,
-        attemptedAt: row.attempted_at?.toISOString() ?? null, error: row.last_error })),
+      ...(companyId && canManage ? {availableSources:{elastic:Boolean(saved),crowdstrike:scopedFalcon},unassignedTiles} : {}),
+      queries,
     };
   } catch {
     return { canManage, storageReady: false, connected: false, queries: [emptyQuery()] };
   }
 }
 
-async function limitedQuery(saved: unknown, query: string | QueryInput, async = true): Promise<QueryResult> {
+async function limitedQuery(saved: unknown, query: string | QueryInput, async = true, revision?: number): Promise<QueryResult> {
   if (state.running >= 2) throw new DashboardError("Two queries are already running. Try again shortly.", 429);
   state.running++;
   const input = typeof query === "string" ? { query } : query;
-  try { return await DASHBOARD_CONNECTORS[querySource(input)].execute(saved, input, async); } finally { state.running--; }
+  try {
+    const db = await database();
+    const route = querySource(input) === "crowdstrike" ? selectQueryRoute(await loadReviewedQueryRoutes(db), input.companyId, undefined, revision) : null;
+    const result = await DASHBOARD_CONNECTORS[querySource(input)].execute(saved, input, async, route?.sourceScope);
+    await recheckQueryRoute(db, route);
+    return route ? { ...result, scopeKey: route.bindingKey } : result;
+  } finally { state.running--; }
 }
 
 export function throttlePreview(actor: string): void {
@@ -150,21 +176,25 @@ export function throttlePreview(actor: string): void {
 export async function previewQuery(query: string | QueryInput, actor: string, queued = false, id?: string): Promise<QueryResult> {
   if (!queued) throttlePreview(actor);
   const input = parseQueryInput(typeof query === "string" ? { query } : query);
+  if (id && input.companyId === undefined) {
+    const row = (await (await database()).query("SELECT definition FROM elastic_dashboard_queries WHERE id=$1 AND deleted_at IS NULL", [id])).rows[0];
+    if (row) input.companyId = reportingTileCompanyId({ ...row.definition, id }, process.env.REPORTING_CUSTOMER_TILE_IDS, process.env.ATLAS_REPORTING_TILE_IDS);
+  }
   const saved = await connection(querySource(input));
   if (!saved) throw new DashboardError(`Connect ${DASHBOARD_CONNECTORS[querySource(input)].label} first.`, 409);
-  const result = await limitedQuery(saved.value, input);
+  const result = await limitedQuery(saved.value, input, true, saved.revision);
   return historyResult(await database(), input, id ?? "preview", saved.revision, result, false);
 }
 
 // The signature prevents edits to the population or measure from mixing history.
-export function historySignature(input: QueryInput): string {
+export function historySignature(input: QueryInput, scopeKey?: string): string {
   return createHash("sha256").update(JSON.stringify({ source: querySource(input), query: input.query,
-    dataset: input.crowdstrike?.dataset, measure: input.crowdstrike?.measure, group: input.crowdstrike?.groupBy })).digest("hex");
+    ...(scopeKey ? { scopeKey, companyId: input.companyId } : {}), dataset: input.crowdstrike?.dataset, measure: input.crowdstrike?.measure, group: input.crowdstrike?.groupBy })).digest("hex");
 }
 
 async function historyResult(db: Pool | PoolClient, input: QueryInput, id: string, revision: number, result: QueryResult, save: boolean): Promise<QueryResult> {
   if (querySource(input) !== "crowdstrike" || !input.crowdstrike?.history) return result;
-  const signature = historySignature(input), today = new Date().toISOString().slice(0, 10), value = result.rows[0]?.[0];
+  const signature = historySignature(input, result.scopeKey), today = new Date().toISOString().slice(0, 10), value = result.rows[0]?.[0];
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0 || result.truncated) throw new DashboardError("Only a complete count can be recorded in history.");
   if (save) {
     await db.query(`INSERT INTO dashboard_daily_history (query_id, connection_revision, signature, day, value)
@@ -184,7 +214,7 @@ async function historyResult(db: Pool | PoolClient, input: QueryInput, id: strin
     const label = new Date(day).toISOString();
     values.push([label, points.get(label.slice(0, 10)) ?? null]);
   }
-  return { columns: [{ name: "day", type: "date" }, { name: input.crowdstrike.measure, type: "long" }], rows: values, truncated: false,
+  return { ...(result.scopeKey ? { scopeKey: result.scopeKey } : {}), columns: [{ name: "day", type: "date" }, { name: input.crowdstrike.measure, type: "long" }], rows: values, truncated: false,
     note: "Last successful observation per UTC day, up to 90 days. Missing collections are gaps. History begins with the first saved collection; preview does not save history." };
 }
 
@@ -243,31 +273,72 @@ export async function saveCrowdStrikeConnection(value: unknown, actor: string): 
   triggerRefresh();
 }
 
-export async function preparePatchRequest(input: unknown, revision: number, alreadyTicketed: Set<string> = new Set()) {
-  const saved = await connection("crowdstrike");
+export async function assertQueryResultScope(input: QueryInput, result: QueryResult) {
+  if (querySource(input) !== "crowdstrike") return;
+  const route = selectQueryRoute(await loadReviewedQueryRoutes(await database()), input.companyId);
+  if (route && result.scopeKey !== route.bindingKey) throw new DashboardError("Customer query approval changed. Preview again.", 409);
+}
+
+function queryProof(route: QueryRoute): QueryScopeProof {
+  return { companyId: route.companyId, cid: route.sourceScope, bindingKey: route.bindingKey, connectionRevision: route.connectionRevision };
+}
+// Saved reports remain available as history. Only a current reviewed proof can
+// authorize a new live ticket/verification once reviewed routing is enabled.
+export async function assertPatchRequestScope(packet: { source?: string; appCompanyId?: string; queryScope?: QueryScopeProof; hostScope?: string[]; tenantIds?: string[]; tenantId?: string }, revision?: number) {
+  if (packet.source === "stored-findings") return;
+  const routes = await loadReviewedQueryRoutes(await database());
+  if (routes === null) return;
+  const proof = packet.queryScope;
+  if (!proof || packet.appCompanyId !== proof.companyId) throw new DashboardError("Prepare a fresh customer-scoped patch report before sending or verifying.", 409);
+  const route = selectQueryRoute(routes, proof.companyId, proof.cid, revision ?? proof.connectionRevision)!;
+  if (route.bindingKey !== proof.bindingKey) throw new DashboardError("Customer patch approval changed. Prepare a fresh report.", 409);
+  assertPatchCid(packet.hostScope ?? [], packet.tenantIds ?? (packet.tenantId ? [packet.tenantId] : []), route.sourceScope);
+}
+export async function preparePatchRequest(value: unknown, revision: number, alreadyTicketed: Set<string> = new Set()) {
+  const input = parsePatchInput(value), saved = await connection("crowdstrike"), db = await database();
   if (!saved || saved.revision !== revision) throw new DashboardError("The CrowdStrike connection changed. Prepare the request again.", 409);
+  const route = selectQueryRoute(await loadReviewedQueryRoutes(db), input.appCompanyId, input.tenantId, revision);
   if (state.running >= 2) throw new DashboardError("Two queries are already running. Try again shortly.", 429);
   state.running++;
-  try { return await executePatchRequest(saved.value as CrowdStrikeConnection, input, alreadyTicketed); }
-  finally { state.running--; }
+  try {
+    const packet = await executePatchRequest(saved.value as CrowdStrikeConnection, route ? { ...input, tenantId: route.sourceScope } : input, alreadyTicketed);
+    await recheckQueryRoute(db, route);
+    if (route) { assertPatchCid(packet.hostScope, packet.tenantIds, route.sourceScope); packet.appCompanyId = route.companyId; packet.queryScope = queryProof(route); }
+    return packet;
+  } finally { state.running--; }
 }
-
-export async function prepareConsolidation(input: unknown, revision: number, alreadyTicketed: Set<string> = new Set()) {
-  const saved = await connection("crowdstrike");
+export async function prepareConsolidation(value: unknown, revision: number, alreadyTicketed: Set<string> = new Set()) {
+  const input = parseConsolidationInput(value), saved = await connection("crowdstrike"), db = await database();
   if (!saved || saved.revision !== revision) throw new DashboardError("The CrowdStrike connection changed. Prepare the consolidation again.", 409);
+  const route = selectQueryRoute(await loadReviewedQueryRoutes(db), input.appCompanyId, input.tenantId, revision);
   if (state.running >= 2) throw new DashboardError("Two queries are already running. Try again shortly.", 429);
   state.running++;
-  try { return await executePatchConsolidation(saved.value as CrowdStrikeConnection, input, alreadyTicketed); }
-  finally { state.running--; }
+  try {
+    const packet = await executePatchConsolidation(saved.value as CrowdStrikeConnection, route ? { ...input, tenantId: route.sourceScope, appCompanyId: route.companyId } : input, alreadyTicketed);
+    await recheckQueryRoute(db, route);
+    if (route) {
+      assertPatchCid([], packet.tenantIds, route.sourceScope);
+      packet.appCompanyId = route.companyId; packet.queryScope = queryProof(route);
+      for (const group of packet.groups) {
+        assertPatchCid(group.hostScope, [group.tenantId, ...group.deviceCves.map(d => d.cid)], route.sourceScope);
+        group.appCompanyId = route.companyId; group.queryScope = queryProof(route);
+      }
+    }
+    return packet;
+  } finally { state.running--; }
 }
-
-export async function verifyAgainstCrowdStrike(cves: string[], hostScope: string[], tenantId: string, revision: number) {
-  const saved = await connection("crowdstrike");
+export async function verifyAgainstCrowdStrike(cves: string[], hostScope: string[], tenantId: string, revision: number, packet?: { appCompanyId?: string; queryScope?: QueryScopeProof }) {
+  const saved = await connection("crowdstrike"), db = await database();
   if (!saved || saved.revision !== revision) throw new DashboardError("The CrowdStrike connection changed. Prepare a fresh report before verifying.", 409);
+  const route = selectQueryRoute(await loadReviewedQueryRoutes(db), packet?.appCompanyId, tenantId, revision);
+  if (route) await assertPatchRequestScope({ ...packet, hostScope, tenantId }, revision);
   if (state.running >= 2) throw new DashboardError("Two queries are already running. Try again shortly.", 429);
   state.running++;
-  try { return await verifyPatchFix(saved.value as CrowdStrikeConnection, cves, hostScope, tenantId); }
-  finally { state.running--; }
+  try {
+    const result = await verifyPatchFix(saved.value as CrowdStrikeConnection, cves, hostScope, tenantId);
+    await recheckQueryRoute(db, route);
+    return result;
+  } finally { state.running--; }
 }
 
 // Save settings first. Remote validation and execution belong to the refresh
@@ -276,6 +347,7 @@ export async function addDashboardTile(value: unknown, actor: string, customerSc
   const body = value as Record<string, unknown>;
   const id = typeof body?.id === "string" ? body.id : randomUUID();
   const definition = parseDefinition(customerScope ? {...body,companyId:customerScope} : body, id), source = querySource(definition);
+  const withheld = source === "crowdstrike" && reviewedQueryRouting(process.env.VULN_REVIEWED_QUERY_PROVIDERS);
   if (definition.companyId) await validateDashboardCustomer(definition.companyId);
   const db = await database(), client = await db.connect();
   let tile: DashboardQuery;
@@ -295,7 +367,7 @@ export async function addDashboardTile(value: unknown, actor: string, customerSc
     const count = await client.query("SELECT count(*)::int AS count FROM elastic_dashboard_queries WHERE id <> $1 AND deleted_at IS NULL", [id]);
     if (count.rows[0].count >= 24) throw new DashboardError("This dashboard supports up to 24 saved queries.");
     let result: QueryResult | null = null, refreshedAt: string | null = null;
-    if (previous?.result && JSON.stringify(parseQueryInput(previous.definition)) === JSON.stringify(parseQueryInput(definition))) {
+    if (previous?.result && JSON.stringify(parseQueryInput({ ...previous.definition, companyId: previousCompany })) === JSON.stringify(parseQueryInput(definition))) {
       try { validateDisplayResult(previous.result, definition); result = previous.result; refreshedAt = previous.refreshed_at?.toISOString() ?? null; }
       catch { /* A new display can wait for its first valid result. */ }
     }
@@ -308,7 +380,9 @@ export async function addDashboardTile(value: unknown, actor: string, customerSc
       [id, JSON.stringify(definition), result ? JSON.stringify(result) : null, refreshedAt]);
     await client.query("INSERT INTO elastic_dashboard_audit (actor, action, query_id) VALUES ($1, 'query.saved', $2)", [actor, id]);
     await client.query("COMMIT");
-    tile = { ...definition, result, refreshedAt, attemptedAt: null, error: null };
+    // Preserve cache in storage, but the immediate save response must not expose
+    // it before readDashboard checks the current approval. Saving stays local.
+    tile = { ...definition, result: withheld ? null : result, refreshedAt: withheld ? null : refreshedAt, attemptedAt: null, error: null };
   } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
   triggerRefresh(false,customerScope ? [id] : undefined);
   return { saved: true, query: tile };
@@ -386,10 +460,14 @@ export async function saveQuery(value: unknown, actor: string, job?: { id: strin
   const id = typeof body?.id === "string" ? body.id : randomUUID();
   const definition = parseDefinition(body, id);
   if (definition.companyId) await validateDashboardCustomer(definition.companyId);
+  if (definition.companyId === undefined) {
+    const row = (await (await database()).query("SELECT definition FROM elastic_dashboard_queries WHERE id=$1 AND deleted_at IS NULL", [id])).rows[0];
+    if (row) definition.companyId = reportingTileCompanyId({ ...row.definition, id }, process.env.REPORTING_CUSTOMER_TILE_IDS, process.env.ATLAS_REPORTING_TILE_IDS);
+  }
   const source = querySource(definition), saved = await connection(source);
   if (!saved) throw new DashboardError(`Connect ${DASHBOARD_CONNECTORS[source].label} first.`, 409);
   if (!job) throttlePreview(actor);
-  const rawResult = await limitedQuery(saved.value, definition);
+  const rawResult = await limitedQuery(saved.value, definition, true, saved.revision);
   const db = await database();
   const client = await db.connect();
   try {
@@ -439,6 +517,7 @@ async function refreshQueries(force = false, ids?: string[]): Promise<void> {
     // Leave pending tiles due while previews occupy the execution slots.
     if (state.running >= 2) break;
     const definition = parseDefinition(row.definition, row.id);
+    definition.companyId = reportingTileCompanyId({ ...definition, id: row.id }, process.env.REPORTING_CUSTOMER_TILE_IDS, process.env.ATLAS_REPORTING_TILE_IDS);
     let saved;
     try { saved = await connection(querySource(definition)); }
     catch (error) {
@@ -460,7 +539,7 @@ async function refreshQueries(force = false, ids?: string[]): Promise<void> {
     let result: QueryResult | null = null;
     let error: string | null = null;
     try {
-      result = await limitedQuery(saved.value, definition);
+      result = await limitedQuery(saved.value, definition, true, saved.revision);
     } catch (err) {
       if (err instanceof DashboardError && err.status === 429 && state.running >= 2) {
         await db.query(`UPDATE elastic_dashboard_queries SET refresh_requested = true,
