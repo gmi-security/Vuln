@@ -59,7 +59,7 @@ const reasons: Record<string, string> = {
 // Public projection: never spread SQL rows, references, raw tenants, target lists,
 // audit notes or another customer's candidates into the browser response.
 export function customerConnectorStatus(companyId: string, preview: ReturnType<typeof buildConnectorPreview>,
-  drafts: ConnectorStatusDraft[], registryAvailable: boolean, checkedAt = new Date().toISOString(), inventory: InventoryRoutingStatus[] = [], spotlight: SpotlightRoutingStatus[] = [], scanner: ScannerRoutingStatus[] = [], queries: { id: string; review: string; routing: string }[] = []): CustomerConnectorStatus {
+  drafts: ConnectorStatusDraft[], registryAvailable: boolean, checkedAt = new Date().toISOString(), inventory: InventoryRoutingStatus[] = [], spotlight: SpotlightRoutingStatus[] = [], scanner: ScannerRoutingStatus[] = [], queries: { id: string; review: string; routing: string }[] = [], appsec: { id: string; review: string; routing: string }[] = []): CustomerConnectorStatus {
   const company = preview.companies.find(c => c.id === companyId);
   if (!company) throw new Error("Customer not found.");
   const current = new Map(preview.candidates.map(c => [c.id, c]));
@@ -125,6 +125,13 @@ export function customerConnectorStatus(companyId: string, preview: ReturnType<t
     item.scope = "A separate saved-query approval is recorded. See routing details for its current state.";
     item.data = { domains: ["saved-queries"], storage: item.provider === "elastic" ? "Customer saved-query cache" : "Customer query cache, daily observations and prepared live patch reports",
       lifecycle: `Refresh within the approved ${item.provider === "elastic" ? "datasets" : "CID"}; this approval does not publish platform findings`, routing: status.routing };
+  }
+  for (const status of appsec) {
+    const item = items.find(i => i.id === status.id && i.provider === "appsec");
+    if (!item) continue;
+    item.review = status.review;
+    item.scope = "A separate repository approval is recorded. See routing details for its current state.";
+    if (item.data) item.data.routing = status.routing;
   }
   return { companyId, companyName: company.name, checkedAt, registryAvailable, items };
 }

@@ -6,7 +6,7 @@ import { userInfo, hostname } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
 import nextEnv from '@next/env';
-import { loadConnectorPreview, loadConnectorDraftStore, loadConnectorBindingStore, loadInventoryRouting, loadSpotlightRouting, loadScannerRouting, loadQueryRouting } from './connector-preview-loader.mjs';
+import { loadConnectorPreview, loadConnectorDraftStore, loadConnectorBindingStore, loadInventoryRouting, loadSpotlightRouting, loadScannerRouting, loadQueryRouting, loadAppSecRouting } from './connector-preview-loader.mjs';
 import { readApplicationConnectorMetadata, readDashboardConnectorMetadata } from '../lib/db/connector-metadata.mjs';
 
 const commands = {
@@ -15,6 +15,8 @@ const commands = {
   review: ['--input', '--env-file'],
   assign: ['--input', '--env-file'],
   'export-bindings': ['--company', '--output', '--env-file'],
+  'route-appsec': ['--input', '--env-file'],
+  'export-appsec-routes': ['--company', '--output', '--env-file'],
   'route-query': ['--input', '--env-file'],
   'export-query-routes': ['--company', '--output', '--env-file'],
   'route-scanner': ['--input', '--env-file'],
@@ -35,7 +37,7 @@ export function parseRegistryArgs(args) {
   }
   if (command === 'import' && !/^[a-f0-9]{64}$/.test(options['--fingerprint'] ?? '')) throw new Error('A reviewed preview fingerprint is required.');
   if (command.startsWith('export') && (!options['--company'] || options['--company'].length > 100 || !options['--output'])) throw new Error('Export requires a customer and private output path.');
-  if (['review','assign','route-inventory','route-spotlight','route-scanner','route-query'].includes(command) && !options['--input']) throw new Error('Review requires a private input file.');
+  if (['review','assign','route-inventory','route-spotlight','route-scanner','route-query','route-appsec'].includes(command) && !options['--input']) throw new Error('Review requires a private input file.');
   return { command, options };
 }
 export function registryReviewInput(value) {
@@ -86,17 +88,19 @@ export async function runRegistry(args, runtimeEnv = process.env) {
       return client;
     }
     const app = await metadataClient(env.DATABASE_URL);
-    const operationalCommand = ['route-inventory','export-inventory-routes','route-spotlight','export-spotlight-routes','route-scanner','export-scanner-routes'].includes(command);
+    const operationalCommand = ['route-appsec','export-appsec-routes','route-inventory','export-inventory-routes','route-spotlight','export-spotlight-routes','route-scanner','export-scanner-routes'].includes(command);
     const dashboard = !operationalCommand && env.ELASTIC_VULN_DATABASE_URL && env.ELASTIC_VULN_DATABASE_URL !== env.DATABASE_URL
       ? await metadataClient(env.ELASTIC_VULN_DATABASE_URL) : app;
     const build = await loadConnectorPreview(), store = (await loadConnectorDraftStore())(pool);
     const collect = async () => build({ ...await readApplicationConnectorMetadata(app),
       ...(operationalCommand ? { connections: [], tiles: [] } : await readDashboardConnectorMetadata(dashboard)) }, env);
     if (command === 'import') return { action: command, ...await store.importPreview(options['--fingerprint'], actor, collect), enabledBindings: 0 };
-    if (['review','assign','route-inventory','route-spotlight','route-scanner','route-query'].includes(command)) {
+    if (['review','assign','route-inventory','route-spotlight','route-scanner','route-query','route-appsec'].includes(command)) {
       const path = resolve(options['--input']);
       if ((await stat(path)).size > 32 * 1024) throw new Error('Review file exceeds 32 KiB.');
       const value = JSON.parse(await readFile(path, 'utf8'));
+      if (command === 'route-appsec') return { action: command,
+        ...await (await loadAppSecRouting()).createAppSecRoutingStore(pool,env).save(value,actor,collect) };
       if (command === 'route-query') return { action: command,
         ...await (await loadQueryRouting()).createQueryRoutingStore(pool).save(value,actor,collect) };
       if (command === 'route-scanner') return { action: command,
@@ -109,6 +113,12 @@ export async function runRegistry(args, runtimeEnv = process.env) {
         ? await (await loadConnectorBindingStore())(pool).save(value,actor,collect)
         : await store.reviewCurrentDraft(registryReviewInput(value), actor, collect);
       return { action: command, revision: result.revision, reviewState: result.reviewState ?? result.review_state, enabledBindings: 0 };
+    }
+    if (command === 'export-appsec-routes') {
+      const result = await (await loadAppSecRouting()).createAppSecRoutingStore(pool,env).exportCustomer(options['--company']);
+      file = await open(resolve(options['--output']),'wx',0o600);
+      await file.writeFile(JSON.stringify(result,null,2)+'\n');
+      return { action:command, routes:result.routes.length };
     }
     if (command === 'export-query-routes') {
       const result = await (await loadQueryRouting()).createQueryRoutingStore(pool).exportCustomer(options['--company']);
@@ -155,6 +165,13 @@ export async function runRegistry(args, runtimeEnv = process.env) {
 }
 
 const safeMessages = new Set([
+  'Invalid appsec routing approval.', 'Appsec routing changed; export current state before approval.',
+  'No appsec route exists to disable.', 'Appsec binding changed; review current state before approval.',
+  'Appsec routing limit exceeded.', 'AppSec assignment needs a current review.',
+  'AppSec routing requires the configured scan/finding datasets and query-only repository ownership.',
+  'AppSec routing requires exact owner/repository identities, with no wildcard or duplicate repository.',
+  'AppSec repository ownership conflicts.', 'AppSec route changed or needs renewed approval.', 'AppSec route scope changed.',
+
   'Use import, export or review with named options.', 'Invalid or duplicate command option.',
   'A reviewed preview fingerprint is required.', 'Export requires a customer and private output path.',
   'Review requires a private input file.', 'Application database is not configured.',

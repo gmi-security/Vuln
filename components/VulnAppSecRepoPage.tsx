@@ -9,8 +9,8 @@ import { formatDateTime, severityClass } from "@/lib/format";
 import type { AppSecRepoDetail } from "@/lib/elastic-appsec";
 import AppSecTrendChart from "@/components/AppSecTrendChart";
 
-const SCAN_GRID = "grid grid-cols-[1fr_110px_85px_85px_85px_85px_110px] items-center gap-4";
-const FINDING_GRID = "grid grid-cols-[95px_120px_1.6fr_1fr_110px_130px] items-center gap-4";
+const SCAN_GRID = "min-w-[820px] grid grid-cols-[1fr_110px_85px_85px_85px_85px_110px] items-center gap-4";
+const FINDING_GRID = "min-w-[950px] grid grid-cols-[95px_120px_1.6fr_1fr_110px_130px] items-center gap-4";
 
 function gateColor(gate: string | null): string {
   if (!gate) return "#52525b";
@@ -20,7 +20,7 @@ function gateColor(gate: string | null): string {
   return "#f5a623";
 }
 
-export default function VulnAppSecRepoPage({ repository }: { repository: string }) {
+export default function VulnAppSecRepoPage({ repository, companyId }: { repository: string; companyId?: string }) {
   const [configured, setConfigured] = useState(true);
   const [detail, setDetail] = useState<AppSecRepoDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -31,21 +31,23 @@ export default function VulnAppSecRepoPage({ repository }: { repository: string 
     const seq = ++loadSeq.current;
     setLoading(true);
     try {
-      const res = await fetch(`/api/appsec/repositories/${encodeURIComponent(repository)}`, { cache: "no-store" });
+      const res = await fetch(`/api/appsec/repositories/${encodeURIComponent(repository)}${companyId ? `?companyId=${encodeURIComponent(companyId)}` : ""}`, { cache: "no-store" });
       const json = await res.json();
       if (seq !== loadSeq.current) return;
+      if (companyId && json.companyId !== companyId) throw new Error("Customer response did not match.");
+      if (!res.ok) { setDetail(null); setError(json.error || "AppSec repository is unavailable."); return; }
       setConfigured(json.configured !== false);
       setDetail(json.detail ?? null);
       setError(json.error ?? null);
     } catch {
       if (seq !== loadSeq.current) return;
-      setError("Failed to reach the API.");
+      setDetail(null); setError("Failed to reach the API.");
     } finally {
       if (seq === loadSeq.current) setLoading(false);
     }
-  }, [repository]);
+  }, [repository, companyId]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void load(); return () => { ++loadSeq.current; }; }, [load]);
 
   const latest = detail?.scans[0];
 
@@ -56,7 +58,7 @@ export default function VulnAppSecRepoPage({ repository }: { repository: string 
       subtitle="Trivy scan history and current findings for this repository."
       actions={
         <>
-          <Link href="/appsec" className={ghostButtonClass}>
+          <Link href={companyId ? `/appsec?companyId=${encodeURIComponent(companyId)}` : "/appsec"} className={ghostButtonClass}>
             <ArrowLeft size={16} />
             All repositories
           </Link>
@@ -100,7 +102,7 @@ export default function VulnAppSecRepoPage({ repository }: { repository: string 
         <AppSecTrendChart points={detail?.scans ?? []} />
       </div>
 
-      <div className="overflow-hidden rounded-[24px] border border-[rgba(179,14,20,0.12)] bg-[#040404]">
+      <div className="overflow-x-auto rounded-[24px] border border-[rgba(179,14,20,0.12)] bg-[#040404]">
         <div className={`${SCAN_GRID} border-b border-zinc-900 px-5 py-3 text-xs uppercase tracking-[0.2em] text-zinc-500`}>
           <div>Scan</div>
           <div>Status</div>
@@ -136,10 +138,11 @@ export default function VulnAppSecRepoPage({ repository }: { repository: string 
         ) : null}
       </div>
 
-      <div className="overflow-hidden rounded-[24px] border border-[rgba(179,14,20,0.12)] bg-[#040404]">
+      <div className="overflow-x-auto rounded-[24px] border border-[rgba(179,14,20,0.12)] bg-[#040404]">
         <div className="border-b border-zinc-900 px-5 py-3 text-xs uppercase tracking-[0.2em] text-zinc-500">
           Current findings
         </div>
+        {detail?.findingsTruncated ? <p className="px-5 py-3 text-sm text-amber-300">Showing the first 100 findings. More findings exist in the source.</p> : null}
         {detail?.findingsError ? (
           <div className="px-5 py-8 text-center text-sm text-zinc-500">
             Findings unavailable: {detail.findingsError}

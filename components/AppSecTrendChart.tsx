@@ -44,7 +44,7 @@ function niceStep(rough: number): number {
 // Input arrives newest-first (both source queries SORT ... DESC); this
 // chart reads left-to-right as time passing, so it needs the chronological
 // order flipped back before plotting.
-export default function AppSecTrendChart({ points }: { points: AppSecTrendInput[] }) {
+export default function AppSecTrendChart({ points, emptyMessage = "Trend appears once this repository has at least two completed scans." }: { points: AppSecTrendInput[]; emptyMessage?: string }) {
   const gradientId = useId();
   const [hover, setHover] = useState<number | null>(null);
 
@@ -63,7 +63,7 @@ export default function AppSecTrendChart({ points }: { points: AppSecTrendInput[
   if (n < 2) {
     return (
       <div className="flex h-44 items-center justify-center rounded-2xl border border-dashed border-zinc-800 px-6 text-center text-sm text-zinc-500">
-        Trend appears once this repository has at least two completed scans.
+        {emptyMessage}
       </div>
     );
   }

@@ -1,5 +1,35 @@
 import { executeEsql, type ElasticConnection } from "./elastic-query-client";
 import { DashboardError, type QueryResult } from "./elastic-dashboard";
+import { executeCustomerEsql } from "./customer-elastic-query";
+import { appsecRepositories, appsecStreams, reviewedAppSecRouting } from "./customer-appsec-routing";
+
+export type AppSecReadScope = { connection: ElasticConnection; repositories: string[]; streams: ReturnType<typeof appsecStreams> };
+function readContext(scope?: AppSecReadScope) {
+  if (!scope && reviewedAppSecRouting(process.env.VULN_REVIEWED_APPSEC_PROVIDERS))
+    throw new DashboardError("Choose a customer with approved AppSec repositories.", 409);
+  const connection = scope?.connection ?? appsecElasticConfig();
+  if (!connection) throw new DashboardError("AppSec Elastic connection is not configured.");
+  if (scope) appsecRepositories(scope.repositories);
+  return connection;
+}
+async function appsecQuery(query: string, stream: "scan" | "finding", scope?: AppSecReadScope) {
+  const connection = readContext(scope);
+  if (!scope) return executeEsql(connection, query);
+  const predicate = scope.repositories.map(repo => `"${esqlStringLiteral(repo)}"`).join(", ");
+  const suffix = query.slice(query.indexOf("\n"));
+  // Fixed server templates only. Scalar identities prevent a multi-valued row
+  // from entering more than one customer's repository totals.
+  const scoped = `FROM ${scope.streams[stream]}\n| WHERE MV_COUNT(\`gmi.appsec.repository\`) == 1 AND \`gmi.appsec.repository\` IN (${predicate})${suffix}`;
+  try { return await executeCustomerEsql(connection, scoped, false, [scope.streams[stream]]); }
+  catch { throw new DashboardError("AppSec source query could not be verified. Review source access and repository configuration.", 502); }
+}
+function assertRepositoryRows(result: QueryResult, scope: AppSecReadScope, repository?: string, scanId?: string) {
+  const repo = col(result, "gmi.appsec.repository");
+  const scan = scanId === undefined ? -1 : col(result, "gmi.appsec.scan.id");
+  if (result.rows.some(row => typeof row[repo] !== "string" || !scope.repositories.includes(row[repo] as string) ||
+    repository !== undefined && row[repo] !== repository || scanId !== undefined && row[scan] !== scanId))
+    throw new DashboardError("AppSec result did not match the approved repository and scan.", 409);
+}
 
 export function appsecElasticConfig(): ElasticConnection | null {
   const endpoint = process.env.APPSEC_ELASTIC_URL?.trim();
@@ -109,11 +139,9 @@ export type AppSecTrendPoint = {
   resolved: number;
 };
 
-export async function fetchAppSecTrend(): Promise<AppSecTrendPoint[]> {
-  const connection = appsecElasticConfig();
-  if (!connection) throw new DashboardError("AppSec Elastic connection is not configured.");
-
-  const result = await executeEsql(connection, AGGREGATE_TREND_QUERY);
+export async function fetchAppSecTrend(scope?: AppSecReadScope): Promise<AppSecTrendPoint[]> {
+  const result = await appsecQuery(AGGREGATE_TREND_QUERY, "scan", scope);
+  if (scope && result.truncated) throw new DashboardError("AppSec trend was incomplete.");
   const idx = Object.fromEntries(
     ["day", "critical", "high", "resolved"].map((name) => [name, col(result, name)]),
   ) as Record<string, number>;
@@ -126,11 +154,9 @@ export async function fetchAppSecTrend(): Promise<AppSecTrendPoint[]> {
   }));
 }
 
-export async function fetchAppSecSummary(): Promise<AppSecSummary> {
-  const connection = appsecElasticConfig();
-  if (!connection) throw new DashboardError("AppSec Elastic connection is not configured.");
-
-  const result = await executeEsql(connection, SUMMARY_QUERY);
+export async function fetchAppSecSummary(scope?: AppSecReadScope): Promise<AppSecSummary> {
+  const result = await appsecQuery(SUMMARY_QUERY, "scan", scope);
+  if (scope && result.truncated) throw new DashboardError("AppSec summary was incomplete.");
   const idx = Object.fromEntries([
     "repository", "last_scan", "findings", "vulnerabilities", "misconfigurations", "licenses",
     "critical", "high", "medium", "low", "secrets", "new_findings", "new_critical", "new_high", "resolved", "gate",
@@ -155,6 +181,9 @@ export async function fetchAppSecSummary(): Promise<AppSecSummary> {
     gate: asString(r[idx.gate]),
   }));
 
+  if (scope && (rows.some(row => !scope.repositories.includes(row.repository)) || new Set(rows.map(row => row.repository)).size !== rows.length))
+    throw new DashboardError("AppSec summary did not match the approved repositories.", 409);
+  const totalRepositories = scope?.repositories.length ?? TARGET_REPOSITORIES;
   const totals = rows.reduce((acc, row) => {
     acc.findings += row.findings;
     acc.vulnerabilities += row.vulnerabilities;
@@ -172,8 +201,8 @@ export async function fetchAppSecSummary(): Promise<AppSecSummary> {
 
   return {
     repositories: rows.length,
-    totalRepositories: TARGET_REPOSITORIES,
-    coveragePct: Math.round((rows.length * 1000) / TARGET_REPOSITORIES) / 10,
+    totalRepositories,
+    coveragePct: Math.round((rows.length * 1000) / totalRepositories) / 10,
     ...totals,
     rows,
   };
@@ -210,6 +239,7 @@ export type AppSecRepoDetail = {
   scans: AppSecScanHistory[];
   findings: AppSecFinding[];
   findingsError: string | null;
+  findingsTruncated?: boolean;
 };
 
 function esqlStringLiteral(value: string): string {
@@ -218,7 +248,7 @@ function esqlStringLiteral(value: string): string {
 
 const SCAN_HISTORY_QUERY = (repository: string) => `FROM ${APPSEC_SCAN_STREAM}
 | WHERE \`gmi.appsec.repository\` == "${repository}" AND \`gmi.appsec.scan.status\` == "completed"
-| KEEP @timestamp, \`gmi.appsec.scan.id\`, \`gmi.appsec.scan.status\`, \`gmi.appsec.findings.total\`, \`gmi.appsec.severity.critical\`, \`gmi.appsec.severity.high\`, \`gmi.appsec.delta.new.critical\`, \`gmi.appsec.delta.new.high\`, \`gmi.appsec.delta.resolved.total\`, \`gmi.appsec.gate.result\`
+| KEEP @timestamp, \`gmi.appsec.repository\`, \`gmi.appsec.scan.id\`, \`gmi.appsec.scan.status\`, \`gmi.appsec.findings.total\`, \`gmi.appsec.severity.critical\`, \`gmi.appsec.severity.high\`, \`gmi.appsec.delta.new.critical\`, \`gmi.appsec.delta.new.high\`, \`gmi.appsec.delta.resolved.total\`, \`gmi.appsec.gate.result\`
 | SORT @timestamp DESC
 | LIMIT 25`;
 
@@ -226,16 +256,20 @@ const FINDINGS_QUERY = (repository: string, scanId: string) => `FROM ${APPSEC_FI
 | WHERE \`gmi.appsec.repository\` == "${repository}"
   AND \`gmi.appsec.scan.id\` == "${scanId}"
   AND \`gmi.appsec.finding.status\` != "resolved"
-| KEEP @timestamp, \`gmi.appsec.finding.fingerprint\`, \`gmi.appsec.finding.id\`, \`gmi.appsec.finding.severity\`, \`gmi.appsec.finding.kind\`, \`gmi.appsec.finding.title\`, \`gmi.appsec.finding.target\`, \`gmi.appsec.finding.status\`, \`package.name\`, \`vulnerability.id\`
+| KEEP @timestamp, \`gmi.appsec.repository\`, \`gmi.appsec.scan.id\`, \`gmi.appsec.finding.fingerprint\`, \`gmi.appsec.finding.id\`, \`gmi.appsec.finding.severity\`, \`gmi.appsec.finding.kind\`, \`gmi.appsec.finding.title\`, \`gmi.appsec.finding.target\`, \`gmi.appsec.finding.status\`, \`package.name\`, \`vulnerability.id\`
 | SORT \`gmi.appsec.finding.severity\` ASC
 | LIMIT 100`;
 
-export async function fetchAppSecRepoDetail(repository: string): Promise<AppSecRepoDetail> {
-  const connection = appsecElasticConfig();
-  if (!connection) throw new DashboardError("AppSec Elastic connection is not configured.");
+export async function fetchAppSecRepoDetail(repository: string, scope?: AppSecReadScope): Promise<AppSecRepoDetail> {
+  readContext(scope);
+  if (scope && !scope.repositories.includes(repository)) throw new DashboardError("Repository is not approved for this customer.", 404);
   const safeName = esqlStringLiteral(repository);
 
-  const scanResult = await executeEsql(connection, SCAN_HISTORY_QUERY(safeName));
+  const scanResult = await appsecQuery(SCAN_HISTORY_QUERY(safeName), "scan", scope);
+  if (scope) {
+    if (scanResult.truncated) throw new DashboardError("AppSec scan history was incomplete.");
+    assertRepositoryRows(scanResult, scope, repository);
+  }
   const idx = Object.fromEntries([
     "@timestamp", "gmi.appsec.scan.id", "gmi.appsec.scan.status", "gmi.appsec.findings.total",
     "gmi.appsec.severity.critical", "gmi.appsec.severity.high", "gmi.appsec.delta.new.critical",
@@ -257,18 +291,22 @@ export async function fetchAppSecRepoDetail(repository: string): Promise<AppSecR
 
   let findings: AppSecFinding[] = [];
   let findingsError: string | null = null;
+  let findingsTruncated = false;
   const latestScanId = scans[0]?.scanId;
 
   if (latestScanId) {
     try {
-      const findingResult = await executeEsql(connection, FINDINGS_QUERY(safeName, esqlStringLiteral(latestScanId)));
+      const query = FINDINGS_QUERY(safeName, esqlStringLiteral(latestScanId));
+      const findingResult = await appsecQuery(scope ? query.replace(/LIMIT 100$/, "LIMIT 101") : query, "finding", scope);
+      if (scope) assertRepositoryRows(findingResult, scope, repository, latestScanId);
+      findingsTruncated = !!findingResult.truncated || findingResult.rows.length > 100;
       const fidx = Object.fromEntries([
         "@timestamp", "gmi.appsec.finding.fingerprint", "gmi.appsec.finding.id", "gmi.appsec.finding.severity",
         "gmi.appsec.finding.kind", "gmi.appsec.finding.title", "gmi.appsec.finding.target",
         "gmi.appsec.finding.status", "package.name", "vulnerability.id",
       ].map((name) => [name, col(findingResult, name)])) as Record<string, number>;
 
-      findings = findingResult.rows.map((r) => ({
+      findings = findingResult.rows.slice(0, 100).map((r) => ({
         observedAt: asString(r[fidx["@timestamp"]]),
         fingerprint: asString(r[fidx["gmi.appsec.finding.fingerprint"]]) ?? "",
         id: asString(r[fidx["gmi.appsec.finding.id"]]) ?? "",
@@ -281,9 +319,10 @@ export async function fetchAppSecRepoDetail(repository: string): Promise<AppSecR
         vulnerabilityId: asString(r[fidx["vulnerability.id"]]),
       }));
     } catch (err) {
-      findingsError = err instanceof Error ? err.message : "Could not load findings.";
+      findingsError = scope ? "Current findings could not be verified for this repository. Try again or review the source." :
+        err instanceof Error ? err.message : "Could not load findings.";
     }
   }
 
-  return { repository, scans, findings, findingsError };
+  return { repository, scans, findings, findingsError, findingsTruncated };
 }

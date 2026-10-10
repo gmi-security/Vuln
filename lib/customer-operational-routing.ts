@@ -8,10 +8,10 @@ type OperationalRouteRow = { candidate_id: string; company_id: string; provider:
   binding_revision: number; candidate_hash: string; revision: number; enabled: boolean };
 const fail = (message: string): never => { throw new Error(message); };
 function operationalTablePrefix(kind: string) {
-  if (!["inventory", "spotlight", "scanner", "query"].includes(kind)) return fail("Unsupported operational route type.");
+  if (!["inventory", "spotlight", "scanner", "query", "appsec"].includes(kind)) return fail("Unsupported operational route type.");
   return `customer_${kind}`;
 }
-export function operationalRouteEvidenceSelect(kind: "inventory" | "spotlight" | "scanner" | "query") {
+export function operationalRouteEvidenceSelect(kind: "inventory" | "spotlight" | "scanner" | "query" | "appsec") {
   return `SELECT r.*,b.candidate_hash AS binding_hash,b.revision AS current_binding_revision,
     b.proposal,b.review_state,b.reviewed_at,d.candidate_hash AS imported_hash,d.source_present
     FROM public.${operationalTablePrefix(kind)}_routes r
@@ -20,7 +20,7 @@ export function operationalRouteEvidenceSelect(kind: "inventory" | "spotlight" |
 }
 // Shared optimistic approval, audit and read transaction. Provider policy owns scope validation.
 export function createOperationalRoutingStore<P extends string, R>(db: Pick<Pool, "connect">, policy: {
-  kind: "inventory" | "spotlight" | "scanner" | "query"; providers: readonly P[];
+  kind: "inventory" | "spotlight" | "scanner" | "query" | "appsec"; providers: readonly P[];
   bindingScope: (companyId: string, preview: Preview, row: any) => { provider: P; sourceScope: string };
   validateRoute: (row: any, preview: Preview) => R;
   checkRoutes: (routes: R[], provider: P) => void;

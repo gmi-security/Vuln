@@ -10,7 +10,7 @@ import { remediationNavItems } from "@/lib/navigation";
 import type { CustomerConnectorStatus } from "@/lib/customer-connector-status";
 import styles from "./QueryDashboard.module.css";
 
-const names: Record<string, string> = { defender: "Microsoft Defender", crowdstrike: "CrowdStrike", elastic: "Elasticsearch",
+const names: Record<string, string> = { appsec: "AppSec", defender: "Microsoft Defender", crowdstrike: "CrowdStrike", elastic: "Elasticsearch",
   misp: "MISP", opencti: "OpenCTI", intelowl: "IntelOwl", spiderfoot: "SpiderFoot", automate: "ConnectWise Automate", tidal: "Tidal", intune: "Intune" };
 
 function Status({ companyId, refresh }: { companyId: string; refresh: number }) {

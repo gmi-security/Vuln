@@ -113,7 +113,7 @@ test('read service skips schema initialization, preserves customer filters and f
     const service = await load('lib/customer-connector-status-service.ts', {
       'pg': { Pool: class { constructor() { throw new Error('Unexpected new database'); } } },
       './persist': { applicationDatabase: () => app }, './elastic-dashboard': { DashboardError },
-      './customer-query-routing':queryRouting, './customer-scanner-routing':scanner, './customer-spotlight-routing':spotlight, './customer-inventory-routing': inventory, './customer-connector-preview': { buildConnectorPreview: build }, './customer-connector-status': { customerConnectorStatus: project },
+      './customer-appsec-routing': {appsecRouteEvidenceSelect: 'SELECT r.* FROM public.customer_appsec_routes r', appsecRoutingStatus: () => {throw Error('Unexpected AppSec status');}}, './customer-query-routing':queryRouting, './customer-scanner-routing':scanner, './customer-spotlight-routing':spotlight, './customer-inventory-routing': inventory, './customer-connector-preview': { buildConnectorPreview: build }, './customer-connector-status': { customerConnectorStatus: project },
       './db/connector-metadata.mjs': { readApplicationConnectorMetadata: async () => data, readDashboardConnectorMetadata: async () => data },
     });
     assert.equal((await service.readCustomerConnectorStatus('A')).registryAvailable, false);
@@ -147,7 +147,7 @@ test('status reads each customer binding over the legacy proposal without export
     const service=await load('lib/customer-connector-status-service.ts',{
       'pg':{Pool:class{constructor(){throw Error('Unexpected pool');}}},
       './persist':{applicationDatabase:()=>({connect:async()=>client})},'./elastic-dashboard':{DashboardError},
-      './customer-query-routing':queryRouting, './customer-scanner-routing':scanner, './customer-spotlight-routing':spotlight, './customer-inventory-routing':inventory, './customer-connector-preview':{buildConnectorPreview:build},'./customer-connector-status':{customerConnectorStatus:project},
+      './customer-appsec-routing': {appsecRouteEvidenceSelect: 'SELECT r.* FROM public.customer_appsec_routes r', appsecRoutingStatus: () => {throw Error('Unexpected AppSec status');}}, './customer-query-routing':queryRouting, './customer-scanner-routing':scanner, './customer-spotlight-routing':spotlight, './customer-inventory-routing':inventory, './customer-connector-preview':{buildConnectorPreview:build},'./customer-connector-status':{customerConnectorStatus:project},
       './db/connector-metadata.mjs':{readApplicationConnectorMetadata:async()=>data,readDashboardConnectorMetadata:async()=>data},
     });
     const a=await service.readCustomerConnectorStatus('A'),b=await service.readCustomerConnectorStatus('B');

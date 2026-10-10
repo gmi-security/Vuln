@@ -1,3 +1,4 @@
+import { appsecRouteEvidenceSelect, appsecRoutingStatus } from "./customer-appsec-routing";
 import { queryRouteEvidenceSelect, queryRoutingStatus } from "./customer-query-routing";
 import { scannerRouteEvidenceSelect, scannerRoutingStatus, type ScannerRouteEvidence } from "./customer-scanner-routing";
 import { spotlightRouteEvidenceSelect, spotlightRoutingStatus, type SpotlightRouteEvidence } from "./customer-spotlight-routing";
@@ -72,11 +73,16 @@ export async function readCustomerConnectorStatus(companyId: string | null) {
       const queries: SpotlightRouteEvidence[] = queryAvailable ? (await client.query(`${queryRouteEvidenceSelect}
         WHERE r.company_id=$1 ORDER BY r.candidate_id LIMIT 1001`, [companyId])).rows : [];
       if (queries.length > 1000) throw new DashboardError("Too many query routes to display.", 503);
+      const appsecAvailable = Boolean((await client.query("SELECT to_regclass('public.customer_appsec_routes') AS name")).rows[0].name);
+      const appsec: SpotlightRouteEvidence[] = appsecAvailable ? (await client.query(`${appsecRouteEvidenceSelect}
+        WHERE r.company_id=$1 ORDER BY r.candidate_id LIMIT 1001`, [companyId])).rows : [];
+      if (appsec.length > 1000) throw new DashboardError("Too many AppSec routes to display.", 503);
       const result = customerConnectorStatus(companyId, preview, [...scoped.values()], available, undefined,
         routes.map(row=>inventoryRoutingStatus(row,preview,process.env.VULN_REVIEWED_INVENTORY_PROVIDERS)),
         spotlight.map(row=>spotlightRoutingStatus(row,preview,process.env.VULN_REVIEWED_SPOTLIGHT_PROVIDERS)),
         scanner.map(row=>scannerRoutingStatus(row,preview,process.env.VULN_REVIEWED_SCANNER_PROVIDERS)),
-        queries.map(row=>queryRoutingStatus(row,preview,process.env.VULN_REVIEWED_QUERY_PROVIDERS)));
+        queries.map(row=>queryRoutingStatus(row,preview,process.env.VULN_REVIEWED_QUERY_PROVIDERS)),
+        appsec.map(row=>appsecRoutingStatus(row,preview,process.env)));
       await client.query("COMMIT");
       return result;
     } catch (error) { await client.query("ROLLBACK").catch(() => {}); throw error; }

@@ -19,7 +19,7 @@ import { formatDateTime, severityBarColor } from "@/lib/format";
 import type { AppSecRepoRow, AppSecSummary, AppSecTrendPoint } from "@/lib/elastic-appsec";
 import AppSecTrendChart from "@/components/AppSecTrendChart";
 
-const ROW_GRID = "grid grid-cols-[1.6fr_80px_80px_90px_90px_95px_110px_150px] items-center gap-4";
+const ROW_GRID = "min-w-[950px] grid grid-cols-[1.6fr_80px_80px_90px_90px_95px_110px_150px] items-center gap-4";
 
 function gateColor(gate: string | null): string {
   if (!gate) return "#52525b";
@@ -37,11 +37,12 @@ function repoSeverityColor(row: AppSecRepoRow): string {
   return severityBarColor.Info;
 }
 
-export default function VulnAppSecPage() {
+export default function VulnAppSecPage({ companyId, selection }: { companyId?: string; selection?: React.ReactNode }) {
   const [configured, setConfigured] = useState(true);
   const [summary, setSummary] = useState<AppSecSummary | null>(null);
   const [trend, setTrend] = useState<AppSecTrendPoint[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [trendError, setTrendError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const loadSeq = useRef(0);
 
@@ -49,32 +50,36 @@ export default function VulnAppSecPage() {
     const seq = ++loadSeq.current;
     setLoading(true);
     try {
-      const res = await fetch("/api/appsec", { cache: "no-store" });
+      const res = await fetch(`/api/appsec${companyId ? `?companyId=${encodeURIComponent(companyId)}` : ""}`, { cache: "no-store" });
       const json = await res.json();
       if (seq !== loadSeq.current) return;
+      if (companyId && json.companyId !== companyId) throw new Error("Customer response did not match.");
+      if (!res.ok) { setSummary(null); setTrend(null); setError(json.error || "AppSec data is unavailable."); return; }
+      setTrendError(json.trendError ?? null);
       setConfigured(json.configured !== false);
       setSummary(json.summary ?? null);
       setTrend(json.trend ?? null);
       setError(json.error ?? null);
     } catch {
       if (seq !== loadSeq.current) return;
+      setSummary(null); setTrend(null);
       setError("Failed to reach the API.");
     } finally {
       if (seq === loadSeq.current) setLoading(false);
     }
-  }, []);
+  }, [companyId]);
 
   useEffect(() => {
     void load();
     const timer = setInterval(() => void load(), 60_000);
-    return () => clearInterval(timer);
+    return () => { ++loadSeq.current; clearInterval(timer); };
   }, [load]);
 
   return (
     <VulnShell
       eyebrow="AppSec"
       title="Application security"
-      subtitle="Trivy coverage and software risk across GMI GitHub repositories. Baseline debt stays visible; newly introduced High/Critical findings drive the gate."
+      subtitle={companyId ? "Trivy coverage and software risk for this customer's approved repositories." : "Trivy coverage and software risk across GMI GitHub repositories. Baseline debt stays visible; newly introduced High/Critical findings drive the gate."}
       actions={
         <button onClick={() => void load()} className={ghostButtonClass}>
           <RefreshCcw size={16} className={loading ? "animate-spin text-zinc-400" : "text-zinc-400"} />
@@ -82,6 +87,8 @@ export default function VulnAppSecPage() {
         </button>
       }
     >
+      {selection}
+      {companyId ? <p className="text-sm text-zinc-300">Coverage uses the approved repository list. Only scans with a single matching repository identity are included. AppSec results remain separate from device vulnerabilities.</p> : null}
       {!configured ? (
         <div className="rounded-2xl border border-[rgba(179,14,20,0.22)] bg-[rgba(179,14,20,0.06)] px-6 py-5 text-sm text-zinc-400">
           AppSec is not configured. Set <code className="text-zinc-300">APPSEC_ELASTIC_URL</code> and{" "}
@@ -119,12 +126,14 @@ export default function VulnAppSecPage() {
 
       <div className="rounded-[24px] border border-[rgba(179,14,20,0.12)] bg-[#040404] px-5 py-5">
         <div className="mb-3 text-xs uppercase tracking-[0.2em] text-zinc-500">
-          Fixes &amp; criticality over time -- all repositories
+          Fixes &amp; criticality over time - {companyId ? "approved repositories" : "all repositories"}
         </div>
-        <AppSecTrendChart points={trend ?? []} />
+        {trendError ? <p role="status" className="mb-3 text-sm text-amber-300">{trendError}</p> : null}
+        <AppSecTrendChart points={trend ?? []} emptyMessage="Trend appears when at least two days have completed scans in this view." />
+        {companyId ? <p className="mt-3 text-xs text-zinc-400">Daily points include repositories scanned that day. Unscanned repositories are not carried forward.</p> : null}
       </div>
 
-      <div className="overflow-hidden rounded-[24px] border border-[rgba(179,14,20,0.12)] bg-[#040404]">
+      <div className="overflow-x-auto rounded-[24px] border border-[rgba(179,14,20,0.12)] bg-[#040404]">
         <div className={`${ROW_GRID} border-b border-zinc-900 px-5 py-3 text-xs uppercase tracking-[0.2em] text-zinc-500`}>
           <div>Repository</div>
           <div>Critical</div>
@@ -138,7 +147,7 @@ export default function VulnAppSecPage() {
         {(summary?.rows ?? []).map((row) => (
           <Link
             key={row.repository}
-            href={`/appsec/repositories/${encodeURIComponent(row.repository)}`}
+            href={`/appsec/repositories/${encodeURIComponent(row.repository)}${companyId ? `?companyId=${encodeURIComponent(companyId)}` : ""}`}
             className={`relative ${ROW_GRID} border-b border-zinc-900/70 px-5 py-4 transition last:border-b-0 hover:bg-[#0a0a0a]`}
           >
             <div className="absolute inset-y-0 left-0 w-[3px]" style={{ background: repoSeverityColor(row) }} />

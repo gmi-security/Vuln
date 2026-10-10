@@ -35,7 +35,7 @@ This completes the implemented connector catalog, review contracts and this regr
 | ConnectWise Automate | Customer/device inventory | Configured; actual adapter and import fixtures, reviewed client-ID routing, SQL approval/revocation checks | Runtime routing implemented behind an empty provider switch; live ownership review and activation pending. No live inventory pull |
 | MISP | CVE threat enrichment | Configured; actual adapter response/failure and enrichment-role tests | Preserve existing signals; a sighting is not independently verified exploitation |
 | OpenCTI | CVE threat enrichment | Configured; actual adapter response/failure and enrichment-role tests | Preserve existing signals; relationship presence alone does not prove exploitation |
-| AppSec / Trivy via Elastic | Repository scans, findings and deltas | Configured; summary/trend result fixtures and dataset/repository review checks | Existing organization AppSec path retained; customer-scoped AppSec reader not activated |
+| AppSec / Trivy via Elastic | Repository scans, findings and deltas | Optional reviewed repository routing, fixed filtered queries, SQL ownership/audit and API/UI isolation tests | Runtime implemented behind a blank opt-in; actual repository/mapping/key acceptance and activation remain pending. AppSec stays separate from device findings |
 | ConnectWise PSA | Ticket delivery and tracking | Saved connection revision present; mock transport and ticket lifecycle checks | Existing board/company routing retained; no live ticket created; not a findings source |
 | Burp | Web scan findings | Unconfigured; XML parser and assignment fixtures | Available but disabled, as requested |
 | Nmap | Host/service discovery and observations | Unconfigured; XML/service and assignment fixtures | Available but disabled, as requested |
@@ -165,3 +165,12 @@ Checkpoint 47 extends the query approval model to exact exclusive Elastic indexe
 The additive v2 query-route migration preserves CrowdStrike approvals and audit, allows both query providers for a customer, and prevents overlapping Elastic dataset ownership. Empty provider switches still mean legacy behavior; no production activation occurred. See [the Elastic operation and recovery guide](customer-elastic-query-routing.md) and checkpoint 47 in the platform plan for verification evidence.
 
 Next: remaining stored-platform/AppSec/source authority paths, actual customer/source acceptance, SQL reporting integration and authoritative writer handoff, then combined release/recovery rehearsal. Query-only approval does not publish findings or make mirrored sources additive. The earlier Artemis/ZAP connectivity issues and intentionally disabled integrations are unchanged.
+
+
+## Follow-up: reviewed AppSec repository routing
+
+Checkpoint 48 adds customer AppSec summary, scan-day trend and repository detail on the existing environment Elastic connection. A single customer selector and repository links preserve scope; missing/stale/revoked approvals cannot fall back to the organization view. Coverage uses approved repositories and capped findings are explicitly labeled. The fixed document-filter contract applies only to AppSec, not arbitrary shared-index saved queries.
+
+The additive application-database migration and actual operator CLI passed eight isolated PostgreSQL groups, including overlapping repository ownership, concurrent revisions, audit failure and stale-route revocation. **301 local tests passed** (two existing database suites skipped locally), the final production build/TypeScript pass succeeded, and **seven AppSec browser groups passed**. The browser-discovered encoded repository drilldown was fixed; desktop/mobile screenshots were inspected. Evidence is recorded in checkpoint 48 of the plan. No live customer assignment, source query, source import, ticket, production change or deployment occurred. See [AppSec operation and recovery](customer-appsec-routing.md).
+
+The blank AppSec switch retains legacy organization access. Turning it off is not revocation. Live repository/mapping/key acceptance, remaining stored-platform consumers, SQL reporting and authoritative writer recovery remain release gates.

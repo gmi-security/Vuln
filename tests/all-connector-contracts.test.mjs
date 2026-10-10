@@ -226,7 +226,7 @@ test('AppSec keeps repository metrics and scan deltas separate; incomplete resul
   const query=async(connection,sql)=>{assert.equal(connection.apiKey,'fixture');queries.push(sql);return response;};
   const result=(names,rows)=>({columns:names.split(',').map(name=>({name,type:'keyword'})),rows});
   try {
-    const appsec=await load('elastic-appsec',{'./elastic-query-client':{executeEsql:query}});
+    const appsec=await load('elastic-appsec',{'./elastic-query-client':{executeEsql:query},'./customer-elastic-query':{executeCustomerEsql:()=>{throw Error('Unexpected reviewed query');}}});
     response=result('repository,last_scan,findings,vulnerabilities,misconfigurations,licenses,critical,high,medium,low,secrets,new_findings,new_critical,new_high,resolved,gate',[
       ['repo-a','2026-10-10',10,7,2,1,1,3,4,2,0,2,1,1,3,'fail'],
       ['repo-b','2026-10-10',5,3,1,1,0,1,2,2,1,1,0,0,2,'pass']]);
