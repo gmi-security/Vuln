@@ -4,10 +4,8 @@ import { parseTidalCsv } from "@/lib/tidal";
 
 export const dynamic = "force-dynamic";
 
-// Tidal.io has no customer API, so inventory comes in as a CSV export from the
-// portal. This accepts the raw CSV (uploaded from the Connectors page), parses
-// it with fuzzy header matching, and loads it as companies + assets — the same
-// path the legacy API sync used, minus the credentials.
+// Offline portal export with the existing header matching. The store refuses
+// this name-based path when reviewed live-session routing is enabled.
 export async function POST(request: Request) {
   await ensureHydrated();
 
@@ -60,5 +58,6 @@ export async function POST(request: Request) {
   }
 
   const result = await importTidalInventory(assets);
+  if ("error" in result) return NextResponse.json({error:result.error},{status:409});
   return NextResponse.json({ result: { ...result, rowsParsed: assets.length } });
 }

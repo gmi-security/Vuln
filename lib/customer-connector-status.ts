@@ -95,7 +95,7 @@ export function customerConnectorStatus(companyId: string, preview: ReturnType<t
   items.sort((a, b) => a.provider.localeCompare(b.provider) || a.evidence.localeCompare(b.evidence) || a.id.localeCompare(b.id));
   for (const status of inventory) {
     const item = items.find(i => i.id === status.id);
-    if (!item || !["automate", "intune"].includes(item.provider)) continue;
+    if (!item || !["automate", "intune", "tidal", "crowdstrike"].includes(item.provider)) continue;
     item.review = status.review;
     item.scope = "A separate inventory import approval is recorded. See routing details for its current state.";
     if (item.data) item.data.routing = status.routing;

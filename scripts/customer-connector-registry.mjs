@@ -144,6 +144,7 @@ const safeMessages = new Set([
   'No inventory route exists to disable.', 'Inventory binding changed; review current state before approval.',
   'Inventory assignment needs a current review.', 'This assignment is not supported by the inventory import router.',
   'Automate routing requires its numeric client ID.', 'Intune routing requires the configured tenant ID.',
+  'Tidal routing requires its exact company ID.', 'CrowdStrike routing requires the 32-character CID.',
   'Inventory routing limit exceeded.', 'Choose an existing customer.',
 ]);
 export function registryFailure(error) {

@@ -4633,6 +4633,7 @@ export type TidalImportResult = {
   findingsRescored: number;
   errors?: string[];
   autoScan?: AutoScanResult;
+  skipped?: number;
 };
 
 // Pull the Tidal asset inventory, map each asset's customer to a company
@@ -5943,15 +5944,29 @@ export async function importFromArtemis(): Promise<
   };
 }
 
-// Core inventory loader shared by the CSV import and the (legacy) API sync.
-// Maps each asset's customer to a company (match by name, create if missing),
-// upserts the asset, then reprices every finding so real risk reflects the
-// authoritative environment. Assets come from a Tidal CSV export or the API.
+// Name-based offline import. When reviewed routing is on, CSV cannot establish
+// portal-session ownership; only the live collector can use the private loader.
 export async function importTidalInventory(
   assets: TidalAsset[],
   errors?: string[],
+): Promise<TidalImportResult | { error: string }> {
+  try {
+    if (await loadReviewedInventoryRoutes("tidal") !== null)
+      return { error: "Tidal CSV imports cannot verify the reviewed portal company ID. Use the live Tidal sync while reviewed routing is enabled." };
+    return await applyTidalInventory(assets, errors);
+  } catch (err) { return { error: err instanceof Error ? err.message : "Tidal inventory routing is unavailable." }; }
+}
+async function applyTidalInventory(
+  assets: TidalAsset[],
+  errors?: string[],
+  routes?: InventoryRoute[],
 ): Promise<TidalImportResult> {
   const s = store();
+  const routeBySource = new Map(routes?.map(r=>[r.sourceScope,r]));
+  if (routes && (routes.some(r=>!s.companies.has(r.companyId) || isDemoCompany(s.companies.get(r.companyId)!)) ||
+      assets.some(a=>!a.sourceCompanyId || !routeBySource.has(a.sourceCompanyId))))
+    throw new Error("Tidal inventory or customer no longer matches its approved route; no inventory was applied.");
+  const importedCompanies = new Set<string>();
 
   let companiesCreated = 0;
   let assetsUpserted = 0;
@@ -5959,7 +5974,8 @@ export async function importTidalInventory(
   const ambiguousCustomers = new Set<string>();
   for (const t of assets) {
     const customer = t.customer.trim() || "Unassigned";
-    const candidates = Array.from(s.companies.values()).filter(
+    const route = t.sourceCompanyId ? routeBySource.get(t.sourceCompanyId) : undefined;
+    const candidates = route ? [s.companies.get(route.companyId)!] : Array.from(s.companies.values()).filter(
       (c) => normalizeCompanyName(c.name) === normalizeCompanyName(customer),
     );
     if (candidates.length > 1) {
@@ -5991,15 +6007,16 @@ export async function importTidalInventory(
       externalId: t.externalId,
     });
     assetsUpserted += 1;
+    importedCompanies.add(company.id);
   }
 
-  const findingsRescored = await rescoreAllFindings(s, (f) => f.assetSource === "tidal");
+  const findingsRescored = await rescoreAllFindings(s, (f) => f.assetSource === "tidal", routes ? importedCompanies : undefined);
 
   // If auto-scan is enabled, scan any newly-known assets that have no
   // coverage yet.
   let autoScan: AutoScanResult | undefined;
   if (s.settings.autoScanNewAssets) {
-    autoScan = await autoScanGaps();
+    autoScan = await autoScanGaps(routes ? importedCompanies : undefined);
   }
 
   await flushNow();
@@ -6011,21 +6028,26 @@ export async function importTidalInventory(
 export async function importFromTidal(
   onProgress?: (p: TidalProgress) => void,
 ): Promise<TidalImportResult | { error: string }> {
-  if (!tidalConfig()) {
+  const config = tidalConfig();
+  if (!config) {
     return {
       error:
         "Tidal is not configured. Set TIDAL_EMAIL and TIDAL_PASSWORD to sign in and pull the live inventory (or upload a CSV export).",
     };
   }
-  let listResult;
   try {
-    listResult = await tidalListAssets(onProgress);
+    const routes = await loadReviewedInventoryRoutes("tidal");
+    const s = store();
+    if (routes && (!routes.length || routes.some(r=>!s.companies.has(r.companyId) || isDemoCompany(s.companies.get(r.companyId)!))))
+      return { error: "Tidal requires activated routes to existing non-demo customers." };
+    const listResult = await tidalListAssets(onProgress, {config,...(routes ? {companyIds:new Set(routes.map(r=>r.sourceScope))} : {})});
+    const result = await applyTidalInventory(listResult.assets, listResult.errors, routes ?? undefined);
+    return {...result,...(routes ? {skipped:listResult.skippedCompanies ?? 0} : {})};
   } catch (err) {
     return {
       error: err instanceof Error ? err.message : "Failed to reach the Tidal API.",
     };
   }
-  return importTidalInventory(listResult.assets, listResult.errors);
 }
 
 export type AutomateImportResult = {
@@ -6499,10 +6521,8 @@ export type IntuneImportResult = {
   autoScan?: AutoScanResult;
 };
 
-// Sync Intune managed devices as inventory assets. Devices belong to the
-// tenant — our own organization — so they attach to the internal company
-// (GMI), created if it doesn't exist yet. Honest linkage: Intune endpoints are
-// never attributed to an external client.
+// Reviewed mode pins the configured Intune tenant to an existing customer.
+// The internal-company fallback is retained only for legacy routing.
 export async function importFromIntune(): Promise<
   IntuneImportResult | { error: string }
 > {
@@ -6533,6 +6553,7 @@ export type EndpointImportResult = {
   findingsRescored: number;
   company: string;
   autoScan?: AutoScanResult;
+  skipped?: number;
   // Per-tenant breakdown when more than one CrowdStrike tenant is configured
   // (an MSSP client with their own separate CID gets synced separately from
   // GMI's own devices). Absent/single-entry for the common one-tenant case.
@@ -6618,12 +6639,13 @@ async function importEndpoints(
 }
 
 // Sync CrowdStrike Falcon host inventory (the scan/coverage perspective).
-// Set FALCON_CUSTOMER to pin devices to a specific client company; omit to
-// attach to the internal GMI org (default for own-estate deployments).
+// Legacy mode uses FALCON_CUSTOMER or the internal-company fallback. Reviewed
+// mode uses exact connection references, validated host CIDs and customer IDs.
 export async function importFromCrowdstrike(
   onProgress?: (fetched: number, total: number) => void,
 ): Promise<EndpointImportResult | { error: string }> {
-  const configs = falconConfigs();
+  const configured = falconConfigs();
+  let configs = configured;
   if (!configs.length) {
     return {
       error:
@@ -6631,6 +6653,16 @@ export async function importFromCrowdstrike(
     };
   }
   const s = store();
+  let routes: InventoryRoute[] | null;
+  try {
+    routes = await loadReviewedInventoryRoutes("crowdstrike");
+    if (routes) {
+      if (!routes.length || routes.some(r=>!s.companies.has(r.companyId) || isDemoCompany(s.companies.get(r.companyId)!) ||
+          configured.filter(c=>c.sourceRef===r.connectionRef).length!==1) || new Set(routes.map(r=>r.connectionRef)).size!==routes.length)
+        return {error:"CrowdStrike requires unambiguous approved connections to existing non-demo customers."};
+      configs = routes.map(r=>configured.find(c=>c.sourceRef===r.connectionRef)!);
+    }
+  } catch (err) { return {error:err instanceof Error ? err.message : "CrowdStrike inventory routing is unavailable."}; }
   const tenants: { label: string; company: string; assetsUpserted: number; error?: string }[] = [];
   let assetsUpserted = 0;
   let findingsRescored = 0;
@@ -6659,7 +6691,7 @@ export async function importFromCrowdstrike(
         const devices = await falconListAssets(config, (f, t) => {
           perTenant[i] = { fetched: f, total: t };
           reportCombined();
-        });
+        }, routes ? {expectedCid:routes.find(r=>r.connectionRef===config.sourceRef)!.sourceScope} : undefined);
         return { config, devices, error: null as string | null };
       } catch (err) {
         return {
@@ -6682,7 +6714,8 @@ export async function importFromCrowdstrike(
       continue;
     }
     try {
-      const r = await importEndpoints(s, devices, "crowdstrike", config.customerName);
+      const route = routes?.find(r=>r.connectionRef===config.sourceRef);
+      const r = await importEndpoints(s, devices, "crowdstrike", config.customerName, route?.companyId);
       assetsUpserted += r.assetsUpserted;
       findingsRescored += r.findingsRescored;
       if (r.autoScan) autoScan = r.autoScan;
@@ -6703,6 +6736,7 @@ export async function importFromCrowdstrike(
     company: tenants.map((t) => t.company).join(", "),
     autoScan,
     tenants: tenants.length > 1 ? tenants : undefined,
+    ...(routes ? {skipped:configured.length-configs.length} : {}),
   };
 }
 

@@ -27,7 +27,9 @@ try{
  const url=new URL(`postgresql://codex@localhost/${name}`);url.searchParams.set('host',socket);url.searchParams.set('port','55483');
  const tenant='11111111-1111-1111-1111-111111111111';
  const env={DATABASE_URL:url.href,AUTOMATE_BASE_URL:'https://not-contacted.invalid',AUTOMATE_API_CLIENT_ID:'fixture',AUTOMATE_USERNAME:'fixture',AUTOMATE_PASSWORD:'fixture',
-  INTUNE_TENANT_ID:tenant,INTUNE_CLIENT_ID:'fixture',INTUNE_CLIENT_SECRET:'fixture',SPIDERFOOT_URL:'https://not-contacted.invalid'};
+  INTUNE_TENANT_ID:tenant,INTUNE_CLIENT_ID:'fixture',INTUNE_CLIENT_SECRET:'fixture',SPIDERFOOT_URL:'https://not-contacted.invalid',
+  TIDAL_EMAIL:'fixture',TIDAL_PASSWORD:'fixture',FALCON_CLIENT_ID:'fixture',FALCON_CLIENT_SECRET:'fixture',
+  FALCON_CLIENT_ID_2:'fixture2',FALCON_CLIENT_SECRET_2:'fixture',FALCON_CUSTOMER_2:'Beta'};
  const build=await loadConnectorPreview(),core=await loadInventoryRouting(),routing=core.createInventoryRoutingStore(pool),bindings=(await loadConnectorBindingStore())(pool);
  const collect=async()=>build({...await readApplicationConnectorMetadata(db),connections:[],tiles:[]},env);
  const run=args=>runRegistry(args,env);
@@ -39,8 +41,8 @@ try{
  assert.deepEqual(await routing.read('automate',collect),[]);
  ok('missing routing schema fails without creating it; explicit migration starts with no operational approvals');
 
- async function bind(company,provider,scope){
-  const list=await bindings.list(company,collect),input=structuredClone(list.items.find(i=>i.provider===provider).assignmentRequest);
+ async function bind(company,provider,scope,ref){
+  const list=await bindings.list(company,collect),input=structuredClone(list.items.find(i=>i.provider===provider&&(!ref||i.connectionRef===ref)).assignmentRequest);
   Object.assign(input,{decision:'reviewed',note:'Synthetic reviewed customer scope'});
   input.proposal={companyId:company,tenantId:scope,datasets:[],targets:provider==='spiderfoot'?['fixture.example']:[],authority:provider==='spiderfoot'?'findings-primary':'inventory'};
   const result=await command('assign',input);assert.equal(result.enabledBindings,0);
@@ -57,8 +59,28 @@ try{
  assert.equal((await db.query('SELECT count(*)::int n FROM customer_inventory_route_audit')).rows[0].n,3);
  ok('actual CLI reviews stay inactive until separate audited inventory approvals; exact client and tenant routes are then readable');
 
+ const ta=await bind('A','tidal','Vendor-A'),tb=await bind('B','tidal','Vendor-B');
+ await assert.rejects(()=>command('route-inventory',ta),e=>e.code==='23514');
+ await db.query(await readFile('docs/sql/customer-inventory-routes-v2.sql','utf8'));
+ await command('route-inventory',ta);await command('route-inventory',tb);
+ assert.deepEqual((await routing.read('tidal',collect)).map(r=>[r.companyId,r.sourceScope]),[['A','Vendor-A'],['B','Vendor-B']]);
+ assert.equal((await routing.read('automate',collect)).length,2);assert.equal((await routing.read('intune',collect)).length,1);
+ const badTidal=await bind('B','tidal','Vendor-A');badTidal.expectedRevision=1;
+ await assert.rejects(()=>command('route-inventory',badTidal),e=>e.code==='23505');
+ const repairedTidal=await bind('B','tidal','Vendor-B');repairedTidal.expectedRevision=1;await command('route-inventory',repairedTidal);
+ ok('explicit v2 migration preserves old approvals, supports case-sensitive Tidal company IDs and rejects duplicate active ownership');
+
+ const ca=await bind('A','crowdstrike','a'.repeat(32),'environment:FALCON');await command('route-inventory',ca);
+ const sameConnection=await bind('B','crowdstrike','b'.repeat(32),'environment:FALCON');
+ await assert.rejects(()=>command('route-inventory',sameConnection),e=>e.code==='23505');
+ const sameCid=await bind('B','crowdstrike','a'.repeat(32),'environment:FALCON_2');
+ await assert.rejects(()=>command('route-inventory',sameCid),e=>e.code==='23505');
+ const cb=await bind('B','crowdstrike','b'.repeat(32),'environment:FALCON_2');await command('route-inventory',cb);
+ assert.deepEqual((await routing.read('crowdstrike',collect)).map(r=>[r.companyId,r.connectionRef,r.sourceScope]),[['A','environment:FALCON','a'.repeat(32)],['B','environment:FALCON_2','b'.repeat(32)]]);
+ ok('Falcon approvals enforce both one owner per CID and one CID/customer per configured connection');
+
  const path=join(dir,'export.json');await run(['export-inventory-routes','--company','A','--output',path]);
- const exported=JSON.parse(await readFile(path,'utf8'));assert.equal(exported.routes.length,2);
+ const exported=JSON.parse(await readFile(path,'utf8'));assert.equal(exported.routes.length,4);
  assert.ok(exported.routes.every(r=>r.companyId==='A'&&r.expectedRevision===1));
  assert.doesNotMatch(JSON.stringify(exported),new RegExp(tenant+'|source_scope|fixture|password|companyId":"B'));
  await assert.rejects(()=>run(['export-inventory-routes','--company','A','--output',path]),e=>e.code==='EEXIST');

@@ -11,6 +11,7 @@ globalThis.fetch=fail;
 const ROOT=resolve('.'),modules=new Map();
 let sfScans=[],sfReads=0,arFindings=[],folders=[],scans=[],clients=[],deviceReads=0,configs=[];
 let routes=null,routeError=false,clientReads=0,requestedClients=[],afterDevices=()=>{},intuneReads=0,intuneConfigUsed;
+let tidalReads=0,tidalOptions,tidalResult,crowdstrikeReads=[],falconFailure;
 const tenantId='11111111-1111-1111-1111-111111111111';
 const device={externalId:'device-1',hostname:'managed-host',ipAddresses:[],os:'Windows',owner:'',tags:[],criticality:'Normal',exposure:'Internal'};
 const mocks={
@@ -21,7 +22,8 @@ const mocks={
  'lib/customer-inventory-routing-server.ts':{loadReviewedInventoryRoutes:async()=>{if(routeError)throw Error('Routing needs renewed approval');return routes;}},
  'lib/connectwise-automate.ts':{automateConfig:()=>({}),automateListClients:async()=>{clientReads++;return clients;},automateListComputers:async(_config,id)=>{deviceReads++;requestedClients.push(id);afterDevices();return[device];}},
  'lib/intune.ts':{intuneConfig:()=>({tenantId}),intuneListAssets:async(config)=>{intuneReads++;intuneConfigUsed=config;afterDevices();return[device];}},
- 'lib/crowdstrike.ts':{falconConfigs:()=>configs,falconListAssets:async()=>[device],SPOTLIGHT_DISCOVERY_PARTITIONS:[]},
+ 'lib/tidal.ts':{tidalConfig:()=>({url:'https://fixture.invalid'}),tidalListAssets:async(_p,options)=>{tidalReads++;tidalOptions=options;afterDevices();return tidalResult;}},
+ 'lib/crowdstrike.ts':{falconConfigs:()=>configs,falconListAssets:async(config,_p,scope)=>{crowdstrikeReads.push({config,scope});if(falconFailure && falconFailure===config.sourceRef)throw Error('Fixture CID mismatch');afterDevices();return[device];},SPOTLIGHT_DISCOVERY_PARTITIONS:[]},
 };
 async function getModule(path){
  path=resolve(path);if(modules.has(path))return modules.get(path);
@@ -47,6 +49,7 @@ const acme=company('CO-A','Acme'),beacon=company('CO-B','Beacon');
 function fixture(companies=[acme,beacon]){
  sfScans=[];sfReads=0;arFindings=[];folders=[];scans=[];clients=[];deviceReads=0;configs=[];
  routes=null;routeError=false;clientReads=0;requestedClients=[];afterDevices=()=>{};intuneReads=0;intuneConfigUsed=undefined;
+ tidalReads=0;tidalOptions=undefined;tidalResult={assets:[],errors:[],skippedCompanies:0};crowdstrikeReads=[];falconFailure=undefined;
  const s={companies:new Map(companies.map(c=>[c.id,c])),folders:new Map(),scans:new Map(),findings:new Map(),assets:new Map(),
   compensatingControls:new Map(),identityAliases:new Map(),settings:{autoScanNewAssets:false,
     schedule:{autoSyncEnabled:false,alertsEnabled:false,monthlyReportsEnabled:false},sla:{Critical:7,High:30,Medium:60,Low:90}},
@@ -96,6 +99,53 @@ test('Automate refuses duplicate names and ambiguous internal alias before fetch
 });
 
 const route=(provider,companyId,sourceScope)=>({provider,companyId,sourceScope,candidateId:'a'.repeat(64),revision:1});
+test('reviewed Tidal uses server company IDs, limits collection and rescoring, and blocks name-only CSV bypass',async()=>{
+ const s=fixture([acme,company('CO-C',' ACME '),beacon]);routes=[route('tidal',beacon.id,'Vendor-A')];
+ tidalResult={assets:[{...device,customer:'Acme',sourceCompanyId:'Vendor-A'}],errors:['One unavailable source'],skippedCompanies:2};
+ const finding={id:'keep',companyId:acme.id,realRisk:73};s.findings.set('keep',finding);
+ let result=await store.importFromTidal();assert.equal(result.assetsUpserted,1);assert.equal(result.companiesCreated,0);assert.equal(result.skipped,2);
+ assert.deepEqual([...tidalOptions.companyIds],['Vendor-A']);assert.equal(tidalOptions.config.url,'https://fixture.invalid');
+ assert.equal([...s.assets.values()][0].companyId,beacon.id);assert.deepEqual(result.errors,['One unavailable source']);assert.equal(finding.realRisk,73);
+ const before=structuredClone([...s.assets]);result=await store.importTidalInventory(tidalResult.assets);
+ assert.match(result.error,/CSV imports cannot verify/);assert.deepEqual([...s.assets],before);assert.equal(tidalReads,1);
+});
+test('reviewed Tidal refuses missing/unapproved row provenance and deleted destinations before applying any assets',async()=>{
+ for(const scope of [undefined,'Wrong-Company','vendor-a']){
+  const s=fixture();routes=[route('tidal',acme.id,'Vendor-A')];
+  tidalResult={assets:[{...device,customer:'Acme',sourceCompanyId:'Vendor-A'},{...device,externalId:'bad',customer:'Acme',sourceCompanyId:scope}],errors:[]};
+  assert.match((await store.importFromTidal()).error,/no inventory was applied/);unchanged(s);
+ }
+ const s=fixture();routes=[route('tidal',acme.id,'Vendor-A')];afterDevices=()=>s.companies.delete(acme.id);
+ assert.match((await store.importFromTidal()).error,/no inventory was applied/);unchanged(s);
+});
+test('scoped automatic gap scan considers only imported customer assets',async()=>{
+ const s=fixture();
+ for(const c of [acme,beacon])s.assets.set(c.id,{...device,id:c.id,identifier:c.id+'.fixture.test',hostname:c.id+'.fixture.test',companyId:c.id,companyName:c.name,source:'manual'});
+ assert.equal((await store.autoScanGaps(new Set())).gapsFound,0);assert.equal(s.folders.size,0);
+ const result=await store.autoScanGaps(new Set([beacon.id]));assert.equal(result.companies,1);assert.equal(result.gapsFound,1);
+ assert.ok([...s.folders.values()].every(f=>f.companyId===beacon.id));assert.ok([...s.scans.values()].every(f=>f.companyId===beacon.id));
+});
+test('reviewed CrowdStrike selects exact configuration and passes CID validation while retaining customer-scoped inventory',async()=>{
+ const s=fixture([acme,company('CO-C',' ACME '),beacon]);
+ configs=[{sourceRef:'environment:FALCON',label:'one',customerName:'Acme'},{sourceRef:'environment:FALCON_2',label:'two',customerName:'Other'}];
+ routes=[{...route('crowdstrike',beacon.id,'a'.repeat(32)),connectionRef:'environment:FALCON'}];
+ const result=await store.importFromCrowdstrike();assert.equal(result.assetsUpserted,1);assert.equal(result.skipped,1);assert.equal(crowdstrikeReads.length,1);
+ assert.equal(crowdstrikeReads[0].config,configs[0]);assert.deepEqual(crowdstrikeReads[0].scope,{expectedCid:'a'.repeat(32)});
+ assert.equal([...s.assets.values()][0].companyId,beacon.id);assert.equal(s.companies.size,3);
+});
+test('reviewed CrowdStrike never substitutes configuration, applies failed-CID results or recreates a deleted customer',async()=>{
+ for(const scenario of ['absent','duplicate','cid','deleted']){
+  const s=fixture();configs=[{sourceRef:scenario==='absent'?'environment:FALCON_2':'environment:FALCON',label:'one',customerName:'Acme'}];
+  if(scenario==='duplicate')configs.push({...configs[0]});
+  routes=[{...route('crowdstrike',acme.id,'a'.repeat(32)),connectionRef:'environment:FALCON'}];
+  if(scenario==='cid')falconFailure='environment:FALCON';if(scenario==='deleted')afterDevices=()=>s.companies.delete(acme.id);
+  assert.ok((await store.importFromCrowdstrike()).error);unchanged(s);
+  if(['absent','duplicate'].includes(scenario))assert.equal(crowdstrikeReads.length,0);
+ }
+ const s=fixture();configs=[{sourceRef:'environment:FALCON',label:'one'},{sourceRef:'environment:FALCON_2',label:'two'}];
+ routes=configs.map((c,i)=>({...route('crowdstrike',i?beacon.id:acme.id,(i?'b':'a').repeat(32)),connectionRef:c.sourceRef}));falconFailure='environment:FALCON';
+ const result=await store.importFromCrowdstrike();assert.equal(result.assetsUpserted,1);assert.ok(result.tenants[0].error);assert.equal([...s.assets.values()][0].companyId,beacon.id);
+});
 test('reviewed Automate client ID wins over duplicate names; unassigned clients cannot create customers or overwrite other inventory',async()=>{
  const s=fixture([acme,company('CO-C',' ACME '),beacon]);
  routes=[route('automate',beacon.id,'17')];clients=[{id:'17',name:'Acme'},{id:'18',name:'New customer'}];
@@ -110,10 +160,11 @@ test('reviewed Automate client ID wins over duplicate names; unassigned clients 
  assert.equal([...s.assets.values()].find(a=>a.id!=='existing').companyId,beacon.id);
 });
 test('reviewed inventory imports stop before vendor collection when approval is missing, stale, or customer is unavailable',async()=>{
- for(const provider of ['automate','intune'])for(const scenario of ['empty','stale','missing']){
+ for(const provider of ['automate','intune','tidal','crowdstrike'])for(const scenario of ['empty','stale','missing']){
   const s=fixture();routes=scenario==='empty'?[]:[route(provider,'UNKNOWN',provider==='intune'?tenantId:'17')];routeError=scenario==='stale';
-  const result=await store[provider==='intune'?'importFromIntune':'importFromAutomate']();
-  assert.ok(result.error);assert.equal(clientReads,0);assert.equal(deviceReads,0);assert.equal(intuneReads,0);unchanged(s);
+  configs=[{sourceRef:'environment:FALCON',label:'one'}];
+  const result=await store[{intune:'importFromIntune',automate:'importFromAutomate',tidal:'importFromTidal',crowdstrike:'importFromCrowdstrike'}[provider]]();
+  assert.ok(result.error);assert.equal(clientReads,0);assert.equal(deviceReads,0);assert.equal(intuneReads,0);assert.equal(tidalReads,0);assert.equal(crowdstrikeReads.length,0);unchanged(s);
  }
 });
 test('reviewed Automate detects duplicate/absent client IDs and deletion during collection without inventing ownership',async()=>{

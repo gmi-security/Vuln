@@ -8,22 +8,25 @@ import { parseRegistryArgs,registryFailure } from '../scripts/customer-connector
 const build=await loadConnectorPreview(),review=await loadConnectorReview(),routing=await loadInventoryRouting(),project=await loadConnectorStatus();
 const tenant='11111111-1111-1111-1111-111111111111';
 const env={AUTOMATE_BASE_URL:'https://fixture.invalid',AUTOMATE_API_CLIENT_ID:'fixture',AUTOMATE_USERNAME:'fixture',AUTOMATE_PASSWORD:'fixture',
- INTUNE_TENANT_ID:tenant,INTUNE_CLIENT_ID:'fixture',INTUNE_CLIENT_SECRET:'fixture'};
+ INTUNE_TENANT_ID:tenant,INTUNE_CLIENT_ID:'fixture',INTUNE_CLIENT_SECRET:'fixture',TIDAL_EMAIL:'fixture',TIDAL_PASSWORD:'fixture',
+ FALCON_CLIENT_ID:'fixture',FALCON_CLIENT_SECRET:'fixture',FALCON_CUSTOMER:'Alpha'};
 const metadata={companies:[{id:'A',name:'Alpha'},{id:'B',name:'Beta'},{id:'DEMO',name:'Demo',isDemo:true}],defender:[],spotlight:[],connections:[],tiles:[]};
 const preview=build(metadata,env);
 function evidence(provider,companyId='A'){
  const c=preview.candidates.find(c=>c.provider===provider),hash=review.connectorDraftEvidence(c,preview.candidates).candidateHash;
- return {candidate_id:c.id,company_id:companyId,provider,source_scope:provider==='intune'?tenant:'17',candidate_hash:hash,binding_hash:hash,imported_hash:hash,
+ const sourceScope=provider==='intune'?tenant:provider==='tidal'?'Vendor-A':provider==='crowdstrike'?'a'.repeat(32):'17';
+ return {candidate_id:c.id,company_id:companyId,provider,source_scope:sourceScope,candidate_hash:hash,binding_hash:hash,imported_hash:hash,
   binding_revision:1,current_binding_revision:1,revision:1,enabled:true,source_present:true,review_state:'reviewed',reviewed_at:'2026-10-10T00:00:00Z',
-  proposal:{companyId,tenantId:provider==='intune'?tenant:'17',authority:'inventory',targets:[],datasets:[]}};
+  proposal:{companyId,tenantId:sourceScope,authority:'inventory',targets:[],datasets:[]}};
 }
 test('inventory opt-in is explicit and rejects malformed provider configuration',()=>{
  for(const v of [undefined,'','  '])assert.deepEqual(routing.reviewedInventoryProviders(v),[]);
  assert.deepEqual(routing.reviewedInventoryProviders(' automate, intune '),['automate','intune']);
- for(const v of ['all','true','intune,','automate,automate','crowdstrike'])assert.throws(()=>routing.reviewedInventoryProviders(v));
+ assert.deepEqual(routing.reviewedInventoryProviders('tidal,crowdstrike'),['tidal','crowdstrike']);
+ for(const v of ['all','true','intune,','automate,automate','nessus'])assert.throws(()=>routing.reviewedInventoryProviders(v));
 });
 test('operational scope requires current review, exact supported connection, tenant/client ID and inventory-only authority',()=>{
- for(const p of ['automate','intune'])assert.equal(routing.inventoryBindingScope('A',preview,evidence(p)).provider,p);
+ for(const p of ['automate','intune','tidal','crowdstrike'])assert.equal(routing.inventoryBindingScope('A',preview,evidence(p)).provider,p);
  for(const edits of [{review_state:'pending-review'},{reviewed_at:null},{imported_hash:'0'.repeat(64)},{source_present:false},
   {proposal:{...evidence('automate').proposal,companyId:'B'}},
   ...['0','017','1 OR 1','9007199254740992'].map(tenantId=>({proposal:{...evidence('automate').proposal,tenantId}})),
@@ -34,13 +37,19 @@ test('operational scope requires current review, exact supported connection, ten
  const changed=build(metadata,{...env,AUTOMATE_BASE_URL:'https://different.invalid'});
  assert.throws(()=>routing.inventoryBindingScope('A',changed,evidence('automate')));
  assert.throws(()=>routing.inventoryBindingScope('A',preview,{...evidence('intune'),proposal:{...evidence('intune').proposal,tenantId:'22222222-2222-2222-2222-222222222222'}}));
+ assert.equal(routing.inventoryBindingScope('A',preview,evidence('tidal')).sourceScope,'Vendor-A');
+ assert.throws(()=>routing.inventoryBindingScope('A',preview,{...evidence('tidal'),proposal:{...evidence('tidal').proposal,tenantId:'Name with spaces'}}));
+ for(const tenantId of ['','bad-cid','a'.repeat(32)+'-1'])assert.throws(()=>routing.inventoryBindingScope('A',preview,{...evidence('crowdstrike'),proposal:{...evidence('crowdstrike').proposal,tenantId}}));
+ const cs=evidence('crowdstrike');cs.proposal.authority='findings-primary';assert.equal(routing.inventoryBindingScope('A',preview,cs).connectionRef,'environment:FALCON');
+ cs.proposal.authority='mirror';assert.throws(()=>routing.inventoryBindingScope('A',preview,cs));
+ assert.throws(()=>routing.inventoryBindingScope('A',build(metadata,{...env,TIDAL_ORIGIN:'https://changed.invalid'}),evidence('tidal')));
 });
 test('customer status distinguishes approved, opted-in, stale and disabled routes without private scope or another customer',()=>{
  const row=evidence('intune'),c=preview.candidates.find(c=>c.id===row.candidate_id);
  const draft={id:c.id,candidate:c,candidate_hash:row.candidate_hash,proposal:row.proposal,source_present:true,review_state:'reviewed',reviewed_at:row.reviewed_at};
  const approved=routing.inventoryRoutingStatus(row,preview,'');assert.match(approved.routing,/switch is off/);
  const on=routing.inventoryRoutingStatus(row,preview,'intune');assert.match(on.routing,/switch is on/);
- const response=project('A',preview,[draft],true,undefined,[on]);assert.equal(response.items[0].review,'Inventory route approved');
+ const response=project('A',preview,[draft],true,undefined,[on]);assert.equal(response.items.find(i=>i.provider==='intune').review,'Inventory route approved');
  assert.doesNotMatch(JSON.stringify(response),new RegExp(tenant+'|source_scope|binding_hash|PRIVATE|fixture.invalid'));
  assert.equal(project('B',preview,[draft],true,undefined,[on]).items.length,0);
  for(const edit of [{current_binding_revision:2},{binding_hash:'0'.repeat(64)},{source_scope:'different'},{imported_hash:'0'.repeat(64)}])

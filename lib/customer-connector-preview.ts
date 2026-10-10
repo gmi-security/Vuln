@@ -149,7 +149,7 @@ export function buildConnectorPreview(metadata: ConnectorMetadata, env: Partial<
     const configured = alternatives.some(keys => keys.every(k => text(env[k])));
     add({ ...base(provider, `environment:${provider}`, [capability]), evidence: "shared-configuration", configured,
       tenantId: provider === "intune" ? text(env.INTUNE_TENANT_ID) || null : null,
-      revision: environmentRevision(provider,env,Object.keys(env).filter(key=>key.startsWith(provider.toUpperCase()+"_")&&/(?:URL|TENANT_ID|CLIENT_ID|EMAIL|USERNAME)$/.test(key)).sort()),
+      revision: environmentRevision(provider,env,Object.keys(env).filter(key=>key.startsWith(provider.toUpperCase()+"_")&&/(?:URL|ORIGIN|TENANT_ID|CLIENT_ID|EMAIL|USERNAME)$/.test(key)).sort()),
       review: ["shared-connection-not-a-customer-binding", ...(!configured ? ["incomplete-credentials"] : [])] });
   }
 
