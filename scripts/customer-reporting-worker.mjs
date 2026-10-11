@@ -25,14 +25,21 @@ async function main(){
   if(!owned){log('already-running');if(retry)process.exitCode=1;return;}
   if(retry){log('requeued',await worker.retryFailed(args[1],Number(args[2])));return;}
   log('started',{customers:settings.customers.length});
+  let nextDiscoveryAt=0;
   while(!controller.signal.aborted){
+   let handledJob=false;
    try{
-    const result=await worker.tick(settings.customers,controller.signal);log('tick',result);
+    const discoverChanges=Date.now()>=nextDiscoveryAt;
+    if(discoverChanges)nextDiscoveryAt=Date.now()+60000;
+    const result=await worker.tick(settings.customers,controller.signal,{discoverChanges});log('tick',result);
+    handledJob=['succeeded','retry-or-superseded','lease-lost'].includes(result.state);
     if(process.argv.includes('--once')&&(result.unavailable>0||['retry-or-superseded','lease-lost'].includes(result.state)))process.exitCode=1;
    }
    catch{log('tick-failed');if(process.argv.includes('--once'))process.exitCode=1;}
    if(process.argv.includes('--once')||controller.signal.aborted)break;
-   await delay(60000,undefined,{signal:controller.signal}).catch(error=>{if(error.name!=='AbortError')throw error;});
+   // Drain ready jobs without a minute-long gap per customer. Rediscover changes
+   // once per minute between builds; an idle/error tick waits instead of spinning.
+   if(!handledJob)await delay(Math.max(1000,Math.min(60000,nextDiscoveryAt-Date.now())),undefined,{signal:controller.signal}).catch(error=>{if(error.name!=='AbortError')throw error;});
   }
  }finally{
   if(owned)await lock.query('SELECT pg_advisory_unlock(804259,1)').catch(()=>{});

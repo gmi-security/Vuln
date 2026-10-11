@@ -222,3 +222,11 @@ The SQL reader is still not connected to the page. Next: accepted customer sourc
 - No production flags/configuration, database, PM2 or permissions changed; no push/deploy. See [worker enable order/rollback](customer-reporting-worker.md) and checkpoint 53 in the [platform proposal](platform-change-proposal.md).
 
 Next is the complete published-read/customer-review cohort check, executive compatibility, authoritative writer/reverse recovery and combined release rehearsal. Burp, Nmap, Intune, IntelOwl and n8n remain available but disabled. Earlier Artemis/ZAP live failures remain open acceptance items.
+
+### Checkpoint 54 - Published reporting capacity and retained inventory
+
+- Added verified customer bucket maps and consecutive queue processing. Empty/small customers no longer scan all shared data; large customers still require their relevant buckets. A new explicit additive migration and fresh input publication are required before SQL reads. Invalid/old maps fail closed; source rows are retained.
+- The complete published path matched every report field for retained Footprint and Atlas plus an empty fixture. Source reviews also included the retained **Tidal and Automate inventory**; omitting these correctly rejected the initial fixture. Actual customer/tenant/target ownership still needs acceptance. Fixture reviews do not approve live sources.
+- Background builds: **31.628 seconds Footprint**, **22.215 seconds Atlas**, **9 ms empty fixture**. Saved SQL reads: **4.3-22.2 ms**. Three consecutive refreshes: **54.207 seconds**, peak worker RSS **247 MiB** under a 512 MiB JavaScript heap. These are historical private-database measurements, not current HTTP latency or all-customer capacity.
+- **37 local tests, 36 PostgreSQL checks, full retained-report parity, production build/TypeScript and worker compilation passed.** No UI change or new browser claim. Disposable databases were removed; the private cluster was stopped. No production changes, push or deployment.
+- Next: actual source-review inventory, full enabled-customer capacity, executive compatibility, authoritative writer/reverse recovery and combined-release rehearsal. The five disabled integrations and outstanding Artemis/ZAP live checks remain unchanged. See checkpoint 54 in the [platform proposal](platform-change-proposal.md).

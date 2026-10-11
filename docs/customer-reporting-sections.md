@@ -2,14 +2,14 @@
 
 ## Current status
 
-Checkpoint 53 connects the tested SQL sections to Remediation Overview through an explicit per-customer read flag. It adds atomic customer input revisions, stored source-review checks and current connection-metadata validation. The default private comparison mode still rejects production databases; an explicit `published` mode uses migrated tables in the application database. The worker, revision writes and SQL page reads remain disabled in production. No production migration or permission change has occurred. See [configuration and rollback](customer-reporting-worker.md).
+Checkpoint 54 adds customer bucket selection and retained-data capacity checks. Checkpoint 53 connects the tested SQL sections to Remediation Overview through an explicit per-customer read flag. It adds atomic customer input revisions, stored source-review checks and current connection-metadata validation. The default private comparison mode still rejects production databases; an explicit `published` mode uses migrated tables in the application database. The worker, revision writes and SQL page reads remain disabled in production. No production migration or permission change has occurred. See [configuration and rollback](customer-reporting-worker.md).
 
 This is a small replaceable reporting summary, not another authoritative finding store. The normalized platform record remains the input. Raw CrowdStrike/Defender counts are not substituted for correlated platform findings.
 
 ## Data flow
 
 1. Read one consistent, committed application snapshot from PostgreSQL in a read-only repeatable-read transaction.
-2. Process the selected customer's saved scans, platform findings and assets one bucket at a time. Read only fields required by the report.
+2. In published mode, verify that the saved customer bucket map matches its input digest, then process only mapped scan, finding and asset buckets. The default private comparison still scans all 88 collection buckets. Process one bucket at a time. Read only fields required by the report.
 3. Accumulate counts and bounded ranked lists, keeping the original report's classifications and workflow rules.
 4. Save the complete report in `customer_reporting_sections` in a separate target transaction. A per-customer lock prevents competing builders from replacing results out of order.
 5. Read the small saved report and verify its source fingerprint, content checksum, customer and age. Changed or expired input produces `stale`; missing output produces `not-ready`. No page-time aggregation or vendor request occurs in this reader.
@@ -45,6 +45,8 @@ The separate threat-intelligence tile, enrichment database, full executive repor
 
 `customer_reporting_inputs` has one versioned digest/generation per customer. The writer computes it from exactly the JSON it saves, covering report-relevant company, finding/workflow, scan and asset fields. Unchanged bucket contributions are cached only after a successful commit. `customer_reporting_publication` pins the complete set of relevant committed shard revisions. Both metadata tables update in the same transaction as `vuln_store`; they cannot acknowledge an unsuccessful write. A table write lock plus the writer's last-observed manifest detects another writer's changes rather than recertifying stale RAM.
 
+Input format version 2 also stores `bucket_map`: ordered bucket identifiers and their per-customer content digests, committed with the same source snapshot. The reader checks its checksum, complete customer-metadata entry, key allowlist and uniqueness before trusting it. New, moved and last-removed records update the map atomically. Customers without records skip all collection buckets; a dense customer may still use all 64 finding buckets. An incomplete map or old version cannot produce a partial report. Apply `customer-reporting-buckets.sql` after the initial input migration and republish with the updated writer; no source reimport is needed.
+
 The reader checks that the current snapshot still matches its publication marker, then compares only this customer's input revision, source review and history. Thus another customer's tracked update or unrelated bookkeeping no longer invalidates this report. An untracked older-writer update withholds the report. A changed source review, workflow, asset, scan or history invalidates it. A deleted/recreated customer gets a new generation.
 
 This is cache freshness for the existing platform writer, not the final normalized authoritative database-write migration. The current customer IDs, record correlation and source provenance remain the platform's inputs. The worker rejects a report containing a provider outside its reviewed roles, including seen-by and enrichment provenance; it never silently drops those rows. Current tenant/dataset/target configuration is checked by the web service against the reviewed registry. These checks do not independently certify the historic ownership of every retained vendor record. That remains part of source-adapter and combined-release acceptance.
@@ -69,6 +71,8 @@ The private PostgreSQL fixture checks full parity, customer isolation, atomic fa
 
 The retained October 9 restore is also compared for Footprint and Atlas. It contains Defender for Footprint and CrowdStrike/SpiderFoot platform findings for Atlas; these are not fresh vendor tests or the complete live Spotlight dataset. Full results, counts and final timings are recorded in checkpoint 51 of the platform plan. Only aggregate evidence is written to the test logs.
 
+Checkpoint 54 also runs the complete `published` path in a disposable copy of retained report buckets and history. Actual review stores use synthetic connection metadata, including Tidal/Automate inventory, before the real worker/reader are compared with the independent legacy reference. Footprint, Atlas and an empty fixture all matched. Saved reads took 4.3-22.2 ms; their continuous build cycle took 54.207 seconds at 247 MiB peak worker RSS. See the plan for per-customer results and limits. These fixture approvals do not establish live source ownership or all-customer capacity.
+
 Run local pure checks:
 
 ```powershell
@@ -78,11 +82,13 @@ node --experimental-vm-modules --test tests/reporting-sections.test.mjs tests/re
 Database checks require the existing private recovery socket and explicitly create/drop disposable databases:
 
 ```bash
+node --experimental-vm-modules tests/reporting-publication-postgres.mjs "$private_socket"
+node --max-old-space-size=1536 --experimental-vm-modules tests/reporting-publication-restored.mjs "$private_socket"
 node --experimental-vm-modules tests/reporting-sections-postgres.mjs "$private_socket"
 node --max-old-space-size=1536 --experimental-vm-modules tests/reporting-sections-restored.mjs "$private_socket"
 ```
 
-Neither command is a production deployment instruction. The restored comparison intentionally buffers reference records to run the unchanged old report; its process peak memory is not the new accumulator's isolated memory measurement.
+These commands are not production deployment instructions. The restored comparison intentionally buffers reference records to run the unchanged old report; its process peak memory is not the new accumulator's isolated memory measurement.
 
 ## Integration and recovery still required
 

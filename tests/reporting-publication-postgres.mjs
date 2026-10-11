@@ -12,6 +12,7 @@ import {loadConnectorPreview,loadConnectorDraftStore,loadConnectorBindingStore,l
 import {readApplicationConnectorMetadata,readDashboardConnectorMetadata} from '../lib/db/connector-metadata.mjs';
 import {readCustomerReportingSections} from '../lib/db/customer-reporting-sections.mjs';
 import {createCustomerReportingWorker} from '../lib/db/customer-reporting-worker.mjs';
+import {readReportingInputRevision} from '../lib/db/customer-reporting-revisions.mjs';
 import {company,reportingFixture,expectedReport} from './reporting-sections-fixture.mjs';
 globalThis.fetch=()=>{throw Error('No source calls allowed');};
 const socket=await realpath(process.argv[2]||'.');assert.ok(socket.startsWith('/home/codex/vuln-recovery/')&&socket.endsWith('/socket'));
@@ -34,6 +35,7 @@ try{
  await assert.rejects(()=>fixture.persist.saveSnapshot(snapshot),e=>e.code==='42P01');
  assert.equal((await db.query('SELECT count(*)::int n FROM vuln_store')).rows[0].n,0);
  await db.query(await readFile('docs/sql/customer-reporting-inputs.sql','utf8'));
+ await db.query(await readFile('docs/sql/customer-reporting-buckets.sql','utf8'));
  await fixture.persist.saveSnapshot(snapshot);
  for(const row of data.history)await db.query('INSERT INTO vuln_metrics_history(company_id,ts,data) VALUES($1,$2,$3)',[company.id,row.ts,row.data]);
  const revision=async id=>(await db.query('SELECT revision::text,generation,content_hash FROM customer_reporting_inputs WHERE company_id=$1',[id])).rows[0];
@@ -102,7 +104,31 @@ try{
  const rejected=await worker.tick([company.id]);assert.equal(rejected.state,'retry-or-superseded');assert.equal((await read()).state,'stale');
  assert.equal((await db.query('SELECT snapshot_id FROM customer_reporting_sections WHERE company_id=$1',[company.id])).rows[0].snapshot_id,savedId);
  data.findings[2].connector='defender';await fixture.persist.saveSnapshot(snapshot);await refresh();
- ok('retained records from an unassigned provider reject the entire refresh without dropping rows or replacing the prior report');
+ const beforeInventory=(await read()).snapshotId;data.assets[0].source='tidal';await fixture.persist.saveSnapshot(snapshot);
+ assert.equal((await worker.tick([company.id])).state,'retry-or-superseded');assert.equal((await read()).state,'stale');
+ assert.equal((await db.query('SELECT snapshot_id FROM customer_reporting_sections WHERE company_id=$1',[company.id])).rows[0].snapshot_id,beforeInventory);
+ data.assets[0].source='defender';await fixture.persist.saveSnapshot(snapshot);await refresh();
+ ok('unassigned finding and inventory providers reject the entire refresh without dropping records or replacing the prior report');
+
+ const mapped=await readReportingInputRevision(db,other.id);assert.equal(mapped.buckets.length,2);
+ assert.equal((await worker.tick([other.id])).bucketsRead,1);
+ snapshot.findings=snapshot.findings.filter(r=>r[0]!=='FOREIGN');await fixture.persist.saveSnapshot(snapshot);
+ const empty=await worker.tick([other.id]);assert.equal(empty.records,0);assert.equal(empty.bucketsRead,0);
+ snapshot.findings.push(['FOREIGN-NEW',{...data.findings[0],id:'FOREIGN-NEW',companyId:other.id}]);
+ await fixture.persist.saveSnapshot(snapshot);assert.equal((await worker.tick([other.id])).records,1);
+ snapshot.findings.at(-1)[1].companyId=company.id;await fixture.persist.saveSnapshot(snapshot);
+ assert.equal((await worker.tick([other.id])).bucketsRead,0);
+ ok('small and empty customers scan only their mapped buckets; added, removed and reassigned records update the map atomically');
+
+ const goodMap=(await db.query('SELECT bucket_map FROM customer_reporting_inputs WHERE company_id=$1',[company.id])).rows[0].bucket_map;
+ await db.query('UPDATE customer_reporting_inputs SET bucket_map=$2 WHERE company_id=$1',[company.id,JSON.stringify(goodMap.filter(p=>p[0]==='companies:00'))]);
+ await assert.rejects(()=>readReportingInputRevision(db,company.id),/Invalid customer reporting bucket map/);
+ await fixture.persist.saveSnapshot(snapshot);assert.deepEqual((await readReportingInputRevision(db,company.id)).buckets,goodMap.map(p=>p[0]));
+ await db.query('UPDATE customer_reporting_inputs SET format_version=1,bucket_map=NULL');
+ await db.query('UPDATE customer_reporting_publication SET format_version=1');
+ await assert.rejects(()=>readReportingInputRevision(db,other.id),/publication is missing/);
+ await fixture.persist.saveSnapshot(snapshot);assert.deepEqual((await readReportingInputRevision(db,other.id)).buckets,['companies:00']);
+ ok('incomplete maps and legacy input versions are withheld until the real writer republishes a complete current map');
 
  const u=new URL(`postgresql://codex@localhost/${name}`);u.searchParams.set('host',socket);u.searchParams.set('port','55483');
  const child=await promisify(execFile)(process.execPath,['--max-old-space-size=512','scripts/customer-reporting-worker.mjs','--once'],{timeout:30000,env:{PATH:process.env.PATH,

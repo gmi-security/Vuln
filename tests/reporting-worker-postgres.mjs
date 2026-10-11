@@ -123,6 +123,13 @@ try{
  const clean=cli(false);await waitFor(()=>clean.output.includes('"event":"tick"'));clean.child.kill('SIGTERM');
  const exit=await clean.exited;assert.equal(exit.code,0,exit.output);assert.match(exit.output,/"event":"stopped"/);
  ok('SIGTERM stops the polling worker cleanly and releases its ownership lock');
+
+ await sourcePool.query("UPDATE vuln_store SET data=data || $1::jsonb WHERE key='companies:00'",[JSON.stringify([['CO-SECOND',{id:'CO-SECOND',name:'Second fixture customer'}]])]);
+ const draining=cli(false,[],`${company.id},CO-SECOND`);
+ await waitFor(()=>draining.output.split('\n').filter(line=>line.includes('"state":"succeeded"')).length===2);
+ draining.child.kill('SIGTERM');const drained=await draining.exited;assert.equal(drained.code,0,drained.output);
+ assert.equal((await targetPool.query("SELECT count(*)::int n FROM customer_reporting_jobs WHERE state='succeeded'")).rows[0].n,2);
+ ok('actual CLI drains two customer jobs within 15 seconds without waiting a minute after each build');
  console.log(`PASS ${checks} isolated reporting worker groups`);
 }finally{
  for(const child of children)if(child.exitCode===null&&child.signalCode===null)child.kill('SIGKILL');
