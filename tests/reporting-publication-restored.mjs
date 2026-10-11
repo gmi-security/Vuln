@@ -14,13 +14,17 @@ import {loadConnectorPreview,loadConnectorDraftStore,loadConnectorBindingStore,l
 import {readApplicationConnectorMetadata,readDashboardConnectorMetadata} from '../lib/db/connector-metadata.mjs';
 import {originalSections,originalExecutive} from './reporting-restored-reference.mjs';
 import {executiveHarness} from './executive-report-harness.mjs';
+import {readPlatformAuthority} from '../lib/db/platform-authority.mjs';
+import {transitionPlatformStore} from '../lib/db/platform-store.mjs';
+import {prepareCapacityFixture} from './platform-capacity-fixture.mjs';
 
 globalThis.fetch=()=>{throw Error('No provider or ticket calls allowed');};
 const socket=await realpath(process.argv[2]||'.');assert.ok(socket.startsWith('/home/codex/vuln-recovery/')&&socket.endsWith('/socket'));
 const config={host:socket,port:55483,user:'codex',connectionTimeoutMillis:5000,statement_timeout:15000};
 const name=`vuln2_reporting_test_${randomUUID().replaceAll('-','')}`,admin=new pg.Client({...config,database:'postgres'});
 const scope=['CO-230784','CO-147284','CO-REPORT-EMPTY'],labels=['Retained Defender','Retained mixed scanners','Empty fixture'];
-let source,db,pool,created=false,child,exited;
+const sqlAuthority=process.env.VULN_TEST_SQL_AUTHORITY==='true';
+let source,db,pool,created=false,child,exited,retainedHashes;
 try{
  await admin.connect();const g=(await admin.query("SELECT current_setting('data_directory') dir,current_setting('listen_addresses') listen")).rows[0];
  assert.ok(g.dir.startsWith('/home/codex/vuln-recovery/')&&!g.listen);await admin.query(`CREATE DATABASE ${name}`);created=true;
@@ -32,7 +36,7 @@ try{
  await source.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');await db.query('BEGIN');
  const digests=createReportingInputDigests(),copyStarted=Date.now(),observed=new Map();let bytes=0;
  const offlineCatalog=(await executiveHarness()).threat.reportingKevCatalog();
- for(const key of reportingKeys){
+ for(const key of [...reportingKeys,...(sqlAuthority?['folders:00']:[])]){
   assert.ok(Date.now()-copyStarted<300000,'Copy deadline');
   let json=(await source.query('SELECT data::text AS json FROM vuln_store WHERE key=$1',[key])).rows[0].json;
   bytes+=Buffer.byteLength(json);
@@ -52,6 +56,18 @@ try{
  console.log(JSON.stringify({phase:'private-copy',retainedCustomers:inputs.length-1,serializedBytes:bytes,copyMs:Date.now()-copyStarted,
   findingsBucketDistribution:{empty:bucketCounts.filter(n=>n===0).length-1,oneToEight:bucketCounts.filter(n=>n>0&&n<=8).length,nineToSixtyFour:bucketCounts.filter(n=>n>8).length}}));
  console.log(JSON.stringify({phase:'retained-source-roles',counts:[...observed].map(([k,n])=>[...JSON.parse(k),n])}));
+ if(sqlAuthority){
+  await db.query("SET statement_timeout='60s'");
+  retainedHashes=(await db.query('SELECT key,md5(data::text) hash FROM vuln_store ORDER BY key')).rows;
+  for(const file of ['001_core_storage.sql','002_platform_store_authority.sql'])await db.query(await readFile('db/migrations/'+file,'utf8'));
+  const started=Date.now(),reporting=createReportingInputDigests();await db.query('BEGIN');
+  await db.query("SET LOCAL statement_timeout='60s';SET LOCAL idle_in_transaction_session_timeout='90s'");
+  const result=await transitionPlatformStore(db,'sql',await readPlatformAuthority(db),{actor:'retained-verification',reporting});
+  await publishReportingInputRevisions(db,reporting.finish());await db.query('COMMIT');
+  // Transition independently compares every copied payload, including sources
+  // outside the three reporting cohorts. No row/sample-only parity claim.
+  console.log(JSON.stringify({phase:'retained-sql-cutover',counts:result.counts,elapsedMs:Date.now()-started}));
+ }
 
  // Only synthetic configuration metadata is installed; no real keys/config are
  // copied from production or the restore. Real review stores validate requests.
@@ -78,14 +94,20 @@ try{
   assert.equal((await api.readSourceSelectionStatus(db,id,await collect())).state,'reviewed');
  }
  const u=new URL(`postgresql://codex@localhost/${name}`);u.searchParams.set('host',socket);u.searchParams.set('port','55483');
+ const workerScope=sqlAuthority?await prepareCapacityFixture(db):scope;
+ if(sqlAuthority){
+  const runtime=spawn(process.execPath,['--max-old-space-size=4096','--experimental-vm-modules','tests/platform-retained-runtime.mjs',socket,name],{stdio:['ignore','pipe','pipe']});
+  runtime.stdout.on('data',v=>process.stdout.write(v));runtime.stderr.on('data',v=>process.stderr.write(v));
+  const code=await new Promise((resolve,reject)=>{runtime.once('error',reject);runtime.once('close',resolve);});assert.equal(code,0,'Full retained runtime check failed');
+ }
  let output='',errors='';const started=Date.now();
  child=spawn(process.execPath,['--max-old-space-size=512','scripts/customer-reporting-worker.mjs'],{env:{PATH:process.env.PATH,
-  VULN_REPORTING_WORKER_ENABLED:'true',VULN_REPORTING_WORKER_CUSTOMERS:scope.join(','),VULN_REPORTING_STORAGE:'published',VULN_REPORTING_INPUT_REVISIONS:'true',VULN_REPORTING_EXECUTIVE_ENABLED:'true',
+  VULN_REPORTING_WORKER_ENABLED:'true',VULN_REPORTING_WORKER_CUSTOMERS:workerScope.join(','),VULN_REPORTING_STORAGE:'published',VULN_REPORTING_INPUT_REVISIONS:'true',VULN_REPORTING_EXECUTIVE_ENABLED:'true',
   DATABASE_URL:u.href,VULN_REPORTING_SOURCE_URL:u.href,VULN_REPORTING_DATABASE_URL:u.href},stdio:['ignore','pipe','pipe']});
  child.stdout.on('data',v=>output+=v);child.stderr.on('data',v=>errors+=v);
  exited=new Promise((resolve,reject)=>{child.once('error',reject);child.once('close',(code,signal)=>resolve({code,signal}));});
- while((await db.query("SELECT count(*)::int n FROM customer_reporting_jobs WHERE state='succeeded'")).rows[0].n<3){
-  assert.equal(child.exitCode,null,'Worker exited before all reports finished');assert.ok(Date.now()-started<180000,'Three-customer refresh deadline');
+ while((await db.query("SELECT count(*)::int n FROM customer_reporting_jobs WHERE state='succeeded'")).rows[0].n<workerScope.length){
+  assert.equal(child.exitCode,null,'Worker exited before all reports finished');assert.ok(Date.now()-started<600000,'Whole-customer refresh must leave headroom below fifteen-minute expiry');
   const failed=(await db.query("SELECT company_id FROM customer_reporting_jobs WHERE state IN ('retry','failed')")).rows[0];
   if(failed){
    child.kill('SIGTERM');await exited;const a=await pool.connect(),b=await pool.connect();
@@ -96,7 +118,17 @@ try{
   await delay(250);
  }
  child.kill('SIGTERM');const finish=await exited;assert.equal(finish.code,0,errors);const cycleMs=Date.now()-started;
- const events=output.trim().split('\n').map(l=>JSON.parse(l)),ticks=events.filter(e=>e.state==='succeeded');assert.equal(ticks.length,3);
+ const events=output.trim().split('\n').map(l=>JSON.parse(l)),ticks=events.filter(e=>e.state==='succeeded');assert.equal(ticks.length,workerScope.length);
+ if(sqlAuthority){
+  const totals=await db.query('SELECT company_id,count(*)::int n FROM app_findings GROUP BY company_id');
+  const counts=new Map(totals.rows.map(r=>[r.company_id,r.n]));
+  for(const id of workerScope){const a=await pool.connect(),b=await pool.connect();try{
+   const revision=(await db.query('SELECT revision FROM customer_source_selections WHERE company_id=$1',[id])).rows[0].revision;
+   const report=await readCustomerReportingSections(a,b,id,{mode:'published',requireExecutive:true,expectedReviewRevision:revision});
+   assert.equal(report.state,'available');assert.equal(report.records,counts.get(id)??0);assert.equal(report.executive.company.id,id);
+  }finally{a.release();b.release();}}
+  console.log(JSON.stringify({phase:'all-customer-capacity',customers:workerScope.length,cycleMs,verifiedRecords:totals.rows.reduce((n,r)=>n+r.n,0)}));
+ }
  assert.equal(ticks.find(t=>t.companyId===scope[2]).bucketsRead,0);
  const {reference}=await loadReportingSections();
  for(let i=0;i<scope.length;i++){
@@ -116,6 +148,13 @@ try{
  const stopped=events.find(e=>e.event==='stopped');console.log(JSON.stringify({cycleMs,peakWorkerRssMiB:stopped.peakRssMiB,sourceCalls:0,
   reviewEvidence:'synthetic connection identities, not live source ownership acceptance'}));
  console.log('PASS published worker, reviewed-source checks, indexed builds and saved reads preserve full retained report parity');
+ if(sqlAuthority){
+  const started=Date.now(),reporting=createReportingInputDigests();await db.query('BEGIN');
+  const reverse=await transitionPlatformStore(db,'legacy',await readPlatformAuthority(db),{actor:'retained-reverse-verification',reporting});
+  await publishReportingInputRevisions(db,reporting.finish());await db.query('COMMIT');
+  assert.deepEqual((await db.query('SELECT key,md5(data::text) hash FROM vuln_store ORDER BY key')).rows,retainedHashes);
+  console.log(JSON.stringify({phase:'retained-reverse',elapsedMs:Date.now()-started,counts:reverse.counts,verifiedBuckets:retainedHashes.length}));
+ }
 }finally{
  if(child&&child.exitCode===null&&child.signalCode===null){child.kill('SIGKILL');await exited.catch(()=>{});}
  await source?.end();await pool?.end();await db?.end();if(created)await admin.query(`DROP DATABASE ${name} WITH (FORCE)`);await admin.end();

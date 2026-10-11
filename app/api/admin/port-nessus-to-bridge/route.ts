@@ -1,3 +1,4 @@
+import { withDurablePlatformMutation } from "@/lib/platform-mutation-route";
 import { NextResponse } from "next/server";
 import { ensureHydrated, listCompanies, nessusBridgeTargetsForCompany, startScan } from "@/lib/store";
 import { adminTokenOk } from "@/lib/admin-auth";
@@ -13,7 +14,7 @@ export const dynamic = "force-dynamic";
 // Targets come from Finding.asset, not Scan.targets: an imported Nessus
 // scan (vendor.imported: true) only records a hostsScanned *count*, not the
 // host list — the actual hostnames only exist on that scan's findings.
-export async function POST(request: Request) {
+async function POSTHandler(request: Request) {
   if (!adminTokenOk(request)) {
     return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
   }
@@ -55,3 +56,5 @@ export async function POST(request: Request) {
 
   return NextResponse.json({ dryRun, portedCompanies: results.length, results });
 }
+
+export const POST = withDurablePlatformMutation(POSTHandler);

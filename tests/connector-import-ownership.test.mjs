@@ -29,7 +29,7 @@ const mocks={
  'lib/customer-spotlight-routing-server.ts':{loadReviewedSpotlightRoutes:async()=>{if(spotlightFailure)throw Error('Spotlight route unavailable');return spotlightRoutes;}},
  'lib/spotlight-resumable-import.ts':{runPartitionedSpotlightImport:async(selection,_partitions,deps)=>{spotlightRuns.push(selection);afterSpotlight();return {...await deps.complete('fixture',selection.tenantKey,selection.reviewedScope),skipped:0};}},
  'lib/spotlight-record-store.ts':{completeResumableSpotlightRun:async()=>{spotlightPromotions++;return {findingsImported:1,hostsAffected:1};}},
- 'lib/persist.ts':{persistenceEnabled:()=>false,applicationDatabase:()=>null},
+ 'lib/persist.ts':{persistenceEnabled:()=>false,strictPlatformPersistence:()=>false,applicationDatabase:()=>null},
  'lib/nessus.ts':{nessusConfig:()=>({url:'https://fixture.invalid'}),nessusListFolders:async()=>folders,nessusListScans:async(_config,folder)=>{nessusRosterReads++;return scans.filter(s=>folder===undefined||s.folderId===folder);},
   nessusImportFindings:async(id,_budget,scope)=>{nessusReads.push({id,scope});afterNessus();return nessusResults;},
   nessusLaunchScan:async(name,targets,profile,scope)=>{nessusLaunches.push({name,targets,profile,scope});return {nessusScanId:10};},

@@ -719,7 +719,11 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
     assert.equal((await jobs.readDashboardJob(esJob.jobId,'es-job')).result.scopeKey,'elastic-c');
     elasticRoutes=[{...elasticRoutes[0],bindingKey:'elastic-d'}];
     await assert.rejects(()=>jobs.readDashboardJob(esJob.jobId,'es-job'),/approval changed/);
-    assert.equal((await store.readDashboard(true,'CO-A')).queries.find(q=>q.id==='reviewed').result,null,'separate CrowdStrike stale proof remains withheld');
+    const currentFalcon=(await store.readDashboard(true,'CO-A')).queries.find(q=>q.id==='reviewed').result;
+    // A previously queued refresh may already have completed while the Elastic
+    // cases ran. A current approved refresh is valid; an old proof never is.
+    assert.ok(currentFalcon===null||currentFalcon.scopeKey===reviewedRoutes[0].bindingKey,
+      'separate CrowdStrike result is withheld or bears its current approval');
     reviewedRoutes=null;elasticRoutes=null;delete process.env.VULN_REVIEWED_QUERY_PROVIDERS;
     // Leave the isolated DB unconnected for the subsequent HTTP authorization checks.
     await db.query("DELETE FROM elastic_dashboard_connection");

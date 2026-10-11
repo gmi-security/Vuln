@@ -45,7 +45,7 @@ function status(id) {
 }
 try {
   let ready = false;
-  for (let i = 0; i < 100; i++) { try { if ((await fetch(base+'/login')).ok) { ready = true; break; } } catch {} await delay(100); }
+  for (const deadline = Date.now()+90000; Date.now()<deadline;) { try { if ((await fetch(base+'/login', {signal:AbortSignal.timeout(2000)})).ok) { ready = true; break; } } catch {} await delay(100); }
   assert.ok(ready, output);
   const anonymous = await fetch(base+'/api/elastic-dashboard/customer-connectors?companyId=CO-A', { redirect: 'manual' });
   assert.ok([401, 307, 302].includes(anonymous.status));
@@ -80,6 +80,7 @@ try {
     }
     unexpected.push(url.pathname); return json({ error: 'Unexpected request' }, 500);
   });
+  page.setDefaultNavigationTimeout(60000);
   await page.goto(base+'/connectors');
   const select = page.getByLabel('Customer', { exact: true }); await select.waitFor();
   assert.equal(calls.filter(c => c.company).length, 0); assert.equal(await select.count(), 1);

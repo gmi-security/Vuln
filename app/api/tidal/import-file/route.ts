@@ -1,3 +1,4 @@
+import { withDurablePlatformMutation } from "@/lib/platform-mutation-route";
 import { NextResponse } from "next/server";
 import { ensureHydrated, importTidalInventory } from "@/lib/store";
 import { parseTidalCsv } from "@/lib/tidal";
@@ -6,7 +7,7 @@ export const dynamic = "force-dynamic";
 
 // Offline portal export with the existing header matching. The store refuses
 // this name-based path when reviewed live-session routing is enabled.
-export async function POST(request: Request) {
+async function POSTHandler(request: Request) {
   await ensureHydrated();
 
   let csv = "";
@@ -61,3 +62,5 @@ export async function POST(request: Request) {
   if ("error" in result) return NextResponse.json({error:result.error},{status:409});
   return NextResponse.json({ result: { ...result, rowsParsed: assets.length } });
 }
+
+export const POST = withDurablePlatformMutation(POSTHandler);

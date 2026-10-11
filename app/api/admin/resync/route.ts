@@ -1,3 +1,4 @@
+import { withDurablePlatformMutation } from "@/lib/platform-mutation-route";
 import { NextResponse } from "next/server";
 import { resyncFromNessus } from "@/lib/store";
 import { adminTokenOk } from "@/lib/admin-auth";
@@ -8,7 +9,7 @@ export const dynamic = "force-dynamic";
 // Nessus scanner (clears demo/stub data). Requires an Authorization: Bearer
 // or x-admin-token header matching ADMIN_TOKEN (no query-param form — that
 // would leak the token into access logs).
-export async function POST(request: Request) {
+async function POSTHandler(request: Request) {
   if (!adminTokenOk(request)) {
     return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
   }
@@ -20,3 +21,5 @@ export async function POST(request: Request) {
   }
   return NextResponse.json({ result });
 }
+
+export const POST = withDurablePlatformMutation(POSTHandler);

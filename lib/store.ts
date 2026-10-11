@@ -123,6 +123,7 @@ import {
   loadSnapshot,
   persistenceEnabled,
   saveSnapshot,
+  strictPlatformPersistence,
 } from "@/lib/persist";
 import {
   emailConfigured,
@@ -572,6 +573,7 @@ function normalizeMeta(raw: unknown): StoreMeta {
 }
 
 type StoreShape = {
+  retainedMetadata?: Record<string, unknown>;
   companies: Map<string, InternalCompany>;
   folders: Map<string, InternalFolder>;
   scans: Map<string, InternalScan>;
@@ -643,13 +645,17 @@ function store(): StoreShape {
 
 // --- snapshot persistence --------------------------------------------------
 
-function serializeStore(s: StoreShape) {
+type PlatformChanges = Partial<Record<"companies" | "folders" | "scans" | "findings" | "assets", string[]>>;
+function serializeStore(s: StoreShape, changes?: PlatformChanges) {
+  const entries = <T,>(map: Map<string, T>, kind: keyof PlatformChanges): [string, T][] => changes === undefined
+    ? [...map.entries()] : (changes[kind] ?? []).flatMap(id => map.has(id) ? [[id, map.get(id)!] as [string, T]] : []);
   return {
-    companies: [...s.companies.entries()],
-    folders: [...s.folders.entries()],
-    scans: [...s.scans.entries()],
-    findings: [...s.findings.entries()],
-    assets: [...s.assets.entries()],
+    ...s.retainedMetadata,
+    companies: entries(s.companies, "companies"),
+    folders: entries(s.folders, "folders"),
+    scans: entries(s.scans, "scans"),
+    findings: entries(s.findings, "findings"),
+    assets: entries(s.assets, "assets"),
     compensatingControls: [...s.compensatingControls.entries()],
     identityAliases: [...s.identityAliases.entries()],
     settings: s.settings,
@@ -676,6 +682,8 @@ function deserializeStore(obj: {
 }): StoreShape {
   restoreReportingKevCatalog(obj.reportingKevCatalog);
   return {
+    retainedMetadata: Object.fromEntries(Object.entries(obj).filter(([key]) =>
+      !["companies", "folders", "scans", "findings", "assets", "compensatingControls", "identityAliases", "settings", "reportingKevCatalog", "meta", "counter"].includes(key))),
     companies: new Map(obj.companies ?? []),
     folders: new Map(obj.folders ?? []),
     scans: new Map(obj.scans ?? []),
@@ -703,6 +711,8 @@ const persistGlobal = globalThis as unknown as {
   // Set by mutations, cleared by a successful snapshot save, so the interval
   // flusher can skip serializing an unchanged store.
   __vulnDirty?: boolean;
+  __vulnMutationVersion?: number;
+  __vulnMutationScope?: Partial<Record<keyof PlatformChanges, Set<string>>> | null;
   // 60s scheduler driving auto-sync, daily metrics snapshots, and monthly
   // reports (same singleton pattern as the flusher).
   __vulnScheduler?: ReturnType<typeof setInterval>;
@@ -741,8 +751,15 @@ export function persistenceBlocked(): boolean {
 }
 
 // Record that the in-memory store changed since the last snapshot save.
-function markDirty(): void {
+function markDirty(changes?: PlatformChanges): void {
   persistGlobal.__vulnDirty = true;
+  persistGlobal.__vulnMutationVersion = (persistGlobal.__vulnMutationVersion ?? 0) + 1;
+  if (changes === undefined) persistGlobal.__vulnMutationScope = null;
+  else if (persistGlobal.__vulnMutationScope !== null) {
+    const pending = persistGlobal.__vulnMutationScope ??= {};
+    for (const kind of Object.keys(changes) as (keyof PlatformChanges)[])
+      for (const id of changes[kind] ?? []) (pending[kind] ??= new Set()).add(id);
+  }
 }
 
 // One-time repair, run once per process on hydrate: earlier SpiderFoot
@@ -781,7 +798,7 @@ function migrateAutoSyncDefault(s: StoreShape): void {
     s.settings.schedule.autoSyncEnabled = true;
     console.error("[store] one-time migration: autoSyncEnabled defaulted on");
   }
-  markDirty();
+  markDirty({});
 }
 
 // Serialize all snapshot writes through a single in-flight promise so an
@@ -801,13 +818,35 @@ function persistSnapshot(throwOnError = false): Promise<void> {
       if (throwOnError) throw new Error("Application storage is unavailable; snapshot was not saved.");
       return;
     }
+    if (strictPlatformPersistence() && !persistGlobal.__vulnDirty) return;
     // Clear the dirty flag before serializing so mutations that land during
     // the save re-mark it and get picked up by the next flush.
-    persistGlobal.__vulnDirty = false;
     try {
-      await saveSnapshot(serializeStore(globalStore.__vulnStore));
+      for (let attempt = 0; ; attempt++) {
+        persistGlobal.__vulnDirty = false;
+        const version = persistGlobal.__vulnMutationVersion ?? 0;
+        const changes = strictPlatformPersistence() && persistGlobal.__vulnMutationScope != null
+          ? Object.fromEntries(Object.entries(persistGlobal.__vulnMutationScope).map(([kind, ids]) => [kind, [...ids]])) as PlatformChanges : undefined;
+        try {
+          await saveSnapshot(serializeStore(globalStore.__vulnStore, changes), {
+            changes,
+            guard: () => {
+              if (strictPlatformPersistence() && version !== (persistGlobal.__vulnMutationVersion ?? 0))
+                throw Object.assign(new Error("Platform changed during save; capture will be retried."), { code: "platform-capture-changed" });
+            },
+          });
+          if (version === (persistGlobal.__vulnMutationVersion ?? 0)) persistGlobal.__vulnMutationScope = {};
+          break;
+        } catch (error) {
+          if ((error as { code?: string })?.code !== "platform-capture-changed" || attempt >= 2) throw error;
+        }
+      }
     } catch (err) {
       persistGlobal.__vulnDirty = true;
+      // Do not serve uncommitted RAM as a successful SQL generation. A busy
+      // capture can retry; a database/fence failure requires a fresh hydration.
+      if (strictPlatformPersistence() && (err as { code?: string })?.code !== "platform-capture-changed")
+        persistGlobal.__vulnPersistBlocked = true;
       console.error("[persist] snapshot save failed:", err);
       throw err;
     }
@@ -841,7 +880,15 @@ function hookDrainOnce(): void {
 // before reading/writing, so a request never seeds an empty store ahead of a
 // pending snapshot load.
 export async function ensureHydrated(): Promise<void> {
-  if (persistGlobal.__vulnHydrated) return;
+  if (strictPlatformPersistence() && persistenceBlocked()) throw new Error("Platform storage is unavailable; restart after database recovery.");
+  if (persistGlobal.__vulnHydrated) {
+    if (strictPlatformPersistence()) {
+      await persistGlobal.__vulnFlushing;
+      if (persistenceBlocked()) throw new Error("Platform storage is unavailable; uncommitted results are not served.");
+      if (persistGlobal.__vulnDirty) await flushNow({ throwOnError: true });
+    }
+    return;
+  }
   if (!persistGlobal.__vulnHydrating) persistGlobal.__vulnHydrating = doHydrate();
   await persistGlobal.__vulnHydrating;
 }
@@ -875,6 +922,7 @@ async function doHydrate(): Promise<void> {
     }
     if (loadFailed) {
       persistGlobal.__vulnPersistBlocked = true;
+      if (strictPlatformPersistence()) throw new Error("SQL platform hydration failed; refusing an empty or stale fallback.");
       console.error(
         "[persist] PERSISTENCE BLOCKED: could not load the snapshot after " +
           `${HYDRATE_ATTEMPTS} attempts. Serving from an in-memory store; ` +
@@ -889,6 +937,7 @@ async function doHydrate(): Promise<void> {
   sanitizeSpiderfootAssets(s);
   repairDefenderPublicationMarkers(s);
   migrateAutoSyncDefault(s);
+  if (strictPlatformPersistence()) await persistSnapshot(true);
   persistGlobal.__vulnHydrated = true;
   startFlusher();
   startScheduler();
@@ -994,7 +1043,7 @@ async function scannerElasticExportTick(): Promise<void> {
   const now = Date.now();
   if (!scannerElasticConfig() || now - (s.meta.lastScannerElasticExportAt ?? 0) < 300_000) return;
   s.meta.lastScannerElasticExportAt = now;
-  markDirty();
+  markDirty({});
   try {
     const findings = Array.from(s.findings.values()).filter(
       (f) => f.connector === "nessus" || f.connector === "vulners",
@@ -1056,7 +1105,7 @@ async function vulnersBridgeTick(): Promise<void> {
   const intervalMs = intervalHours * 3_600_000;
   if (syncAllStatus().running || now - (s.meta.lastVulnersBridgeSweepAt ?? 0) < intervalMs) return;
   s.meta.lastVulnersBridgeSweepAt = now;
-  markDirty();
+  markDirty({});
   try {
     console.log("[vulners-bridge] full-inventory sweep starting");
     const result = await importFromVulnersBridge();
@@ -1096,7 +1145,7 @@ async function vulnersBridgeOffsetTick(s: StoreShape, now: number): Promise<void
         const targets = nessusBridgeTargetsForCompany(companyId);
         if (!targets.length) continue;
         s.meta.nessusOffsetLastTriggered[key] = occurrence;
-        markDirty();
+        markDirty({});
         const result = await startScan({
           name: `GMI scan: ${company.name} (1h after Nessus)`,
           connector: "vulners",
@@ -1130,7 +1179,7 @@ async function schedulerTick(): Promise<void> {
     const last = s.meta.lastAutoSyncAt ?? 0;
     if (now - last >= intervalMs) {
       s.meta.lastAutoSyncAt = now;
-      markDirty();
+      markDirty({});
       const r = startSyncAll();
       if (r.started) {
         console.log("[scheduler] auto sync-all started");
@@ -1156,7 +1205,7 @@ async function schedulerTick(): Promise<void> {
     s.meta.lastMonthlyReportMonth !== month
   ) {
     s.meta.lastMonthlyReportMonth = month;
-    markDirty();
+    markDirty({});
     try {
       await sendMonthlyExecReports(month);
     } catch (err) {
@@ -1172,7 +1221,7 @@ async function schedulerTick(): Promise<void> {
     now - (s.meta.lastNessusHealthCheckAt ?? 0) >= 3_600_000
   ) {
     s.meta.lastNessusHealthCheckAt = now;
-    markDirty();
+    markDirty({});
     try {
       const health = await nessusServerStatus();
       if (health.configured) {
@@ -1192,7 +1241,7 @@ async function schedulerTick(): Promise<void> {
         }
         if (previous !== ok) {
           s.meta.lastNessusHealthOk = ok;
-          markDirty();
+          markDirty({});
         }
       }
     } catch (err) {
@@ -1214,7 +1263,7 @@ async function schedulerTick(): Promise<void> {
     now - (s.meta.lastNessusFreshCheckAt ?? 0) >= 3_600_000
   ) {
     s.meta.lastNessusFreshCheckAt = now;
-    markDirty();
+    markDirty({});
     try {
       const FRESHNESS_WINDOW_MS = 30 * 3_600_000; // 30h: daily cadence + scheduling slack
       let mostRecentImport = 0;
@@ -1241,7 +1290,7 @@ async function schedulerTick(): Promise<void> {
       }
       if (previousFresh !== fresh) {
         s.meta.lastNessusFreshOk = fresh;
-        markDirty();
+        markDirty({});
       }
     } catch (err) {
       console.error("[scheduler] nessus freshness check failed:", err);
@@ -1256,7 +1305,7 @@ async function schedulerTick(): Promise<void> {
   // re-sends the same breach.
   if (sched.alertsEnabled && s.meta.lastSlaBreachCheckDay !== todayUtc()) {
     s.meta.lastSlaBreachCheckDay = todayUtc();
-    markDirty();
+    markDirty({});
     try {
       const nowIso = new Date().toISOString();
       const breaching: SlaBreachFinding[] = [];
@@ -1501,7 +1550,7 @@ export async function snapshotMetricsNow(): Promise<{ rows: number }> {
   await ensureHydrated();
   const s = store();
   s.meta.lastMetricsSnapshotDay = todayUtc();
-  markDirty();
+  markDirty({});
 
   const remediation = Array.from(s.findings.values()).filter(isRemediationFinding);
   const demo = demoCompanyIds(s);
@@ -1600,7 +1649,13 @@ export async function storeStatus(): Promise<{
 
 // Force an immediate snapshot write (used right after large imports).
 export async function flushNow(options?: { throwOnError?: boolean }): Promise<void> {
-  await persistSnapshot(options?.throwOnError);
+  await persistSnapshot(options?.throwOnError ?? strictPlatformPersistence());
+}
+
+// Mutation routes call this before acknowledging success. Existing deployments
+// retain their behavior until the explicitly selected SQL authority is active.
+export async function commitPlatformMutation(): Promise<void> {
+  if (strictPlatformPersistence()) await flushNow({ throwOnError: true });
 }
 
 // --- deterministic RNG so demo data is stable per scan -----------------
@@ -1662,10 +1717,11 @@ function demoScansEnabled(): boolean {
   return process.env.DEMO_SCANS === "true";
 }
 
-function nextId(s: StoreShape, prefix: string): string {
+function nextId(s: StoreShape, prefix: string, collection?: keyof PlatformChanges): string {
   s.counter += 1;
-  markDirty(); // every entity creation funnels through here
-  return `${prefix}-${s.counter}`;
+  const id = `${prefix}-${s.counter}`;
+  markDirty(collection ? { [collection]: [id] } : undefined);
+  return id;
 }
 
 function computeProgress(scan: InternalScan, now: number): number {
@@ -2266,7 +2322,7 @@ export function createCompany(input: {
       };
     }
   }
-  const id = nextId(s, "CO");
+  const id = nextId(s, "CO", "companies");
   const company: InternalCompany = {
     id,
     name,
@@ -2312,7 +2368,7 @@ export function updateCompany(
   if (patch.industry !== undefined) company.industry = patch.industry.trim();
   if (patch.contactName !== undefined) company.contactName = patch.contactName.trim();
   if (patch.contactEmail !== undefined) company.contactEmail = patch.contactEmail.trim();
-  markDirty();
+  markDirty(patch.name === undefined ? { companies: [id] } : undefined);
   return toPublicCompany(s, company);
 }
 
@@ -2423,7 +2479,7 @@ function ensureFolder(s: StoreShape, companyId: string, name: string): InternalF
     (f) => f.companyId === companyId && f.name.toLowerCase() === trimmed.toLowerCase(),
   );
   if (existing) return existing;
-  const id = nextId(s, "FLD");
+  const id = nextId(s, "FLD", "folders");
   const folder: InternalFolder = {
     id,
     companyId,
@@ -2451,7 +2507,7 @@ export function deleteFolder(id: string): { deleted: true } | { error: string } 
   const hasScans = Array.from(s.scans.values()).some((sc) => sc.folderId === id);
   if (hasScans) return { error: "Move this folder's scans before deleting it." };
   s.folders.delete(id);
-  markDirty();
+  markDirty({ folders: [id] });
   return { deleted: true };
 }
 
@@ -3052,7 +3108,7 @@ export function updateSettings(patch: SettingsPatch): Settings {
     schedule: { ...s.settings.schedule, ...patch.schedule },
     sla: { ...s.settings.sla, ...patch.sla },
   };
-  markDirty();
+  markDirty({});
   return copySettings(s.settings);
 }
 
@@ -3306,7 +3362,7 @@ export function markReportSent(companyId: string): void {
   const company = s.companies.get(companyId);
   if (!company) return;
   company.lastReportSentAt = new Date().toISOString();
-  markDirty();
+  markDirty({ companies: [companyId] });
   void persistSnapshot();
 }
 
@@ -6841,7 +6897,7 @@ function repairDefenderPublicationMarkers(s: StoreShape): void {
     const scan = s.scans.get(`defender:${companyId}`);
     if (scan?.externalRef === runId && scan.findingsCount === (counts.get(companyId) ?? 0)) continue;
     delete generations[companyId];
-    markDirty();
+    markDirty({});
     console.error("[defender] Stored publication is incomplete; the completed import will be republished.");
   }
 }
@@ -6852,7 +6908,7 @@ export function invalidateDefenderPublication(companyId: string, runId: string):
   const s = store();
   if (s.meta.defenderGenerations?.[companyId] !== runId) return;
   delete s.meta.defenderGenerations[companyId];
-  markDirty();
+  markDirty({});
 }
 export function publishDefenderSnapshot(snapshot: DefenderSnapshot): void {
   if (persistenceBlocked()) throw new Error("Application storage is unavailable; Defender publication deferred.");
@@ -7397,7 +7453,7 @@ async function runVulnersBridgeScanAsync(
       current.progressFrozenAt = 0;
       if (current.bridgeScan) current.bridgeScan.done = true;
     }
-    void flushNow();
+    void flushNow().catch(error => console.error("[platform] background save failed:", error));
     return;
   }
 
@@ -7414,7 +7470,7 @@ async function runVulnersBridgeScanAsync(
   current.completedAt = new Date().toISOString();
   current.progressFrozenAt = failedTargets ? Math.round(completedTargets / targets.length * 100) : 100;
   current.bridgeScan.done = true;
-  void flushNow();
+  void flushNow().catch(error => console.error("[platform] background save failed:", error));
 }
 
 function zapTargetPort(target: string): string {
@@ -7553,7 +7609,7 @@ async function runZapScanAsync(
       current.progressFrozenAt = 0;
       if (current.zapScan) current.zapScan.phase = "done";
     }
-    void flushNow();
+    void flushNow().catch(error => console.error("[platform] background save failed:", error));
     return;
   }
 
@@ -7570,7 +7626,7 @@ async function runZapScanAsync(
   current.completedAt = new Date().toISOString();
   current.progressFrozenAt = failedTargets ? Math.round(completedTargets / targets.length * 100) : 100;
   current.zapScan.phase = "done";
-  void flushNow();
+  void flushNow().catch(error => console.error("[platform] background save failed:", error));
 }
 
 export async function startScan(input: {
@@ -7856,7 +7912,7 @@ export function updateFinding(
         : null;
   }
   if (patch.assignee !== undefined) finding.assignee = patch.assignee || null;
-  markDirty();
+  markDirty({ findings: [id] });
   return finding;
 }
 

@@ -1,3 +1,4 @@
+import { withDurablePlatformMutation } from "@/lib/platform-mutation-route";
 import { NextResponse } from "next/server";
 import { ensureHydrated, mergeCompanies } from "@/lib/store";
 
@@ -7,7 +8,7 @@ export const dynamic = "force-dynamic";
 // its assets/findings/scans and deleting it once empty. Use when a sync's
 // name-matching missed an existing company and created a near-duplicate
 // (e.g. "GCON" vs "GCON Inc.") instead of attaching to it.
-export async function POST(
+async function POSTHandler(
   request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -28,3 +29,5 @@ export async function POST(
   }
   return NextResponse.json({ result });
 }
+
+export const POST = withDurablePlatformMutation(POSTHandler);

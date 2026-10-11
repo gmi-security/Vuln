@@ -2,6 +2,8 @@
 
 Updated October 10, 2026. Development branch: `Vuln2.0`. Production was not deployed, restarted or reconfigured by these checks.
 
+**Latest combined-release position (checkpoint 57):** authoritative SQL persistence, all-customer report capacity and built-application edit/restart/reverse recovery have now passed private validation. The earlier sections below retain their checkpoint-specific evidence and limitations. The current remaining gates are actual customer/tenant/dataset/target approvals, Artemis/ZAP availability and runtime/maintenance reconciliation. See [the combined release checklist](vuln2-combined-release.md). A fresh read-only pass reached both CrowdStrike connections, Defender, Elasticsearch, AppSec, ConnectWise boards, MISP, OpenCTI, Automate and Tidal; Nessus, SpiderFoot and Vulners were reachable. Artemis still refused connections and ZAP timed out. No live import, scan or ticket was started.
+
 ## What is complete in this connector pass
 
 - All 20 integration types have a documented data role, storage path, native identity and lifecycle contract.

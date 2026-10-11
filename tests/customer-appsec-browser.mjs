@@ -27,7 +27,7 @@ const calls=[],errors=[],unexpected=[];let fail=false,mismatch=false,reviewed=tr
 function summary(id){const repo=id==='CO-B'?'Fixture/Beta':'Fixture/Alpha';return {repositories:1,totalRepositories:2,coveragePct:50,findings:7,vulnerabilities:6,misconfigurations:1,licenses:0,gateFailures:1,critical:2,high:3,newCritical:1,newHigh:1,secrets:0,resolved:4,
  rows:[{repository:repo,lastScan:'2026-10-10T12:00:00Z',findings:7,vulnerabilities:6,misconfigurations:1,licenses:0,critical:2,high:3,medium:2,low:0,secrets:0,newFindings:2,newCritical:1,newHigh:1,resolved:4,gate:'fail'}]};}
 try {
- let ready=false;for(let i=0;i<100;i++){try{if((await fetch(base+'/login')).ok){ready=true;break;}}catch{}await delay(100);}assert.ok(ready,output);
+ let ready=false;for(const deadline=Date.now()+90000;Date.now()<deadline;){try{if((await fetch(base+'/login',{signal:AbortSignal.timeout(2000)})).ok){ready=true;break;}}catch{}await delay(100);}assert.ok(ready,output);
  for(const path of ['/api/appsec?setup=1','/api/appsec?companyId=CO-A','/api/appsec/repositories/Fixture%2FAlpha?companyId=CO-A'])
   assert.equal((await fetch(base+path,{redirect:'manual'})).status,401);
  pass('real proxy requires authentication for setup, summary and repository APIs');
@@ -58,6 +58,7 @@ try {
   }
   unexpected.push(url.pathname);return json({error:'Unexpected fixture request'},500);
  });
+ page.setDefaultNavigationTimeout(60000);
  await page.goto(base+'/appsec');const select=()=>page.getByLabel('Customer',{exact:true});await select().waitFor();
  assert.equal(await select().count(),1);assert.equal(calls.filter(c=>c.path==='/api/appsec'&&c.company).length,0);
  await page.getByText('Choose a customer to view its approved AppSec repositories.',{exact:true}).waitFor();

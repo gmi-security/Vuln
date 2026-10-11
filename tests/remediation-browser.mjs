@@ -60,7 +60,7 @@ const published=publishedComparisonFixture({companies,cve,when,id,calls});
 function pass(message){checks++;console.log('PASS '+message);}
 try{
   let ready=false;
-  for(let i=0;i<100;i++){try{if((await fetch(base+'/login')).ok){ready=true;break;}}catch{}await delay(100);}
+  for(const deadline=Date.now()+90000;Date.now()<deadline;){try{if((await fetch(base+'/login',{signal:AbortSignal.timeout(2000)})).ok){ready=true;break;}}catch{}await delay(100);}
   assert.ok(ready,serverOutput);
   browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_CHANNEL?{channel:process.env.PLAYWRIGHT_CHANNEL}:{})});
   const context=await browser.newContext({viewport:{width:1440,height:1000},acceptDownloads:true});

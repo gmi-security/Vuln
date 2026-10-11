@@ -102,10 +102,12 @@ test('Tidal CSV HTTP endpoint exposes reviewed-routing refusal and preserves suc
  const code=ts.transpileModule(await readFile('app/api/tidal/import-file/route.ts','utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText;
  const values={
   'next/server':{NextResponse:{json:(data,init)=>Response.json(data,init)}},
-  '@/lib/store':{ensureHydrated:async()=>{},importTidalInventory:async()=>rejected?{error:'Use live Tidal sync for reviewed routing.'}:{assetsUpserted:1}},
+  '@/lib/store':{ensureHydrated:async()=>{},commitPlatformMutation:async()=>{},importTidalInventory:async()=>rejected?{error:'Use live Tidal sync for reviewed routing.'}:{assetsUpserted:1}},
   '@/lib/tidal':{parseTidalCsv:tidal.parseTidalCsv},
  };
- const mod=new SourceTextModule(code);await mod.link(name=>{assert.ok(values[name]);return new SyntheticModule(Object.keys(values[name]),function(){for(const[k,v]of Object.entries(values[name]))this.setExport(k,v);});});await mod.evaluate();
+ const linker=name=>{assert.ok(values[name]);return new SyntheticModule(Object.keys(values[name]),function(){for(const[k,v]of Object.entries(values[name]))this.setExport(k,v);});};
+ const wrapper=new SourceTextModule(ts.transpileModule(await readFile('lib/platform-mutation-route.ts','utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText);await wrapper.link(linker);
+ const mod=new SourceTextModule(code);await mod.link(name=>name==='@/lib/platform-mutation-route'?wrapper:linker(name));await mod.evaluate();
  const request=()=>new Request('http://fixture.invalid/api/tidal/import-file',{method:'POST',body:'Hostname,Customer\nhost-a,Alpha'});
  let result=await mod.namespace.POST(request());assert.equal(result.status,409);assert.match((await result.json()).error,/live Tidal/);
  rejected=false;result=await mod.namespace.POST(request());assert.equal(result.status,200);assert.equal((await result.json()).result.rowsParsed,1);

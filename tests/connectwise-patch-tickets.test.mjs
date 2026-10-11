@@ -20,8 +20,8 @@ function loader(overrides = {}) {
  const synthetic=values=>new SyntheticModule(Object.keys(values),function(){for(const k of Object.keys(values))this.setExport(k,values[k]);});
  async function linker(name,parent) {
   if(overrides[name])return synthetic(overrides[name]);
-  if(name.startsWith("."))return getModule(resolve(dirname(parent.identifier),`${name}.ts`));
-  if(name.startsWith("@/"))return getModule(resolve(".",`${name.slice(2)}.ts`));
+  if(name.startsWith("."))return getModule(resolve(dirname(parent.identifier),/\.(?:mjs|js|ts)$/.test(name)?name:`${name}.ts`));
+  if(name.startsWith("@/"))return getModule(resolve(".",/\.(?:mjs|js|ts)$/.test(name)?name.slice(2):`${name.slice(2)}.ts`));
   const imported=await import(name);return synthetic(name === "rrule"?{...imported.default,...imported}:imported);
  }
  return async path=>{const m=await getModule(path);if(m.status === "unlinked")await m.link(linker);await m.evaluate();return m.namespace;};

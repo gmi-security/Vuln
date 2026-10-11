@@ -1,3 +1,4 @@
+import { withDurablePlatformMutation } from "@/lib/platform-mutation-route";
 import { NextResponse } from "next/server";
 import {
   ensureHydrated,
@@ -16,7 +17,7 @@ export async function GET() {
 
 const SLA_SEVERITIES: SlaSeverity[] = ["Critical", "High", "Medium", "Low"];
 
-export async function PATCH(request: Request) {
+async function PATCHHandler(request: Request) {
   await ensureHydrated();
   let body: {
     autoScanNewAssets?: unknown;
@@ -84,3 +85,5 @@ export async function PATCH(request: Request) {
 
   return NextResponse.json({ settings: updateSettings(patch) });
 }
+
+export const PATCH = withDurablePlatformMutation(PATCHHandler);
