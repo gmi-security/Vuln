@@ -1,3 +1,4 @@
+import { savedReportingOverview, savedReportingSetup } from "./reporting-saved-overview";
 import { DashboardError } from "./elastic-dashboard";
 import { buildCustomerInsights } from "./reporting-insights";
 import { buildCustomerReportingModel } from "./reporting-customer-model";
@@ -11,6 +12,8 @@ import { resolveCustomerScope } from "./customer-scope";
 // rather than being permanently unreachable from the customer picker. Demo
 // companies (e.g. SplashWorks) are still excluded everywhere.
 export async function reportingSetup() {
+  const saved = await savedReportingSetup();
+  if (saved) return saved;
   await ensureHydrated();
   return { companies: listCompanies().filter(company => !company.isDemo)
     .map(company => ({ id: company.id, name: company.name })).sort((a, b) => a.name.localeCompare(b.name)) };
@@ -31,8 +34,11 @@ export async function reportingCustomer(appCompanyId: string) {
 
 // Overview renders only these sections. Avoid computing unused executive
 // risk/compliance/SLA and a second insights aggregation on that request.
-// This remains the existing platform read until saved SQL routing is accepted.
+// The SQL path is opt-in per customer; other customers retain existing reads.
 export async function reportingOverview(appCompanyId: string) {
+  if (typeof appCompanyId !== "string" || !appCompanyId || appCompanyId.length > 100) throw new DashboardError("Choose a customer.", 400);
+  const saved = await savedReportingOverview(appCompanyId);
+  if (saved) return saved;
   const { company } = await resolveCustomerScope(appCompanyId);
   const findings = listFindings({ companyId: company.id });
   const scans = await listScans({ companyId: company.id });

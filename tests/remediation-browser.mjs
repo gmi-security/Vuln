@@ -95,7 +95,7 @@ try{
       if(!url.searchParams.has('companyId'))return json({companies});
       const model=overviewModel(mismatchOverview?companies[1].id:companyId);
       if(delayOverview&&companyId===companies[0].id){delayOverview=false;await new Promise(r=>releaseOverview=r);}
-      return json(url.searchParams.get('view')==='sections'?{model}:{report:{company:{id:companyId}},model});
+      return json(url.searchParams.get('view')==='sections'?{model,savedReport:{capturedAt:when,builtAt:when}}:{report:{company:{id:companyId}},model});
     }
     if(p==='customer-saved-sources'){
       if(url.searchParams.get('setup')==='1')return json({companies});
@@ -144,6 +144,7 @@ try{
   assert.equal(await page.getByRole('link',{name:'Open full report',exact:true}).getAttribute('href'),`/report/${companies[0].id}`);
   assert.ok(calls.filter(c=>c.path==='reporting'&&c.companyId).every(c=>c.view==='sections'));
   assert.equal(await page.getByLabel('Customer',{exact:true}).count(),1);
+  await page.getByText(/Saved platform report as of/).waitFor();
   pass('Overview loads the sections-only contract with one selector and preserves the full-report link');
   await page.getByRole('region',{name:'Highest risk vulnerability findings',exact:true}).getByRole('button',{name:`View ${cve} details`,exact:true}).click();
   await page.getByRole('dialog',{name:cve,exact:true}).getByText(`${companies[0].id}-device`,{exact:true}).waitFor();

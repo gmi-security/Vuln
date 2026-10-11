@@ -1,5 +1,6 @@
 import { Pool } from "pg";
 import { createHash } from "node:crypto";
+import { createReportingInputDigests, publishReportingInputRevisions, reportingSnapshotManifest } from "./db/customer-reporting-revisions.mjs";
 
 // Snapshot persistence. The in-memory store (companies, folders, scans,
 // findings, assets, settings, counter) is serialized by store.ts and flushed
@@ -20,6 +21,8 @@ let ready: Promise<void> | null = null;
 // after boot and updated only after a successful write commit. A failed
 // transaction retries every changed row on the next flush.
 const lastWrittenHashes = new Map<string, string>();
+let lastReportingManifest: string | null = null;
+const reportingDigestCache = new Map();
 
 // --- sharding layout ---------------------------------------------------------
 // Bucket counts are FROZEN constants: the bucket for an id is
@@ -333,7 +336,9 @@ export async function loadSnapshot(): Promise<unknown | null> {
         // Yield so concurrent requests aren't starved during a large load.
         await new Promise((resolve) => setImmediate(resolve));
       }
+      const reportingManifest = process.env.VULN_REPORTING_INPUT_REVISIONS === "true" ? await reportingSnapshotManifest(client) : null;
       await withTimeout(client.query("COMMIT"),10000,"loadSnapshot(commit)");
+      lastReportingManifest = reportingManifest?.hash ?? null;
       // A restart should not rewrite every unchanged shard. Prime from the
       // committed snapshot; subsequent mutations still compare content hashes.
       lastWrittenHashes.clear();
@@ -350,6 +355,7 @@ export async function loadSnapshot(): Promise<unknown | null> {
     );
     await withTimeout(client.query("COMMIT"),10000,"loadSnapshot(commit)");
     lastWrittenHashes.clear();
+    lastReportingManifest = null;
     return legacy.rows[0]?.data ?? null;
   } catch (error) {
     releaseError = error instanceof Error ? error : new Error(String(error));
@@ -384,16 +390,20 @@ export async function saveSnapshot(data: unknown): Promise<void> {
       : { __raw: data };
 
   const rows = await shardSnapshot(obj);
+  const reporting = process.env.VULN_REPORTING_INPUT_REVISIONS === "true" ? createReportingInputDigests(reportingDigestCache) : null;
   const changed: { key: string; json: string; hash: string }[] = [];
   for (const [key, value] of rows) {
     const json = JSON.stringify(value);
     const hash = sha1Hex(json);
+    await reporting?.bucket(key, json, hash);
     if (lastWrittenHashes.get(key) !== hash) changed.push({ key, json, hash });
     await new Promise<void>(resolve => setImmediate(resolve));
   }
-  if (changed.length === 0) return;
+  if (changed.length === 0 && !reporting) return;
+  const reportingDigests = reporting?.finish();
 
   const client = await p.connect();
+  let committedReportingManifest: string | null = null;
   try {
     // Bound each statement/lock wait, but allow a large atomic publication to
     // take longer than the old 60-second budget for ALL shards combined.
@@ -402,9 +412,18 @@ export async function saveSnapshot(data: unknown): Promise<void> {
         await client.query("BEGIN");
         await client.query("SET LOCAL statement_timeout = '60s'");
         await client.query("SET LOCAL lock_timeout = '10s'");
+        if (reportingDigests) {
+          // Detect another/older writer rather than certify its data using this
+          // process's stale hash cache. Readers remain free to use MVCC snapshots.
+          await client.query("LOCK TABLE public.vuln_store IN SHARE ROW EXCLUSIVE MODE");
+          const present = (await client.query("SELECT 1 FROM public.vuln_store LIMIT 1")).rowCount;
+          if (present && (!lastReportingManifest || (await reportingSnapshotManifest(client)).hash !== lastReportingManifest))
+            throw new Error("Platform snapshot changed outside this writer; reload before publishing report revisions.");
+        }
         for (const row of changed) {
           await client.query(UPSERT_SQL, [row.key, row.json]);
         }
+        if (reportingDigests) committedReportingManifest = await publishReportingInputRevisions(client, reportingDigests);
         await client.query("COMMIT");
       })(),
       300000,
@@ -419,6 +438,8 @@ export async function saveSnapshot(data: unknown): Promise<void> {
     throw err;
   }
   client.release();
+  lastReportingManifest = committedReportingManifest;
+  reporting?.committed();
   for (const row of changed) lastWrittenHashes.set(row.key, row.hash);
 }
 

@@ -1,4 +1,4 @@
--- Explicit private-verification migration after customer-reporting-sections.sql.
+-- Explicit additive migration after customer-reporting-sections.sql.
 -- No source-table triggers, startup initializer or production scheduler.
 CREATE TABLE customer_reporting_jobs (
   company_id text PRIMARY KEY,

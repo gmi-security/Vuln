@@ -19,7 +19,7 @@ async function main(){
  source.on('error',connectionLost);target.on('error',connectionLost);process.on('SIGTERM',stop);process.on('SIGINT',stop);
  let lock,owned=false;
  try{
-  const worker=createCustomerReportingWorker(source,target,createReportingSectionsAccumulator);await worker.assertReady();
+  const worker=createCustomerReportingWorker(source,target,createReportingSectionsAccumulator,{mode:settings.mode});await worker.assertReady();
   lock=await target.connect();lock.on('error',connectionLost);
   owned=(await lock.query('SELECT pg_try_advisory_lock(804259,1) owned')).rows[0].owned;
   if(!owned){log('already-running');if(retry)process.exitCode=1;return;}

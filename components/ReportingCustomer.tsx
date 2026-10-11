@@ -8,7 +8,7 @@ import type { CustomerReportingModel } from "@/lib/reporting-customer-model";
 import { selectClass } from "@/components/ui";
 
 type Setup = { companies: { id: string; name: string }[] };
-type Customer = { model: CustomerReportingModel };
+type Customer = { model: CustomerReportingModel; savedReport?: { capturedAt: string; builtAt: string } };
 
 export default function ReportingCustomer({ companyId, onCompanyChange, refreshToken, showReport = true, setupPath = "reporting", sectionsOnly = false }: { companyId: string; onCompanyChange: (companyId: string) => void; refreshToken: number; showReport?: boolean; setupPath?: string; sectionsOnly?: boolean }) {
   const [setup, setSetup] = useState<Setup | null>(null);
@@ -53,6 +53,7 @@ export default function ReportingCustomer({ companyId, onCompanyChange, refreshT
     </label>}
     {error && <p role="alert" className="mt-4 text-sm text-red-300">{error}</p>}
     {showReport && loading && <p role="status" className="mt-5 text-sm text-zinc-400">Loading this customer’s report…</p>}
+    {showReport && model && customer?.savedReport && <p role="status" className="mt-4 text-sm text-zinc-300">Saved platform report as of {new Date(customer.savedReport.capturedAt).toLocaleString()}. Refreshes in the background.</p>}
     {showReport && model && <CustomerReportSections model={model} />}
   </section>
   </>;

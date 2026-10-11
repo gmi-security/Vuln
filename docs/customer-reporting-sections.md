@@ -2,7 +2,7 @@
 
 ## Current status
 
-Checkpoint 51 implements and verifies a derived SQL report for the sections rendered by `CustomerReportSections`. Checkpoint 52 adds the [private dedicated refresh worker](customer-reporting-worker.md) and a lean Overview response over the existing platform store. SQL page reads and the worker remain inactive in production. Both SQL builder and reader refuse databases outside the private recovery cluster. No production migration or permission change has occurred.
+Checkpoint 53 connects the tested SQL sections to Remediation Overview through an explicit per-customer read flag. It adds atomic customer input revisions, stored source-review checks and current connection-metadata validation. The default private comparison mode still rejects production databases; an explicit `published` mode uses migrated tables in the application database. The worker, revision writes and SQL page reads remain disabled in production. No production migration or permission change has occurred. See [configuration and rollback](customer-reporting-worker.md).
 
 This is a small replaceable reporting summary, not another authoritative finding store. The normalized platform record remains the input. Raw CrowdStrike/Defender counts are not substituted for correlated platform findings.
 
@@ -30,7 +30,7 @@ The current validation target is a disposable database. The retained source data
 | History | Recorded customer observations within the captured 180-day window; missing count remains null |
 | CVE links | Existing finding identifiers and CVE values retained; ticket preparation and evidence collection remain in their existing services |
 
-The comparison uses the unchanged `buildCustomerReportingModel`, with the current store's finding, scan and asset ordering. It compares saved state; it does not execute `tick`, hydrate the application, poll active scans or import vendor changes. An active RAM mutation not yet committed is outside this snapshot. This boundary must be explicit when the runtime reader is integrated.
+The comparison uses the unchanged `buildCustomerReportingModel`, with the current store's finding, scan and asset ordering. It compares saved state; it does not execute `tick`, hydrate the application, poll active scans or import vendor changes. An active RAM mutation not yet committed is outside this snapshot. The integrated SQL reader intentionally serves the last committed platform observation, with a visible capture time; it does not promise read-your-write visibility for unsaved RAM changes.
 
 The separate threat-intelligence tile, enrichment database, full executive report, financial calculations, compliance, risk recomputation, SLA clocks and ConnectWise workflows are not replaced by this component. Existing saved source activity is retained; independent live MISP/OpenCTI parity is not newly established here.
 
@@ -40,12 +40,16 @@ The separate threat-intelligence tile, enrichment database, full executive repor
 
 - Version, generated snapshot ID and customer ID.
 - Captured time, build time, expiry and finding count.
-- Fingerprint of the source database/relation, 90 relevant snapshot rows and that customer's history row revisions.
+- In published mode, the customer input generation/content digest, reviewed source pin and that customer's history row revisions. The original private comparison keeps its coarse snapshot-row fingerprint.
 - Compact report JSON and a canonical SHA-256 checksum that survives PostgreSQL JSONB key reordering.
 
-The current fingerprint is deliberately conservative: another customer's change in a shared bucket also invalidates this report. PostgreSQL row versions are local database evidence, not portable business generation identifiers. Before activation, replace this coarse check with the authoritative customer publication/workflow revision, include current connector/source-selection evidence, and connect a durable refresh job. Do not simply remove the private-database guards.
+`customer_reporting_inputs` has one versioned digest/generation per customer. The writer computes it from exactly the JSON it saves, covering report-relevant company, finding/workflow, scan and asset fields. Unchanged bucket contributions are cached only after a successful commit. `customer_reporting_publication` pins the complete set of relevant committed shard revisions. Both metadata tables update in the same transaction as `vuln_store`; they cannot acknowledge an unsuccessful write. A table write lock plus the writer's last-observed manifest detects another writer's changes rather than recertifying stale RAM.
 
-Saved reports expire after 15 minutes or when their oldest included history row leaves the 180-day window, whichever is sooner. This is a verification safety limit. The private worker refreshes unchanged reports five minutes before expiry and discovers committed source changes outside page requests. A stale result never becomes a current zero or triggers a full rebuild inside the reader.
+The reader checks that the current snapshot still matches its publication marker, then compares only this customer's input revision, source review and history. Thus another customer's tracked update or unrelated bookkeeping no longer invalidates this report. An untracked older-writer update withholds the report. A changed source review, workflow, asset, scan or history invalidates it. A deleted/recreated customer gets a new generation.
+
+This is cache freshness for the existing platform writer, not the final normalized authoritative database-write migration. The current customer IDs, record correlation and source provenance remain the platform's inputs. The worker rejects a report containing a provider outside its reviewed roles, including seen-by and enrichment provenance; it never silently drops those rows. Current tenant/dataset/target configuration is checked by the web service against the reviewed registry. These checks do not independently certify the historic ownership of every retained vendor record. That remains part of source-adapter and combined-release acceptance.
+
+Saved reports expire after 15 minutes or when their oldest included history row leaves the 180-day window, whichever is sooner. This is the current cache freshness limit. The dedicated worker refreshes unchanged reports five minutes before expiry and discovers committed source changes outside page requests. A stale result never becomes a current zero or triggers a full rebuild inside the reader.
 
 ## Bounds and failure behavior
 
@@ -53,7 +57,7 @@ Saved reports expire after 15 minutes or when their oldest included history row 
 - Complete expected snapshot buckets are required. Meta overrides, malformed tuples, repeated IDs, incorrect hash-bucket placement and invalid finding assessments fail the build.
 - At most 50,000 entries per bucket, 32 MiB of projected data per bucket, two million customer findings and 10,000 history rows. Exceeding a limit is an error, not truncation.
 - Report output is limited to 2 MiB; top lists are bounded while totals include every accepted record.
-- Build statements are limited to 15 seconds, source read statements to five seconds, and a build to five minutes. Private test connection settings also bound target read statements.
+- Build statements are limited to 15 seconds, source read statements to five seconds, and a build to five minutes. Both source and saved-report read transactions have a five-second statement limit.
 - Atomic replacement preserves the previous complete report on failure. A source commit during construction makes the completed older summary stale on a subsequent read. Concurrent readers see a consistent saved observation, not a promise that upstream data cannot change immediately after the read.
 - Checksums detect unexpected saved-content changes. They are integrity checks, not an independent validation of the original source's accuracy.
 
@@ -82,10 +86,6 @@ Neither command is a production deployment instruction. The restored comparison 
 
 ## Integration and recovery still required
 
-1. Connect reviewed customer source assignments and current normalized publication/workflow revisions to the builder and reader. Preserve independent sources and approved mirrors without double counting or hiding unresolved ownership.
-2. Promote the tested private refresh lifecycle to accepted customer publication/workflow revisions; include scan, asset and history changes, explicit runtime configuration and retention. The dedicated queue, retry and interruption recovery now exist.
-3. Integrate a reversible customer-scoped SQL read with visible freshness and tested failure behavior. The Overview response has already been split from the unused executive-report computation; it still uses the existing store.
-4. Test the live runtime contract separately from the static snapshot comparison: scanner polling ownership, in-memory changes, source freshness and current connector scope remain material.
-5. Complete executive-report/risk/SLA compatibility, authoritative writer handoff and the coordinated release/recovery rehearsal.
+The per-customer SQL route, published input revisions and reversible read flags now exist and are tested in disposable PostgreSQL. Before rollout, complete the production customer-review inventory and prepare the explicit migrations and independent worker configuration. Verify source-adapter ownership evidence and refresh capacity for the enabled customer set. Keep Burp, Nmap, Intune, IntelOwl and n8n disabled as agreed.
 
-No production recovery action is needed for this checkpoint. Derived test databases are dropped after verification. The application continues to use its existing report path; no findings, history, saved tiles, tickets or assignments are removed.
+The full executive report/risk/SLA calculations, scanner polling ownership, authoritative normalized writer handoff/reverse recovery and coordinated release rehearsal remain separate work. This read optimization does not remove application RAM hydration from unrelated pages or replace patch/ticket evidence collection. No source deletion or resync is needed for this change. For rollback, first disable the SQL read flag, then stop the dedicated worker; keep the derived tables and existing data.

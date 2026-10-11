@@ -1,4 +1,4 @@
--- Explicit disposable verification migration. No application initializer.
+-- Explicit additive migration. No application initializer.
 -- A replaceable derived report, never an authoritative finding/workflow store.
 CREATE TABLE customer_reporting_sections (
   company_id text PRIMARY KEY,
