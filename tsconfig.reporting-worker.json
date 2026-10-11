@@ -2,8 +2,8 @@
   "compilerOptions": {
     "target": "ES2022", "lib": ["ES2022", "DOM"], "module": "CommonJS",
     "moduleResolution": "Node", "strict": true, "skipLibCheck": true,
-    "esModuleInterop": true, "rootDir": ".",
+    "esModuleInterop": true, "rootDir": ".", "paths": {"@/*": ["./*"]},
     "outDir": ".worker-build/customer-reporting", "noEmitOnError": true
   },
-  "include": ["lib/reporting-sections-accumulator.ts"]
+  "include": ["lib/reporting-sections-accumulator.ts", "lib/executive-report.ts"]
 }

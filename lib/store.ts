@@ -1,3 +1,4 @@
+import { buildExecutiveReport, type ExecReport } from "./executive-report";
 import { loadReviewedScannerRoutes } from "@/lib/customer-scanner-routing-server";
 import type { ScannerRoute } from "@/lib/customer-scanner-routing";
 import { scannerTargetMatcher, assertScannerResultScope, scannerExactTargetKey, scannerWebOrigin } from "@/lib/scanner-target-scope";
@@ -3166,130 +3167,18 @@ export async function resyncFromNessus(options?: {
 
 // --- executive report (per-client board one-pager) -------------------------
 
-// Single-loss-expectancy per finding by severity (order-of-magnitude, breach-
-// cost flavored) and annual rate of occurrence driven by exploitation signal.
-// ALE = SLE x ARO summed over open findings. Assumptions are shown on the page.
-const SLE_BY_SEVERITY: Record<Severity, number> = {
-  Critical: 250_000,
-  High: 75_000,
-  Medium: 15_000,
-  Low: 2_000,
-  Info: 0,
-};
-
-function annualRate(f: Finding): number {
-  let p = 0.05;
-  if (f.kev) p = 0.6;
-  else if (f.exploitAvailable || f.epss >= 0.3) p = 0.3;
-  if (f.assetExposure === "Internet-facing") p += 0.1;
-  if (f.assetCriticality === "Crown Jewel") p += 0.1;
-  return Math.min(0.9, p);
-}
-
-export type ExecReport = {
-  generatedAt: string;
-  company: { id: string; name: string; industry: string };
-  posture: { compositeScore: number; compositeBand: string; exposureScore: number };
-  findings: { open: number; critical: number; high: number; kevOpen: number };
-  ssvc: { act: number; attend: number; overdue: number; kevOverdue: number };
-  compliance: { framework: string; overall: string; score: number }[];
-  attackSurface: {
-    total: number;
-    exposedAssets: number;
-    leakedCredentials: number;
-    webVulnerabilities: number;
-  };
-  financial: { ale: number };
-  // Remediation SLA rollup: open + overdue counts per severity against the
-  // configured settings.sla days, plus 90-day mean time to remediate.
-  sla: {
-    bySeverity: Record<Severity, { open: number; overdue: number }>;
-    mttrDays: number | null;
-  };
-  topRisks: {
-    cve: string;
-    title: string;
-    asset: string;
-    realRisk: number;
-    decision: SsvcDecision;
-    kev: boolean;
-  }[];
-};
-
+// Preserve the existing executive response while avoiding unused dashboard
+// trends, asset rankings and repeated compliance scans. The pure accumulator
+// also accepts streamed, scoped records for the planned saved SQL report.
+export type { ExecReport } from "./executive-report";
 export function computeExecReport(companyId: string): ExecReport | null {
   const s = store();
   tick(s);
   const company = s.companies.get(companyId);
   if (!company) return null;
-
-  const metrics = computeMetrics({ companyId });
-  const priorities = computePriorities({ companyId, limit: 5000 });
-  const surface = computeAttackSurface({ companyId });
-  const surfaceSummary = surface.summary;
-
-  const open = Array.from(s.findings.values()).filter(
-    (f) => f.companyId === companyId && isOpen(f),
-  );
-  const ale = Math.round(
-    open.reduce((sum, f) => sum + SLE_BY_SEVERITY[f.severity] * annualRate(f), 0),
-  );
-
-  const slaBySeverity = {} as Record<Severity, { open: number; overdue: number }>;
-  for (const sev of SEVERITIES) slaBySeverity[sev] = { open: 0, overdue: 0 };
-  for (const f of open.filter(isRemediationFinding)) {
-    slaBySeverity[f.severity].open += 1;
-    if (findingSlaInfo(f).overdue) slaBySeverity[f.severity].overdue += 1;
-  }
-  const companyRemediation = Array.from(s.findings.values()).filter(
-    (f) => f.companyId === companyId && isRemediationFinding(f),
-  );
-
-  const compliance = FRAMEWORKS.map((fw) => {
-    const p = computeCompliance({ companyId, framework: fw.id }).companies[0];
-    return { framework: fw.name, overall: p?.overall ?? "Pass", score: p?.score ?? 100 };
+  return buildExecutiveReport(company, s.findings.values(), s.scans.values(), s.assets.values(), {
+    now: Date.now(), sla: s.settings.sla, isComplianceKev: isKev,
   });
-
-  return {
-    generatedAt: "",
-    company: { id: company.id, name: company.name, industry: company.industry },
-    posture: {
-      compositeScore: metrics.composite.score,
-      compositeBand: metrics.composite.band,
-      exposureScore: metrics.exposureScore,
-    },
-    findings: {
-      open: metrics.totalOpen,
-      critical: metrics.severityCounts.Critical,
-      high: metrics.severityCounts.High,
-      kevOpen: metrics.kevOpen,
-    },
-    ssvc: {
-      act: priorities.summary.act,
-      attend: priorities.summary.attend,
-      overdue: priorities.summary.overdue,
-      kevOverdue: priorities.summary.kevOverdue,
-    },
-    compliance,
-    attackSurface: {
-      total: surfaceSummary.total,
-      exposedAssets: surfaceSummary.exposedAssets,
-      leakedCredentials: surfaceSummary.byCategory["Leaked Credentials"],
-      webVulnerabilities: surfaceSummary.byCategory["Web Vulnerabilities"],
-    },
-    financial: { ale },
-    sla: {
-      bySeverity: slaBySeverity,
-      mttrDays: mttr90Days(companyRemediation),
-    },
-    topRisks: priorities.items.slice(0, 5).map((i) => ({
-      cve: i.cve,
-      title: i.title,
-      asset: i.asset,
-      realRisk: i.realRisk,
-      decision: i.decision,
-      kev: i.kev,
-    })),
-  };
 }
 
 // --- customer report email data ---------------------------------------------
