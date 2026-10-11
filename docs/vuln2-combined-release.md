@@ -2,6 +2,8 @@
 
 This is the release preparation document, not permission to deploy. Production has not been restarted, reconfigured or migrated. The last verified production and `origin/main` commit is `a6c485b`. The verified application runtime is committed as `3e2357686f2140136b4923430c947c1ddf5ce865` on `Vuln2.0`. Subsequent release-review scripts/documentation do not change that runtime. The final archive and its checksum are recorded separately after those files are committed.
 
+**October 11 publication direction:** The user supplied the root runtime inventory and authorized pushing the prepared commits to the existing `Vuln2.0` branch only. Do not merge into `main`, deploy, restart services, migrate production schemas or change production configuration as part of this push. The `89703cb` source archive remains an immutable earlier review artifact; this runtime-inventory documentation update is a later commit with no application changes.
+
 ## What the release changes
 
 | Area | Result |
@@ -46,11 +48,12 @@ The HTTP rehearsal detected separately bundled persistence modules losing the lo
 - [x] Finish the optional database-suite rerun after correcting a test that incorrectly rejected a valid background-refreshed tile.
 - [ ] Confirm live customer/tenant/dataset/repository/target assignments. Current metadata contains 28 proposals for 40 customers; shared credentials and historical names do not prove ownership.
 - [ ] Resolve Artemis connection refusal and ZAP timeout, or obtain an explicit decision to keep them visibly unavailable while preserving their data.
-- [ ] Review the root-owned PM2 runtime inventory, including other users' PM2 managers, actual environment overrides and all writer owners.
+- [x] Review the supplied root PM2 inventory, including the other users' existing PM2 managers.
+- [ ] Reconcile application environment files, non-PM2/external jobs and in-flight writes for the maintenance window. Unset startup flags do not establish their effective application values.
 - [ ] Reconcile server-local files and record the immutable release commit plus compatible recovery build.
 - [ ] Review the RAM compatibility/bulk-publication boundary above and the exact customer/provider activation list.
 
-The independent code/build/test preparation is complete. The unresolved external inputs are the customer scope decisions, the two unavailable scanner services and the actual runtime owner/environment inventory. Do not claim deployment readiness until those inputs are reconciled; another generic regression run does not resolve them.
+The independent code/build/test preparation is complete. PM2 process ownership is now confirmed by the supplied inventory. The unresolved external inputs are the customer scope decisions and the two unavailable scanner services; effective configuration and job draining still belong to the final maintenance review. Do not claim deployment readiness until those inputs are reconciled; another generic regression run does not resolve them.
 
 The saved settings explicitly associate Defender with Footprint (`CO-230784`) and one environment CrowdStrike connection with Atlas (`CO-147284`). The other CrowdStrike connection, shared dashboard scope, scanner targets and AppSec repository ownership must not be guessed. Existing tiles are preserved throughout review.
 
@@ -75,11 +78,23 @@ The two server-local scripts were preserved in a private archive at `/home/codex
 
 ## Operator preparation
 
-The following are templates until the release commit and runtime inventory are reviewed. Do not run them against production as an unreviewed batch.
+### Runtime inventory supplied October 11
+
+The user ran `collect-release-runtime.cjs` as root and supplied the result collected at `2026-10-11T15:00:01.810Z` (08:00 America/Phoenix). It recorded:
+
+- Root's PM2 manager: one online process, `vuln`, PM2 ID `0`, working directory `/opt/vuln`, executable `/usr/bin/npm`, one instance in fork mode and seven recorded restarts.
+- The `chuck` and `johngoff` PM2 managers: zero processes each. No additional Vuln process was found in those managers.
+- The collector could read the process's initial environment. Every inspected release/scheduler flag was unset there. The app also loads environment files, so these values must not be interpreted as all features or jobs being disabled.
+- No explicit heap value, kill timeout or memory restart value was reported by the inspected PM2/startup fields. The npm wrapper result does not establish the running Next.js child's effective V8 heap limit.
+- The collector saved private PM2 recovery definitions under `/root/vuln-release-recovery/runtime-Wcy316`. Keep these private; the pasted summary contains no credentials.
+
+This confirms the PM2 owner and process identity at collection time. It does not inventory cron/systemd/remote orchestration or prove imports/ticket jobs have drained. Use the root manager and process name `vuln` in the final reviewed deployment procedure; do not act on the other users' managers. No process action was performed as part of recording this evidence.
+
+The following are templates until the release commit, effective configuration and activation scope are reviewed. Do not run them against production as an unreviewed batch.
 
 1. Preserve the local modified `scripts/audit-unenriched-auto-tickets.mjs` and untracked `scripts/print-saved-connectwise-connection.mjs` privately. Do not reset them or copy their contents into Git/logs. Compare their intended purpose before choosing the final release directory.
 2. Use a separate release directory for `npm ci`, `npm run build`, `npm run build:reporting-worker` and `npm run build:summary-worker`. Build without production configuration. Do not overwrite the active `.next` directory.
-3. Capture actual PM2 ownership/settings from a root terminal:
+3. The root inventory above is captured. Refresh it from a root terminal immediately before the maintenance window if process ownership/settings may have changed:
 
    ```bash
    node /home/codex/vuln-recovery/collect-release-runtime.cjs
@@ -127,7 +142,7 @@ The following are templates until the release commit and runtime inventory are r
 | `VULN_SHADOW_CVE_READS=false` | Leave the experimental comparison path off. |
 | Existing scheduler/export/bridge flags | Preserve the reviewed runtime choices. Do not turn every background job on together. |
 
-The separate report worker does not automatically load `.env.local`; its process configuration must supply the reviewed environment. The final PM2 command must use the confirmed process owner and release directory, not a guessed process ID.
+The separate report worker does not automatically load `.env.local`; its process configuration must supply the reviewed environment. The application owner is confirmed as root with process name `vuln`; the final PM2 command must also use the reviewed release directory and environment. No separate reporting worker was present in the supplied inventory.
 
 ## Recovery
 
