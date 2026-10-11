@@ -1,6 +1,6 @@
 # Vuln2.0 combined release
 
-This is the release preparation document, not permission to deploy. Production has not been restarted, reconfigured or migrated. The last verified production and `origin/main` commit is `a6c485b`. The candidate is on `Vuln2.0`; the final commit will be recorded after the remaining checks.
+This is the release preparation document, not permission to deploy. Production has not been restarted, reconfigured or migrated. The last verified production and `origin/main` commit is `a6c485b`. The verified application runtime is committed as `3e2357686f2140136b4923430c947c1ddf5ce865` on `Vuln2.0`. Subsequent release-review scripts/documentation do not change that runtime. The final archive and its checksum are recorded separately after those files are committed.
 
 ## What the release changes
 
@@ -50,9 +50,28 @@ The HTTP rehearsal detected separately bundled persistence modules losing the lo
 - [ ] Reconcile server-local files and record the immutable release commit plus compatible recovery build.
 - [ ] Review the RAM compatibility/bulk-publication boundary above and the exact customer/provider activation list.
 
+The independent code/build/test preparation is complete. The unresolved external inputs are the customer scope decisions, the two unavailable scanner services and the actual runtime owner/environment inventory. Do not claim deployment readiness until those inputs are reconciled; another generic regression run does not resolve them.
+
 The saved settings explicitly associate Defender with Footprint (`CO-230784`) and one environment CrowdStrike connection with Atlas (`CO-147284`). The other CrowdStrike connection, shared dashboard scope, scanner targets and AppSec repository ownership must not be guessed. Existing tiles are preserved throughout review.
 
 The latest live read-only checks reached both CrowdStrike connections, Defender, Elasticsearch, AppSec, ConnectWise board lookup, MISP, OpenCTI, Automate and Tidal. Nessus, SpiderFoot and Vulners were reachable. This proves the tested reads, not scanner-launch or ConnectWise ticket-creation permission. Artemis and ZAP remain the known service failures.
+
+### Customer review artifact and current evidence
+
+The additional read-only collection at `2026-10-11T06:18:36.855Z` found **40 customers, 421 recorded scans/imports and eight tiles without a saved customer owner**. The earlier retained-copy migration benchmark had 385 scans; these are different captures, not an assertion that production stayed frozen. Explicit saved ownership evidence was found for Footprint's Defender connection and Atlas's completed Spotlight pointer/two saved tiles. Environment-only connections and repository ownership require the separate connector preview; absence from this collection does not mean a source is unconfigured.
+
+`scripts/collect-customer-assignment-review.mjs` performs bounded read-only queries without hydrating findings. `scripts/render-customer-assignment-review.mjs` turns its private JSON into a standalone searchable HTML file. The generated file contains customer/target information and must stay outside Git. The reviewed artifact is available in the local `Vuln2.0-release-review` folder beside the checkout as `Customer connector review.html`. Forty rows, customer filtering, expandable evidence and mobile fit were verified in the browser. The file makes no HTTP requests and cannot activate assignments.
+
+```bash
+node scripts/collect-customer-assignment-review.mjs --env-file /opt/vuln/.env.local --output /private/new-customer-review.json
+node scripts/render-customer-assignment-review.mjs --input /private/new-customer-review.json --output /private/new-customer-review.html
+```
+
+Both output paths must be new files in an appropriate private directory. These commands do not approve ownership or change existing tiles.
+
+A separate TCP-only check confirmed Artemis refuses connections on its configured remote port 5000; ZAP's configured remote port 8081 timed out after ten seconds. Both are on different hosts from the Vuln application. This narrows the failure to service/listener/network reachability before an API call, but does not determine whether the remote service, firewall or configured address needs correction. No scan or authenticated mutation was attempted.
+
+The two server-local scripts were preserved in a private archive at `/home/codex/vuln-recovery/server-local-tools-20261011.tar.gz`, SHA-256 `25a8aad9f5becc7ebe7ebe69610f07f03c0f9f72ea783dcddc8f3839f5222e7b`. The tracked script has 25 added and 14 removed lines; the other is untracked. Their contents were not printed or added to Git. Production files remain untouched. Preserve this archive alongside the fresh maintenance recovery point and retain the original checkout when choosing a separate release directory.
 
 ## Operator preparation
 
