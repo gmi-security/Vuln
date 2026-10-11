@@ -105,7 +105,7 @@ export default function CustomerReportingPage({ initialCompanyId="", canManage, 
         {value === "overview" ? "Overview" : value === "prioritize" ? "Prioritize" : "Tickets"}
       </button>)}
     </nav>}
-    <ReportingCustomer companyId={companyId} onCompanyChange={selectCustomer} refreshToken={refresh} showReport={overview}
+    <ReportingCustomer companyId={companyId} onCompanyChange={selectCustomer} refreshToken={refresh} showReport={overview} sectionsOnly={remediation}
       setupPath={savedReads ? "customer-saved-sources?setup=1" : "reporting"}/>
     {!companyId && <p className="mt-6 text-sm text-zinc-300">Choose a customer to view its connector data. No shared customer results are shown until a customer is selected.</p>}
     {/* Remount every customer-bound child immediately. Late results and open

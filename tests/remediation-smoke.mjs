@@ -39,6 +39,11 @@ for (const enabled of [false, true]) {
     const headers = { cookie: `next-auth.session-token=${token}` };
     assert.equal((await fetch(`${base}/remediation`, { redirect: 'manual' })).status, 307);
     assert.equal((await fetch(`${base}/api/elastic-vulnerabilities/status`)).status, 401);
+    const sections=`${base}/api/elastic-dashboard/reporting?view=sections`;
+    assert.equal((await fetch(sections)).status,401);
+    const unscoped=await fetch(sections,{headers});assert.equal(unscoped.status,400);
+    assert.match(unscoped.headers.get('cache-control'),/no-store/);
+    assert.equal((await fetch(`${base}/api/elastic-dashboard/reporting?companyId=CO-230784&view=unknown`,{headers})).status,400);
     for(const endpoint of ['customer-cve','customer-threat-intelligence']) {
       assert.equal((await fetch(`${base}/api/elastic-dashboard/${endpoint}`)).status,401);
       const scoped=await fetch(`${base}/api/elastic-dashboard/${endpoint}?companyId=&cve=CVE-2026-1234`,{headers});

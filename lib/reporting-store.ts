@@ -28,3 +28,14 @@ export async function reportingCustomer(appCompanyId: string) {
   return { report: { ...report, generatedAt: new Date().toISOString() },
     sources: insights.sources.map(({ name, open }) => ({ name, open })), insights, model };
 }
+
+// Overview renders only these sections. Avoid computing unused executive
+// risk/compliance/SLA and a second insights aggregation on that request.
+// This remains the existing platform read until saved SQL routing is accepted.
+export async function reportingOverview(appCompanyId: string) {
+  const { company } = await resolveCustomerScope(appCompanyId);
+  const findings = listFindings({ companyId: company.id });
+  const scans = await listScans({ companyId: company.id });
+  const model = buildCustomerReportingModel(company, findings, scans, listAssets({ companyId: company.id }), await loadMetricsHistory(company.id, 180));
+  return { model };
+}

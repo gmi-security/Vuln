@@ -4,7 +4,7 @@ import {randomUUID,createHash} from 'node:crypto';
 import pg from 'pg';
 import {loadReportingSections} from '../scripts/reporting-sections-loader.mjs';
 import {buildCustomerReportingSections,readCustomerReportingSections} from '../lib/db/customer-reporting-sections.mjs';
-import {company,reportingFixture,expectedReport} from './reporting-sections.test.mjs';
+import {company,reportingFixture,expectedReport} from './reporting-sections-fixture.mjs';
 globalThis.fetch=()=>{throw Error('No vendor, scan or ticket calls allowed');};
 const socket=await realpath(process.argv[2]||'.');assert.ok(socket.startsWith('/home/codex/vuln-recovery/')&&socket.endsWith('/socket'));
 const config={host:socket,port:55483,user:'codex',connectionTimeoutMillis:5000,statement_timeout:15000};

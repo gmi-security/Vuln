@@ -36,6 +36,16 @@ const summary=(companyId)=>({id,cves:[cve],hostCount:2,findingCount:2,remediatio
 const group=(companyId)=>({manualOnly:true,source:'stored-findings',appCompanyId:companyId,companyName:companyId===companies[0].id?'Fixture A':'Fixture B',connectors:['defender'],title:'Install recommended patch',action:'Install recommended update',tenantId:companyId,remediationId:'manual:fixture',cves:[cve],deviceCount:2,findingCount:2,hostScope:[],deviceCves:[],maxRisk:72,worstSeverity:'High',label:cve,csv:`cve,hostname,cvss,remediation\r\n${cve},${companyId}-device,8.1,Install recommended update\r\n`,ticketTitle:`${companyId}: ${cve}`,ticketBody:`Customer: ${companyId}\nCVE: ${cve}\nRecommended remediation: Install recommended update\nCVSS: 8.1\nSee attached CSV for devices.`});
 const detail=companyId=>({companyId,cve,companyName:companyId===companies[0].id?'Fixture A':'Fixture B',observedAt:when,sourceObservations:{platform:when,crowdstrike:null},findingCount:2,deviceCount:2,hosts:[{host:`${companyId}-device`,source:'defender',severity:'High',cvss:8.1}],enrichment:{cvss_score:8.1,epss_probability:0.9,cisa_kev:true,active_exploitation:true,active_exploitation_source:'MISP',active_exploitation_detail:'Synthetic retained signal',updated_at:when},tickets:[],moreTickets:false});
 let approved=false,created=false,failPrepare=false,failIntel=false,delayDetail=false,releaseDetail;
+let mismatchOverview=false,delayOverview=false,releaseOverview;
+function overviewModel(companyId){
+  const company=companies.find(c=>c.id===companyId),count=companyId===companies[0].id?1:2;
+  return {company,metrics:{vulnerabilities:{open:count,critical:0,high:count,kev:0,exploitable:0,cveOpen:count,
+    bySeverity:{Critical:0,High:count,Medium:0,Low:0,Info:0},assessed:true},attackSurface:{open:0},webTesting:{open:0,assessed:false}},
+    assessmentState:'assessed',sourceActivity:[],priorityTotal:count,priorityRows:[{id:'overview-finding',cve,title:'Overview patch',
+      asset:`${companyId}-overview-device`,severity:'High',realRisk:72,status:'Open',lastSeen:when,connectors:['defender']}],
+    scanTotal:0,recentScans:[],assets:{inventoryCount:2,authoritativeFindingCount:0,contextCoveragePercent:0,scanCoveragePercent:null,sourceCounts:[]},
+    attackSurfaceRows:[],webTestingRows:[],history:[]};
+}
 let sourceState='available',failSource=false,delaySource=false,releaseSource;
 function savedResult(companyId,source,offset){
   const state=sourceState==='pending'?'summary-pending':'available';
@@ -67,7 +77,7 @@ try{
     if(url.origin!==base){await route.abort();return;}
     if(!url.pathname.startsWith('/api/')){await route.continue();return;}
     const p=url.pathname.replace('/api/elastic-dashboard/',''),companyId=url.searchParams.get('companyId')||companies[0].id;
-    const body=req.method()==='POST'?req.postDataJSON():null;calls.push({path:p,companyId:url.searchParams.get('companyId'),method:req.method(),body});
+    const body=req.method()==='POST'?req.postDataJSON():null;calls.push({path:p,companyId:url.searchParams.get('companyId'),view:url.searchParams.get('view'),method:req.method(),body});
     const json=(data,status=200)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(data)});
     if(p==='preview'){
       assert.equal(body.companyId,companies[0].id);assert.equal(body.source,'crowdstrike');
@@ -81,7 +91,12 @@ try{
     if(p==='/api/settings')return json({settings:{sla:null}});
     if(p==='/api/elastic-vulnerabilities/status')return json({enabled:true,remediationEnabled:true});
     if(p==='/api/defender/results')return json({configured:false});
-    if(p==='reporting')return json(url.searchParams.has('companyId')?{report:{company:{id:companyId}},model:{company:{id:'empty-fixture'}}}:{companies});
+    if(p==='reporting'){
+      if(!url.searchParams.has('companyId'))return json({companies});
+      const model=overviewModel(mismatchOverview?companies[1].id:companyId);
+      if(delayOverview&&companyId===companies[0].id){delayOverview=false;await new Promise(r=>releaseOverview=r);}
+      return json(url.searchParams.get('view')==='sections'?{model}:{report:{company:{id:companyId}},model});
+    }
     if(p==='customer-saved-sources'){
       if(url.searchParams.get('setup')==='1')return json({companies});
       const source=url.searchParams.get('source');
@@ -125,6 +140,15 @@ try{
     unexpected.push(p);return json({error:'Unexpected fixture request'},500);
   });
   await page.goto(base+`/remediation?companyId=${companies[0].id}&view=overview`);
+  await page.getByRole('link',{name:'Open full report',exact:true}).waitFor();
+  assert.equal(await page.getByRole('link',{name:'Open full report',exact:true}).getAttribute('href'),`/report/${companies[0].id}`);
+  assert.ok(calls.filter(c=>c.path==='reporting'&&c.companyId).every(c=>c.view==='sections'));
+  assert.equal(await page.getByLabel('Customer',{exact:true}).count(),1);
+  pass('Overview loads the sections-only contract with one selector and preserves the full-report link');
+  await page.getByRole('region',{name:'Highest risk vulnerability findings',exact:true}).getByRole('button',{name:`View ${cve} details`,exact:true}).click();
+  await page.getByRole('dialog',{name:cve,exact:true}).getByText(`${companies[0].id}-device`,{exact:true}).waitFor();
+  await page.keyboard.press('Escape');
+  pass('CVE links in the Overview sections retain the shared patch-request panel');
   const tile=page.getByRole('region',{name:'Fixture table',exact:true});
   await tile.getByRole('button',{name:'Edit',exact:true}).click();
   await page.getByRole('button',{name:'Preview (optional)',exact:true}).click();
@@ -264,6 +288,23 @@ try{
     await published.run({page,panel,base,pass,artifacts});
   }
   if(!shadowReads){assert.equal(await page.getByRole('button',{name:'Compare published data',exact:true}).count(),0);assert.equal(published.requests.length,0);pass('disabled comparison adds no button or page requests');}
+  await page.goto(base+`/remediation?companyId=${companies[0].id}&view=overview`);
+  await page.getByRole('link',{name:'Open full report',exact:true}).waitFor();
+  mismatchOverview=true;await page.getByRole('button',{name:'Refresh report',exact:true}).click();
+  await page.getByRole('alert').filter({hasText:'report returned a different customer'}).waitFor();
+  assert.equal(await page.getByRole('link',{name:'Open full report',exact:true}).count(),0);
+  assert.equal(await page.getByText(`${companies[1].id}-overview-device`,{exact:true}).count(),0);
+  mismatchOverview=false;delayOverview=true;await page.getByRole('button',{name:'Refresh report',exact:true}).click();
+  for(let i=0;i<100&&!releaseOverview;i++)await delay(20);assert.ok(releaseOverview);
+  await page.getByLabel('Customer',{exact:true}).selectOption(companies[1].id);
+  await page.getByText(`${companies[1].id}-overview-device`,{exact:true}).waitFor();releaseOverview();await delay(150);
+  assert.equal(await page.getByText(`${companies[0].id}-overview-device`,{exact:true}).count(),0);
+  await page.screenshot({path:join(artifacts,'overview-sections-mobile.png'),fullPage:true});
+  pass('mismatched and late Overview responses cannot show another customer report');
+  await page.goto(base+`/reporting?companyId=${companies[0].id}`);
+  await page.getByRole('link',{name:'Open full report',exact:true}).waitFor();
+  assert.ok(calls.some(c=>c.path==='reporting'&&c.companyId===companies[0].id&&c.view===null));
+  pass('original reporting keeps its full response route and report sections');
   assert.deepEqual(unexpected,[]);assert.deepEqual(errors,[]);
   await writeFile(join(artifacts,'result.json'),JSON.stringify({checks,passed:true,syntheticData:true,realTicketsSent:0,unexpected,errors},null,2));
   console.log(JSON.stringify({checks,passed:true,artifacts,realTicketsSent:0}));

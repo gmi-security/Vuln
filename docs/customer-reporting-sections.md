@@ -2,7 +2,7 @@
 
 ## Current status
 
-Checkpoint 51 implements and verifies a derived SQL report for the sections rendered by `CustomerReportSections`. It is a local verification component, with no runtime caller, new route, scheduler, production migration or activation flag. Both builder and reader refuse databases outside the private recovery cluster. Production pages and their permissions remain unchanged.
+Checkpoint 51 implements and verifies a derived SQL report for the sections rendered by `CustomerReportSections`. Checkpoint 52 adds the [private dedicated refresh worker](customer-reporting-worker.md) and a lean Overview response over the existing platform store. SQL page reads and the worker remain inactive in production. Both SQL builder and reader refuse databases outside the private recovery cluster. No production migration or permission change has occurred.
 
 This is a small replaceable reporting summary, not another authoritative finding store. The normalized platform record remains the input. Raw CrowdStrike/Defender counts are not substituted for correlated platform findings.
 
@@ -45,7 +45,7 @@ The separate threat-intelligence tile, enrichment database, full executive repor
 
 The current fingerprint is deliberately conservative: another customer's change in a shared bucket also invalidates this report. PostgreSQL row versions are local database evidence, not portable business generation identifiers. Before activation, replace this coarse check with the authoritative customer publication/workflow revision, include current connector/source-selection evidence, and connect a durable refresh job. Do not simply remove the private-database guards.
 
-Saved reports expire after 15 minutes or when their oldest included history row leaves the 180-day window, whichever is sooner. This is a verification safety limit, not a configured refresh schedule. There is no worker yet. A stale result never becomes a current zero or triggers a full rebuild inside the reader.
+Saved reports expire after 15 minutes or when their oldest included history row leaves the 180-day window, whichever is sooner. This is a verification safety limit. The private worker refreshes unchanged reports five minutes before expiry and discovers committed source changes outside page requests. A stale result never becomes a current zero or triggers a full rebuild inside the reader.
 
 ## Bounds and failure behavior
 
@@ -83,8 +83,8 @@ Neither command is a production deployment instruction. The restored comparison 
 ## Integration and recovery still required
 
 1. Connect reviewed customer source assignments and current normalized publication/workflow revisions to the builder and reader. Preserve independent sources and approved mirrors without double counting or hiding unresolved ownership.
-2. Queue a bounded refresh after successful platform publication/save; include workflow, scan, asset and history changes. Handle retries, interrupted workers, retention and staleness without expensive request-time work.
-3. Split the Overview response from the currently unused executive-report computation. Integrate a reversible customer-scoped SQL read with visible freshness and tested failure behavior.
+2. Promote the tested private refresh lifecycle to accepted customer publication/workflow revisions; include scan, asset and history changes, explicit runtime configuration and retention. The dedicated queue, retry and interruption recovery now exist.
+3. Integrate a reversible customer-scoped SQL read with visible freshness and tested failure behavior. The Overview response has already been split from the unused executive-report computation; it still uses the existing store.
 4. Test the live runtime contract separately from the static snapshot comparison: scanner polling ownership, in-memory changes, source freshness and current connector scope remain material.
 5. Complete executive-report/risk/SLA compatibility, authoritative writer handoff and the coordinated release/recovery rehearsal.
 
