@@ -5,5 +5,5 @@
     "esModuleInterop": true, "rootDir": ".", "paths": {"@/*": ["./*"]},
     "outDir": ".worker-build/customer-reporting", "noEmitOnError": true
   },
-  "include": ["lib/reporting-sections-accumulator.ts", "lib/executive-report.ts"]
+  "include": ["lib/reporting-sections-accumulator.ts", "lib/reporting-bundle.ts"]
 }

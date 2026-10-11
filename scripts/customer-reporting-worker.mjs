@@ -2,6 +2,7 @@
 import {createRequire} from 'node:module';
 import {setTimeout as delay} from 'node:timers/promises';
 import {reportingWorkerSettings,createCustomerReportingWorker} from '../lib/db/customer-reporting-worker.mjs';
+import {applicationDatabaseSsl} from '../lib/db/connection-target.mjs';
 const log=(event,details={})=>console.log(JSON.stringify({worker:'customer-reporting',event,...details}));
 async function main(){
  const settings=reportingWorkerSettings(process.env);
@@ -12,14 +13,16 @@ async function main(){
  }else if(args.length>1||(args.length===1&&args[0]!=='--once'))throw Error('invalid-arguments');
  const require=createRequire(import.meta.url),{Pool}=require('pg');
  const {createReportingSectionsAccumulator}=require('../.worker-build/customer-reporting/lib/reporting-sections-accumulator.js');
+ const createAccumulator=settings.executive?require('../.worker-build/customer-reporting/lib/reporting-bundle.js').createReportingBundleAccumulator:createReportingSectionsAccumulator;
  const options={connectionTimeoutMillis:5000,statement_timeout:15000,application_name:'vuln-customer-reporting-worker'};
- const source=new Pool({...options,connectionString:settings.sourceUrl,max:2}),target=new Pool({...options,connectionString:settings.targetUrl,max:4});
+ const source=new Pool({...options,connectionString:settings.sourceUrl,ssl:applicationDatabaseSsl(settings.sourceUrl),max:2}),
+  target=new Pool({...options,connectionString:settings.targetUrl,ssl:applicationDatabaseSsl(settings.targetUrl),max:4});
  const controller=new AbortController(),stop=()=>controller.abort();
  const connectionLost=()=>{log('connection-lost');process.exitCode=1;stop();};
  source.on('error',connectionLost);target.on('error',connectionLost);process.on('SIGTERM',stop);process.on('SIGINT',stop);
  let lock,owned=false;
  try{
-  const worker=createCustomerReportingWorker(source,target,createReportingSectionsAccumulator,{mode:settings.mode});await worker.assertReady();
+  const worker=createCustomerReportingWorker(source,target,createAccumulator,{mode:settings.mode,executive:settings.executive});await worker.assertReady();
   lock=await target.connect();lock.on('error',connectionLost);
   owned=(await lock.query('SELECT pg_try_advisory_lock(804259,1) owned')).rows[0].owned;
   if(!owned){log('already-running');if(retry)process.exitCode=1;return;}

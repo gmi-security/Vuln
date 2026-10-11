@@ -7,6 +7,7 @@ import pg from 'pg';
 import nextEnv from '@next/env';
 import { loadConnectorPreview } from './connector-preview-loader.mjs';
 import { readApplicationConnectorMetadata, readDashboardConnectorMetadata } from '../lib/db/connector-metadata.mjs';
+import { applicationDatabaseSsl } from '../lib/db/connection-target.mjs';
 
 const args = process.argv.slice(2);
 let output, envFile;
@@ -29,7 +30,7 @@ try {
   const env = { ...process.env };
   if (!env.DATABASE_URL) throw new Error('Application database is not configured.');
   async function connect(url) {
-    const client = new pg.Client({ connectionString: url, application_name: 'vuln2-connector-preview',
+    const client = new pg.Client({ connectionString: url, ssl: applicationDatabaseSsl(url), application_name: 'vuln2-connector-preview',
       options: '-c default_transaction_read_only=on', statement_timeout: 15000, connectionTimeoutMillis: 5000 });
     clients.push(client); await client.connect(); return client;
   }

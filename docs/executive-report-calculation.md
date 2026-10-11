@@ -36,7 +36,13 @@ On the read-only October 9 retained snapshot, all executive output fields matche
 
 Timings exclude SQL collection and do not represent production HTTP/browser latency. The comparison process retained reference data and both calculation paths and peaked at 710 MiB RSS; this is not a measurement of isolated accumulator memory or a new production heap requirement. No claim is made about the freshness/completeness of the retained source records or current vendor threat intelligence. No mail or ticket was sent.
 
-## Still required for saved SQL executive reports
+## Saved SQL integration (checkpoint 56)
+
+The combined background accumulator, v3 input revisions, persisted SLA/KEV context, atomic executive output and opt-in API/print reader are now implemented. The capture time is displayed; the 15-minute expiry deliberately represents a saved observation rather than an instantaneous deadline calculation. A policy/catalog/input change invalidates the report immediately on its next read. Email packet generation retains the compatible existing path.
+
+The published worker matched every report and history field for the retained Defender and mixed-scanner cohorts plus an empty fixture. Builds took 38.023 s, 24.396 s and 16 ms; saved reads took 6.5-21.6 ms. The three-job cycle was 63.051 s at 264 MiB worker peak RSS with a 512 MiB JavaScript heap. Reviews and the offline catalog were explicit test fixtures, not live ownership or current intelligence attestations.
+
+## Original saved SQL acceptance checklist (implemented above)
 
 1. Publish executive-specific input revisions for the required finding, inventory-alias, company-industry and scan fields. The existing Overview input digest omits several of these fields and must not be reused unchanged.
 2. Include configured SLA policy and a durable, identified KEV catalog snapshot in report freshness. An in-memory catalog callback alone is insufficient for a saved report worker.

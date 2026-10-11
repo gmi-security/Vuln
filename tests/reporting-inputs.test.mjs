@@ -28,3 +28,12 @@ test('incomplete, duplicate and orphaned input cannot produce a customer bucket 
  const data=baseline();data['findings:00']=[['orphan',{id:'orphan',companyId:'MISSING'}]];
  await assert.rejects(()=>collect(data),/no saved customer/);
 });
+
+test('every additional executive finding field and inventory alias participates in customer revisions',async()=>{
+ for(const [kind,fields] of [['findings',['firstSeen','resolvedAt','cvssV2','cvssV3','epss','category','assetExposure','assetCriticality','ransomware']],
+  ['assets',['hostname','ipAddresses']]])for(const field of fields){
+  const data=baseline();data[kind+':00']=[['f',{id:'f',companyId:'A'}]];
+  const before=(await collect(data)).rows;data[kind+':00'][0][1][field]=field==='ipAddresses'?['changed']:'changed';
+  const after=(await collect(data)).rows;assert.notEqual(after[0].hash,before[0].hash,field);assert.equal(after[1].hash,before[1].hash);
+ }
+});

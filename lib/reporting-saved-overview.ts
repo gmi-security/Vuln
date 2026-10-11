@@ -3,6 +3,7 @@ import { DashboardError } from "./elastic-dashboard";
 import { readCustomerConnectorStatus } from "./customer-connector-status-service";
 import { readCustomerReportingSections } from "./db/customer-reporting-sections.mjs";
 import type { CustomerReportingModel } from "./reporting-customer-model";
+import type { ExecReport } from "./executive-report";
 import { readSavedApplicationCompanies } from "./db/connector-metadata.mjs";
 
 export async function savedReportingSetup() {
@@ -31,6 +32,19 @@ export function savedOverviewEnabled(companyId: string, env: Partial<NodeJS.Proc
 // No hydration, provider calls, scheduler tick, DDL, jobs or fallback aggregation.
 // Turning the read flag off restores the existing Overview path immediately.
 export async function savedReportingOverview(companyId: string) {
+  const saved = await savedReportingResult(companyId);
+  return saved ? { model: saved.model, savedReport: saved.savedReport } : null;
+}
+
+export async function savedReportingExecutive(companyId: string) {
+  if (process.env.VULN_REPORTING_EXECUTIVE_ENABLED !== "true") return null;
+  const saved = await savedReportingResult(companyId, true);
+  if (!saved) return null;
+  if (!saved.executive) throw new DashboardError("This customer's executive report is awaiting refresh.", 503);
+  return { report: { ...saved.executive, generatedAt: saved.savedReport.capturedAt }, savedReport: saved.savedReport };
+}
+
+async function savedReportingResult(companyId: string, requireExecutive = false) {
   if (!savedOverviewEnabled(companyId)) return null;
   const app = applicationDatabase();
   if (!app) throw new DashboardError("Saved reporting storage is unavailable.", 503);
@@ -43,10 +57,10 @@ export async function savedReportingOverview(companyId: string) {
       const target = await app.connect();
       try {
         const result = await readCustomerReportingSections(source, target, companyId,
-          { mode: "published", expectedReviewRevision: status.sourceSelection.revision });
+          { mode: "published", expectedReviewRevision: status.sourceSelection.revision, requireExecutive });
         if (result.state !== "available" || !result.model)
           throw new DashboardError("This customer's saved report is awaiting refresh. Try again after the background refresh completes.", 503);
-        return { model: result.model as CustomerReportingModel,
+        return { model: result.model as CustomerReportingModel, executive: result.executive as (ExecReport & { trend?: unknown[] }) | undefined,
           savedReport: { capturedAt: result.capturedAt as string, builtAt: result.builtAt as string } };
       } finally { target.release(); }
     } finally { source.release(); }

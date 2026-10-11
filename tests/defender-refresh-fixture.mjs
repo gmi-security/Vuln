@@ -2,6 +2,7 @@ import {readFile} from 'node:fs/promises';
 import {resolve,dirname} from 'node:path';
 import {SourceTextModule,SyntheticModule} from 'node:vm';
 import ts from 'typescript';
+const sourcePath = value => /\.(?:mjs|js|ts)$/.test(value) ? value : `${value}.ts`;
 // Actual existing projector/scorer/publication code, without application startup.
 export async function refreshModules({persist}={}){
   const modules=new Map();
@@ -11,8 +12,8 @@ export async function refreshModules({persist}={}){
     }
     if(!modules.has(path))modules.set(path,new SourceTextModule(ts.transpileModule(await readFile(path,'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText,{identifier:path}));return modules.get(path);}
   async function link(name,parent){
-    if(name.startsWith('.'))return load(resolve(dirname(parent.identifier),`${name}.ts`));
-    if(name.startsWith('@/'))return load(resolve(`${name.slice(2)}.ts`));
+    if(name.startsWith('.'))return load(resolve(dirname(parent.identifier),sourcePath(name)));
+    if(name.startsWith('@/'))return load(resolve(sourcePath(name.slice(2))));
     const imported=await import(name),values=name==='rrule'?{...imported.default,...imported}:imported;
     return new SyntheticModule(Object.keys(values),function(){for(const k of Object.keys(values))this.setExport(k,values[k]);});
   }

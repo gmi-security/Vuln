@@ -6,7 +6,8 @@ import {SourceTextModule} from 'node:vm';
 import ts from 'typescript';
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 export async function loadReportingSections(){
- const allowed=new Set(['reporting-sections-accumulator','reporting-metrics','reporting-customer-model','reporting-source-activity']);
+ const allowed=new Set(['reporting-sections-accumulator','reporting-metrics','reporting-customer-model','reporting-source-activity',
+  'reporting-bundle','executive-report','reporting-policy','ssvc','compliance','vuln-sla']);
  const cache=new Map();
  async function load(name){
   if(!allowed.has(name))throw Error('Unexpected reporting dependency');
@@ -18,5 +19,7 @@ export async function loadReportingSections(){
  }
  const model=await load('reporting-sections-accumulator');await model.evaluate();
  const reference=await load('reporting-customer-model');if(reference.status!=='evaluated')await reference.evaluate();
- return {create:model.namespace.createReportingSectionsAccumulator,reference:reference.namespace.buildCustomerReportingModel};
+ const bundle=await load('reporting-bundle');await bundle.evaluate();
+ return {create:model.namespace.createReportingSectionsAccumulator,reference:reference.namespace.buildCustomerReportingModel,
+  bundle:bundle.namespace.createReportingBundleAccumulator};
 }

@@ -8,6 +8,7 @@ import pg from 'pg';
 import nextEnv from '@next/env';
 import { loadConnectorPreview, loadConnectorDraftStore, loadConnectorBindingStore, loadInventoryRouting, loadSpotlightRouting, loadScannerRouting, loadQueryRouting, loadAppSecRouting, loadSourceSelection } from './connector-preview-loader.mjs';
 import { readApplicationConnectorMetadata, readDashboardConnectorMetadata } from '../lib/db/connector-metadata.mjs';
+import { applicationDatabaseSsl } from '../lib/db/connection-target.mjs';
 
 const commands = {
   'review-sources': ['--input', '--env-file'],
@@ -76,13 +77,13 @@ export async function runRegistry(args, runtimeEnv = process.env) {
     if (!env.DATABASE_URL) throw new Error('Application database is not configured.');
     const actor = `operator:${userInfo().username}@${hostname()}`;
     // Export is read-only at the connection level, including list queries.
-    const poolOptions = { connectionString: env.DATABASE_URL, max: 2, connectionTimeoutMillis: 5000,
+    const poolOptions = { connectionString: env.DATABASE_URL, ssl: applicationDatabaseSsl(env.DATABASE_URL), max: 2, connectionTimeoutMillis: 5000,
       statement_timeout: 15000, application_name: 'vuln2-connector-registry',
       ...(command.startsWith('export') ? { options: '-c default_transaction_read_only=on' } : {}) };
     pool = new pg.Pool(poolOptions);
     pool.on('error', () => {}); // Caller reports a redacted failure, never a raw connection URL.
     async function metadataClient(url) {
-      const client = new pg.Client({ connectionString: url, connectionTimeoutMillis: 5000, statement_timeout: 15000,
+      const client = new pg.Client({ connectionString: url, ssl: applicationDatabaseSsl(url), connectionTimeoutMillis: 5000, statement_timeout: 15000,
         options: '-c default_transaction_read_only=on', application_name: 'vuln2-connector-registry-metadata' });
       clients.push(client);
       client.on('error', () => {});

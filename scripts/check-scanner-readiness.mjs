@@ -43,7 +43,11 @@ try {
     const mod=new SourceTextModule(code);
     await mod.link(async spec=>{
       if(spec==='@/lib/threat')return new SyntheticModule(['isKev'],function(){this.setExport('isKev',()=>{throw new Error('Finding processing is prohibited in readiness probes');});});
-      if(!['node:http','node:https'].includes(spec))throw new Error('Unexpected status dependency');
+      if(spec==='./scanner-target-scope')return new SyntheticModule(['scannerTargetMatcher','assertScannerResultScope','scannerExactTargetKey','scannerWebOrigin'],function(){
+        for(const name of ['scannerTargetMatcher','assertScannerResultScope','scannerExactTargetKey','scannerWebOrigin'])
+          this.setExport(name,()=>{throw new Error('Target processing is prohibited in readiness probes');});
+      });
+      if(!['node:http','node:https','node:crypto'].includes(spec))throw new Error('Unexpected status dependency');
       const values=await import(spec);return new SyntheticModule(Object.keys(values),function(){for(const[k,v]of Object.entries(values))this.setExport(k,v);});
     });
     await mod.evaluate();const start=Date.now();

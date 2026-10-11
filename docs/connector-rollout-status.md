@@ -237,3 +237,10 @@ Next is the complete published-read/customer-review cohort check, executive comp
 - Isolated calculation times: Footprint **6.786 s to 1.227-1.322 s**; Atlas **2.160 s to 0.430-0.527 s**. These exclude database collection and are not live page timings. The report still reads the current RAM store; no source writer changed.
 - **53 local tests**, full retained-output comparison, production build/TypeScript and separate worker compilation passed. The private cluster was stopped. No production change, push or deployment.
 - Executive saved SQL reads still need policy/catalog/clock-aware freshness. The authoritative writer/reverse recovery, actual source acceptance, full customer capacity and combined rollout rehearsal remain unfinished. The existing disabled connectors and Artemis/ZAP live issues are unchanged. See [executive calculation](executive-report-calculation.md) and checkpoint 55 in the platform proposal.
+
+### Checkpoint 56 - Saved executive reporting
+
+- Executive and Overview outputs now share the background build, committed customer inputs, saved SLA/KEV policy and atomic publication. The opt-in executive API/print reader avoids hydration; its capture time is visible and results expire within 15 minutes.
+- Full retained Footprint/Atlas/empty-cohort executive and history parity passed. The three-job cycle was 63.051 s at 264 MiB worker RSS; saved reads were 6.5-21.6 ms. Thirty-six PostgreSQL scenario groups passed. This is retained-data testing with synthetic reviews, not live tenant acceptance.
+- Fresh read-only production inventory: 40 customers, 28 connector candidates. Fixed missing managed-Postgres TLS configuration in new operator/worker clients. Nessus, SpiderFoot and Vulners respond; Artemis refuses connections and ZAP times out. The rollout treatment for those services is pending the operator's decision.
+- Authoritative database writes/recovery, full-customer load, actual source acceptance and combined rollout remain in progress. No production rollout occurred.

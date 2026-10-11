@@ -14,6 +14,7 @@ import {readCustomerReportingSections} from '../lib/db/customer-reporting-sectio
 import {createCustomerReportingWorker} from '../lib/db/customer-reporting-worker.mjs';
 import {readReportingInputRevision} from '../lib/db/customer-reporting-revisions.mjs';
 import {company,reportingFixture,expectedReport} from './reporting-sections-fixture.mjs';
+import {executiveHarness} from './executive-report-harness.mjs';
 globalThis.fetch=()=>{throw Error('No source calls allowed');};
 const socket=await realpath(process.argv[2]||'.');assert.ok(socket.startsWith('/home/codex/vuln-recovery/')&&socket.endsWith('/socket'));
 const config={host:socket,port:55483,user:'codex',connectionTimeoutMillis:5000,statement_timeout:15000};
@@ -27,15 +28,22 @@ try{
   await db.query(await readFile(`docs/sql/${file}.sql`,'utf8'));
  let fixture=await legacyPersistenceFixture(pool,{VULN_REPORTING_INPUT_REVISIONS:'true'});
  const data=reportingFixture(1200),other={id:'CO-OTHER',name:'Other Customer'};
+ const owner={...company,industry:'Fixture'};other.industry='Fixture';
+ const sla={Critical:1,High:5,Medium:30,Low:90};
+ const catalog={version:1,cves:['CVE-2021-44228'],ransomware:[],refreshedAt:null};
+ for(const f of data.findings)Object.assign(f,{firstSeen:new Date(Date.now()-20*86400000).toISOString(),resolvedAt:null,
+  epss:0.2,category:'Vulnerability',assetExposure:'Internal',assetCriticality:'Normal',cvssV3:9.8});
+ for(const a of data.assets)Object.assign(a,{hostname:a.identifier,ipAddresses:[]});
  for(const f of data.findings){f.connector='defender';delete f.seenBy;delete f.enrichments;}
  for(const s of data.scans)s.connector='defender';for(const a of data.assets)a.source='defender';
- const snapshot={companies:[[company.id,company],[other.id,other]],folders:[],meta:{counter:1},
+ const snapshot={companies:[[company.id,owner],[other.id,other]],folders:[],meta:{counter:1},settings:{sla},reportingKevCatalog:catalog,
   findings:[...data.findings,{...data.findings[0],id:'FOREIGN',companyId:other.id}].map(r=>[r.id,r]),
   scans:data.scans.map(r=>[r.id,r]),assets:data.assets.map(r=>[r.id,r])};
  await assert.rejects(()=>fixture.persist.saveSnapshot(snapshot),e=>e.code==='42P01');
  assert.equal((await db.query('SELECT count(*)::int n FROM vuln_store')).rows[0].n,0);
  await db.query(await readFile('docs/sql/customer-reporting-inputs.sql','utf8'));
  await db.query(await readFile('docs/sql/customer-reporting-buckets.sql','utf8'));
+ await db.query(await readFile('docs/sql/customer-reporting-executive.sql','utf8'));
  await fixture.persist.saveSnapshot(snapshot);
  for(const row of data.history)await db.query('INSERT INTO vuln_metrics_history(company_id,ts,data) VALUES($1,$2,$3)',[company.id,row.ts,row.data]);
  const revision=async id=>(await db.query('SELECT revision::text,generation,content_hash FROM customer_reporting_inputs WHERE company_id=$1',[id])).rows[0];
@@ -55,15 +63,22 @@ try{
   const selection=(await selections.exportCustomer(id,collect)).reviewRequest;selection.note='Fixture primary review';
   await selections.save(selection,'test:operator',collect);
  }
- const {create,reference}=await loadReportingSections(),worker=createCustomerReportingWorker(pool,pool,create,{mode:'published'});
+ const {bundle,reference}=await loadReportingSections(),worker=createCustomerReportingWorker(pool,pool,bundle,{mode:'published',executive:true});
  const review=async()=>reviewApi.readSourceSelectionStatus(db,company.id,await collect());
- const read=async()=>{const s=await pool.connect(),t=await pool.connect();try{return await readCustomerReportingSections(s,t,company.id,{mode:'published',expectedReviewRevision:(await review()).revision});}finally{s.release();t.release();}};
+ const read=async()=>{const s=await pool.connect(),t=await pool.connect();try{return await readCustomerReportingSections(s,t,company.id,{mode:'published',expectedReviewRevision:(await review()).revision,requireExecutive:true});}finally{s.release();t.release();}};
  const refresh=async()=>{const result=await worker.tick([company.id]);assert.equal(result.state,'succeeded');return result;};
  await refresh();let result=await read();assert.equal(result.state,'available');
  // Reference the actual hydrated ordering, exactly as the existing store does.
  const loaded=await fixture.persist.loadSnapshot();
  const expected=expectedReport(reference,{findings:loaded.findings.map(r=>r[1]).filter(r=>r.companyId===company.id),scans:loaded.scans.map(r=>r[1]),assets:loaded.assets.map(r=>r[1]),history:await fixture.persist.loadMetricsHistory(company.id,180)});
  assert.deepEqual(result.model,JSON.parse(JSON.stringify(expected)));const originalReport=result.snapshotId;
+ const h=await executiveHarness(Date.parse(result.capturedAt));h.threat.restoreReportingKevCatalog(catalog);
+ const state={companies:new Map(loaded.companies),findings:new Map(loaded.findings),assets:new Map(loaded.assets),scans:new Map(loaded.scans),
+  folders:new Map(),identityAliases:new Map(),compensatingControls:new Map(),settings:{sla,autoScanNewAssets:false,schedule:{autoSyncEnabled:false,alertsEnabled:false,monthlyReportsEnabled:false}},meta:{},seeded:true,counter:1000};
+ h.setState(state);const {trend,...savedExecutive}=result.executive;
+ assert.deepEqual(savedExecutive,JSON.parse(JSON.stringify(h.legacy.legacyExecutiveReport(h.store,state,company.id))));
+ assert.deepEqual(trend,data.history.map(r=>({ts:new Date(r.ts).toISOString(),companyId:company.id,...r.data})));
+ ok('executive report and complete history match the legacy report at the committed observation time');
  assert.equal((await worker.tick([company.id])).state,'idle');ok('actual reviewed-source worker and saved Overview preserve the complete existing model in the application database');
 
  snapshot.findings.find(r=>r[0]==='FOREIGN')[1].status='Resolved';snapshot.meta.counter++;
@@ -72,6 +87,16 @@ try{
  assert.equal((await read()).snapshotId,originalReport);assert.equal((await worker.tick([company.id])).state,'idle');
  snapshot.meta.counter++;await fixture.persist.saveSnapshot(snapshot);assert.deepEqual(await revision(company.id),first);
  ok('another customer and unrelated bookkeeping do not invalidate or rebuild this customer report');
+
+ for(const change of [()=>snapshot.settings.sla.Critical=3,()=>snapshot.reportingKevCatalog.cves.push('CVE-2026-1234'),
+  ()=>data.findings[0].cvssV3=5,()=>data.findings[0].epss=0.7,()=>data.findings[0].firstSeen=new Date(Date.now()-40*86400000).toISOString(),
+  ()=>data.assets[0].hostname='new-host-alias',()=>owner.industry='Changed fixture industry']){
+  change();await fixture.persist.saveSnapshot(snapshot);assert.equal((await read()).state,'stale');await refresh();assert.equal((await read()).state,'available');
+ }
+ ok('SLA, durable KEV, executive score inputs, first-seen time, aliases and industry invalidate saved reports');
+ await db.query("UPDATE customer_reporting_sections SET captured_at=now()-interval '16 minutes',expires_at=now()-interval '1 minute' WHERE company_id=$1",[company.id]);
+ assert.equal((await read()).state,'stale');await refresh();
+ ok('clock-only expiry refreshes reports even without a source change');
 
  data.findings[0].status=data.findings[0].status==='Resolved'?'Open':'Resolved';await fixture.persist.saveSnapshot(snapshot);
  assert.notEqual((await revision(company.id)).generation,first.generation);assert.equal((await read()).state,'stale');await refresh();
@@ -132,7 +157,7 @@ try{
 
  const u=new URL(`postgresql://codex@localhost/${name}`);u.searchParams.set('host',socket);u.searchParams.set('port','55483');
  const child=await promisify(execFile)(process.execPath,['--max-old-space-size=512','scripts/customer-reporting-worker.mjs','--once'],{timeout:30000,env:{PATH:process.env.PATH,
-  VULN_REPORTING_WORKER_ENABLED:'true',VULN_REPORTING_WORKER_CUSTOMERS:other.id,VULN_REPORTING_STORAGE:'published',VULN_REPORTING_INPUT_REVISIONS:'true',
+  VULN_REPORTING_WORKER_ENABLED:'true',VULN_REPORTING_WORKER_CUSTOMERS:other.id,VULN_REPORTING_STORAGE:'published',VULN_REPORTING_INPUT_REVISIONS:'true',VULN_REPORTING_EXECUTIVE_ENABLED:'true',
   DATABASE_URL:u.href,VULN_REPORTING_SOURCE_URL:u.href,VULN_REPORTING_DATABASE_URL:u.href}});
  assert.match(child.stdout,/"state":"succeeded"/);assert.doesNotMatch(child.stdout,/private-a|private-b|postgresql/);
  ok('actual compiled worker CLI supports the explicit single application database mode with sanitized output');

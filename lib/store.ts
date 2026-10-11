@@ -37,6 +37,8 @@ import {
   isKev,
   isKevRansomware,
   refreshKevFromCisa,
+  reportingKevCatalog,
+  restoreReportingKevCatalog,
   riskPriority,
 } from "@/lib/threat";
 import {
@@ -651,6 +653,7 @@ function serializeStore(s: StoreShape) {
     compensatingControls: [...s.compensatingControls.entries()],
     identityAliases: [...s.identityAliases.entries()],
     settings: s.settings,
+    reportingKevCatalog: reportingKevCatalog(),
     // Publication markers must describe THESE collection arrays even if a
     // connector publishes a new generation while the database write yields.
     meta: structuredClone(s.meta),
@@ -667,9 +670,11 @@ function deserializeStore(obj: {
   compensatingControls?: [string, CompensatingControl][];
   identityAliases?: [string, string][];
   settings?: unknown;
+  reportingKevCatalog?: unknown;
   meta?: unknown;
   counter?: number;
 }): StoreShape {
+  restoreReportingKevCatalog(obj.reportingKevCatalog);
   return {
     companies: new Map(obj.companies ?? []),
     folders: new Map(obj.folders ?? []),

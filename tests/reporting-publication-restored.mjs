@@ -12,7 +12,8 @@ import {buildCustomerReportingSections,readCustomerReportingSections} from '../l
 import {loadReportingSections} from '../scripts/reporting-sections-loader.mjs';
 import {loadConnectorPreview,loadConnectorDraftStore,loadConnectorBindingStore,loadSourceSelection} from '../scripts/connector-preview-loader.mjs';
 import {readApplicationConnectorMetadata,readDashboardConnectorMetadata} from '../lib/db/connector-metadata.mjs';
-import {originalSections} from './reporting-restored-reference.mjs';
+import {originalSections,originalExecutive} from './reporting-restored-reference.mjs';
+import {executiveHarness} from './executive-report-harness.mjs';
 
 globalThis.fetch=()=>{throw Error('No provider or ticket calls allowed');};
 const socket=await realpath(process.argv[2]||'.');assert.ok(socket.startsWith('/home/codex/vuln-recovery/')&&socket.endsWith('/socket'));
@@ -25,16 +26,18 @@ try{
  assert.ok(g.dir.startsWith('/home/codex/vuln-recovery/')&&!g.listen);await admin.query(`CREATE DATABASE ${name}`);created=true;
  source=new pg.Client({...config,database:'recovery_application'});db=new pg.Client({...config,database:name});
  await source.connect();await db.connect();pool=new pg.Pool({...config,database:name,max:4});
- for(const file of ['customer-connector-drafts','customer-connector-bindings','customer-source-selections','customer-reporting-inputs','customer-reporting-buckets','customer-reporting-sections','customer-reporting-jobs'])
+ for(const file of ['customer-connector-drafts','customer-connector-bindings','customer-source-selections','customer-reporting-inputs','customer-reporting-buckets','customer-reporting-sections','customer-reporting-jobs','customer-reporting-executive'])
   await db.query(await readFile(`docs/sql/${file}.sql`,'utf8'));
  await db.query('CREATE TABLE vuln_store(key text PRIMARY KEY,data jsonb,updated_at timestamptz DEFAULT now());CREATE TABLE vuln_metrics_history(id bigserial PRIMARY KEY,company_id text,ts timestamptz,data jsonb)');
  await source.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');await db.query('BEGIN');
  const digests=createReportingInputDigests(),copyStarted=Date.now(),observed=new Map();let bytes=0;
+ const offlineCatalog=(await executiveHarness()).threat.reportingKevCatalog();
  for(const key of reportingKeys){
   assert.ok(Date.now()-copyStarted<300000,'Copy deadline');
   let json=(await source.query('SELECT data::text AS json FROM vuln_store WHERE key=$1',[key])).rows[0].json;
   bytes+=Buffer.byteLength(json);
-  if(key==='companies:00'){const companies=JSON.parse(json);assert.ok(!companies.some(r=>r[0]===scope[2]));companies.push([scope[2],{id:scope[2],name:'Empty reporting fixture'}]);json=JSON.stringify(companies);}
+  if(key==='meta'){const m=JSON.parse(json);m.reportingKevCatalog=offlineCatalog;json=JSON.stringify(m);}
+  if(key==='companies:00'){const companies=JSON.parse(json);assert.ok(!companies.some(r=>r[0]===scope[2]));companies.push([scope[2],{id:scope[2],name:'Empty reporting fixture',industry:'Fixture'}]);json=JSON.stringify(companies);}
   if(/^(findings|scans|assets):/.test(key))for(const [,r] of JSON.parse(json))if(scope.includes(r.companyId)){
    const kind=key.split(':')[0],values=kind==='findings'?[['findings',r.connector],...(r.seenBy??[]).map(s=>['seenBy',s]),...(r.enrichments??[]).map(e=>['enrichment',e.source])]:[[kind,kind==='scans'?r.connector:r.source]];
    for(const [role,provider] of values){const k=JSON.stringify([scope.indexOf(r.companyId),role,/^[a-z]+$/.test(provider)?provider:'invalid']);observed.set(k,(observed.get(k)??0)+1);}
@@ -77,7 +80,7 @@ try{
  const u=new URL(`postgresql://codex@localhost/${name}`);u.searchParams.set('host',socket);u.searchParams.set('port','55483');
  let output='',errors='';const started=Date.now();
  child=spawn(process.execPath,['--max-old-space-size=512','scripts/customer-reporting-worker.mjs'],{env:{PATH:process.env.PATH,
-  VULN_REPORTING_WORKER_ENABLED:'true',VULN_REPORTING_WORKER_CUSTOMERS:scope.join(','),VULN_REPORTING_STORAGE:'published',VULN_REPORTING_INPUT_REVISIONS:'true',
+  VULN_REPORTING_WORKER_ENABLED:'true',VULN_REPORTING_WORKER_CUSTOMERS:scope.join(','),VULN_REPORTING_STORAGE:'published',VULN_REPORTING_INPUT_REVISIONS:'true',VULN_REPORTING_EXECUTIVE_ENABLED:'true',
   DATABASE_URL:u.href,VULN_REPORTING_SOURCE_URL:u.href,VULN_REPORTING_DATABASE_URL:u.href},stdio:['ignore','pipe','pipe']});
  child.stdout.on('data',v=>output+=v);child.stderr.on('data',v=>errors+=v);
  exited=new Promise((resolve,reject)=>{child.once('error',reject);child.once('close',(code,signal)=>resolve({code,signal}));});
@@ -86,7 +89,7 @@ try{
   const failed=(await db.query("SELECT company_id FROM customer_reporting_jobs WHERE state IN ('retry','failed')")).rows[0];
   if(failed){
    child.kill('SIGTERM');await exited;const a=await pool.connect(),b=await pool.connect();
-   try{await buildCustomerReportingSections(a,b,failed.company_id,(await loadReportingSections()).create,{mode:'published'});}
+   try{await buildCustomerReportingSections(a,b,failed.company_id,(await loadReportingSections()).bundle,{mode:'published',requireExecutive:true});}
    finally{a.release();b.release();}
    assert.fail('Retained worker failed despite a successful direct diagnostic build');
   }
@@ -100,11 +103,12 @@ try{
   const id=scope[i],review=await api.readSourceSelectionStatus(db,id,await collect()),times=[];let result;
   for(let n=0;n<5;n++){
    const a=await pool.connect(),b=await pool.connect(),start=performance.now();
-   try{result=await readCustomerReportingSections(a,b,id,{mode:'published',expectedReviewRevision:review.revision});}
+   try{result=await readCustomerReportingSections(a,b,id,{mode:'published',expectedReviewRevision:review.revision,requireExecutive:true});}
    finally{a.release();b.release();}times.push(Math.round((performance.now()-start)*10)/10);
   }
   assert.equal(result.state,'available');const expected=await originalSections(db,reference,id,result.capturedAt);
   assert.deepEqual(result.model,JSON.parse(JSON.stringify(expected.model)));assert.equal(result.records,expected.records);
+  assert.deepEqual(result.executive,await originalExecutive(db,id,result.capturedAt));
   const tick=ticks.find(t=>t.companyId===id);
   console.log(JSON.stringify({cohort:labels[i],records:result.records,open:result.model.metrics.vulnerabilities.open,
    findingsSources:expected.contributors,buildMs:tick.buildMs,bucketsRead:tick.bucketsRead,readMs:times}));

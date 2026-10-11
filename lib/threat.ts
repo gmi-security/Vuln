@@ -14,6 +14,7 @@
 // CISA Known Exploited Vulnerabilities — CVEs confirmed exploited in the
 // wild. This is the curated subset covering the demo catalog; the deployed
 // app can also refresh from the live CISA KEV feed (see refreshKevFromCisa).
+import { validateReportingCatalog, type ReportingKevCatalog } from "./reporting-policy";
 export const KEV_CVES = new Set<string>([
   "CVE-2024-3400",
   "CVE-2023-4966",
@@ -51,6 +52,17 @@ const kevRuntime = new Set<string>();
 // CVEs the CISA KEV catalog flags as used in ransomware campaigns — the
 // highest-confidence "fix this now" signal (open-source threat-actor context).
 const kevRansomware = new Set<string>();
+let kevRefreshedAt: string | null = null;
+export function reportingKevCatalog(): ReportingKevCatalog {
+  return {version:1,cves:[...new Set([...KEV_CVES,...kevRuntime])].sort(),ransomware:[...kevRansomware].sort(),refreshedAt:kevRefreshedAt};
+}
+export function restoreReportingKevCatalog(value: unknown): void {
+  if(value===undefined)return; // Older snapshots acquire a catalog on next save.
+  validateReportingCatalog(value);
+  for(const id of value.cves)kevRuntime.add(id);
+  for(const id of value.ransomware)kevRansomware.add(id);
+  if(value.refreshedAt&&(!kevRefreshedAt||value.refreshedAt>kevRefreshedAt))kevRefreshedAt=value.refreshedAt;
+}
 
 export function isKev(cve: string): boolean {
   return KEV_CVES.has(cve) || kevRuntime.has(cve);
@@ -106,7 +118,7 @@ export async function refreshKevFromCisa(): Promise<number> {
     };
     let added = 0;
     for (const v of data.vulnerabilities ?? []) {
-      if (!v.cveID) continue;
+      if (!v.cveID || !/^CVE-\d{4}-\d{4,19}$/i.test(v.cveID)) continue;
       const id = v.cveID.toUpperCase();
       if (!kevRuntime.has(id)) {
         kevRuntime.add(id);
@@ -116,6 +128,7 @@ export async function refreshKevFromCisa(): Promise<number> {
         kevRansomware.add(id);
       }
     }
+    if(data.vulnerabilities?.some(v=>v.cveID&&/^CVE-\d{4}-\d{4,19}$/i.test(v.cveID)))kevRefreshedAt=new Date().toISOString();
     return added;
   } catch {
     return 0;

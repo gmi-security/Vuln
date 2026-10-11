@@ -6,6 +6,7 @@ import { SourceTextModule, SyntheticModule } from "node:vm";
 import { randomBytes } from "node:crypto";
 import test from "node:test";
 import ts from "typescript";
+const sourcePath = value => /\.(?:mjs|js|ts)$/.test(value) ? value : `${value}.ts`;
 
 const ROOT = resolve(".");
 const modules = new Map();
@@ -20,8 +21,8 @@ async function moduleFor(path) {
 async function load(path) {
   const module = await moduleFor(path);
   if (module.status === "unlinked") await module.link(async (name, parent) => {
-    if (name.startsWith(".")) return moduleFor(resolve(dirname(parent.identifier), `${name}.ts`));
-    if (name.startsWith("@/")) return moduleFor(resolve(ROOT, `${name.slice(2)}.ts`));
+    if (name.startsWith(".")) return moduleFor(resolve(dirname(parent.identifier), sourcePath(name)));
+    if (name.startsWith("@/")) return moduleFor(resolve(ROOT, sourcePath(name.slice(2))));
     const imported = await import(name);
     const values = name === "rrule" ? { ...imported.default, ...imported } : imported;
     return new SyntheticModule(Object.keys(values), function () { for (const key of Object.keys(values)) this.setExport(key, values[key]); });
