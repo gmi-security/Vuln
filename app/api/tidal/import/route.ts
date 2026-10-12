@@ -1,3 +1,4 @@
+import { withDurablePlatformMutation } from "@/lib/platform-mutation-route";
 import { NextResponse } from "next/server";
 import { ensureHydrated, getTidalSyncStatus, startTidalSync } from "@/lib/store";
 
@@ -6,7 +7,7 @@ export const dynamic = "force-dynamic";
 // Start a background Tidal sync. The live sync spans ~49 client companies and
 // can pull thousands of devices, so it runs in the background — POST kicks it
 // off and returns immediately; poll GET for progress.
-export async function POST() {
+async function POSTHandler() {
   await ensureHydrated();
   const { started, error } = startTidalSync();
   if (!started) {
@@ -23,3 +24,5 @@ export async function GET() {
   await ensureHydrated();
   return NextResponse.json({ status: getTidalSyncStatus() });
 }
+
+export const POST = withDurablePlatformMutation(POSTHandler);

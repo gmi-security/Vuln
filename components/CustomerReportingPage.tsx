@@ -15,6 +15,12 @@ import { dashboardRequest } from "@/lib/dashboard-browser-client";
 import type { ElasticDashboard } from "@/lib/elastic-dashboard";
 import type { SlaSettings } from "@/lib/types";
 import styles from "./QueryDashboard.module.css";
+import CustomerCveProvider from "./CustomerCveProvider";
+import CustomerThreatIntelligence from "./CustomerThreatIntelligence";
+import CustomerSavedSources from "./CustomerSavedSources";
+import CustomerPlatformComparison from "./CustomerPlatformComparison";
+import { baseNavItems, remediationNavItems } from "@/lib/navigation";
+import { customerConnectorsHref, remediationHref, remediationView, remediationViews, type RemediationView } from "@/lib/remediation-view";
 
 function CustomerTiles({ companyId, canManage }: { companyId:string; canManage:boolean }) {
   const [dashboard,setDashboard] = useState<ElasticDashboard | null>(null);
@@ -32,10 +38,35 @@ function CustomerTiles({ companyId, canManage }: { companyId:string; canManage:b
   return <ElasticQueryDashboard initial={{...dashboard,canManage}} companyId={companyId}/>;
 }
 
-export default function CustomerReportingPage({ initialCompanyId="", canManage }: { initialCompanyId?:string; canManage:boolean }) {
+export default function CustomerReportingPage({ initialCompanyId="", canManage, layout="reporting", initialView="overview", savedSourceReads=false, shadowCveReads=false }: {
+  initialCompanyId?:string; canManage:boolean; layout?:"reporting" | "remediation"; initialView?:RemediationView; savedSourceReads?:boolean; shadowCveReads?:boolean;
+}) {
   const [companyId,setCompanyId]=useState(initialCompanyId);
+  const [view,setView]=useState<RemediationView>(initialView);
   const [refresh,setRefresh]=useState(0);
   const [sla,setSla]=useState<SlaSettings | null>(null);
+  const remediation = layout === "remediation";
+  const savedReads = remediation && savedSourceReads;
+  const overview = !remediation || view === "overview";
+  const prioritize = !remediation || view === "prioritize";
+  const tickets = !remediation || view === "tickets";
+  useEffect(()=>{
+    if (!remediation) return;
+    setCompanyId(initialCompanyId);
+    setView(initialView);
+    setRefresh(0);
+  },[initialCompanyId,initialView,remediation]);
+  useEffect(()=>{
+    if (!remediation) return;
+    function restoreLocation() {
+      const params = new URL(window.location.href).searchParams;
+      setCompanyId(params.get("companyId") || "");
+      setView(remediationView(params.get("view")));
+      setRefresh(0);
+    }
+    window.addEventListener("popstate",restoreLocation);
+    return ()=>window.removeEventListener("popstate",restoreLocation);
+  },[remediation]);
   useEffect(()=>{
     let active=true;
     fetch("/api/settings").then(response=>response.json()).then(data=>{if(active)setSla(data?.settings?.sla ?? null);}).catch(()=>{});
@@ -43,29 +74,61 @@ export default function CustomerReportingPage({ initialCompanyId="", canManage }
   },[]);
   function selectCustomer(id:string) {
     setCompanyId(id);setRefresh(0);
+    if (remediation) {
+      window.history.pushState(null,"",remediationHref(id,view));
+      return;
+    }
     const url=new URL(window.location.href);
     if(id)url.searchParams.set("companyId",id);else url.searchParams.delete("companyId");
     window.history.replaceState(null,"",url);
   }
-  return <VulnShell variant="dashboard" eyebrow="Customer reporting" title="Vulnerability reporting"
-    subtitle="Select a customer to view its connected sources, findings and patch review."
+  function selectView(next:RemediationView) {
+    setView(next);
+    window.history.pushState(null,"",remediationHref(companyId,next));
+  }
+  return <CustomerCveProvider key={remediation ? companyId : "legacy"} enabled={remediation} companyId={companyId} canManage={canManage} compareEnabled={remediation && shadowCveReads}><VulnShell variant="dashboard" eyebrow={remediation ? "Customer operations" : "Customer reporting"}
+    title={remediation ? "Remediation" : "Vulnerability reporting"}
+    subtitle={remediation ? "Understand exposure, prioritize fixes and track patch tickets for the selected customer." : "Select a customer to view its connected sources, findings and patch review."}
+    navigation={remediation ? <nav aria-label="Main navigation" className="mb-7 flex flex-wrap items-center gap-5 text-sm text-zinc-300">
+      <Link href="/" className="text-lg font-semibold tracking-widest text-[#b30e14]">GMI VULN</Link>
+      {remediationNavItems.map(item=><Link key={item.href} href={item.href === "/remediation" ? remediationHref(companyId) : item.href === "/connectors" ? customerConnectorsHref(companyId) : item.href} aria-current={item.href === "/remediation" ? "page" : undefined}
+        className={item.href === "/remediation" ? "border-b border-red-600 pb-1 text-white" : "hover:text-white"}>{item.label}</Link>)}
+      <Link href="/settings" className="hover:text-white">Settings</Link>
+    </nav> : undefined}
     actions={<div className="flex flex-wrap gap-2">
       <button className={styles.button} disabled={!companyId} onClick={()=>setRefresh(value=>value+1)}><RefreshCw size={16}/>Refresh report</button>
       {canManage && <Link className={styles.button} href="/query-tiles">Manage shared query tiles</Link>}
     </div>}>
-    <ReportingCustomer companyId={companyId} onCompanyChange={selectCustomer} refreshToken={refresh}/>
+    {remediation && <nav aria-label="Remediation views" className="flex flex-wrap gap-2">
+      {remediationViews.map(value=><button key={value} type="button" aria-pressed={view === value}
+        onClick={()=>selectView(value)} className={`rounded-xl border px-5 py-3 text-sm font-medium ${view === value ? "border-red-800 bg-red-950/40 text-white" : "border-zinc-800 bg-zinc-950 text-zinc-300 hover:bg-zinc-900"}`}>
+        {value === "overview" ? "Overview" : value === "prioritize" ? "Prioritize" : "Tickets"}
+      </button>)}
+    </nav>}
+    <ReportingCustomer companyId={companyId} onCompanyChange={selectCustomer} refreshToken={refresh} showReport={overview} sectionsOnly={remediation}
+      setupPath={savedReads ? "customer-saved-sources?setup=1" : "reporting"}/>
     {!companyId && <p className="mt-6 text-sm text-zinc-300">Choose a customer to view its connector data. No shared customer results are shown until a customer is selected.</p>}
     {/* Remount every customer-bound child immediately. Late results and open
         exports/ticket dialogs from the previous customer cannot be reused. */}
-    {companyId && <div key={`${companyId}:${refresh}`} className="mt-6 space-y-6">
-      <DefenderCustomerPanel companyId={companyId} hideUnconfigured/>
-      <CustomerTiles companyId={companyId} canManage={canManage}/>
-      <TopFixes companyId={companyId}/>
-      {canManage && <RiskDashboard companyId={companyId}/>}
-      <div id="consolidation-review" className="grid items-start gap-6 2xl:grid-cols-2">
+    {companyId && <div key={`${companyId}:${refresh}:${remediation ? view : "reporting"}`} className="mt-6 space-y-6">
+      {remediation && shadowCveReads && (overview || prioritize) && <CustomerPlatformComparison companyId={companyId}/>}
+      {overview && <DefenderCustomerPanel companyId={companyId} hideUnconfigured/>}
+      {savedReads && (overview || prioritize) && <CustomerSavedSources companyId={companyId} showCves={prioritize}/>}
+      {overview && <CustomerTiles companyId={companyId} canManage={canManage}/>}
+        {prioritize && <TopFixes companyId={companyId} reviewHref={remediation ? remediationHref(companyId,"tickets") : undefined}/>}
+      {remediation && prioritize && <CustomerThreatIntelligence companyId={companyId}/>}
+      {prioritize && canManage && <RiskDashboard companyId={companyId}/>}
+      {tickets && <div id="consolidation-review" className="grid items-start gap-6 2xl:grid-cols-2">
         <PatchReviewQueue companyId={companyId} sla={sla}/>
         {canManage && <PatchTicketTracker companyId={companyId} sla={sla} allowGlobalActions={false}/>}
-      </div>
+      </div>}
     </div>}
-  </VulnShell>;
+    {remediation && <details className="rounded-xl border border-zinc-800 p-4 text-sm text-zinc-300">
+      <summary className="cursor-pointer font-medium">More tools</summary>
+      <nav aria-label="Operational tools" className="mt-4 flex flex-wrap gap-x-5 gap-y-3">
+        <Link href={companyId ? `/reporting?companyId=${encodeURIComponent(companyId)}` : "/reporting"}>Original reporting</Link>
+        {baseNavItems.filter(item=>!remediationNavItems.some(main=>main.href===item.href)).map(item=><Link key={item.href} href={item.href} className="hover:text-white">{item.label}</Link>)}
+      </nav>
+    </details>}
+  </VulnShell></CustomerCveProvider>;
 }

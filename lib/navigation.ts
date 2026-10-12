@@ -41,3 +41,10 @@ export const baseNavItems: VulnNavItem[] = [
   { label: "Scanner Telemetry", icon: Database, href: "/scanner-telemetry" },
   { label: "Connectors", icon: PlugZap, href: "/connectors" },
 ];
+
+// Old routes stay available as operational drilldowns during the UI rollout.
+// Settings is appended by the sidebar, as in the existing navigation.
+export const remediationNavItems: VulnNavItem[] = [
+  { label: "Remediation", icon: Flame, href: "/remediation" },
+  ...baseNavItems.filter(item => ["/companies", "/appsec", "/scanner-telemetry", "/connectors"].includes(item.href)),
+];

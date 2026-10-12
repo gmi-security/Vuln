@@ -1,3 +1,4 @@
+import { withDurablePlatformMutation } from "@/lib/platform-mutation-route";
 import { NextResponse } from "next/server";
 import { createCompany, ensureHydrated, listCompanies } from "@/lib/store";
 import { elasticVulnEnabled } from "@/lib/elastic-vuln-server";
@@ -28,7 +29,7 @@ export async function GET() {
   return NextResponse.json({ companies });
 }
 
-export async function POST(request: Request) {
+async function POSTHandler(request: Request) {
   await ensureHydrated();
   let body: {
     name?: string;
@@ -58,3 +59,5 @@ export async function POST(request: Request) {
   }
   return NextResponse.json({ company: result }, { status: 201 });
 }
+
+export const POST = withDurablePlatformMutation(POSTHandler);

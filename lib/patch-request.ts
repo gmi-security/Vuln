@@ -4,7 +4,11 @@ import { dashboardCsv } from "./dashboard-csv";
 import { getCompany } from "./store";
 import { worstSeverityOf } from "./vuln-sla";
 
+import type { QueryScopeProof } from "./customer-query-scope";
+import type { StoredSpotlightScopeProof } from "./customer-stored-spotlight";
+
 export type PatchRequest = {
+  appCompanyId?: string; queryScope?: QueryScopeProof;
   cve: string; collectedAt: string; region: string; hostCount: number; findingCount: number;
   csvRows: number; title: string; body: string; csv: string; warnings: string[];
   tenantIds: string[]; hostScope: string[]; worstSeverity: string | null; alreadyTicketedFindings: number;
@@ -25,12 +29,14 @@ const list = (value: unknown): string[] => Array.isArray(value) ? [...new Set(va
 const num = (value: unknown): number | null => typeof value === "number" && Number.isFinite(value) ? value : null;
 const shown = (value: unknown): string => value === null || value === undefined || value === "" ? "Not supplied" : String(value);
 
-export function parsePatchInput(value: unknown): { source: "crowdstrike"; cve: string; tenantId?: string } {
+export function parsePatchInput(value: unknown): { source: "crowdstrike"; cve: string; tenantId?: string; appCompanyId?: string } {
   const cve = (value as { cve?: unknown } | null)?.cve;
   if (typeof cve !== "string" || !/^CVE-\d{4}-\d{4,19}$/i.test(cve)) throw new DashboardError("Choose a valid CVE identifier.");
   const tenantId = (value as { tenantId?: unknown }).tenantId;
   if (tenantId !== undefined && (typeof tenantId !== "string" || !/^[a-f0-9]{32}$/i.test(tenantId))) throw new DashboardError("Choose a valid CrowdStrike tenant.");
-  return { source: "crowdstrike", cve: cve.toUpperCase(), ...(typeof tenantId === "string" ? { tenantId: tenantId.toLowerCase() } : {}) };
+  const appCompanyId = (value as { appCompanyId?: unknown }).appCompanyId;
+  if (appCompanyId !== undefined && (typeof appCompanyId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(appCompanyId))) throw new DashboardError("Choose a valid customer.");
+  return { source: "crowdstrike", ...(typeof appCompanyId === "string" ? { appCompanyId } : {}), cve: cve.toUpperCase(), ...(typeof tenantId === "string" ? { tenantId: tenantId.toLowerCase() } : {}) };
 }
 
 export function parseConsolidationInput(value: unknown): { source: "crowdstrike"; cves: string[]; tenantId?: string; appCompanyId?: string; companyName?: string } {
@@ -44,11 +50,7 @@ export function parseConsolidationInput(value: unknown): { source: "crowdstrike"
   if (unique.length !== normalized.length) throw new DashboardError("Remove duplicate CVEs before consolidating.");
   const tenantId = (value as { tenantId?: unknown } | null)?.tenantId;
   if (tenantId !== undefined && (typeof tenantId !== "string" || !/^[a-f0-9]{32}$/i.test(tenantId))) throw new DashboardError("Choose a valid CrowdStrike tenant.");
-  // Optional: the customer the analyst had selected when building this plan.
-  // Trusting this explicit human choice (rather than inferring it from the
-  // CrowdStrike tenant) is what lets a consolidation land in the right
-  // customer's review queue without maintaining a separate tenant-to-company
-  // allowlist for every customer.
+  // Selected customer is retained; reviewed routing verifies its CID server-side.
   const appCompanyId = (value as { appCompanyId?: unknown } | null)?.appCompanyId;
   if (appCompanyId !== undefined) {
     if (typeof appCompanyId !== "string" || !/^CO-\d+$/.test(appCompanyId)) throw new DashboardError("Choose a valid customer.");
@@ -69,6 +71,9 @@ export function parseVerifyInput(value: unknown): { source: "crowdstrike"; ticke
 }
 
 export type PatchGroup = {
+  queryScope?: QueryScopeProof;
+  storedSpotlightScope?: StoredSpotlightScopeProof;
+  manualOnly?: boolean;
   source?: "stored-findings";
   appCompanyId?: string; companyName?: string; connectors?: string[];
   remediationId: string; tenantId: string; title: string; action: string; reference: string;
@@ -87,6 +92,7 @@ export type PatchGroup = {
   label: string; ticketTitle: string; ticketBody: string;
 };
 export type PatchConsolidation = {
+  appCompanyId?: string; queryScope?: QueryScopeProof;
   cves: string[]; region: string; collectedAt: string; totalDevices: number; totalFindings: number;
   tenantIds: string[]; title: string; body: string; csv: string; groups: PatchGroup[]; unmapped: { cve: string; deviceCount: number }[];
   alreadyTicketedFindings: number;

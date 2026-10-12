@@ -1,3 +1,4 @@
+import { withDurablePlatformMutation } from "@/lib/platform-mutation-route";
 import { NextResponse } from "next/server";
 import { ensureHydrated, importFromSpiderfoot } from "@/lib/store";
 
@@ -5,7 +6,7 @@ export const dynamic = "force-dynamic";
 
 // Pull finished SpiderFoot scans in as findings, grouped under the matching
 // company (by scan name / target).
-export async function POST() {
+async function POSTHandler() {
   try {
     await ensureHydrated();
     const result = await importFromSpiderfoot();
@@ -21,3 +22,5 @@ export async function POST() {
     );
   }
 }
+
+export const POST = withDurablePlatformMutation(POSTHandler);

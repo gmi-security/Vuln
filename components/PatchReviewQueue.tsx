@@ -1,4 +1,5 @@
 "use client";
+import CveText from "./CveText";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { dashboardRequest } from "@/lib/dashboard-browser-client";
@@ -128,7 +129,7 @@ export default function PatchReviewQueue({ companyId, sla }: { companyId: string
             {row.maxRisk !== null && row.maxRisk >= 80 && <span title="Real risk score >= 80 -- KEV-listed, actively exploited, or otherwise critical regardless of raw CVSS severity" className="mr-2 rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300">Risk {row.maxRisk}</span>}
             {row.remediationTitle || "Recommended remediation"}
           </p>
-          <p className="mt-1 truncate text-xs text-zinc-400" title={row.cves.join(", ")}>{shownCves.join(", ")}{moreCves > 0 && ` +${moreCves} more`}</p>
+          <p className="mt-1 truncate text-xs text-zinc-400" title={row.cves.join(", ")}><CveText text={shownCves.join(", ")}/>{moreCves > 0 && ` +${moreCves} more`}</p>
           <div className="mt-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-xs text-zinc-500">
             <span className="truncate">{row.companyName ?? (row.source === "stored-findings" ? "Unassigned" : `CrowdStrike tenant ${row.tenantId}`)}</span>
             <span>{row.findingCount.toLocaleString()} findings · {patchGroupTicketState(row)}</span>
@@ -146,14 +147,14 @@ export default function PatchReviewQueue({ companyId, sla }: { companyId: string
         }{selected.group.source === "stored-findings" && selected.group.connectors?.length ? ` · ${selected.group.connectors.join(", ")}` : ""}</p></div>
         <button type="button" className={styles.button} onClick={() => setSelected(null)}>Close</button></div>
       <p className="mt-4 whitespace-pre-wrap text-sm text-zinc-200">{selected.group.action || "No remediation action was supplied by the source."}</p>
-      <p className="mt-3 text-xs text-zinc-400">Resolves {selected.group.cves.join(", ")}</p>
+      <p className="mt-3 max-h-20 overflow-auto text-xs text-zinc-300">Resolves <CveText text={selected.group.cves.join(", ")}/></p>
       <div className="mt-5 flex flex-wrap items-center justify-between gap-3"><h4 className="font-medium text-white">Affected findings</h4>
         <button type="button" className={styles.button} onClick={() => download(selected.group)}>Download full findings list</button></div>
       <p className="mt-2 text-xs text-zinc-400">{detailRows.length.toLocaleString()} asset and CVE rows in this review packet. The download contains the complete source detail.</p>
       <div className={`${styles.tableScroll} mt-3`}><table className={styles.table}>
         <thead><tr><th>Asset</th><th>CVE</th><th>Severity</th><th>Risk</th><th>Source</th><th>Host / IP</th><th>OS</th><th>Exposure</th><th>Finding ID</th></tr></thead>
         <tbody>{detailRows.slice((detailPage - 1) * 50, detailPage * 50).map((row, index) => <tr key={`${row.asset}-${row.cve}-${index}`}>
-          <td>{row.asset}</td><td>{row.cve}</td><td>{row.severity || "—"}</td>
+          <td>{row.asset}</td><td><CveText text={row.cve}/></td><td>{row.severity || "—"}</td>
           <td>{typeof row.risk === "number" && row.risk >= 0 ? row.risk : "—"}</td>
           <td>{row.connectors?.join(", ") || "—"}</td>
           <td>{row.ip || row.hostname || "—"}</td><td>{row.os || "—"}</td>

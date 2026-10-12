@@ -1,3 +1,4 @@
+import { withDurablePlatformMutation } from "@/lib/platform-mutation-route";
 import { NextResponse } from "next/server";
 import { ensureHydrated, startSyncAll, syncAllStatus } from "@/lib/store";
 
@@ -7,7 +8,7 @@ export const dynamic = "force-dynamic";
 // run threat-intel enrichment so KEV/EPSS/ransomware flags apply immediately.
 // The full sweep can take minutes, so it runs as a background job — POST kicks
 // it off and returns immediately; poll GET for the results.
-export async function POST() {
+async function POSTHandler() {
   await ensureHydrated();
   const { started } = startSyncAll();
   if (!started) {
@@ -25,3 +26,5 @@ export async function GET() {
   await ensureHydrated();
   return NextResponse.json({ status: syncAllStatus() });
 }
+
+export const POST = withDurablePlatformMutation(POSTHandler);

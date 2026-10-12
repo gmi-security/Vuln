@@ -1,10 +1,13 @@
 "use client";
+import { useCustomerCve } from "./customer-cve-context";
 
 export function cveIdentifier(value: unknown): string | undefined {
   return typeof value === "string" && /^CVE-\d{4}-\d{4,19}$/i.test(value.trim()) ? value.trim().toUpperCase() : undefined;
 }
 
 export default function CveText({ text, onSelect }: { text: string; onSelect?: (cve: string) => void }) {
+  const customerSelect=useCustomerCve();
+  onSelect=customerSelect ?? onSelect;
   if (!onSelect) return <>{text}</>;
   return <>{text.split(/(\bCVE-\d{4}-\d{4,19}\b)/gi).map((part, index) => {
     const cve = cveIdentifier(part);

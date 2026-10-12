@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { computeExecReport, ensureHydrated } from "@/lib/store";
 import { loadMetricsHistory } from "@/lib/persist";
+import { savedReportingExecutive } from "@/lib/reporting-saved-overview";
+import { DashboardError } from "@/lib/elastic-dashboard";
 
 export const dynamic = "force-dynamic";
 
@@ -8,8 +10,15 @@ export async function GET(
   _request: Request,
   { params }: { params: Promise<{ companyId: string }> },
 ) {
-  await ensureHydrated();
   const { companyId } = await params;
+  try {
+    const saved = await savedReportingExecutive(companyId);
+    if (saved) return NextResponse.json(saved, { headers: { "cache-control": "no-store" } });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof DashboardError ? error.message : "Saved report unavailable." },
+      { status: error instanceof DashboardError ? error.status : 503, headers: { "cache-control": "no-store" } });
+  }
+  await ensureHydrated();
   const report = computeExecReport(companyId);
   if (!report) {
     return NextResponse.json({ error: "Company not found." }, { status: 404 });

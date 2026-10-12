@@ -1,3 +1,4 @@
+import { scannerExactTargetKey } from "./scanner-target-scope";
 import type { Severity } from "@/lib/types";
 
 // Vulners adapter — two modes:
@@ -58,8 +59,10 @@ function mapSeverity(cvss: number): Severity {
 export type VulnersBridgeConfig = { baseUrl: string; apiKey: string };
 
 export function vulnersBridgeConfig(): VulnersBridgeConfig | null {
-  const rawUrl = process.env.GMI_SCANNER_URL?.trim() || process.env.VULNERS_BRIDGE_URL?.trim();
-  const apiKey = process.env.GMI_SCANNER_API_KEY?.trim() || process.env.VULNERS_BRIDGE_API_KEY?.trim();
+  // Never combine the URL of one deployment with the other deployment's key.
+  const prefix = process.env.GMI_SCANNER_URL?.trim() && process.env.GMI_SCANNER_API_KEY?.trim() ? "GMI_SCANNER" : "VULNERS_BRIDGE";
+  const rawUrl = process.env[`${prefix}_URL`]?.trim();
+  const apiKey = process.env[`${prefix}_API_KEY`]?.trim();
   if (!rawUrl || !apiKey) return null;
   // Accept the base URL with or without a trailing /api — every route below
   // is built as `${baseUrl}/api/...`, so normalize either form to the bare
@@ -90,6 +93,7 @@ async function bridgeFetch(
     },
     body: init.body ? JSON.stringify(init.body) : undefined,
     cache: "no-store",
+    redirect: "error",
     signal: AbortSignal.timeout(init.timeoutMs ?? 15_000),
   });
   if (!res.ok) {
@@ -101,14 +105,18 @@ async function bridgeFetch(
 
 const BRIDGE_SCAN_PROFILE = "full-fast";
 
+export type VulnersBridgeScope = { config: VulnersBridgeConfig; target: string; verify?: () => Promise<void> };
+
 export type VulnersBridgeJob = { jobId: string; status: string };
 
 export async function vulnersBridgeStartScan(
   target: string,
   scanName?: string,
+  scope?: VulnersBridgeScope,
 ): Promise<VulnersBridgeJob> {
-  const cfg = vulnersBridgeConfig();
+  const cfg = scope?.config ?? vulnersBridgeConfig();
   if (!cfg) throw new Error("Vulners bridge is not configured.");
+  if (scope && scannerExactTargetKey(target) !== scannerExactTargetKey(scope.target)) throw new Error("Bridge target is outside its reviewed scope.");
   // Confirmed live under real load: 6 companies' scans each create+start
   // their first target within the same few seconds, and gmi-vuln-api
   // (apparently single-worker, GMP calls likely blocking its event loop)
@@ -127,7 +135,8 @@ export async function vulnersBridgeStartScan(
   // swallowed by the caller's per-target catch -- "Completed, 0 findings"
   // for every target, every time, with no visible error anywhere.
   const jobId = String(created?.task_id ?? created?.id ?? "");
-  if (!jobId) throw new Error("Bridge scan launch: no scan id returned.");
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId)) throw new Error("Bridge scan launch was not confirmed; inspect the scanner before retrying.");
+  await scope?.verify?.();
   const started = await bridgeFetch(cfg, `/api/v1/scans/${encodeURIComponent(jobId)}/start`, {
     method: "POST",
     body: { authorization_confirmed: true },
@@ -158,10 +167,11 @@ function mapBridgeStatus(raw: unknown): "queued" | "running" | "complete" | "fai
   return "failed";
 }
 
-export async function vulnersBridgeJobStatus(jobId: string): Promise<VulnersBridgeJobStatus> {
-  const cfg = vulnersBridgeConfig();
+export async function vulnersBridgeJobStatus(jobId: string, scope?: VulnersBridgeScope): Promise<VulnersBridgeJobStatus> {
+  const cfg = scope?.config ?? vulnersBridgeConfig();
   if (!cfg) throw new Error("Vulners bridge is not configured.");
   const data = await bridgeFetch(cfg, `/api/v1/scans/${encodeURIComponent(jobId)}`, { timeoutMs: 30_000 });
+  if (scope && data?.id !== jobId) throw new Error("Bridge returned a different or missing job identity.");
   const status = mapBridgeStatus(data?.status);
   return { status, error: status === "failed" ? `Scan status: ${data?.status ?? "unknown"}` : null };
 }
@@ -182,21 +192,32 @@ export type VulnersBridgeFinding = {
 export async function vulnersBridgeJobFindings(
   jobId: string,
   target: string,
+  scope?: VulnersBridgeScope,
 ): Promise<VulnersBridgeFinding[]> {
-  const cfg = vulnersBridgeConfig();
+  const cfg = scope?.config ?? vulnersBridgeConfig();
   if (!cfg) throw new Error("Vulners bridge is not configured.");
   const data = await bridgeFetch(cfg, `/api/v1/scans/${encodeURIComponent(jobId)}/findings`, { timeoutMs: 30_000 });
-  const rows = Array.isArray(data?.findings) ? data.findings : [];
+  if (!Array.isArray(data?.findings)) throw new Error("Bridge returned an invalid findings list; coverage is unknown.");
+  const rows = data.findings;
+  if (scope && (rows.length > 10000 || data.has_more === true || data.next || data.next_page ||
+      (data.total !== undefined && (!Number.isSafeInteger(data.total) || data.total !== rows.length))))
+    throw new Error("Bridge findings are incomplete or exceed the collection limit.");
   const out: VulnersBridgeFinding[] = [];
   for (const r of rows) {
+    if (scope && (!Array.isArray(r?.cves) || typeof r?.host !== "string" ||
+        scannerExactTargetKey(r.host) !== scannerExactTargetKey(scope.target)))
+      throw new Error("Bridge result is malformed or outside the scanned customer target.");
     const cves = Array.isArray(r?.cves) ? r.cves : [];
     if (!cves.length) continue;
     const portNum = String(r?.port ?? "").match(/^(\d+)/)?.[1] ?? r?.port ?? "?";
     const component = `${r?.name ?? r?.nvt_name ?? "service"} (Port ${portNum})`;
     const cvss = Number(r?.severity ?? 0);
+    if (scope && (r?.severity === null || r?.severity === undefined || !Number.isFinite(cvss) || cvss < 0 || cvss > 10))
+      throw new Error("Bridge returned an invalid vulnerability score.");
     const host = r?.host ?? target;
     for (const c of cves) {
       const cve = String(typeof c === "string" ? c : c?.id ?? c?.cve ?? "").toUpperCase();
+      if (scope && !/^CVE-[0-9]{4}-[0-9]{4,}$/.test(cve)) throw new Error("Bridge returned an invalid CVE identity.");
       if (!cve.startsWith("CVE-")) continue;
       out.push({ cve, cvss, component, exploitAvailable: false, target: host });
     }

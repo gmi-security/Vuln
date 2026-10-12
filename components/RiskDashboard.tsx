@@ -1,4 +1,5 @@
 "use client";
+import CveText from "./CveText";
 import { useCallback, useEffect, useState } from "react";
 import { SlidersHorizontal } from "lucide-react";
 import { dashboardRequest } from "@/lib/dashboard-browser-client";
@@ -108,7 +109,7 @@ function RiskRow({ row, onChanged }: { row: FindingRisk; onChanged: () => void }
         </button>
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-1.5">
-            <span className="truncate text-sm font-medium text-white">{row.cve}</span>
+            <span className="truncate text-sm font-medium text-white"><CveText text={row.cve}/></span>
             {row.cisaKev && (
               <span className="shrink-0 rounded-full border border-[#ff4d57] bg-[rgba(179,14,20,0.14)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[#ff8f96]">
                 KEV

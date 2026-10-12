@@ -23,8 +23,9 @@ async function getModule(path) {
   modules.set(path, promise); return promise;
 }
 async function linker(name, parent) {
-  if (name.startsWith(".")) return getModule(resolve(dirname(parent.identifier), `${name}.ts`));
-  if (name.startsWith("@/")) return getModule(resolve(ROOT, `${name.slice(2)}.ts`));
+  const sourcePath = value => /\.(?:mjs|js|ts)$/.test(value) ? value : `${value}.ts`;
+  if (name.startsWith(".")) return getModule(resolve(dirname(parent.identifier), sourcePath(name)));
+  if (name.startsWith("@/")) return getModule(resolve(ROOT, sourcePath(name.slice(2))));
   const imported = await import(name), values = name === "rrule" ? { ...imported.default, ...imported } : imported;
   return new SyntheticModule(Object.keys(values), function () { for (const k of Object.keys(values)) this.setExport(k, values[k]); });
 }

@@ -15,9 +15,9 @@ const seed = () => ({ companies:[[company.id,company]], folders:[], scans:[], fi
   settings:{autoScanNewAssets:false,schedule:{autoSyncEnabled:false,alertsEnabled:false,monthlyReportsEnabled:false},sla:{Critical:7,High:30,Medium:60,Low:90}},
   meta:{autoSyncDefaultMigrated:true,defenderGenerations:{}} });
 
-async function harness(disk = { value:seed() }) {
+async function harness(disk = { value:seed() }, strict = false) {
   const intervals = [], logs = [], modules = new Map();
-  let failSave = false, saveCalls = 0, snapshotReads = 0, gate;
+  let failSave = false, saveCalls = 0, snapshotReads = 0, gate, lastChanges;
   const context = createContext({ Buffer, URL, URLSearchParams, TextEncoder, TextDecoder, AbortController, Response, Request, Headers, structuredClone,
     process:{ env:{VULN_DISABLE_SCHEDULER:"true"},once(){} },
     console:{ log:(...args)=>logs.push(args.join(" ")), info:(...args)=>logs.push(args.join(" ")), error:(...args)=>logs.push(args.join(" ")),warn(){} },
@@ -26,8 +26,15 @@ async function harness(disk = { value:seed() }) {
   const synthetic = values => new SyntheticModule(Object.keys(values), function(){for(const key of Object.keys(values))this.setExport(key,values[key]);},{context});
   const persist = synthetic({
     persistenceEnabled:()=>true, applicationDatabase:()=>null,
+    strictPlatformPersistence:()=>strict,
     loadSnapshot:async()=>clone(disk.value),
-    saveSnapshot:async value=>{saveCalls++;if(gate)await gate;if(failSave)throw new Error("simulated database save failure");disk.value=clone(value);},
+    saveSnapshot:async (value,options)=>{saveCalls++;if(gate)await gate;if(failSave)throw new Error("simulated database save failure");options?.guard?.();
+      lastChanges=options?.changes;const next=clone(value);
+      if(options?.changes!==undefined)for(const kind of ['companies','folders','scans','findings','assets']){
+        const entries=new Map(disk.value[kind]),incoming=new Map(next[kind]);
+        for(const id of options.changes[kind]??[])if(incoming.has(id))entries.set(id,incoming.get(id));else entries.delete(id);
+        next[kind]=[...entries];
+      }disk.value=next;},
     appendMetricsSnapshots:async()=>{},loadMetricsHistory:async()=>[],pingDb:async()=>({ok:true}),snapshotMeta:async()=>({updatedAt:null}),
   });
   const defender = synthetic({defenderStore:()=>({
@@ -52,7 +59,7 @@ async function harness(disk = { value:seed() }) {
   await store.ensureHydrated();await context.__vulnFlushing;
   return { context,store,platform:mod.namespace,disk,logs,intervals,
     fail:()=>{failSave=true;},recover:()=>{failSave=false;},block:value=>{gate=value;},
-    saves:()=>saveCalls,reads:()=>snapshotReads };
+    saves:()=>saveCalls,reads:()=>snapshotReads,changes:()=>lastChanges };
 }
 
 test("automatic snapshot saves retry after failure and save later mutations",async()=>{
@@ -141,4 +148,40 @@ test("publication stays pending until its database write completes",async()=>{
   release();await publishing;
   assert.equal(h.platform.defenderPublicationPending(company.id),false);
   assert.equal(h.disk.value.findings.length,1);
+});
+
+
+test("SQL save failure blocks subsequent reads instead of serving uncommitted RAM",async()=>{
+ const h=await harness(undefined,true),before=clone(h.disk.value);
+ h.store.createCompany({name:"Unsaved customer",allowNearDuplicate:true});h.fail();
+ await assert.rejects(h.store.commitPlatformMutation(),/simulated database save failure/);
+ assert.equal(h.store.persistenceBlocked(),true);assert.deepEqual(h.disk.value,before);
+ await assert.rejects(h.store.ensureHydrated(),/storage is unavailable/);
+});
+test("SQL capture retries when another mutation arrives during save",async()=>{
+ const h=await harness(undefined,true);let release;h.block(new Promise(r=>{release=r;}));
+ h.store.createCompany({name:"First customer",allowNearDuplicate:true});const pending=h.store.commitPlatformMutation();
+ await new Promise(r=>setImmediate(r));h.store.createCompany({name:"Second customer",allowNearDuplicate:true});release();await pending;
+ assert.ok(h.disk.value.companies.some(([,c])=>c.name==="First customer"));
+ assert.ok(h.disk.value.companies.some(([,c])=>c.name==="Second customer"));assert.equal(h.store.persistenceBlocked(),false);
+});
+
+test("SQL analyst edits declare only their finding and preserve unrelated data and metadata",async()=>{
+ const data=seed();data.futureMetadata={keep:'yes'};data.findings=[['F-one',{id:'F-one',companyId:company.id,status:'Open',assignee:null}],['F-two',{id:'F-two',companyId:company.id,status:'Open'}]];
+ const h=await harness({value:data},true);h.store.updateFinding('F-one',{status:'In Remediation',assignee:'Team'});await h.store.commitPlatformMutation();
+ assert.deepEqual(JSON.parse(JSON.stringify(h.changes())),{findings:['F-one']});
+ assert.equal(h.disk.value.findings[0][1].status,'In Remediation');assert.equal(h.disk.value.findings[1][1].status,'Open');assert.deepEqual(h.disk.value.futureMetadata,{keep:'yes'});
+ h.store.updateSettings({sla:{Critical:4}});await h.store.commitPlatformMutation();assert.deepEqual(JSON.parse(JSON.stringify(h.changes())),{});assert.equal(h.disk.value.findings.length,2);
+});
+
+test("SQL customer creation saves its new company, default folder and counter together",async()=>{
+ const h=await harness(undefined,true);
+ const created=h.store.createCompany({name:'Scoped creation fixture',allowNearDuplicate:true});assert.ok(!created.error);
+ await h.store.commitPlatformMutation();const changes=JSON.parse(JSON.stringify(h.changes()));
+ assert.deepEqual(changes.companies,[created.id]);assert.equal(changes.folders.length,1);assert.equal(changes.findings,undefined);
+ assert.equal(h.disk.value.companies.find(([id])=>id===created.id)[1].name,'Scoped creation fixture');
+ assert.equal(h.disk.value.folders.find(([id])=>id===changes.folders[0])[1].companyId,created.id);
+ const restarted=await harness(h.disk,true),second=restarted.store.createCompany({name:'Next scoped customer',allowNearDuplicate:true});
+ assert.notEqual(second.id,created.id);await restarted.store.commitPlatformMutation();
+ assert.ok(restarted.disk.value.companies.some(([id])=>id===created.id));
 });

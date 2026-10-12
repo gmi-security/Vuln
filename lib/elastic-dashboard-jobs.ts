@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { DashboardError, parseDefinition, parseQueryInput, querySource } from "./elastic-dashboard";
 import { elasticVulnEnabled } from "./elastic-vuln-server";
-import { dashboardDatabase, dashboardConnectionRevision, prepareConsolidation, preparePatchRequest, previewQuery, saveQuery, throttlePreview } from "./elastic-dashboard-store";
+import { dashboardDatabase, assertPatchRequestScope, assertQueryResultScope, dashboardConnectionRevision, prepareConsolidation, preparePatchRequest, previewQuery, saveQuery, throttlePreview } from "./elastic-dashboard-store";
 import { parseConsolidationInput, parsePatchInput, parseVerifyInput } from "./patch-request";
 import { activeTicketedPairs, persistPreparedPatch, verifyPatchTicketFix } from "./patch-ticket-store";
 import { persistPreparedGroups, verifyGroupTicketFix } from "./patch-group-ticket-store";
@@ -40,6 +40,9 @@ export async function readDashboardJob(id: string, actor: string) {
   const row = (await db.query("SELECT id, status, result, error, input, connection_revision FROM elastic_dashboard_jobs WHERE id = $1 AND actor = $2 AND expires_at > now()", [id, actor])).rows[0];
   if (!row) throw new DashboardError("Query job expired or was not found. Preview again.", 404);
   if (row.connection_revision !== await dashboardConnectionRevision(querySource(row.input))) throw new DashboardError("The connection changed. Preview again.", 409);
+  if (row.result?.result) await assertQueryResultScope(row.input, row.result.result);
+  if (row.result?.patchRequest) await assertPatchRequestScope(row.result.patchRequest, row.connection_revision);
+  if (row.result?.consolidation) await assertPatchRequestScope(row.result.consolidation, row.connection_revision);
   triggerDashboardJobs();
   return { jobId: row.id, status: row.status, ...(row.result ?? {}), ...(row.error ? { error: row.error } : {}) };
 }
@@ -93,6 +96,9 @@ async function work() {
         result = { result: await previewQuery(job.input, job.actor, true, job.input.id) };
       }
       if (job.connection_revision !== await dashboardConnectionRevision(querySource(job.input))) throw new DashboardError("The connection changed. Preview again.", 409);
+      if ("result" in result && result.result) await assertQueryResultScope(job.input, result.result);
+      if ("patchRequest" in result && result.patchRequest) await assertPatchRequestScope(result.patchRequest, job.connection_revision);
+      if ("consolidation" in result && result.consolidation) await assertPatchRequestScope(result.consolidation, job.connection_revision);
       await db.query("UPDATE elastic_dashboard_jobs SET status = 'succeeded', result = $2::jsonb WHERE id = $1 AND status = 'running'", [job.id, JSON.stringify(result)]);
     } catch (error) {
       const message = error instanceof DashboardError ? error.message : "Background query failed. Check the connection and retry.";

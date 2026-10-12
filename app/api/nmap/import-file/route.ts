@@ -1,3 +1,4 @@
+import { withDurablePlatformMutation } from "@/lib/platform-mutation-route";
 import { NextResponse } from "next/server";
 import { ensureHydrated, importNmapScan, flushNow } from "@/lib/store";
 import { parseNmapXml } from "@/lib/nmap";
@@ -8,7 +9,7 @@ export const dynamic = "force-dynamic";
 // the <host>/<port> entries, attaches ground-truth open-port facts to assets,
 // and raises exposed-service findings — the same path the runner pull uses,
 // minus the runner.
-export async function POST(request: Request) {
+async function POSTHandler(request: Request) {
   await ensureHydrated();
 
   let xml = "";
@@ -63,3 +64,5 @@ export async function POST(request: Request) {
   await flushNow();
   return NextResponse.json({ result: { ...result, hostsParsed: hosts.length } });
 }
+
+export const POST = withDurablePlatformMutation(POSTHandler);

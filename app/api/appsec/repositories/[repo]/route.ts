@@ -1,23 +1,25 @@
 import { NextResponse } from "next/server";
 import { appsecElasticConfig, fetchAppSecRepoDetail } from "@/lib/elastic-appsec";
 import { DashboardError } from "@/lib/elastic-dashboard";
+import { appsecCompanyParameter, loadCustomerAppSecScope } from "@/lib/customer-appsec-routing-server";
 
 export const dynamic = "force-dynamic";
-
-export async function GET(
-  _request: Request,
-  { params }: { params: Promise<{ repo: string }> },
-) {
-  if (!appsecElasticConfig()) {
-    return NextResponse.json({ configured: false, detail: null });
-  }
-  const { repo } = await params;
-  const repository = decodeURIComponent(repo);
+const headers = { "Cache-Control": "private, no-store" };
+export async function GET(request: Request, { params }: { params: Promise<{ repo: string }> }) {
+  let companyId: string | null = null;
   try {
-    const detail = await fetchAppSecRepoDetail(repository);
-    return NextResponse.json({ configured: true, detail });
+    companyId = appsecCompanyParameter(request);
+    const reviewed = await loadCustomerAppSecScope(companyId);
+    if (!reviewed && !appsecElasticConfig()) return NextResponse.json({ companyId, configured: false, detail: null }, { headers });
+    const { repo } = await params;
+    let repository: string;
+    try { repository = decodeURIComponent(repo); } catch { throw new DashboardError("Invalid repository path.", 400); }
+    const detail = await fetchAppSecRepoDetail(repository, reviewed?.scope);
+    await reviewed?.recheck();
+    return NextResponse.json({ companyId, configured: true, detail }, { headers });
   } catch (err) {
-    const message = err instanceof DashboardError ? err.message : "Could not reach the AppSec Elastic index.";
-    return NextResponse.json({ configured: true, detail: null, error: message }, { status: 502 });
+    const safe = err instanceof DashboardError && [400, 404, 409].includes(err.status);
+    return NextResponse.json({ companyId, configured: true, detail: null,
+      error: safe ? err.message : "Could not load this AppSec repository. Check source access and approval." }, { status: safe ? err.status : 502, headers });
   }
 }

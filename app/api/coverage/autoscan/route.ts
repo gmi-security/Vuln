@@ -1,10 +1,11 @@
+import { withDurablePlatformMutation } from "@/lib/platform-mutation-route";
 import { NextResponse } from "next/server";
 import { autoScanGaps, ensureHydrated } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
 // Launch scans for all known-but-unscanned assets (the coverage gap).
-export async function POST() {
+async function POSTHandler() {
   try {
     await ensureHydrated();
     const result = await autoScanGaps();
@@ -17,3 +18,5 @@ export async function POST() {
     );
   }
 }
+
+export const POST = withDurablePlatformMutation(POSTHandler);

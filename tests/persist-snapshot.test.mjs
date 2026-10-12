@@ -1,3 +1,6 @@
+import * as reportingRevisions from "../lib/db/customer-reporting-revisions.mjs";
+import * as platformAuthority from "../lib/db/platform-authority.mjs";
+import * as platformStore from "../lib/db/platform-store.mjs";
 // Disposable localhost PostgreSQL only. No application or production credentials.
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -34,9 +37,12 @@ async function harness(t) {
   }};
   const code=ts.transpileModule(await readFile("lib/persist.ts","utf8"),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText;
   async function freshModule() {
+    // A fresh module here simulates a new process, unlike separately bundled
+    // Next routes which must share the same process-global persistence state.
+    delete globalThis.__vulnDatabasePersistenceV1;
     const mod=new SourceTextModule(code);
     await mod.link(async name=>{
-      const values=name === "pg" ? {Pool:class{constructor(){return wrapper;}}} : crypto;
+      const values=name === "pg" ? {Pool:class{constructor(){return wrapper;}}} : name.endsWith("customer-reporting-revisions.mjs") ? reportingRevisions : name.endsWith("platform-authority.mjs") ? platformAuthority : name.endsWith("platform-store.mjs") ? platformStore : crypto;
       return new SyntheticModule(Object.keys(values),function(){for(const key of Object.keys(values))this.setExport(key,values[key]);});
     });
     await mod.evaluate();return mod.namespace;

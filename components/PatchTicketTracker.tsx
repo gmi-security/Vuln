@@ -1,4 +1,5 @@
 "use client";
+import CveText from "./CveText";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { dashboardRequest } from "@/lib/dashboard-browser-client";
 import { ageDays, patchGroupTicketState, type PatchGroupTicketSummary } from "@/lib/patch-group-ticket-types";
@@ -52,7 +53,8 @@ function TicketCard({ r, sla }: { r: Row; sla: SlaSettings | null }) {
   return <div className={`flex gap-3 rounded-lg border border-zinc-800 border-l-4 bg-zinc-950 p-3 transition-colors hover:border-zinc-600 ${BUCKET_STYLE[bucket].stripe}`}>
     <ImpactChip hostCount={r.row.hostCount} bucket={bucket} />
     <div className="min-w-0 flex-1">
-      <p className="truncate text-sm font-medium text-zinc-100" title={`${r.row.remediationTitle || "Remediation"}\nResolves: ${r.cves.join(", ")}`}>{r.scope}</p>
+      <p className="truncate text-sm font-medium text-zinc-100" title={`${r.row.remediationTitle || "Remediation"}\nResolves: ${r.cves.join(", ")}`}><CveText text={r.scope}/></p>
+      {r.cves.length > 1 && <p className="max-h-20 overflow-auto text-xs text-zinc-300"><CveText text={r.cves.join(", ")}/></p>}
       <p className="mt-1 text-xs text-zinc-400">{r.row.ticketUrl && <a href={r.row.ticketUrl} target="_blank" rel="noopener noreferrer" className="text-sky-300 underline">#{r.row.ticketId}</a>}{r.row.ticketUrl && " · "}{patchGroupTicketState(r.row)}</p>
       {r.row.createdBy === "auto-create" && <p className="mt-1 text-[11px] font-medium text-emerald-400">Auto-created (Critical/High)</p>}
       {r.row.slaEscalations > 0 && <p className="mt-1 text-[11px] font-medium text-[#ff8f96]">Auto-escalated ×{r.row.slaEscalations} (SLA breach)</p>}

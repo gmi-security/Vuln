@@ -1,6 +1,7 @@
 import http from "node:http";
 import https from "node:https";
 import type { Severity } from "@/lib/types";
+import { scannerExactTargetKey } from "./scanner-target-scope";
 
 // SpiderFoot (open-source) adapter.
 //
@@ -149,13 +150,18 @@ export type SpiderfootScan = {
   status: string;
   resultCount: number;
   risk: { HIGH?: number; MEDIUM?: number; LOW?: number; INFO?: number };
+  finishedAt?: string;
 };
 
-export async function spiderfootListScans(): Promise<SpiderfootScan[]> {
-  const config = spiderfootConfig();
+export async function spiderfootListScans(pinned?: SpiderfootConfig): Promise<SpiderfootScan[]> {
+  const config = pinned ?? spiderfootConfig();
   if (!config) throw new Error("SpiderFoot is not configured.");
   const rows = await getJson(config, "/scanlist");
-  if (!Array.isArray(rows)) return [];
+  if (!Array.isArray(rows)) throw new Error("SpiderFoot returned an invalid scan roster.");
+  if (pinned && (rows.some((r: any) => !Array.isArray(r) || typeof r[0] !== "string" || !/^[A-Za-z0-9_-]+$/.test(r[0]) ||
+      typeof r[1] !== "string" || typeof r[2] !== "string" || !r[2] || typeof r[5] !== "string" ||
+      typeof r[6] !== "string" || !Number.isSafeInteger(r[7]) || r[7] < 0) || new Set(rows.map((r: any) => r[0])).size !== rows.length))
+    throw new Error("SpiderFoot returned invalid or duplicate scan identities.");
   return rows.map((r: any[]) => ({
     id: String(r[0]),
     name: String(r[1] ?? r[0]),
@@ -163,6 +169,7 @@ export async function spiderfootListScans(): Promise<SpiderfootScan[]> {
     status: String(r[6] ?? "UNKNOWN"),
     resultCount: Number(r[7] ?? 0),
     risk: r[8] && typeof r[8] === "object" ? r[8] : {},
+    ...(pinned ? { finishedAt: r[5] } : {}),
   }));
 }
 
@@ -172,9 +179,12 @@ export async function spiderfootStartScan(
   name: string,
   target: string,
   usecase = "all",
+  scope?: { config: SpiderfootConfig; targets: string[] },
 ): Promise<string> {
-  const config = spiderfootConfig();
+  const config = scope?.config ?? spiderfootConfig();
   if (!config) throw new Error("SpiderFoot is not configured.");
+  if (scope && !scope.targets.map(scannerExactTargetKey).includes(scannerExactTargetKey(target)))
+    throw new Error("SpiderFoot launch target is outside the reviewed customer scope.");
   const res = await request(config, "POST", "/startscan", {
     scanname: name,
     scantarget: target,
@@ -191,7 +201,7 @@ export async function spiderfootStartScan(
   } catch {
     throw new Error("SpiderFoot startscan returned non-JSON.");
   }
-  if (Array.isArray(parsed) && parsed[0] === "SUCCESS") return String(parsed[1]);
+  if (Array.isArray(parsed) && parsed[0] === "SUCCESS" && (!scope || typeof parsed[1] === "string" && /^[A-Za-z0-9_-]+$/.test(parsed[1]))) return String(parsed[1]);
   throw new Error(
     `SpiderFoot startscan error: ${Array.isArray(parsed) ? parsed[1] : res.text}`,
   );
@@ -276,14 +286,28 @@ export type SpiderfootFinding = {
 // Pull a finished scan's events and map the security-relevant ones to findings.
 export async function spiderfootImportFindings(
   scanId: string,
+  scope?: { config: SpiderfootConfig; targets: string[]; scan: SpiderfootScan },
 ): Promise<SpiderfootFinding[]> {
-  const config = spiderfootConfig();
+  const config = scope?.config ?? spiderfootConfig();
   if (!config) throw new Error("SpiderFoot is not configured.");
+  const signature = (scan: SpiderfootScan) => JSON.stringify([scan.id, scan.name, scan.target, scan.status, scan.finishedAt, scan.resultCount]);
+  const verify = async () => {
+    if (!scope) return;
+    if (scope.scan.id !== scanId || scope.scan.status !== "FINISHED" || !scope.scan.finishedAt || scope.scan.finishedAt === "Not yet" ||
+        !scope.targets.map(scannerExactTargetKey).includes(scannerExactTargetKey(scope.scan.target)))
+      throw new Error("SpiderFoot scan is not finished in its reviewed target scope.");
+    const current = (await spiderfootListScans(config)).find(scan => scan.id === scanId);
+    if (!current || signature(current) !== signature(scope.scan)) throw new Error("SpiderFoot scan changed during collection; results were withheld.");
+  };
+  await verify();
   const events = await getJson(
     config,
     `/scanexportjsonmulti?ids=${encodeURIComponent(scanId)}`,
   );
-  if (!Array.isArray(events)) return [];
+  if (!Array.isArray(events)) throw new Error("SpiderFoot returned an invalid scan event list.");
+  if (scope && events.some((ev: any) => !ev || typeof ev !== "object" || typeof ev.scan_target !== "string" ||
+      scannerExactTargetKey(ev.scan_target) !== scannerExactTargetKey(scope.scan.target) || ev.scan_name !== scope.scan.name))
+    throw new Error("SpiderFoot returned an event outside the reviewed scan.");
   const out: SpiderfootFinding[] = [];
   for (const ev of events) {
     const type = String(ev.event_type ?? "");
@@ -310,5 +334,6 @@ export async function spiderfootImportFindings(
       module: String(ev.module ?? ""),
     });
   }
+  await verify();
   return out;
 }

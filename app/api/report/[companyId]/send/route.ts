@@ -1,3 +1,4 @@
+import { withDurablePlatformMutation } from "@/lib/platform-mutation-route";
 import { NextResponse } from "next/server";
 import {
   buildCustomerReportData,
@@ -20,7 +21,7 @@ const MAX_CC = 5;
 // POST /api/report/[companyId]/send — email the full customer report (with a
 // what-changed delta once a previous send exists) to the company contact.
 // Session-authed by the edge proxy like every other /api route.
-export async function POST(
+async function POSTHandler(
   request: Request,
   { params }: { params: Promise<{ companyId: string }> },
 ) {
@@ -111,3 +112,5 @@ export async function POST(
     delta: data.delta !== null,
   });
 }
+
+export const POST = withDurablePlatformMutation(POSTHandler);

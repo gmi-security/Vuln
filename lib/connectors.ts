@@ -230,20 +230,20 @@ export const SCAN_PROFILES: ScanProfile[] = [
   },
 ];
 
-function envSetComplete(vars: string[]): boolean {
-  return vars.every((v) => Boolean(process.env[v]));
+function envSetComplete(vars: string[], env: Partial<NodeJS.ProcessEnv>): boolean {
+  return vars.every((v) => Boolean(env[v]));
 }
 
 // Configured if the primary set is complete, OR (when present) the
 // alternative set is — the two are independent auth modes, not a combined
 // requirement.
-function isConfigured(def: ConnectorDef): boolean {
-  return envSetComplete(def.envVars) || Boolean(def.envVarsAlt?.some((set) => envSetComplete(set)));
+function isConfigured(def: ConnectorDef, env: Partial<NodeJS.ProcessEnv>): boolean {
+  return envSetComplete(def.envVars, env) || Boolean(def.envVarsAlt?.some((set) => envSetComplete(set, env)));
 }
 
-export function getConnectors(): Connector[] {
+export function getConnectors(env: Partial<NodeJS.ProcessEnv> = process.env): Connector[] {
   return (Object.values(CONNECTOR_DEFS) as ConnectorDef[]).map((def) => {
-    const configured = isConfigured(def);
+    const configured = isConfigured(def, env);
     return {
       id: def.id,
       name: def.name,
@@ -258,7 +258,7 @@ export function getConnectors(): Connector[] {
         ? "Planned"
         : configured
           ? "Connected"
-          : process.env.DEMO_SCANS === "true"
+          : env.DEMO_SCANS === "true"
             ? "Demo Mode"
             : "Not Configured",
     };
