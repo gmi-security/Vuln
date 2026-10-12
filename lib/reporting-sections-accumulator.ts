@@ -106,6 +106,7 @@ export function createReportingSectionsAccumulator(company: Pick<Company, "id" |
         attackSurfaceRows: exposure.map(item => item.row), webTestingRows: web.map(item => item.row),
         history: history.filter(row => row && typeof row.ts === "string" && typeof row.data === "object" && row.data !== null)
           .map(row => ({ ts: row.ts, open: typeof (row.data as { totalOpen?: unknown }).totalOpen === "number" ? (row.data as { totalOpen: number }).totalOpen : null })),
+        legacyHistory: [],
       } };
     },
   };

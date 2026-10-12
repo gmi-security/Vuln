@@ -10,7 +10,9 @@ async function harness(env=settings){
  let state='available',review='reviewed',fail=false;
  class DashboardError extends Error{constructor(message,status){super(message);this.status=status;}}
  const deps={
-  './persist':{applicationDatabase:()=>({connect:async()=>{calls.push('connect');return {release:()=>calls.push('release')};}})},
+  './persist':{applicationDatabase:()=>({connect:async()=>{calls.push('connect');return {
+    release:()=>calls.push('release'),query:async(_sql,params)=>{calls.push('legacy:'+params[0]);return {rows:[{ts:'2026-10-09T00:00:00Z',data:{totalOpen:12}}]};}
+   };}})},
   './elastic-dashboard':{DashboardError},
   './customer-connector-status-service':{readCustomerConnectorStatus:async id=>{calls.push('review:'+id);return {sourceSelection:{state:review,revision:4}};}},
   './db/connector-metadata.mjs':{readSavedApplicationCompanies:async()=>[{id:'CO-A',name:'A'},{id:'DEMO',name:'Demo',isDemo:true}]},
@@ -40,6 +42,13 @@ test('executive opt-in returns the same saved generation time and full trend, wi
  assert.equal(saved.report.generatedAt,saved.savedReport.capturedAt);assert.equal(saved.report.trend[0].totalOpen,10);
  h.state('stale');await assert.rejects(()=>h.api.savedReportingExecutive('CO-A'),e=>e.status===503);
  assert.equal(await h.api.savedReportingExecutive('CO-B'),null);
+});
+test('selected canonical customer shows labeled legacy rows without combining its current trend',async()=>{
+ const h=await harness({...settings,VULN_REPORTING_SQL_CUSTOMERS:'CO-229336'});
+ const result=await h.api.savedReportingOverview('CO-229336');
+ assert.deepEqual(JSON.parse(JSON.stringify(result.model.legacyHistory)),[{ts:'2026-10-09T00:00:00Z',sourceCompanyId:'CO-9150',
+  sourceCompanyName:'GMI Scans',open:12}]);
+ assert.ok(h.calls.includes('legacy:CO-9150'));
 });
 test('selected Overview reads only current approved SQL output and releases both clients',async()=>{
  const h=await harness();const result=await h.api.savedReportingOverview('CO-A');assert.equal(result.model.company.id,'CO-A');assert.ok(result.savedReport.capturedAt);

@@ -21,7 +21,9 @@ async function tx(client,fn){await client.query('BEGIN');try{const r=await fn();
 const sources=['crowdstrike','defender','nessus','spiderfoot','artemis','zap','vulners','github'];
 const fixture={companies:[['CO-1',{id:'CO-1',name:'Test',kind:'client'}]],folders:[],scans:[],assets:[],
  findings:Array.from({length:1400},(_,i)=>[`F-${i}`,{id:`F-${i}`,companyId:'CO-1',connector:sources[i%sources.length],cve:`CVE-2026-${10000+i}`,realRisk:44.5,status:'Open',future:{providerField:i}}]),
- counter:2000,settings:{sla:{Critical:7,High:30,Medium:90,Low:180}},identityAliases:[['ip','host']],meta:{sourceGenerations:{defender:'one'}},futureMetadata:{keep:true}};
+ counter:2000,settings:{sla:{Critical:7,High:30,Medium:90,Low:180}},identityAliases:[['ip','host']],
+ meta:{sourceGenerations:{defender:'one'},customerConsolidation:{version:1,mappings:[
+  {sourceId:'CO-9150',destinationId:'CO-229336'},{sourceId:'CO-9153',destinationId:'CO-229438'}]}},futureMetadata:{keep:true}};
 const normalized=value=>Object.fromEntries(Object.entries(value).map(([k,v])=>[k,platformCollections[k]?[...v].sort(([a],[b])=>a.localeCompare(b)):v]));
 try{
  await admin.connect();const guard=(await admin.query("SELECT current_setting('data_directory') dir,current_setting('listen_addresses') listen")).rows[0];

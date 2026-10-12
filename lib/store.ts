@@ -500,6 +500,7 @@ function normalizeSettings(raw: unknown): Settings {
 // Bookkeeping the scheduler + alerting need to survive restarts (persisted in
 // the snapshot's meta row so a redeploy never double-runs a sync or report).
 type StoreMeta = {
+  customerConsolidation?: { version: number; mappings: { sourceId: string; destinationId: string }[] };
   defenderGenerations?: Record<string,string>;
   lastAutoSyncAt: number | null; // epoch ms of the last scheduler-launched sync-all
   lastAlertCheckAt: string | null; // ISO — findings first seen after this are "new"
@@ -2310,6 +2311,8 @@ export function createCompany(input: {
   const s = store();
   const name = input.name.trim();
   if (!name) return { error: "Company name is required." };
+  if (s.meta.customerConsolidation && ["gmi scans", "valor global scans"].includes(normalizeCompanyName(name)))
+    return { error: "This historical customer name was consolidated; use its reviewed canonical customer ID." };
   const existing = Array.from(s.companies.values());
   if (existing.some((c) => normalizeCompanyName(c.name) === normalizeCompanyName(name))) {
     return { error: "A company with that name already exists." };
@@ -2401,10 +2404,14 @@ export type MergeCompaniesResult = {
 // `fromId`. For cleaning up a duplicate company created by a name-matching
 // miss (see normalizeCompanyName's history in lib/company-name.ts) without
 // having to re-run every sync from scratch.
+// The approved GMI/Valor source and destination IDs are excluded below.
 export function mergeCompanies(
   fromId: string,
   intoId: string,
 ): MergeCompaniesResult | { error: string } {
+  if (["CO-9150", "CO-9153", "CO-229336", "CO-229438"].includes(fromId) ||
+      ["CO-9150", "CO-9153", "CO-229336", "CO-229438"].includes(intoId))
+    return { error: "These customers require the purpose-built consolidation with folder and history checks." };
   const s = store();
   const from = s.companies.get(fromId);
   const into = s.companies.get(intoId);
@@ -4614,12 +4621,41 @@ function upsertAsset(
   input: Omit<InternalAsset, "id" | "lastSynced"> & { id?: string },
 ): InternalAsset {
   const nowIso = new Date().toISOString();
+  if (input.source === "crowdstrike" &&
+      (input.companyId === "CO-229336" || input.companyId === "CO-229438")) {
+    const automate = Array.from(s.assets.values()).find(a =>
+      a.companyId === input.companyId && a.source === "automate" &&
+      a.identifier.toLowerCase() === input.identifier.toLowerCase() &&
+      a.hostname.toLowerCase() === input.hostname.toLowerCase());
+    if (automate) {
+      automate.crowdstrikeObservation = {
+        assetId: automate.crowdstrikeObservation?.assetId,
+        externalId: input.externalId,
+        identifier: input.identifier,
+        hostname: input.hostname,
+        ipAddresses: input.ipAddresses,
+        os: input.os,
+        owner: input.owner,
+        tags: input.tags,
+        exposure: input.exposure,
+        criticality: input.criticality,
+        lastSynced: nowIso,
+      };
+      markDirty();
+      return automate;
+    }
+  }
   // Match an existing asset by external id or identifier, always scoped to
   // the same company — a vendor externalId collision (or a caller passing
   // the wrong companyId) must never reassign an asset across customers.
   const existing = Array.from(s.assets.values()).find(
     (a) =>
       a.companyId === input.companyId &&
+      // The approved consolidation keeps Automate as the canonical asset
+      // record when CrowdStrike reports the same host under the new owner.
+      !(a.source !== input.source &&
+        [a.source, input.source].every(source => source === "automate" || source === "crowdstrike") &&
+        (input.companyId === "CO-229336" || input.companyId === "CO-229438")) &&
       ((input.externalId && a.externalId === input.externalId) ||
         a.identifier.toLowerCase() === input.identifier.toLowerCase()),
   );
@@ -6974,6 +7010,8 @@ export async function importFromNessus(): Promise<
   try { routes = await loadReviewedScannerRoutes("nessus"); }
   catch (error) { return { error: error instanceof Error ? error.message : "Nessus routing is unavailable." }; }
   const s = store();
+  if (s.meta.customerConsolidation && routes === null)
+    return { error: "Nessus requires reviewed numeric folder routes after customer consolidation." };
   if (routes !== null && (!routes.length || routes.some(r => !s.companies.has(r.companyId) || demoCompanyIds(s).has(r.companyId))))
     return { error: "Nessus requires reviewed folder routes to existing non-demo customers." };
 
@@ -7007,6 +7045,7 @@ export async function importFromNessus(): Promise<
   // "My Scans" (type "main"), and the virtual "All Scans" view — since those
   // aren't clients.
   const BUILTIN_FOLDERS = new Set(["my scans", "all scans", "trash"]);
+  const reviewedLegacyFolders = new Map([["gmi scans", "CO-229336"], ["valor global scans", "CO-229438"]]);
   const folderToCompany = new Map<number, string>();
   let companiesCreated = 0;
   let companiesMatched = 0;
@@ -7016,10 +7055,16 @@ export async function importFromNessus(): Promise<
       const route = routes.find(r => r.sourceScope === String(folder.id));
       if (!route) continue;
       if (folder.type !== "custom") { errors.push("Approved Nessus folder is not a customer folder."); continue; }
+      const canonical = reviewedLegacyFolders.get(folder.name.trim().toLowerCase());
+      if (canonical && route.companyId !== canonical) { errors.push("Legacy Nessus folder needs its reviewed canonical customer route."); continue; }
       folderToCompany.set(folder.id, route.companyId); companiesMatched++; continue;
     }
     if (folder.type === "trash" || folder.type === "main") continue;
     if (BUILTIN_FOLDERS.has(folder.name.trim().toLowerCase())) continue;
+    if (reviewedLegacyFolders.has(folder.name.trim().toLowerCase())) {
+      errors.push("Legacy Nessus customer requires a reviewed folder route before import.");
+      continue;
+    }
     const matches = Array.from(s.companies.values()).filter(
       (c) => normalizeCompanyName(c.name) === normalizeCompanyName(folder.name),
     );

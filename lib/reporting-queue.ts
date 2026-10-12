@@ -43,9 +43,11 @@ export async function refreshReportingQueue(force = false): Promise<void> {
         // picture is refreshed here too. Scoped to state='prepared' AND
         // review_state='pending' -- no reason to touch a row that's already
         // been approved/created/dismissed.
-        await client.query(`UPDATE patch_group_ticket_requests SET worst_severity=$2,max_risk=$3,updated_at=now()
+        await client.query(`UPDATE patch_group_ticket_requests SET worst_severity=$2,max_risk=$3,
+          packet=CASE WHEN $4::boolean THEN jsonb_set(packet,'{manualOnly}','true'::jsonb,true) ELSE packet END,
+          updated_at=now()
           WHERE id=$1 AND state='prepared' AND review_state='pending'`,
-          [prior.rows[0].id, group.worstSeverity, group.maxRisk]);
+          [prior.rows[0].id, group.worstSeverity, group.maxRisk, group.manualOnly === true]);
         continue;
       }
       const id = randomUUID();

@@ -225,6 +225,34 @@ test('Nessus refuses ambiguous folder names and a scan moved to a different cust
  assert.equal(s.scans.size,1);assert.equal(existing.vendor.nessusLastModified,5);assert.equal(s.findings.size,0);
 });
 
+test('approved consolidation customers cannot use the unsafe general merge or implicit Nessus name matching',async()=>{
+ const source=company('CO-9150','GMI Scans','internal'),destination=company('CO-229336','Global Market Innovators, Inc.','internal');
+ let s=fixture([source,destination]);
+ assert.match(store.mergeCompanies(source.id,destination.id).error,/purpose-built consolidation/i);
+ assert.match(store.mergeCompanies(destination.id,source.id).error,/purpose-built consolidation/i);
+ assert.equal(s.companies.has(source.id),true);
+ s=fixture([destination]);folders=[{id:9150,name:'GMI Scans',type:'custom'}];scans=[{id:20,folderId:9150,name:'legacy',status:'completed',lastModified:10}];
+ const result=await store.importFromNessus();
+ assert.equal(result.companiesCreated,0);assert.equal(s.companies.size,1);assert.equal(nessusReads.length,0);
+ assert.match(result.errors[0],/reviewed folder route/i);
+ s.meta.customerConsolidation={version:1,mappings:[{sourceId:source.id,destinationId:destination.id}]};
+ assert.match(store.createCompany({name:'GMI Scans',allowNearDuplicate:true}).error,/historical customer name/i);
+ folders=[{id:9150,name:'Renamed legacy folder',type:'custom'}];
+ assert.match((await store.importFromNessus()).error,/reviewed numeric folder routes/i);
+ assert.equal(s.companies.size,1);
+});
+
+test('CrowdStrike inventory cannot overwrite canonical Automate metadata after consolidation',async()=>{
+ const destination=company('CO-229336','Global Market Innovators, Inc.','internal');
+ const s=fixture([destination]);
+ const automate={...device,id:'AST-AUTO',companyId:destination.id,companyName:destination.name,identifier:device.hostname,source:'automate',externalId:'auto-1',os:'Automate OS'};
+ s.assets.set(automate.id,automate);configs=[{label:'GMI',customerName:destination.name}];
+ await store.importFromCrowdstrike();
+ assert.equal(s.assets.get(automate.id).source,'automate');
+ assert.equal(s.assets.get(automate.id).externalId,'auto-1');
+ assert.equal(s.assets.get(automate.id).os,'Automate OS');
+});
+
 const spotlightRoute=()=>({companyId:acme.id,connectionRef:'environment:FALCON',sourceScope:'a'.repeat(32),bindingKey:'a'.repeat(64),candidateId:'b'.repeat(64),candidateHash:'c'.repeat(64),bindingRevision:1,revision:1});
 test('actual Spotlight entrypoint selects explicit reviewed customer and rechecks approval before publication',async()=>{
  const s=fixture();configs=[{sourceRef:'environment:FALCON',customerName:'Beacon',label:'Fixture'}];spotlightRoutes=[spotlightRoute()];

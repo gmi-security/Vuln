@@ -35,6 +35,16 @@ test('empty customer is unassessed, not described as zero risk', () => {
   assert.equal(model.assets.inventoryCount, 0);
 });
 
+test('legacy customer snapshots keep their original label and separate trend', () => {
+  const model = buildCustomerReportingModel(company, [], [], [],
+    [{ts:'2026-10-10T00:00:00Z',data:{totalOpen:4}}],
+    [{ts:'2026-10-09T00:00:00Z',data:{totalOpen:12},
+      sourceCompanyId:'CO-9150',sourceCompanyName:'GMI Scans'}]);
+  assert.equal(model.history[0].open,4);
+  assert.deepEqual(model.legacyHistory,[{ts:'2026-10-09T00:00:00Z',open:12,
+    sourceCompanyId:'CO-9150',sourceCompanyName:'GMI Scans'}]);
+});
+
 test('completed clean vulnerability scan is assessed while a failed scan is not', () => {
   const clean = buildCustomerReportingModel(company, [], [scan('ok')], [], []);
   const failed = buildCustomerReportingModel(company, [], [scan('bad', { status: 'Failed', completedAt: null })], [], []);

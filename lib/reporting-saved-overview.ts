@@ -41,7 +41,8 @@ export async function savedReportingExecutive(companyId: string) {
   const saved = await savedReportingResult(companyId, true);
   if (!saved) return null;
   if (!saved.executive) throw new DashboardError("This customer's executive report is awaiting refresh.", 503);
-  return { report: { ...saved.executive, generatedAt: saved.savedReport.capturedAt }, savedReport: saved.savedReport };
+  return { report: { ...saved.executive, generatedAt: saved.savedReport.capturedAt,
+    legacyTrend: saved.legacyTrend }, savedReport: saved.savedReport };
 }
 
 async function savedReportingResult(companyId: string, requireExecutive = false) {
@@ -60,7 +61,22 @@ async function savedReportingResult(companyId: string, requireExecutive = false)
           { mode: "published", expectedReviewRevision: status.sourceSelection.revision, requireExecutive });
         if (result.state !== "available" || !result.model)
           throw new DashboardError("This customer's saved report is awaiting refresh. Try again after the background refresh completes.", 503);
-        return { model: result.model as CustomerReportingModel, executive: result.executive as (ExecReport & { trend?: unknown[] }) | undefined,
+        const legacySource = companyId === "CO-229336" ? { id: "CO-9150", name: "GMI Scans" }
+          : companyId === "CO-229438" ? { id: "CO-9153", name: "Valor Global Scans" } : null;
+        const legacyRows = legacySource ? (await source.query(
+          "SELECT ts,data FROM vuln_metrics_history WHERE company_id=$1 ORDER BY ts ASC", [legacySource.id],
+        )).rows.map((row: { ts: Date | string; data: unknown }) => ({
+          ts: row.ts instanceof Date ? row.ts.toISOString() : String(row.ts),
+          data: row.data, sourceCompanyId: legacySource.id, sourceCompanyName: legacySource.name,
+        })) : [];
+        const model = result.model as CustomerReportingModel;
+        model.legacyHistory = legacyRows.map(row => ({ ts: row.ts, sourceCompanyId: row.sourceCompanyId,
+          sourceCompanyName: row.sourceCompanyName,
+          open: typeof (row.data as { totalOpen?: unknown })?.totalOpen === "number"
+            ? (row.data as { totalOpen: number }).totalOpen : null }));
+        return { model, executive: result.executive as (ExecReport & { trend?: unknown[] }) | undefined,
+          legacyTrend: legacyRows.map(row => ({ ts: row.ts, sourceCompanyId: row.sourceCompanyId,
+            sourceCompanyName: row.sourceCompanyName, ...row.data as Record<string, unknown> })),
           savedReport: { capturedAt: result.capturedAt as string, builtAt: result.builtAt as string } };
       } finally { target.release(); }
     } finally { source.release(); }

@@ -8,7 +8,8 @@ async function harness(saved){
  const values={
   'next/server':{NextResponse:{json:(value,options)=>Response.json(value,options)}},
   '@/lib/store':{ensureHydrated:async()=>calls.push('hydrate'),computeExecReport:id=>{calls.push('aggregate');return {company:{id},generatedAt:''};}},
-  '@/lib/persist':{loadMetricsHistory:async()=>{calls.push('history');return []; }},
+  '@/lib/persist':{loadMetricsHistory:async()=>{calls.push('history');return []; },
+   loadLegacyCustomerMetricsHistory:async()=>{calls.push('legacy history');return []; }},
   '@/lib/elastic-dashboard':{DashboardError},
   '@/lib/reporting-saved-overview':{savedReportingExecutive:async()=>{calls.push('saved');if(saved==='stale')throw new DashboardError('Awaiting refresh',503);return saved;}}
  };
@@ -22,5 +23,5 @@ test('printable executive API uses the saved report without hydrating or aggrega
 });
 test('stale SQL reports do not silently hydrate, while disabled customers retain the original route',async()=>{
  const stale=await harness('stale');assert.equal((await stale.get()).status,503);assert.deepEqual(stale.calls,['saved']);
- const legacy=await harness(null);assert.equal((await legacy.get()).status,200);assert.deepEqual(legacy.calls,['saved','hydrate','aggregate','history']);
+ const legacy=await harness(null);assert.equal((await legacy.get()).status,200);assert.deepEqual(legacy.calls,['saved','hydrate','aggregate','history','legacy history']);
 });

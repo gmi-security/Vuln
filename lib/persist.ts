@@ -589,3 +589,37 @@ export async function loadMetricsHistory(
     return [];
   }
 }
+
+// Historical snapshots retain their original customer_id and are shown as a
+// separate series after the approved consolidation. Composite measures such
+// as MTTR must never be added to the canonical series.
+export async function loadLegacyCustomerMetricsHistory(
+  companyId: string,
+): Promise<{ ts: string; sourceCompanyId: string; sourceCompanyName: string; data: unknown }[]> {
+  const source = companyId === "CO-229336"
+    ? { id: "CO-9150", name: "GMI Scans" }
+    : companyId === "CO-229438"
+      ? { id: "CO-9153", name: "Valor Global Scans" }
+      : null;
+  if (!source) return [];
+  const p = getPool();
+  if (!p) return [];
+  try {
+    await withTimeout(ensureTable(), 10000, "ensureTable");
+    const res = await withTimeout(p.query(
+      `SELECT ts, data FROM vuln_metrics_history
+       WHERE company_id=$1
+       ORDER BY ts ASC`,
+      [source.id],
+    ), 15000, "loadLegacyCustomerMetricsHistory");
+    return res.rows.map((r: { ts: unknown; data: unknown }) => ({
+      ts: r.ts instanceof Date ? r.ts.toISOString() : String(r.ts),
+      sourceCompanyId: source.id,
+      sourceCompanyName: source.name,
+      data: r.data,
+    }));
+  } catch (err) {
+    console.error("[persist] legacy metrics history load failed:", err instanceof Error ? err.message : err);
+    return [];
+  }
+}

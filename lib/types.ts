@@ -142,6 +142,20 @@ export type InventoryAsset = {
   // Ground-truth open ports/services from the most recent Nmap discovery scan,
   // when one has run against this asset. Empty/absent until then.
   openPorts?: OpenPort[];
+  // The CrowdStrike view of a host whose canonical inventory record is Automate.
+  crowdstrikeObservation?: {
+    assetId?: string;
+    externalId: string;
+    identifier: string;
+    hostname: string;
+    ipAddresses: string[];
+    os: string;
+    owner: string;
+    tags: string[];
+    exposure: AssetExposure;
+    criticality: AssetCriticality;
+    lastSynced: string;
+  };
 };
 
 export type ConnectorId =

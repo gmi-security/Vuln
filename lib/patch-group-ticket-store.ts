@@ -4,6 +4,7 @@ import { patchTicketDatabase, savedConnection } from "./patch-ticket-store";
 import { verifyAgainstCrowdStrike, assertPatchRequestScope } from "./elastic-dashboard-store";
 import { customerFalconTenantIds } from "./reporting-tenant-scope";
 import { atlasFalconReviewPacket } from "./reporting-direct-sources";
+import { requiresConsolidationManualReview } from "./customer-consolidation-hold";
 import type { PatchConsolidation, PatchGroup } from "./patch-request";
 import { automatedGroupTicketBody, type PatchGroupTicketSummary } from "./patch-group-ticket-types";
 import { cwId, cwRequest, findCWRequest, CWRequestError, parseRouting, ticketUrl, uploadPatchCsv, validateCWRouting, type ConnectWiseConnection, type CWRecord, type TicketRouting } from "./connectwise-client";
@@ -54,16 +55,20 @@ export async function persistPreparedGroups(consolidation: PatchConsolidation, a
         // pending draft's risk picture stays current and group-auto-create's
         // gate isn't evaluating stale numbers from whenever this row first
         // got inserted.
-        await client.query(`UPDATE patch_group_ticket_requests SET worst_severity=$2,max_risk=$3,updated_at=now() WHERE id=$1`,
-          [existing.id, group.worstSeverity, group.maxRisk]);
+        await client.query(`UPDATE patch_group_ticket_requests SET worst_severity=$2,max_risk=$3,
+          packet=CASE WHEN $4::boolean THEN jsonb_set(packet,'{manualOnly}','true'::jsonb,true) ELSE packet END,
+          updated_at=now() WHERE id=$1`,
+          [existing.id, group.worstSeverity, group.maxRisk, requiresConsolidationManualReview(group.appCompanyId)]);
         ids[index] = existing.id; continue;
       }
       // An analyst's explicit customer selection at build time always wins.
       // Only fall back to the legacy Atlas tenant-CID allowlist for groups
       // built with no customer selected (e.g. an org-wide, unscoped query).
-      const packet = group.appCompanyId
+      const selectedPacket = group.appCompanyId
         ? group
         : atlasFalconReviewPacket(group, customerFalconTenantIds("CO-147284", process.env.ATLAS_CROWDSTRIKE_TENANT_IDS));
+      const packet = requiresConsolidationManualReview(selectedPacket.appCompanyId)
+        ? { ...selectedPacket, manualOnly: true } : selectedPacket;
       await client.query(`INSERT INTO patch_group_ticket_requests(id,cves,remediation_id,tenant_id,prepared_by,prepared_at,crowdstrike_revision,packet,host_count,finding_count,scope_hash,worst_severity,max_risk)
         VALUES($1,$2::jsonb,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13) ON CONFLICT(id) DO NOTHING`,
         [id, JSON.stringify(group.cves), group.remediationId, group.tenantId, actor, consolidation.collectedAt, revision,

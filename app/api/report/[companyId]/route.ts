@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { computeExecReport, ensureHydrated } from "@/lib/store";
-import { loadMetricsHistory } from "@/lib/persist";
+import { loadMetricsHistory, loadLegacyCustomerMetricsHistory } from "@/lib/persist";
 import { savedReportingExecutive } from "@/lib/reporting-saved-overview";
 import { DashboardError } from "@/lib/elastic-dashboard";
 
@@ -26,11 +26,15 @@ export async function GET(
   report.generatedAt = new Date().toISOString();
   // Last 180 days of this company's metrics history (same row shape as
   // /api/history). Fail-safe: [] when the DB is unset/unreachable.
-  const history = await loadMetricsHistory(companyId, 180);
+  const [history, legacyHistory] = await Promise.all([
+    loadMetricsHistory(companyId, 180), loadLegacyCustomerMetricsHistory(companyId),
+  ]);
   const trend = history.map((row) => ({
     ts: row.ts,
     companyId,
     ...(row.data as Record<string, unknown>),
   }));
-  return NextResponse.json({ report: { ...report, trend } });
+  return NextResponse.json({ report: { ...report, trend,
+    legacyTrend: legacyHistory.map(row => ({ ts: row.ts, sourceCompanyId: row.sourceCompanyId,
+      sourceCompanyName: row.sourceCompanyName, ...row.data as Record<string, unknown> })) } });
 }

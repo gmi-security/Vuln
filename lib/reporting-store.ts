@@ -2,7 +2,7 @@ import { savedReportingOverview, savedReportingSetup } from "./reporting-saved-o
 import { DashboardError } from "./elastic-dashboard";
 import { buildCustomerInsights } from "./reporting-insights";
 import { buildCustomerReportingModel } from "./reporting-customer-model";
-import { loadMetricsHistory } from "./persist";
+import { loadMetricsHistory, loadLegacyCustomerMetricsHistory } from "./persist";
 import { computeExecReport, ensureHydrated, listAssets, listCompanies, listFindings, listScans } from "./store";
 import { resolveCustomerScope } from "./customer-scope";
 
@@ -27,7 +27,8 @@ export async function reportingCustomer(appCompanyId: string) {
   const findings = listFindings({ companyId: company.id });
   const scans = await listScans({ companyId: company.id });
   const insights = buildCustomerInsights(company.id, findings, scans);
-  const model = buildCustomerReportingModel(company, findings, scans, listAssets({ companyId: company.id }), await loadMetricsHistory(company.id, 180));
+  const [history, legacyHistory] = await Promise.all([loadMetricsHistory(company.id, 180), loadLegacyCustomerMetricsHistory(company.id)]);
+  const model = buildCustomerReportingModel(company, findings, scans, listAssets({ companyId: company.id }), history, legacyHistory);
   return { report: { ...report, generatedAt: new Date().toISOString() },
     sources: insights.sources.map(({ name, open }) => ({ name, open })), insights, model };
 }
@@ -42,6 +43,7 @@ export async function reportingOverview(appCompanyId: string) {
   const { company } = await resolveCustomerScope(appCompanyId);
   const findings = listFindings({ companyId: company.id });
   const scans = await listScans({ companyId: company.id });
-  const model = buildCustomerReportingModel(company, findings, scans, listAssets({ companyId: company.id }), await loadMetricsHistory(company.id, 180));
+  const [history, legacyHistory] = await Promise.all([loadMetricsHistory(company.id, 180), loadLegacyCustomerMetricsHistory(company.id)]);
+  const model = buildCustomerReportingModel(company, findings, scans, listAssets({ companyId: company.id }), history, legacyHistory);
   return { model };
 }

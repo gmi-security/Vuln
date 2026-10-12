@@ -68,6 +68,13 @@ export default function CustomerReportSections({ model }: { model: CustomerRepor
         <h3 className="text-lg font-semibold text-white">Recorded history</h3><p className="mt-1 text-sm text-zinc-400">Stored company snapshots over the past 180 days, when available.</p>
         {model.history.length ? <div className={`${styles.tableScroll} mt-4 max-h-64`} role="region" tabIndex={0} aria-label="Recorded history table"><table className={styles.table}><thead><tr><th>Observed</th><th>Recorded open findings</th></tr></thead>
           <tbody>{model.history.slice(-12).map((point, index) => <tr key={`${point.ts}-${index}`}><td>{observed(point.ts)}</td><td className="tabular-nums">{point.open === null ? "Unavailable" : format(point.open)}</td></tr>)}</tbody></table></div> : <p className="mt-5 text-sm text-zinc-400">No recorded history yet. Current findings are still shown above.</p>}
+        {model.legacyHistory.length > 0 && <div className="mt-5"><h4 className="text-sm font-medium text-white">Earlier customer record</h4>
+          <p className="mt-1 text-xs text-zinc-400">Preserved separately from the current customer series. Counts and composite measures are not combined.</p>
+          <div className={`${styles.tableScroll} mt-3 max-h-64`} role="region" tabIndex={0} aria-label="Earlier customer history table"><table className={styles.table}>
+            <thead><tr><th>Original customer</th><th>Observed</th><th>Recorded open findings</th></tr></thead><tbody>
+              {model.legacyHistory.slice(-12).map((point, index) => <tr key={`${point.ts}-${index}`}><td>{point.sourceCompanyName} ({point.sourceCompanyId})</td>
+                <td>{observed(point.ts)}</td><td className="tabular-nums">{point.open === null ? "Unavailable" : format(point.open)}</td></tr>)}
+            </tbody></table></div></div>}
       </section>
     </div>
 

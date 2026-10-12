@@ -45,6 +45,16 @@ test('corroborated findings share one review group while retaining source eviden
   assert.doesNotMatch(groups[0].csv, /host-closed/);
 });
 
+test('new drafts for both approved canonical customers require manual review', () => {
+  for (const id of ['CO-229336', 'CO-229438']) {
+    const selected = { id, name: 'Approved destination' };
+    const groups = buildStoredFindingGroups(selected, [finding('one', 'nessus', undefined, { companyId: id })]);
+    assert.equal(groups.length, 1);
+    assert.equal(groups[0].manualOnly, true);
+  }
+  assert.equal(buildStoredFindingGroups(company, [finding('one', 'nessus')])[0].manualOnly, undefined);
+});
+
 test('identical generic remediation on different CVEs is kept separate', () => {
   const groups = buildStoredFindingGroups(company, [
     finding('one', 'nessus', 'CVE-2026-1234', { remediation: 'Apply vendor patch.' }),
