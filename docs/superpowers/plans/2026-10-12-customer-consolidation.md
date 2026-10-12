@@ -12,10 +12,10 @@
 
 1. [x] Add focused synthetic tests for ownership, folder and asset collisions, aliases, history presentation, and generated ticket holds.
 2. [x] Implement pure snapshot planning and verification with exact source/destination IDs and no unrelated-row changes.
-3. [ ] Implement and exercise the private-socket maintenance CLI. Its guards, dry-run/commit transaction paths, manifest checks, ledger and report are coded; clone execution and commit-mode validation remain pending.
+3. [ ] Implement and exercise the private-socket maintenance CLI. Its guards, dry-run/commit transaction paths, manifest checks, ledger and report are coded and local tests pass. The recovery operator must run inspect and dry-run from the separate Vuln-NYC1 terminal; clone commit remains pending until vendor IDs are verified.
 4. [x] Guard the unsafe general merge route and prevent implicit Nessus imports from recreating retired records.
 5. [x] Present legacy metrics under the canonical selector with the original label and a separate series.
-6. [ ] Exercise rollback, rerun, SQL forward/reverse recovery and restart consistency on a disposable clone. External numeric IDs and access to the private restore remain pending.
+6. [ ] Exercise rollback, rerun, SQL forward/reverse recovery and restart consistency on a disposable clone. The operator has terminal access; Codex SSH is unavailable. External numeric IDs remain unverified. Keep the database commit, rollback, and restart checks pending until operator output is reviewed.
 7. [x] Write the operator runbook and review the local diff.
 
 ## Review focus

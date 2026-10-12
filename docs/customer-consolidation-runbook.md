@@ -8,6 +8,7 @@ The approved Vuln mappings are `CO-9150` → `CO-229336` and `CO-9153` → `CO-2
 - `scripts/consolidate-approved-customers.mjs` accepts only the private `recovery_merge` Unix socket at `/home/codex/vuln-recovery/merge-rehearsal-26PA6Y/restore-vR3gUb/socket`, port `55483`. It has no `DATABASE_URL` fallback. It never connects to production.
 - This command does not call ConnectWise, Nessus, or any other provider; start scans/imports; create tickets; launch the web app; or restart PM2.
 - **Do not use the normal company merge route.** The migration does not authorize a production deployment, PR #52 merge, schema transition, or connector activation.
+- As of this handoff, Codex has no SSH access to Vuln-NYC1. The recovery operator runs the commands below through the existing terminal. The private-clone inspect, dry run, commit, rollback, and restart checks have not yet been executed. Do not try an alternative host or production credentials.
 
 ## Gather independent evidence
 
@@ -31,32 +32,93 @@ Use this manifest shape with the `observed` object copied exactly from `--inspec
 
 After read-only external verification, replace `externalVerification` with two rows, one per destination: `destinationId`, `connectwise` (`numericId`, exact `name`, `observedVia: "GET /company/companies"`, `evidenceSha256`), and `nessus` (`numericFolderId`, exact source `name`, `observedVia: "GET /folders"`, `evidenceSha256`). All IDs must be positive numeric values and the two vendor IDs must be distinct. A dry run can use null; commit rejects null.
 
-## Rehearsal sequence
+## Manual Vuln-NYC1 terminal handoff: inspect and dry run only
 
-The verified restore `recovery_application` is an immutable comparison point. Perform the following only against the separately cloned `recovery_merge` database. Keep every application writer, scheduler, import, reporting worker and export stopped during the clone rehearsal. The command also rejects other database sessions.
+The verified restore `recovery_application` is an immutable comparison point. Use only the separately cloned `recovery_merge` database. Keep every application writer, scheduler, import, reporting worker and export stopped during this rehearsal. The command also rejects other database sessions. Run the whole block in one Bash session under the recovery operator account. It makes a separate review checkout and writes reports only under a private recovery directory; it does not touch `/opt/vuln`.
 
 ```sh
+set -euo pipefail
+RUN_DIR="$(mktemp -d /home/codex/vuln-recovery/customer-consolidation-XXXXXX)"
+chmod 700 "$RUN_DIR"
+SOCKET=/home/codex/vuln-recovery/merge-rehearsal-26PA6Y/restore-vR3gUb/socket
+test -S "$SOCKET"
+git clone --branch Vuln2.0 --single-branch https://github.com/gmi-security/Vuln.git "$RUN_DIR/Vuln"
+cd "$RUN_DIR/Vuln"
+git checkout --detach e10c5ec5b37bb7828e407ddd882f1d787be7263f
+test "$(git rev-parse HEAD)" = e10c5ec5b37bb7828e407ddd882f1d787be7263f
+npm ci --ignore-scripts --no-audit --no-fund
+
 node scripts/consolidate-approved-customers.mjs --inspect \
-  --socket /home/codex/vuln-recovery/merge-rehearsal-26PA6Y/restore-vR3gUb/socket \
-  --database recovery_merge --port 55483 --user REHEARSAL_DB_ROLE > inspect.json
+  --socket "$SOCKET" --database recovery_merge --port 55483 --user codex \
+  > "$RUN_DIR/inspect.json"
+
+node - "$RUN_DIR/inspect.json" "$RUN_DIR/manifest.json" <<'NODE'
+const fs = require('node:fs');
+const inspect = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+if (inspect.mode !== 'inspect' || inspect.observed?.authority?.mode !== 'legacy' ||
+    inspect.observed.authority.enforced !== true)
+  throw Error('Stop: isolated clone lacks the enforced legacy writer fence.');
+const manifest = {
+  version: 1,
+  mappings: [
+    {sourceId:'CO-9150',sourceName:'GMI Scans',destinationId:'CO-229336',destinationName:'Global Market Innovators, Inc.'},
+    {sourceId:'CO-9153',sourceName:'Valor Global Scans',destinationId:'CO-229438',destinationName:'Valor Global, LLC'},
+  ],
+  expected: inspect.observed,
+  externalVerification: null,
+};
+fs.writeFileSync(process.argv[3], JSON.stringify(manifest, null, 2) + '\n', {flag:'wx',mode:0o600});
+NODE
 
 node scripts/consolidate-approved-customers.mjs --dry-run \
-  --socket /home/codex/vuln-recovery/merge-rehearsal-26PA6Y/restore-vR3gUb/socket \
-  --database recovery_merge --port 55483 --user REHEARSAL_DB_ROLE \
-  --manifest private-reviewed-manifest.json > dry-run.json
+  --socket "$SOCKET" --database recovery_merge --port 55483 --user codex \
+  --manifest "$RUN_DIR/manifest.json" > "$RUN_DIR/dry-run.json"
+
+node scripts/consolidate-approved-customers.mjs --inspect \
+  --socket "$SOCKET" --database recovery_merge --port 55483 --user codex \
+  > "$RUN_DIR/inspect-after.json"
+cmp "$RUN_DIR/inspect.json" "$RUN_DIR/inspect-after.json"
+
+node - "$RUN_DIR/dry-run.json" <<'NODE'
+const fs = require('node:fs');
+const assert = require('node:assert/strict');
+const report = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const sources = ['CO-9150','CO-9153'];
+const total = kind => sources.reduce((n,id) => n + report.before.counts[id].source[kind], 0);
+assert.equal(report.mode, 'dry-run');
+assert.equal(report.externalIdentitiesVerified, false);
+assert.equal(total('findings'), 106256);
+assert.equal(total('scans'), 206);
+assert.equal(report.before.aliasesToMove, 55);
+assert.equal(Object.values(report.before.metrics).reduce((a,b) => a+b, 0), 104);
+assert.equal(report.before.drafts, 39353);
+assert.equal(report.assetCollisions, 93);
+assert.equal(report.sourceAssetsArchived, 93);
+assert.equal(report.folderMappings.filter(x => x.source.id !== x.destinationId).length, 2);
+assert.deepEqual(report.orphans, {scanFolder:0,findingScan:0});
+assert.equal(report.after.draftsQuarantined, 39353);
+assert.equal(report.after.draftAuditRowsAdded, 39353);
+assert.match(report.planHash, /^[a-f0-9]{64}$/);
+console.log(JSON.stringify({result:'dry-run-validated',planHash:report.planHash,
+  findings:total('findings'),scans:total('scans'),assetCollisions:report.assetCollisions,
+  legacyDraftsHeldInPlan:report.after.draftsQuarantined}));
+NODE
+printf 'Private rehearsal files: %s\n' "$RUN_DIR"
 ```
 
-Copy `inspect.json.observed` into the private manifest `expected`; do not copy the wrapper. Compare `dry-run.json` with the reviewed source/destination counts, folder mappings, 93 overlap assets, 55 aliases, 104 history rows and 39,353 pending drafts. The command rejects unexpected SQL customer references, missing scan/finding links, asset collisions outside the reviewed CrowdStrike/Automate case, alias cycles, changed authority, or a changed snapshot. Inspect and dry run roll back their transactions.
+The second inspect must match the first byte for byte; this checks that the dry run left the clone unchanged. The command itself rejects unexpected SQL customer references, missing scan/finding links, asset collisions outside the reviewed CrowdStrike/Automate case, alias cycles, changed authority or snapshot, and count drift. Preserve `inspect.json`, `manifest.json`, `dry-run.json`, and `inspect-after.json` privately. Share only the final compact validation line and any redacted error; the files can contain customer metadata.
 
-If inspection reports `authority: null` or `enforced: false`, stop: the clone does not have the expected writer fence. Prepare and review the additive platform authority schema on another disposable clone, then repeat inspection. Do not install it on production as part of this rehearsal.
+If inspection reports `authority: null` or `enforced: false`, stop: the clone does not have the expected writer fence. Prepare and review the additive platform authority schema on another disposable clone, then repeat inspection. Do not install it on production as part of this rehearsal. If any command fails, stop and keep the private files for diagnosis; do not proceed to a commit.
 
-Once vendor IDs are independently verified, a separate clone rehearsal can commit the reviewed plan. The exact hash comes from `dry-run.json.planHash` and binds the snapshot, transformed data, lineage, history counts and external evidence. Reinspect immediately before commit; any drift requires a new manifest and review.
+## Pending: isolated commit, rollback, and restart
+
+Do not run a database commit now. The numeric vendor IDs and read-only evidence are still unverified. The manifest above deliberately has `externalVerification: null`, and the command rejects `--commit` before connecting with that manifest. The initial dry-run hash is **not** a commit hash: external verification is included in the hash. Once the evidence exists, prepare a new private manifest, reinspect the clone, rerun the dry run with the verified manifest, review its new plan hash, and separately execute the isolated commit and reverse/restart rehearsals. Keep these checks pending until their output has been reviewed.
 
 ```sh
 node scripts/consolidate-approved-customers.mjs --commit \
   --socket /home/codex/vuln-recovery/merge-rehearsal-26PA6Y/restore-vR3gUb/socket \
-  --database recovery_merge --port 55483 --user REHEARSAL_DB_ROLE \
-  --manifest private-reviewed-manifest.json --expect-plan-hash REVIEWED_64_CHARACTER_HASH > commit.json
+  --database recovery_merge --port 55483 --user codex \
+  --manifest VERIFIED_MANIFEST_PATH --expect-plan-hash VERIFIED_DRY_RUN_PLAN_HASH > PRIVATE_COMMIT_REPORT_PATH
 ```
 
 Commit writes the transformed legacy buckets, a `customer_consolidation_runs` lineage/report row and `manualOnly=true` on the 39,353 still-pending original drafts in one transaction. It also adds one quarantine audit event per held draft. Scan and finding IDs stay fixed; overlapping CrowdStrike asset payloads and old-to-new asset IDs are in the ledger. The retained Automate asset also carries a separate CrowdStrike observation, refreshed by later imports without replacing the Automate identity or metadata. Metric rows retain their original company IDs and are displayed separately under the canonical selection. New and reused canonical drafts from both stored-findings reporting and CrowdStrike patch consolidation are marked `manualOnly`. A rerun fails because the source identities and approved snapshot no longer match. Compare the ledger, `commit.json`, counts, folder and finding references, aliases, draft status and metrics with `recovery_application` before any release decision. Exercise the existing SQL authority transition and reverse path on another disposable copy and verify hydration/reporting after restart. Do not run application or worker jobs during this rehearsal.
