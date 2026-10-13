@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
+import {spawnSync} from 'node:child_process';
 import {mkdtemp,readFile,writeFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import {preflightRecovery,executeRecovery,classifyLookup,boundedGet} from '../lib/connectwise-recovery-batch.mjs';
+import {preflightRecovery,executeRecovery,retryIndex17,exclusiveWrite,classifyLookup,boundedGet} from '../lib/connectwise-recovery-batch.mjs';
 import {readRecoveryDatabase,sendConnectWiseGet} from '../scripts/connectwise-recovery-batch.mjs';
 
 const hash=value=>createHash('sha256').update(value).digest('hex');
@@ -12,6 +13,19 @@ const id=i=>`00000000-0000-4000-8000-${String(i).padStart(12,'0')}`;
 const scope='a'.repeat(64);
 const target=hash('api-na.myconnectwise.net/test');
 const expected={companyId:32628,boardId:159,appCompanyId:'CO-147284'};
+
+test('operator command keeps retry and batch GETs disabled before preflight',()=>{
+  const script=path.resolve('scripts/connectwise-recovery-batch.mjs');
+  for(const [args,message] of [
+    [['--retry-index-17','--authorize-index-17'],'INDEX_17_RETRY_DISABLED'],
+    [['--execute'],'BATCH_EXECUTION_DISABLED'],
+  ]){
+    const run=spawnSync(process.execPath,[script,...args],{encoding:'utf8'});
+    assert.equal(run.status,1);
+    assert.match(run.stderr,new RegExp(message));
+    assert.doesNotMatch(run.stderr,/EVIDENCE_DIRECTORY_MISSING|DATABASE_NOT_READ_ONLY/);
+  }
+});
 
 async function fixture(t){
   const dir=await mkdtemp(path.join(tmpdir(),'cw-recovery-test-'));
@@ -39,6 +53,119 @@ async function fixture(t){
   }});
   return {dir,pins,pending,rows,readDb};
 }
+
+async function seedRateLimit(f){
+  let previous=f.pins['single-13-retry-01-result.json'];
+  for(let index=14;index<=17;index++){
+    const startedAt=`2026-10-13T00:${String((index-13)*5).padStart(2,'0')}:00.000Z`;
+    await exclusiveWrite(`single-${index}-started.json`,{
+      requestId:id(index),method:'GET',attempt:1,index,scopeHash:scope,
+      checkpointSha256:f.pins['checkpoint.json'],previousResultSha256:previous,startedAt,
+    },f.dir);
+    const result={requestId:id(index),method:'GET',attempt:1,index,checkedAt:startedAt,
+      httpStatus:index===17?429:200,responseSha256:hash('[]'),
+      ...(index===17?{classification:'rate_limited',retryAfter:'30'}:{classification:'not_found',responseCount:0})};
+    previous=await exclusiveWrite(`single-${index}-result.json`,result,f.dir);
+  }
+  for(const name of ['single-17-started.json','single-17-result.json'])
+    f.pins[name]=hash(await readFile(path.join(f.dir,name)));
+}
+
+test('index-17 rate limit requires pinned originals and blocks normal execution',async t=>{
+  const f=await fixture(t);await seedRateLimit(f);let calls=0;
+  const plan=await preflightRecovery({dir:f.dir,pins:f.pins,readDb:f.readDb});
+  assert.equal(plan.nextIndex,17);assert.equal(plan.retryRequired,true);
+  await assert.rejects(executeRecovery({dir:f.dir,pins:f.pins,readDb:f.readDb,
+    sendGet:async()=>{calls++;return {status:200,headers:{},body:'[]'};}}),/INDEX_17_RETRY_REQUIRED/);
+  assert.equal(calls,0);
+  delete f.pins['single-17-result.json'];
+  await assert.rejects(preflightRecovery({dir:f.dir,pins:f.pins,readDb:f.readDb}),/EVIDENCE_PIN_MISSING/);
+});
+
+test('index-17 retry needs authorization and durable five-minute cooldown',async t=>{
+  const f=await fixture(t);await seedRateLimit(f);let calls=0;
+  const sendGet=async()=>{calls++;return {status:200,headers:{},body:'[]'};};
+  const options={dir:f.dir,pins:f.pins,readDb:f.readDb,sendGet};
+  await assert.rejects(retryIndex17({...options,now:()=>new Date('2026-10-13T00:26:00.000Z')}),/RETRY_NOT_AUTHORIZED/);
+  await assert.rejects(retryIndex17({...options,authorized:true,
+    now:()=>new Date('2026-10-13T00:24:59.999Z')}),/COOLDOWN_ACTIVE/);
+  assert.equal(calls,0);
+  await retryIndex17({...options,authorized:true,now:()=>new Date('2026-10-13T00:25:00.000Z')});
+  assert.equal(calls,1);
+  const plan=await preflightRecovery({dir:f.dir,pins:f.pins,readDb:f.readDb});
+  assert.equal(plan.nextIndex,18);assert.equal(plan.retryRequired,false);
+  await assert.rejects(retryIndex17({...options,authorized:true,
+    now:()=>new Date('2026-10-13T00:31:00.000Z')}),/RETRY_ALREADY_ATTEMPTED/);
+  assert.equal(calls,1);
+});
+
+test('index-17 pins reject changed originals and incomplete retry evidence',async t=>{
+  const f=await fixture(t);await seedRateLimit(f);
+  const result=path.join(f.dir,'single-17-result.json');
+  await writeFile(result,'{}');
+  await assert.rejects(preflightRecovery({dir:f.dir,pins:f.pins,readDb:f.readDb}),/EVIDENCE_CHANGED/);
+  const g=await fixture(t);await seedRateLimit(g);
+  await exclusiveWrite('single-17-retry-01-started.json',{requestId:id(17)},g.dir);
+  await assert.rejects(preflightRecovery({dir:g.dir,pins:g.pins,readDb:g.readDb}),/INCOMPLETE_ATTEMPT/);
+  let calls=0;
+  await assert.rejects(retryIndex17({dir:g.dir,pins:g.pins,readDb:g.readDb,authorized:true,
+    now:()=>new Date('2026-10-13T00:26:00.000Z'),sendGet:async()=>{calls++;}}),/INCOMPLETE_ATTEMPT/);
+  assert.equal(calls,0);
+  const h=await fixture(t);
+  await writeFile(path.join(h.dir,'single-17-retry-01-result.json.sha256'),hash('{}'));
+  await assert.rejects(preflightRecovery({dir:h.dir,pins:h.pins,readDb:h.readDb}),/INCOMPLETE_ATTEMPT/);
+});
+
+test('index-17 retry stops on another 429, identity mismatch, transport and evidence write failure',async t=>{
+  for(const response of [
+    {status:429,headers:{'retry-after':'600'},body:'{}'},
+    {status:401,headers:{},body:'{}'},
+    {status:200,headers:{},body:JSON.stringify([{id:1,externalXRef:'wrong',company:{id:32628},board:{id:159}}])},
+    new Error('GET_TIMEOUT'),
+  ]){
+    const f=await fixture(t);await seedRateLimit(f);let calls=0;
+    await assert.rejects(retryIndex17({dir:f.dir,pins:f.pins,readDb:f.readDb,authorized:true,
+      now:()=>new Date('2026-10-13T00:26:00.000Z'),sendGet:async()=>{
+        calls++;if(response instanceof Error)throw response;return response;
+      }}),/LOOKUP_STOPPED/);
+    assert.equal(calls,1);
+    await assert.rejects(preflightRecovery({dir:f.dir,pins:f.pins,readDb:f.readDb}),/INVALID_EVIDENCE|INCOMPLETE_ATTEMPT/);
+    await assert.rejects(retryIndex17({dir:f.dir,pins:f.pins,readDb:f.readDb,authorized:true,
+      now:()=>new Date('2026-10-13T00:40:00.000Z'),sendGet:async()=>{calls++;}}),/INVALID_EVIDENCE|INCOMPLETE_ATTEMPT/);
+    assert.equal(calls,1);
+  }
+  const f=await fixture(t);await seedRateLimit(f);let calls=0;
+  await assert.rejects(retryIndex17({dir:f.dir,pins:f.pins,readDb:f.readDb,authorized:true,
+    now:()=>new Date('2026-10-13T00:26:00.000Z'),sendGet:async()=>{
+      calls++;return {status:200,headers:{},body:'[]'};
+    },writeEvidence:async(name,value,dir)=>{
+      if(name.endsWith('-result.json'))throw Error('disk full');
+      return exclusiveWrite(name,value,dir);
+    }}),/EVIDENCE_WRITE_FAILED/);
+  assert.equal(calls,1);
+  await assert.rejects(preflightRecovery({dir:f.dir,pins:f.pins,readDb:f.readDb}),/INCOMPLETE_ATTEMPT/);
+});
+
+test('index-18 waits across restarts and honors a longer Retry-After from the retry',async t=>{
+  const f=await fixture(t);await seedRateLimit(f);
+  await retryIndex17({dir:f.dir,pins:f.pins,readDb:f.readDb,authorized:true,
+    now:()=>new Date('2026-10-13T00:25:00.000Z'),
+    sendGet:async()=>({status:200,headers:{'retry-after':'600'},body:'[]'})});
+  const plan=await preflightRecovery({dir:f.dir,pins:f.pins,readDb:f.readDb});
+  assert.equal(plan.nextAllowedAt,Date.parse('2026-10-13T00:35:00.000Z'));
+  let calls=0;
+  await assert.rejects(executeRecovery({dir:f.dir,pins:f.pins,readDb:f.readDb,
+    now:()=>new Date('2026-10-13T00:34:59.999Z'),sleep:async()=>{},
+    sendGet:async()=>{calls++;return {status:200,headers:{},body:'[]'};}}),/COOLDOWN_ACTIVE/);
+  assert.equal(calls,0);
+  await assert.rejects(executeRecovery({dir:f.dir,pins:f.pins,readDb:f.readDb,maxRequests:1,
+    now:()=>new Date('2026-10-13T00:35:00.000Z'),sleep:async()=>{},
+    sendGet:async()=>{calls++;return {status:200,headers:{},body:'[]'};}}),/BATCH_PAUSED/);
+  assert.equal(calls,1);
+  const resumed=await preflightRecovery({dir:f.dir,pins:f.pins,readDb:f.readDb});
+  assert.equal(resumed.nextIndex,19);
+  assert.equal(resumed.nextAllowedAt,Date.parse('2026-10-13T00:40:00.000Z'));
+});
 
 test('preflight pins checkpoint and index-13 retry, validates 58 unqueried scopes without sending GET',async t=>{
   const f=await fixture(t);let calls=0;
@@ -109,7 +236,7 @@ test('execution records one GET at a time, preserves results, and resumes withou
   assert.equal(plan.nextIndex,16);
   clock=Date.parse('2026-10-15T00:00:00.000Z');
   await assert.rejects(executeRecovery({dir:f.dir,pins:f.pins,readDb:f.readDb,sendGet,
-    maxRequests:1,now:()=>new Date(clock),sleep:async ms=>{clock+=ms;}}),/BATCH_PAUSED/);
+    maxRequests:1,now:()=>new Date(clock),sleep:async ms=>{clock+=ms;}}),/INDEX_17_RETRY_REQUIRED/);
   assert.deepEqual(calls,[id(14),id(15),id(16)]);
 });
 
@@ -122,19 +249,23 @@ test('execution halts before another GET if the cooldown clock has not advanced'
 });
 
 test('all 58 sequential results produce a verified report and repeat execution sends no GET',async t=>{
-  const f=await fixture(t);let calls=0,active=0;
+  const f=await fixture(t);await seedRateLimit(f);
+  await retryIndex17({dir:f.dir,pins:f.pins,readDb:f.readDb,authorized:true,
+    now:()=>new Date('2026-10-13T00:25:00.000Z'),
+    sendGet:async()=>({status:200,headers:{},body:'[]'})});
+  let calls=0,active=0;
   const sendGet=async()=>{calls++;active++;assert.equal(active,1);active--;return {status:200,headers:{},body:'[]'};};
   let clock=Date.parse('2026-10-14T00:00:00.000Z');
   const options={dir:f.dir,pins:f.pins,readDb:f.readDb,sendGet,
     now:()=>new Date(clock),sleep:async ms=>{clock+=ms;}};
   const report=await executeRecovery(options);
-  assert.equal(calls,58);assert.equal(report.processed,58);
+  assert.equal(calls,54);assert.equal(report.processed,58);
   assert.equal(report.totalVerified,34);assert.equal(report.totalUnresolved,62);
   assert.equal(report.records.length,58);
   const saved=JSON.parse(await readFile(path.join(f.dir,'batch-14-71-report.json'),'utf8'));
   assert.deepEqual(saved,report);
   assert.deepEqual(await executeRecovery(options),report);
-  assert.equal(calls,58);
+  assert.equal(calls,54);
   await writeFile(path.join(f.dir,'batch-14-71-report.json'),'{}');
   await assert.rejects(preflightRecovery({dir:f.dir,pins:f.pins,readDb:f.readDb}),/EVIDENCE_CHANGED/);
 });

@@ -17,6 +17,8 @@ const pins={
   'single-13-started.json':'d0a3457302e400d6d62855e2742d6fd7770c364f1aca8dbb6d59feaecb08fe38',
   'single-13-retry-01-started.json':'3f7d9051382fc0a2bb57a4446491135822f98531d5bc80e599b59321b52d6d1d',
   'single-13-retry-01-result.json':'a095869f15911a6ca7dd5cb6f561f1e57ecdcc75e26c8405bb9efa661aa28200',
+  'single-17-started.json':'4654271c74d6bc91aef8a61619d5558c6eaf7ab468f2da1a4bddac3f56018ca3',
+  'single-17-result.json':'f42a79528cf6c1568247768426897888d35b7513b46d51202006d957c80c4e38',
 };
 const sha256=value=>createHash('sha256').update(value).digest('hex');
 const fail=code=>{throw Error(code);};
@@ -91,12 +93,15 @@ export async function sendConnectWiseGet({requestId,row,connection},{lookup=dnsL
 
 async function main(){
   const args=process.argv.slice(2);
+  if(args.includes('--retry-index-17')||args.includes('--authorize-index-17'))fail('INDEX_17_RETRY_DISABLED');
+  if(args.includes('--execute'))fail('BATCH_EXECUTION_DISABLED');
   if(args.length>1||(args[0]&&args[0]!=='--execute'))fail('Usage: node scripts/connectwise-recovery-batch.mjs [--execute]');
   process.umask(0o077);
   if(args[0]!=='--execute'){
     const plan=await preflightRecovery({dir,pins,readDb:readRecoveryDatabase});
     console.log(JSON.stringify({mode:'preflight',checkpointSha256:plan.checkpointSha256,
       nextIndex:plan.nextIndex,remaining:plan.remaining,lastCheckedAt:plan.lastCheckedAt,
+      retryRequired:plan.retryRequired,nextAllowedAt:new Date(plan.nextAllowedAt).toISOString(),
       noExternalRequests:true,noDatabaseWrites:true},null,2));
     return;
   }

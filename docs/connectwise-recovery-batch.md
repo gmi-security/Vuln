@@ -1,24 +1,22 @@
-# ConnectWise GET recovery batch (indexes 14–71)
+# ConnectWise recovery batch: index 17 and indexes 18–71
 
-PR #52 remains on production HOLD. This is a standalone operator command, not an application job. Codex does not run it on Vuln-NYC1. The command reads the private `recovery_merge_fenced` database through its named Unix socket in a read-only transaction; it does not update the production or recovery database. It reads `/opt/vuln/.env.local` only to open the existing encrypted ConnectWise connection. It never prints credentials or saves provider response bodies.
+PR #52 and production remain on HOLD. This standalone runner uses the named `recovery_merge_fenced` clone in a read-only transaction. It never changes the database or saves ConnectWise response bodies. **This revision disables both execution flags in the operator command.** The retry and continuation commands below are reserved for a later, separately authorized revision. Running them now fails before evidence, database, DNS, or ConnectWise access.
 
-The command pins the original 72-item checkpoint and independently recorded index-12/13 evidence hashes, including the successful index-13 retry. It accepts only 58 unique `not_queried` checkpoint entries in positions 14–71. Every run verifies the 96-row uncertain cohort, each pending request's scope hash, the exact Atlas/ConnectWise company and board, the saved account target, and the indexed UUID before any GET. A changed identity, evidence file, account, or cohort stops the run.
+The command pins the original checkpoint, index-12/13 evidence, and the independently verified index-17 attempt and HTTP 429 result. Offline preflight verifies those bytes, sidecars, the 429 classification and `Retry-After: 30`, completed index-14/16 evidence, each request scope, the saved ConnectWise target, and the 96-row recovery cohort. Normal execution cannot skip index 17. The library's retry path requires explicit authorization, verifies the same request in the read-only clone, waits at least five minutes after the original result, writes an exclusive attempt marker before its one GET, and stops on uncertain outcomes. Later GETs use at least five minutes between requests, including restarts, and honor a longer valid `Retry-After`.
 
-Each execution attempt creates `single-N-started.json` exclusively before a GET and `single-N-result.json` plus SHA-256 sidecars after a complete response. A network failure creates `single-N-failure.json`; an incomplete marker, failed evidence write, HTTP 429/401/403/500, ambiguous result, or identity mismatch stops the batch. The command never retries an attempted index automatically. Successful HTTP 200 with zero matches is retained as **unresolved**, not proof that the original creation failed. GETs are sequential, at least 120 seconds apart, with a 15-second absolute HTTPS timeout, 5-second DNS timeout, 2 MiB response cap, public IPv4 DNS pinning, and no redirects. On completion, `batch-14-71-report.json` records classifications and evidence hashes without changing ticket rows.
+## 1. Verify files and run offline preflight
 
-## Operator commands for Vuln-NYC1, after separate approval to start recovery
-
-Run these in the existing Vuln-NYC1 terminal. They use a separate source checkout and do not change `/opt/vuln` or restart the app. Stop if any prerequisite, hash, preflight, or test fails. Do not replace the pinned hashes or remove attempt markers to make a rerun pass.
+Use the separate recovery checkout. Confirm that the displayed Git SHA matches the reviewed PR commit before relying on the preflight result. These commands do not alter `/opt/vuln`.
 
 ```sh
 sudo -u codex -H bash -euo pipefail <<'SH'
 umask 077
 SRC=/home/codex/vuln-recovery/cw-runner-pr52
-test ! -e "$SRC"
-git clone --branch Vuln2.0 --single-branch https://github.com/gmi-security/Vuln.git "$SRC"
+test -d "$SRC/.git"
 cd "$SRC"
-git checkout --detach 5c687c8c3d07019872034a7c715b5aebb28e8a14
-test "$(git rev-parse HEAD)" = 5c687c8c3d07019872034a7c715b5aebb28e8a14
+git fetch origin Vuln2.0
+git checkout --detach origin/Vuln2.0
+git rev-parse HEAD
 node -e 'if (Number(process.versions.node.split(".")[0]) < 22) process.exit(1)'
 test -S /home/codex/vuln-recovery/merge-rehearsal-26PA6Y/restore-vR3gUb/socket/.s.PGSQL.55483
 test -r /opt/vuln/.env.local
@@ -31,28 +29,47 @@ printf '%s  %s\n' \
   d0a3457302e400d6d62855e2742d6fd7770c364f1aca8dbb6d59feaecb08fe38 single-13-started.json \
   3f7d9051382fc0a2bb57a4446491135822f98531d5bc80e599b59321b52d6d1d single-13-retry-01-started.json \
   a095869f15911a6ca7dd5cb6f561f1e57ecdcc75e26c8405bb9efa661aa28200 single-13-retry-01-result.json \
+  4654271c74d6bc91aef8a61619d5558c6eaf7ab468f2da1a4bddac3f56018ca3 single-17-started.json \
+  f42a79528cf6c1568247768426897888d35b7513b46d51202006d957c80c4e38 single-17-result.json \
   | sha256sum -c -
 cd "$SRC"
 npm ci --ignore-scripts --no-audit --no-fund
 node --test tests/connectwise-recovery-batch.test.mjs
+node scripts/connectwise-recovery-batch.mjs
 SH
 ```
 
-The first command only checks local evidence, reads the named recovery clone and connection settings, and reports the next index. It sends no ConnectWise request.
+Preflight should report `nextIndex: 17`, `retryRequired: true`, and `noExternalRequests: true`. Any unexpected result is a stop condition. It reads the private recovery clone and connection settings; it performs no database write or external GET.
+
+## 2. Explicit index-17 retry — disabled pending separate authorization
+
+Reserved command:
+
+```sh
+sudo -u codex -H node /home/codex/vuln-recovery/cw-runner-pr52/scripts/connectwise-recovery-batch.mjs --retry-index-17 --authorize-index-17
+```
+
+**Do not run it yet.** This revision returns `INDEX_17_RETRY_DISABLED` before any read or GET. A later reviewed change and separate operator authorization are required to unlock it. Never remove or edit the original index-17 files, and never retry an uncertain retry attempt.
+
+## 3. Verify retry evidence offline — after an authorized retry
 
 ```sh
 sudo -u codex -H node /home/codex/vuln-recovery/cw-runner-pr52/scripts/connectwise-recovery-batch.mjs
 ```
 
-After reviewing a successful preflight and explicitly initiating the GET-only recovery, use the same checkout path:
+The preflight must verify `single-17-retry-01-started.json` and `single-17-retry-01-result.json` with their SHA-256 sidecars and report `nextIndex: 18`, `retryRequired: false`. Record independent SHA-256 digests for both new files. An incomplete marker, failure file, another 429, HTTP error, ambiguous response, or identity mismatch is a stop condition.
+
+## 4. Continue indexes 18–71 — disabled pending separate authorization
+
+Reserved command:
 
 ```sh
 sudo -u codex -H node /home/codex/vuln-recovery/cw-runner-pr52/scripts/connectwise-recovery-batch.mjs --execute
 ```
 
-An interruption after an attempt marker requires evidence review. A rerun will skip only indexes with complete, verified HTTP 200 evidence and will refuse to resend any uncertain attempt or stopped response. HTTP 429 records `Retry-After` but stops; it never starts a retry on its own.
+**Do not run it yet.** This revision returns `BATCH_EXECUTION_DISABLED` before any read or GET. A later reviewed change and separate operator authorization are required. When unlocked, the runner processes only complete, verified predecessors, one GET at a time. It never automatically retries or skips an uncertain request.
 
-Verify the final report hash and inspect classifications before any application reconciliation decision:
+## 5. Review the final reconciliation report — after an authorized batch
 
 ```sh
 sudo -u codex -H node -e '
@@ -74,4 +91,4 @@ for(const item of report.records)
 '
 ```
 
-The report is evidence for manual reconciliation. It does not update the 96 uncertain database rows or authorize ticket creation, deployment, migrations, PM2 changes, or release of the production HOLD.
+The report is evidence for manual reconciliation. It does not update ticket rows or authorize ticket creation, deployment, PM2 changes, migrations, scheduler activity, or release of the production HOLD.
