@@ -10,17 +10,30 @@ const pair = [
 const row=(id,companyId,extra={})=>[id,{id,companyId,...extra}];
 function fixture(){
   const companies=pair.flatMap(p=>[[p.sourceId,{id:p.sourceId,name:p.sourceName}],[p.destinationId,{id:p.destinationId,name:p.destinationName}]]);
+  const scheduled=pair.flatMap((p,pairIndex)=>Array.from({length:4},(_,index)=>({
+    id:`N-${pairIndex}-${index}`,companyId:p.sourceId,companyName:p.sourceName,
+    folderId:pairIndex?'F-V-S':'F-G-S',nessusScanId:(pairIndex?5101:4101)+index,
+    timestamp:1700000000000+pairIndex*100000+index*123,
+  })));
   const buckets=new Map([
     ['companies:00',companies],
     ['folders:00',[row('F-G-S','CO-9150',{name:'General'}),row('F-G-D','CO-229336',{name:'General'}),row('F-V-S','CO-9153',{name:'General'}),row('F-V-D','CO-229438',{name:'General'})]],
     ['scans:00',[row('S-G','CO-9150',{companyName:'GMI Scans',folderId:'F-G-S',folderName:'General',connector:'nessus'}),row('S-V','CO-9153',{companyName:'Valor Global Scans',folderId:'F-V-S',folderName:'General',connector:'nessus'}),
       row('SCAN-140499','CO-9150',{companyName:'GMI Scans',folderId:'F-G-S',folderName:'General',connector:'vulners',externalRef:'vulners-bridge:CO-9150'}),
-      row('SCAN-25239','CO-9150',{companyName:'GMI Scans',folderId:'F-G-S',folderName:'General',connector:'crowdstrike',externalRef:'spotlight:CO-9150'})]],
+      row('SCAN-25239','CO-9150',{companyName:'GMI Scans',folderId:'F-G-S',folderName:'General',connector:'crowdstrike',externalRef:'spotlight:CO-9150'}),
+      ...scheduled.map(s=>row(s.id,s.companyId,{companyName:s.companyName,folderId:s.folderId,folderName:'General',
+        connector:'nessus',vendor:{nessusScanId:s.nessusScanId}}))]],
     ['findings:00',[row('V-G','CO-9150',{companyName:'GMI Scans',scanId:'S-G',asset:'host-g'}),row('V-V','CO-9153',{companyName:'Valor Global Scans',scanId:'S-V',asset:'host-v'}),
       row('V-G-VULNERS','CO-9150',{companyName:'GMI Scans',scanId:'SCAN-140499',asset:'host-g'}),
-      row('V-G-SPOTLIGHT','CO-9150',{companyName:'GMI Scans',scanId:'SCAN-25239',asset:'host-g'})]],
+      row('V-G-SPOTLIGHT','CO-9150',{companyName:'GMI Scans',scanId:'SCAN-25239',asset:'host-g'}),
+      row('V-G-NESSUS','CO-9150',{companyName:'GMI Scans',scanId:'N-0-0',asset:'host-g'}),
+      row('V-V-NESSUS','CO-9153',{companyName:'Valor Global Scans',scanId:'N-1-0',asset:'host-v'})]],
     ['assets:00',[row('A-G','CO-9150',{companyName:'GMI Scans',identifier:'host-g',hostname:'host-g',source:'crowdstrike',os:'CS OS',externalId:'cs-1'}),row('A-G-D','CO-229336',{companyName:'Global Market Innovators, Inc.',identifier:'host-g',hostname:'host-g',source:'automate',os:'Automate OS',externalId:'auto-1'}),row('A-V','CO-9153',{companyName:'Valor Global Scans',identifier:'host-v',source:'crowdstrike'})]],
-    ['meta',{counter:1000,identityAliases:[['CO-9150::host-g','CO-9150::ip-g'],['CO-9153::host-v','CO-9153::ip-v']]}],
+    ['meta',{counter:1000,identityAliases:[['CO-9150::host-g','CO-9150::ip-g'],['CO-9153::host-v','CO-9153::ip-v']],
+      unrelatedTopLevel:{keep:'same'},meta:{unrelatedNested:{keep:'same'},nessusOffsetLastTriggered:{
+        ...Object.fromEntries(scheduled.map(s=>[`${s.companyId}:${s.nessusScanId}`,s.timestamp])),
+        'CO-OTHER:9001':42,
+      }}}],
   ]);
   return buckets;
 }
@@ -30,6 +43,8 @@ test('approved pairs move records without changing IDs, orphaning scans, or over
   const original=fixture(), untouched=structuredClone(original);
   const result=planCustomerConsolidation(original,pair);
   assert.deepEqual(original,untouched);
+  assert.deepEqual(records(result.buckets,'scans').map(([id])=>id),records(original,'scans').map(([id])=>id));
+  assert.deepEqual(records(result.buckets,'findings').map(([id])=>id),records(original,'findings').map(([id])=>id));
   assert.deepEqual(records(result.buckets,'companies').map(([id])=>id),['CO-229336','CO-229438']);
   const scans=Object.fromEntries(records(result.buckets,'scans'));
   assert.equal(scans['S-G'].companyId,'CO-229336');assert.equal(scans['S-G'].folderId,'F-G-D');
@@ -42,6 +57,10 @@ test('approved pairs move records without changing IDs, orphaning scans, or over
   assert.equal(findings['V-G-SPOTLIGHT'].scanId,'SCAN-25239');
   assert.equal(findings['V-G-VULNERS'].companyId,'CO-229336');
   assert.equal(findings['V-G-SPOTLIGHT'].companyId,'CO-229336');
+  assert.equal(findings['V-G-NESSUS'].scanId,'N-0-0');
+  assert.equal(findings['V-V-NESSUS'].scanId,'N-1-0');
+  assert.equal(findings['V-G-NESSUS'].companyId,'CO-229336');
+  assert.equal(findings['V-V-NESSUS'].companyId,'CO-229438');
   assert.deepEqual(result.lineage.scanExternalRefs,[
     {scanId:'SCAN-140499',sourceCompanyId:'CO-9150',destinationCompanyId:'CO-229336',connector:'vulners',externalRefBefore:'vulners-bridge:CO-9150',externalRefAfter:'vulners-bridge:CO-229336'},
     {scanId:'SCAN-25239',sourceCompanyId:'CO-9150',destinationCompanyId:'CO-229336',connector:'crowdstrike',externalRefBefore:'spotlight:CO-9150',externalRefAfter:'spotlight:CO-229336'},
@@ -54,7 +73,52 @@ test('approved pairs move records without changing IDs, orphaning scans, or over
   assert.equal(result.lineage.assets[0].source.id,'A-G');
   assert.equal(result.lineage.assets[0].destinationId,'A-G-D');
   assert.deepEqual(result.buckets.get('meta').identityAliases,[['CO-229336::host-g','CO-229336::ip-g'],['CO-229438::host-v','CO-229438::ip-v']]);
+  const beforeTriggers=original.get('meta').meta.nessusOffsetLastTriggered;
+  const afterTriggers=result.buckets.get('meta').meta.nessusOffsetLastTriggered;
+  assert.equal(Object.keys(afterTriggers).length,Object.keys(beforeTriggers).length);
+  for(const [sourceId,destinationId] of [['CO-9150','CO-229336'],['CO-9153','CO-229438']])
+    for(const [key,timestamp] of Object.entries(beforeTriggers).filter(([key])=>key.startsWith(`${sourceId}:`))){
+      assert.equal(afterTriggers[`${destinationId}:${key.split(':')[1]}`],timestamp);
+      assert.equal(Object.hasOwn(afterTriggers,key),false);
+    }
+  assert.equal(afterTriggers['CO-OTHER:9001'],42);
+  assert.deepEqual(result.buckets.get('meta').unrelatedTopLevel,original.get('meta').unrelatedTopLevel);
+  assert.deepEqual(result.buckets.get('meta').meta.unrelatedNested,original.get('meta').meta.unrelatedNested);
+  assert.equal(result.lineage.nessusOffsetLastTriggered.length,8);
+  for(const entry of result.lineage.nessusOffsetLastTriggered){
+    assert.equal(beforeTriggers[entry.sourceKey],entry.timestamp);
+    assert.equal(afterTriggers[entry.destinationKey],entry.timestamp);
+    assert.ok(records(original,'scans').some(([id])=>id===entry.scanId));
+  }
   assert.equal(result.report.orphans.scanFolder,0);
+});
+
+test('scheduler keys reject malformed source keys and invalid timestamps',()=>{
+  for(const bad of ['CO-9150:abc','CO-9150:0','CO-9150:04101','CO-9150:4101:extra','prefix:CO-9150:4101']){
+    const snapshot=fixture(),triggers=snapshot.get('meta').meta.nessusOffsetLastTriggered;
+    triggers[bad]=triggers['CO-9150:4101'];delete triggers['CO-9150:4101'];
+    assert.throws(()=>planCustomerConsolidation(snapshot,pair),/scheduler key/i);
+  }
+  for(const bad of ['1700000000000',-1,1.5,Number.MAX_SAFE_INTEGER+1,NaN,Infinity]){
+    const snapshot=fixture();snapshot.get('meta').meta.nessusOffsetLastTriggered['CO-9153:5101']=bad;
+    assert.throws(()=>planCustomerConsolidation(snapshot,pair),/scheduler timestamp/i);
+  }
+  const missingEntry=fixture();delete missingEntry.get('meta').meta.nessusOffsetLastTriggered['CO-9153:5101'];
+  assert.throws(()=>planCustomerConsolidation(missingEntry,pair),/scheduler count/i);
+});
+
+test('scheduler entries require one source-owned Nessus scan and no destination collision',()=>{
+  const missing=fixture();missing.get('scans:00').splice(missing.get('scans:00').findIndex(([id])=>id==='N-0-0'),1);
+  missing.get('findings:00').splice(missing.get('findings:00').findIndex(([id])=>id==='V-G-NESSUS'),1);
+  assert.throws(()=>planCustomerConsolidation(missing,pair),/scheduler scan ownership/i);
+  const foreign=fixture();foreign.get('scans:00').find(([id])=>id==='N-0-0')[1].companyId='CO-229438';
+  foreign.get('findings:00').splice(foreign.get('findings:00').findIndex(([id])=>id==='V-G-NESSUS'),1);
+  assert.throws(()=>planCustomerConsolidation(foreign,pair),/scheduler scan ownership/i);
+  const ambiguous=fixture();ambiguous.get('scans:00').push(row('DUP-N','CO-229438',
+    {companyName:'Valor Global, LLC',folderId:'F-V-D',folderName:'General',connector:'nessus',vendor:{nessusScanId:4101}}));
+  assert.throws(()=>planCustomerConsolidation(ambiguous,pair),/scheduler scan ownership/i);
+  const collision=fixture();collision.get('meta').meta.nessusOffsetLastTriggered['CO-229336:4101']=99;
+  assert.throws(()=>planCustomerConsolidation(collision,pair),/scheduler destination collision/i);
 });
 
 test('canonical scan external references must not collide with any existing scan',()=>{
