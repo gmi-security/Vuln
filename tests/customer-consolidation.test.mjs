@@ -88,7 +88,8 @@ test('approved pairs move records without changing IDs, orphaning scans, or over
   for(const entry of result.lineage.nessusOffsetLastTriggered){
     assert.equal(beforeTriggers[entry.sourceKey],entry.timestamp);
     assert.equal(afterTriggers[entry.destinationKey],entry.timestamp);
-    assert.ok(records(original,'scans').some(([id])=>id===entry.scanId));
+    assert.equal(entry.scanIds.length,1);
+    assert.ok(records(original,'scans').some(([id])=>id===entry.scanIds[0]));
   }
   assert.equal(result.report.orphans.scanFolder,0);
 });
@@ -107,16 +108,57 @@ test('scheduler keys reject malformed source keys and invalid timestamps',()=>{
   assert.throws(()=>planCustomerConsolidation(missingEntry,pair),/scheduler count/i);
 });
 
-test('scheduler entries require one source-owned Nessus scan and no destination collision',()=>{
+test('scheduler lineage includes every source-owned historical scan in deterministic order',()=>{
+  const snapshot=fixture(),scans=snapshot.get('scans:00');
+  for(const [id,companyId,folderId,nessusScanId] of [
+    ['N-0-0-Z','CO-9150','F-G-S',4101],['N-0-0-A','CO-9150','F-G-S',4101],
+    ['N-1-0-Z','CO-9153','F-V-S',5101],['N-1-0-A','CO-9153','F-V-S',5101],
+  ]) scans.push(row(id,companyId,{folderId,folderName:'General',connector:'nessus',vendor:{nessusScanId}}));
+  snapshot.get('findings:00').push(row('V-G-HISTORICAL','CO-9150',{scanId:'N-0-0-A',asset:'host-g'}));
+  const reversed=structuredClone(snapshot);
+  reversed.get('scans:00').reverse();
+  const original=structuredClone(snapshot);
+  const result=planCustomerConsolidation(snapshot,pair);
+  const reversedResult=planCustomerConsolidation(reversed,pair);
+  assert.deepEqual(snapshot,original);
+  for(const [sourceKey,expectedIds,destinationKey] of [
+    ['CO-9150:4101',['N-0-0','N-0-0-A','N-0-0-Z'],'CO-229336:4101'],
+    ['CO-9153:5101',['N-1-0','N-1-0-A','N-1-0-Z'],'CO-229438:5101'],
+  ]){
+    const entry=result.lineage.nessusOffsetLastTriggered.find(item=>item.sourceKey===sourceKey);
+    const reversedEntry=reversedResult.lineage.nessusOffsetLastTriggered.find(item=>item.sourceKey===sourceKey);
+    assert.deepEqual(entry.scanIds,expectedIds);
+    assert.deepEqual(reversedEntry.scanIds,expectedIds);
+    assert.equal(entry.destinationKey,destinationKey);
+    assert.equal(entry.timestamp,original.get('meta').meta.nessusOffsetLastTriggered[sourceKey]);
+    assert.equal(result.buckets.get('meta').meta.nessusOffsetLastTriggered[destinationKey],entry.timestamp);
+  }
+  assert.deepEqual(records(result.buckets,'scans').map(([id])=>id),records(snapshot,'scans').map(([id])=>id));
+  assert.deepEqual(records(result.buckets,'findings').map(([id])=>id),records(snapshot,'findings').map(([id])=>id));
+  assert.equal(Object.fromEntries(records(result.buckets,'findings'))['V-G-HISTORICAL'].scanId,'N-0-0-A');
+  assert.equal(result.buckets.get('meta').meta.nessusOffsetLastTriggered['CO-OTHER:9001'],42);
+  assert.deepEqual(result.buckets.get('meta').meta.unrelatedNested,original.get('meta').meta.unrelatedNested);
+});
+
+test('scheduler entries require all historical Nessus scans to have source ownership and matching IDs',()=>{
   const missing=fixture();missing.get('scans:00').splice(missing.get('scans:00').findIndex(([id])=>id==='N-0-0'),1);
   missing.get('findings:00').splice(missing.get('findings:00').findIndex(([id])=>id==='V-G-NESSUS'),1);
   assert.throws(()=>planCustomerConsolidation(missing,pair),/scheduler scan ownership/i);
   const foreign=fixture();foreign.get('scans:00').find(([id])=>id==='N-0-0')[1].companyId='CO-229438';
   foreign.get('findings:00').splice(foreign.get('findings:00').findIndex(([id])=>id==='V-G-NESSUS'),1);
   assert.throws(()=>planCustomerConsolidation(foreign,pair),/scheduler scan ownership/i);
-  const ambiguous=fixture();ambiguous.get('scans:00').push(row('DUP-N','CO-229438',
+  const mixed=fixture();mixed.get('scans:00').push(row('N-0-0-VALID','CO-9150',
+    {companyName:'GMI Scans',folderId:'F-G-S',folderName:'General',connector:'nessus',vendor:{nessusScanId:4101}}));
+  mixed.get('scans:00').push(row('DUP-N','CO-229438',
     {companyName:'Valor Global, LLC',folderId:'F-V-D',folderName:'General',connector:'nessus',vendor:{nessusScanId:4101}}));
-  assert.throws(()=>planCustomerConsolidation(ambiguous,pair),/scheduler scan ownership/i);
+  assert.throws(()=>planCustomerConsolidation(mixed,pair),/scheduler scan ownership/i);
+  const mismatched=fixture();mismatched.get('scans:00').push(row('N-0-0-MISMATCH','CO-9150',
+    {companyName:'GMI Scans',folderId:'F-G-S',folderName:'General',connector:'nessus',vendor:{nessusScanId:4101}}));
+  mismatched.get('scans:00').at(-1)[1].id='DIFFERENT-ID';
+  assert.throws(()=>planCustomerConsolidation(mismatched,pair),/scheduler scan ownership/i);
+});
+
+test('scheduler destination keys must remain collision free',()=>{
   const collision=fixture();collision.get('meta').meta.nessusOffsetLastTriggered['CO-229336:4101']=99;
   assert.throws(()=>planCustomerConsolidation(collision,pair),/scheduler destination collision/i);
 });
