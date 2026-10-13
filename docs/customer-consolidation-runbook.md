@@ -44,8 +44,8 @@ SOCKET=/home/codex/vuln-recovery/merge-rehearsal-26PA6Y/restore-vR3gUb/socket
 test -S "$SOCKET"
 git clone --branch Vuln2.0 --single-branch https://github.com/gmi-security/Vuln.git "$RUN_DIR/Vuln"
 cd "$RUN_DIR/Vuln"
-git checkout --detach e10c5ec5b37bb7828e407ddd882f1d787be7263f
-test "$(git rev-parse HEAD)" = e10c5ec5b37bb7828e407ddd882f1d787be7263f
+git checkout --detach fabbd2596b141d7a68bc4664979c077e586ac75a
+test "$(git rev-parse HEAD)" = fabbd2596b141d7a68bc4664979c077e586ac75a
 npm ci --ignore-scripts --no-audit --no-fund
 
 node scripts/consolidate-approved-customers.mjs --inspect \
