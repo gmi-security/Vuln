@@ -13,8 +13,12 @@ function fixture(){
   const buckets=new Map([
     ['companies:00',companies],
     ['folders:00',[row('F-G-S','CO-9150',{name:'General'}),row('F-G-D','CO-229336',{name:'General'}),row('F-V-S','CO-9153',{name:'General'}),row('F-V-D','CO-229438',{name:'General'})]],
-    ['scans:00',[row('S-G','CO-9150',{companyName:'GMI Scans',folderId:'F-G-S',folderName:'General',connector:'nessus'}),row('S-V','CO-9153',{companyName:'Valor Global Scans',folderId:'F-V-S',folderName:'General',connector:'nessus'})]],
-    ['findings:00',[row('V-G','CO-9150',{companyName:'GMI Scans',scanId:'S-G',asset:'host-g'}),row('V-V','CO-9153',{companyName:'Valor Global Scans',scanId:'S-V',asset:'host-v'})]],
+    ['scans:00',[row('S-G','CO-9150',{companyName:'GMI Scans',folderId:'F-G-S',folderName:'General',connector:'nessus'}),row('S-V','CO-9153',{companyName:'Valor Global Scans',folderId:'F-V-S',folderName:'General',connector:'nessus'}),
+      row('SCAN-140499','CO-9150',{companyName:'GMI Scans',folderId:'F-G-S',folderName:'General',connector:'vulners',externalRef:'vulners-bridge:CO-9150'}),
+      row('SCAN-25239','CO-9150',{companyName:'GMI Scans',folderId:'F-G-S',folderName:'General',connector:'crowdstrike',externalRef:'spotlight:CO-9150'})]],
+    ['findings:00',[row('V-G','CO-9150',{companyName:'GMI Scans',scanId:'S-G',asset:'host-g'}),row('V-V','CO-9153',{companyName:'Valor Global Scans',scanId:'S-V',asset:'host-v'}),
+      row('V-G-VULNERS','CO-9150',{companyName:'GMI Scans',scanId:'SCAN-140499',asset:'host-g'}),
+      row('V-G-SPOTLIGHT','CO-9150',{companyName:'GMI Scans',scanId:'SCAN-25239',asset:'host-g'})]],
     ['assets:00',[row('A-G','CO-9150',{companyName:'GMI Scans',identifier:'host-g',hostname:'host-g',source:'crowdstrike',os:'CS OS',externalId:'cs-1'}),row('A-G-D','CO-229336',{companyName:'Global Market Innovators, Inc.',identifier:'host-g',hostname:'host-g',source:'automate',os:'Automate OS',externalId:'auto-1'}),row('A-V','CO-9153',{companyName:'Valor Global Scans',identifier:'host-v',source:'crowdstrike'})]],
     ['meta',{counter:1000,identityAliases:[['CO-9150::host-g','CO-9150::ip-g'],['CO-9153::host-v','CO-9153::ip-v']]}],
   ]);
@@ -30,8 +34,18 @@ test('approved pairs move records without changing IDs, orphaning scans, or over
   const scans=Object.fromEntries(records(result.buckets,'scans'));
   assert.equal(scans['S-G'].companyId,'CO-229336');assert.equal(scans['S-G'].folderId,'F-G-D');
   assert.equal(scans['S-V'].companyId,'CO-229438');assert.equal(scans['S-V'].folderId,'F-V-D');
+  assert.equal(scans['SCAN-140499'].externalRef,'vulners-bridge:CO-229336');
+  assert.equal(scans['SCAN-25239'].externalRef,'spotlight:CO-229336');
   const findings=Object.fromEntries(records(result.buckets,'findings'));
   assert.equal(findings['V-G'].id,'V-G');assert.equal(findings['V-G'].scanId,'S-G');
+  assert.equal(findings['V-G-VULNERS'].scanId,'SCAN-140499');
+  assert.equal(findings['V-G-SPOTLIGHT'].scanId,'SCAN-25239');
+  assert.equal(findings['V-G-VULNERS'].companyId,'CO-229336');
+  assert.equal(findings['V-G-SPOTLIGHT'].companyId,'CO-229336');
+  assert.deepEqual(result.lineage.scanExternalRefs,[
+    {scanId:'SCAN-140499',sourceCompanyId:'CO-9150',destinationCompanyId:'CO-229336',connector:'vulners',externalRefBefore:'vulners-bridge:CO-9150',externalRefAfter:'vulners-bridge:CO-229336'},
+    {scanId:'SCAN-25239',sourceCompanyId:'CO-9150',destinationCompanyId:'CO-229336',connector:'crowdstrike',externalRefBefore:'spotlight:CO-9150',externalRefAfter:'spotlight:CO-229336'},
+  ]);
   const assets=Object.fromEntries(records(result.buckets,'assets'));
   assert.equal(assets['A-G-D'].os,'Automate OS');assert.equal(assets['A-G'],undefined);
   assert.equal(assets['A-G-D'].crowdstrikeObservation.assetId,'A-G');
@@ -41,6 +55,40 @@ test('approved pairs move records without changing IDs, orphaning scans, or over
   assert.equal(result.lineage.assets[0].destinationId,'A-G-D');
   assert.deepEqual(result.buckets.get('meta').identityAliases,[['CO-229336::host-g','CO-229336::ip-g'],['CO-229438::host-v','CO-229438::ip-v']]);
   assert.equal(result.report.orphans.scanFolder,0);
+});
+
+test('canonical scan external references must not collide with any existing scan',()=>{
+  for(const [externalRef,connector] of [['vulners-bridge:CO-229336','vulners'],['spotlight:CO-229336','crowdstrike']]){
+    const snapshot=fixture();
+    snapshot.get('scans:00').push(row(`D-${connector}`,'CO-229336',
+      {companyName:'Global Market Innovators, Inc.',folderId:'F-G-D',folderName:'General',connector,externalRef}));
+    assert.throws(()=>planCustomerConsolidation(snapshot,pair),/externalRef collision/i);
+  }
+});
+
+test('unapproved source references and changed scan identity fail closed',()=>{
+  for(const change of [
+    scan=>{scan.externalRef='vulners-bridge:CO-9150:extra';},
+    scan=>{scan.connector='nessus';},
+    scan=>{scan.companyId='CO-9153';scan.folderId='F-V-S';},
+  ]){
+    const snapshot=fixture();change(snapshot.get('scans:00').find(([id])=>id==='SCAN-140499')[1]);
+    assert.throws(()=>planCustomerConsolidation(snapshot,pair),/unapproved scan externalRef/i);
+  }
+  const unknown=fixture();unknown.get('scans:00').push(row('SCAN-OTHER','CO-9150',
+    {companyName:'GMI Scans',folderId:'F-G-S',folderName:'General',connector:'vulners',externalRef:'vulners-bridge:CO-9150'}));
+  assert.throws(()=>planCustomerConsolidation(unknown,pair),/unapproved scan externalRef/i);
+  const otherFormat=fixture();otherFormat.get('scans:00').find(([id])=>id==='S-G')[1].externalRef='nmap:CO-9150';
+  assert.throws(()=>planCustomerConsolidation(otherFormat,pair),/unapproved scan externalRef/i);
+  const spotlight=fixture();spotlight.get('scans:00').find(([id])=>id==='SCAN-25239')[1].externalRef='spotlight:CO-9150:extra';
+  assert.throws(()=>planCustomerConsolidation(spotlight,pair),/unapproved scan externalRef/i);
+  const missing=fixture();missing.get('scans:00').splice(missing.get('scans:00').findIndex(([id])=>id==='SCAN-25239'),1);
+  assert.throws(()=>planCustomerConsolidation(missing,pair),/approved scan externalRef identity is missing/i);
+  const foreign=fixture();foreign.get('scans:00').push(row('FOREIGN','CO-229438',
+    {companyName:'Valor Global, LLC',folderId:'F-V-D',folderName:'General',connector:'crowdstrike',externalRef:'spotlight:CO-9150'}));
+  assert.throws(()=>planCustomerConsolidation(foreign,pair),/unapproved scan externalRef/i);
+  const note=fixture();note.get('scans:00').find(([id])=>id==='SCAN-25239')[1].note='Original CO-9150 reference';
+  assert.throws(()=>planCustomerConsolidation(note,pair),/Unhandled legacy customer reference in scans/i);
 });
 
 test('missing folder and alias collisions stop without changing the source snapshot',()=>{
