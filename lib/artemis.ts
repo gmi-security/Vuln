@@ -1,6 +1,7 @@
 import http from "node:http";
 import https from "node:https";
 import type { Severity } from "@/lib/types";
+import { scannerExactTargetKey } from "./scanner-target-scope";
 
 // Artemis (CERT Polska) adapter.
 //
@@ -108,7 +109,8 @@ export async function artemisStatus(): Promise<{
   }
   try {
     const analyses = await getJson(config, "/api/analyses");
-    const n = Array.isArray(analyses) ? analyses.length : 0;
+    if (!Array.isArray(analyses)) throw new Error("Artemis returned an invalid analysis list.");
+    const n = analyses.length;
     return {
       configured: true,
       reachable: true,
@@ -133,9 +135,12 @@ export async function artemisStatus(): Promise<{
 export async function artemisAddTargets(
   targets: string[],
   tag: string,
+  scope?: { config: ArtemisConfig; tag: string; targets: string[] },
 ): Promise<{ ok: boolean; ids: unknown[] }> {
-  const config = artemisConfig();
+  const config = scope?.config ?? artemisConfig();
   if (!config) throw new Error("Artemis is not configured.");
+  if (scope && (tag !== scope.tag || !targets.length || targets.some(target => !scope.targets.map(scannerExactTargetKey).includes(scannerExactTargetKey(target)))))
+    throw new Error("Artemis launch exceeds its reviewed tag or targets.");
   if (targets.length === 0) return { ok: true, ids: [] };
   const res = await request(config, "POST", "/api/add", { targets, tag });
   if (res.status === 401) {
@@ -150,6 +155,9 @@ export async function artemisAddTargets(
   } catch {
     json = {};
   }
+  if (scope && (json?.ok !== true || !Array.isArray(json.ids) || json.ids.length !== targets.length ||
+      json.ids.some((id: unknown) => typeof id !== "string" || !id) || new Set(json.ids).size !== json.ids.length))
+    throw new Error("Artemis did not confirm the requested target launches; inspect the scanner before retrying.");
   return { ok: json?.ok !== false, ids: json?.ids ?? [] };
 }
 
@@ -158,18 +166,24 @@ export type ArtemisAnalysis = {
   target: string;
   tag: string;
   pending: number;
+  stopped?: boolean;
 };
 
-export async function artemisListAnalyses(): Promise<ArtemisAnalysis[]> {
-  const config = artemisConfig();
+export async function artemisListAnalyses(pinned?: ArtemisConfig, tag?: string): Promise<ArtemisAnalysis[]> {
+  const config = pinned ?? artemisConfig();
   if (!config) throw new Error("Artemis is not configured.");
-  const rows = await getJson(config, "/api/analyses");
-  if (!Array.isArray(rows)) return [];
+  const rows = await getJson(config, tag === undefined ? "/api/analyses" : `/api/analyses?tag=${encodeURIComponent(tag)}`);
+  if (!Array.isArray(rows)) throw new Error("Artemis returned an invalid analysis list.");
+  if (pinned && (rows.length > 1000 || rows.some((r: any) => !r || typeof r.id !== "string" || !r.id ||
+      typeof r.target !== "string" || !r.target || r.tag !== tag || typeof r.stopped !== "boolean" ||
+      !Number.isSafeInteger(r.num_pending_tasks) || r.num_pending_tasks < 0) || new Set(rows.map((r: any) => r.id)).size !== rows.length))
+    throw new Error("Artemis returned invalid or out-of-scope analysis identities.");
   return rows.map((r: any) => ({
     id: String(r?.id ?? r?._id ?? ""),
     target: String(r?.target ?? r?.target_string ?? r?.payload?.data ?? ""),
     tag: String(r?.tag ?? r?.payload_persistent?.tag ?? ""),
     pending: Number(r?.num_pending_tasks ?? 0),
+    ...(pinned ? { stopped: r.stopped } : {}),
   }));
 }
 
@@ -178,8 +192,9 @@ export async function artemisTaskResults(
   pageSize = 200,
   page = 1,
   analysisId?: string,
+  pinned?: ArtemisConfig,
 ): Promise<any[]> {
-  const config = artemisConfig();
+  const config = pinned ?? artemisConfig();
   if (!config) throw new Error("Artemis is not configured.");
   const params = new URLSearchParams({
     only_interesting: "true",
@@ -190,7 +205,7 @@ export async function artemisTaskResults(
   const data = await getJson(config, `/api/task-results?${params.toString()}`);
   if (Array.isArray(data)) return data;
   if (Array.isArray(data?.data)) return data.data;
-  return [];
+  throw new Error("Artemis returned an invalid task result page.");
 }
 
 // ---- field extractors (defensive against version drift) -------------------
@@ -343,9 +358,10 @@ export function mapArtemisResult(r: any): ArtemisFinding {
 }
 
 // Pull all interesting task results (paginated) and map to findings.
-export async function artemisImportFindings(): Promise<ArtemisFinding[]> {
-  const config = artemisConfig();
+export async function artemisImportFindings(scope?: { config: ArtemisConfig; tag: string; targets: string[] }): Promise<ArtemisFinding[]> {
+  const config = scope?.config ?? artemisConfig();
   if (!config) throw new Error("Artemis is not configured.");
+  if (scope) return (await artemisCollectReviewedFindings(scope)).findings;
   const findings: ArtemisFinding[] = [];
   const pageSize = 200;
   for (let page = 1; page <= 25; page += 1) {
@@ -353,6 +369,36 @@ export async function artemisImportFindings(): Promise<ArtemisFinding[]> {
     if (batch.length === 0) break;
     for (const r of batch) findings.push(mapArtemisResult(r));
     if (batch.length < pageSize) break;
+    if (page === 25) throw new Error("Artemis findings exceeded the pagination limit; no complete result was returned.");
   }
   return findings;
+}
+
+export async function artemisCollectReviewedFindings(scope: { config: ArtemisConfig; tag: string; targets: string[] }): Promise<{ findings: ArtemisFinding[]; incompleteAnalyses: number }> {
+  const allowed = new Set(scope.targets.map(scannerExactTargetKey));
+  const roster = await artemisListAnalyses(scope.config, scope.tag);
+  if (roster.some(row => !allowed.has(scannerExactTargetKey(row.target))))
+    throw new Error("Artemis tag contains targets outside the reviewed customer scope.");
+  const complete = roster.filter(row => row.pending === 0 && !row.stopped);
+  const findings: ArtemisFinding[] = [], seen = new Set<string>();
+  for (const analysis of complete) {
+    for (let page = 1; page <= 25; page++) {
+      const rows = await artemisTaskResults(200, page, analysis.id, scope.config);
+      if (rows.length > 200) throw new Error("Artemis returned an oversized task result page.");
+      for (const row of rows) {
+        if (!row || typeof row.id !== "string" || !row.id || seen.has(row.id) || row.analysis_id !== analysis.id || row.tag !== scope.tag)
+          throw new Error("Artemis returned duplicate or out-of-scope task results.");
+        seen.add(row.id);
+        if (seen.size > 5000) throw new Error("Artemis findings exceeded the customer collection limit.");
+        findings.push(mapArtemisResult(row));
+      }
+      if (rows.length < 200) break;
+      if (page === 25) throw new Error("Artemis findings exceeded the pagination limit; no complete result was returned.");
+    }
+  }
+  const current = await artemisListAnalyses(scope.config, scope.tag);
+  if (complete.some(before => !current.some(after => after.id === before.id && after.target === before.target &&
+      after.tag === before.tag && after.pending === 0 && !after.stopped)))
+    throw new Error("Artemis analysis changed during collection; results were withheld.");
+  return { findings, incompleteAnalyses: roster.length - complete.length };
 }

@@ -157,6 +157,7 @@ test("HTTP client rejects metadata and loopback endpoints before sending a key",
 test("async queries wait for completion, reject partial data, and clean up owned queries", async () => {
   const calls = [];
   let replies = [];
+  overrides.set("./customer-elastic-query", {checkReviewedElasticConnection:async()=>{}, executeCustomerEsql:async(_connection,_query,_background,datasets)=>{lastElasticDatasets=datasets;return fakeQuery();}});
   overrides.set("./elastic-query-client", { elasticJsonRequest: async (_connection, path, method, body) => {
     calls.push({ path, method, body });
     if (method === "DELETE") return { body: { acknowledged: true }, warning: false };
@@ -216,19 +217,29 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
     if (!["CO-A","CO-B"].includes(id)) throw new contract.DashboardError("Customer not found.",404);
   }});
   overrides.set("./persist", { applicationDatabase: () => null });
+  overrides.set("./store", {getCompany:id=>["CO-A","CO-B","CO-1"].includes(id)?{id,name:id}:undefined});
+  let reviewedRoutes = null, elasticRoutes = null;
+  const routeModule = await load("lib/customer-query-routing-server.ts"); await routeModule.evaluate();
+  const selectRoute = routeModule.namespace.selectQueryRoute;
+  overrides.set("./customer-query-routing-server", {
+    loadReviewedQueryRoutes: async(_db,source="crowdstrike")=>source==="elastic"?elasticRoutes:reviewedRoutes, selectQueryRoute:selectRoute,
+    recheckQueryRoute:async(_db,route)=>{if(route && !(route.provider==="elastic"?elasticRoutes:reviewedRoutes)?.some(r=>r.bindingKey===route.bindingKey))throw new contract.DashboardError("Customer query approval changed.",409);}
+  });
   overrides.set("./elastic-vuln-server", { elasticVulnEnabled: () => true });
+  let lastElasticDatasets;
   const fakeQuery = async () => {
       if (hold) { const wait = hold; hold = null; return await wait; }
       if (fail) throw new contract.DashboardError("Simulated Elastic outage.");
       return response;
   };
+  overrides.set("./customer-elastic-query", {checkReviewedElasticConnection:async()=>{}, executeCustomerEsql:async(_connection,_query,_background,datasets)=>{lastElasticDatasets=datasets;return fakeQuery();}});
   overrides.set("./elastic-query-client", { ...client, executeEsql: fakeQuery });
   overrides.set("./elastic-async-client", { executeEsqlAsync: fakeQuery });
   const falconModule = await load("lib/crowdstrike-dashboard-client.ts");
   await falconModule.evaluate();
   let falconFail = false, falconHold = null;
   const falconResult = { columns: [{ name: "findings", type: "long" }], rows: [[7]], truncated: false };
-  let patchHold = null;
+  let patchHold = null, lastPatchInput, lastQueryCid;
   const patchPacket = { cve: "CVE-2026-12345", hostCount: 104, findingCount: 108, body: "All hosts and remediations", csv: "test csv",
     tenantIds: ["test-tenant"], hostScope: ["test-tenant:host-1"], collectedAt: new Date().toISOString(), worstSeverity: "Critical" };
   // This suite exercises dashboard jobs, not ticket persistence or live CW operations.
@@ -240,10 +251,12 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
     persistPreparedGroups: async () => { throw new Error("Unexpected consolidation"); },
     verifyGroupTicketFix: async () => { throw new Error("Unexpected group verification"); },
   });
-  overrides.set("./crowdstrike-dashboard-client", { ...falconModule.namespace, executePatchRequest: async () => {
+  overrides.set("./crowdstrike-dashboard-client", { ...falconModule.namespace, executePatchRequest: async (_connection,input) => {
+    lastPatchInput=input;
     if (patchHold) { const wait = patchHold; patchHold = null; return wait; }
-    return patchPacket;
-  }, testCrowdStrikeConnection: async () => {}, executeCrowdStrike: async () => {
+    return structuredClone(patchPacket);
+  }, testCrowdStrikeConnection: async () => {}, executeCrowdStrike: async (_connection,_input,_budget,cid) => {
+    lastQueryCid=cid;
     if (falconHold) { const wait = falconHold; falconHold = null; return wait; }
     if (falconFail) throw new contract.DashboardError("Simulated CrowdStrike outage.");
     return falconResult;
@@ -636,8 +649,84 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
     await store.deleteDashboardTile(exprt.id, "delete-exprt");
     await installExprtRankedCveTile(db);
     assert.ok(!(await store.readDashboard(true)).queries.some(q => q.id === exprt.id));
+    // Reviewed routing: transport is mocked; real cache/history/job persistence is exercised.
+    await waitFor(() => !globalThis.__elasticDashboard.ticking && !globalThis.__elasticJobs.working);
+    await db.query("UPDATE elastic_dashboard_queries SET next_attempt=now()+interval '1 day'");
+    process.env.VULN_REVIEWED_QUERY_PROVIDERS='crowdstrike';
+    const cid='a'.repeat(32), revision=await store.dashboardConnectionRevision('crowdstrike');
+    reviewedRoutes=[{provider:'crowdstrike',companyId:'CO-A',sourceScope:cid,connectionRevision:revision,bindingKey:'proof-a'}];
+    const reviewed={...falconDefinition,id:'reviewed',companyId:'CO-A',enabled:false};
+    await assert.rejects(()=>store.previewQuery({...reviewed,companyId:'CO-B'},'wrong-owner'),/approved/);
+    assert.equal(selectRoute(null,'CO-B'),null);
+    assert.throws(()=>selectRoute(reviewedRoutes,'CO-A','b'.repeat(32),revision),/approved/);
+    assert.throws(()=>selectRoute(reviewedRoutes,'CO-A',cid,revision+1),/approved/);
+    await store.saveQuery(reviewed,'reviewed-save');assert.equal(lastQueryCid,cid);
+    const scopedView=await store.readDashboard(true,'CO-A');
+    assert.equal(scopedView.queries.find(q=>q.id==='reviewed').result.scopeKey,'proof-a');
+    assert.notEqual(store.historySignature(reviewed,'proof-a'),store.historySignature(reviewed,'proof-b'));
+    assert.notEqual(store.historySignature(reviewed,'proof-a'),store.historySignature({...reviewed,companyId:'CO-B'},'proof-a'));
+    assert.equal(store.historySignature(reviewed),store.historySignature({...reviewed,companyId:'CO-B'}),'legacy history signatures unchanged');
+    const rawResult=(await db.query("SELECT result FROM elastic_dashboard_queries WHERE id='reviewed'")).rows[0].result;
+    globalThis.__elasticDashboard.running=2;
+    try {
+      const renamed=await store.addDashboardTile({...reviewed,title:'Renamed reviewed tile'},'rename-reviewed');
+      assert.equal(renamed.query.result,null,'fast save response withholds unverified cache');
+      assert.deepEqual((await db.query("SELECT result FROM elastic_dashboard_queries WHERE id='reviewed'")).rows[0].result,rawResult,'cosmetic edits retain stored cache');
+    }finally{globalThis.__elasticDashboard.running=0;}
+
+    reviewedRoutes=[{...reviewedRoutes[0],bindingKey:'proof-b'}];
+    assert.equal((await store.readDashboard(true,'CO-A')).queries.find(q=>q.id==='reviewed').result,null);
+    assert.deepEqual((await db.query("SELECT result FROM elastic_dashboard_queries WHERE id='reviewed'")).rows[0].result,rawResult,'old results retained');
+    await assert.rejects(()=>store.assertQueryResultScope(reviewed,rawResult),/approval changed/);
+    let finishReviewed;falconHold=new Promise(resolve=>finishReviewed=resolve);
+    const pendingPreview=store.previewQuery(reviewed,'scope-race',true);
+    await waitFor(()=>falconHold===null);reviewedRoutes=[{...reviewedRoutes[0],bindingKey:'proof-c'}];finishReviewed(falconResult);
+    await assert.rejects(()=>pendingPreview,/approval changed/);
+    patchPacket.tenantIds=[cid];patchPacket.hostScope=[JSON.stringify([cid,'host-1'])];
+    const prepared=await store.preparePatchRequest({cve:patchPacket.cve,appCompanyId:'CO-A'},revision);
+    assert.equal(lastPatchInput.tenantId,cid);assert.equal(prepared.queryScope.bindingKey,'proof-c');assert.equal(prepared.appCompanyId,'CO-A');
+    await store.assertPatchRequestScope(prepared,revision);
+    await assert.rejects(()=>store.assertPatchRequestScope({...prepared,queryScope:undefined},revision),/fresh/);
+    await assert.rejects(()=>store.assertPatchRequestScope({...prepared,hostScope:[JSON.stringify(['foreign','host'])]},revision),/different customer/);
+    await assert.rejects(()=>store.preparePatchRequest({cve:patchPacket.cve,appCompanyId:'CO-B'},revision),/approved/);
+    reviewedRoutes=[{...reviewedRoutes[0],bindingKey:'proof-d'}];
+    await assert.rejects(()=>store.assertPatchRequestScope(prepared,revision),/approval changed/);
+    await store.assertPatchRequestScope({source:'stored-findings'},revision);
+    // Jobs cannot return previously completed results under a replacement approval.
+    const reviewedJob=await jobs.enqueueDashboardJob('preview',reviewed,'reviewed-job');await waitFor(()=>!globalThis.__elasticJobs.working);
+    assert.equal((await jobs.readDashboardJob(reviewedJob.jobId,'reviewed-job')).result.scopeKey,'proof-d');
+    reviewedRoutes=[{...reviewedRoutes[0],bindingKey:'proof-e'}];
+    await assert.rejects(()=>jobs.readDashboardJob(reviewedJob.jobId,'reviewed-job'),/approval changed/);
+    process.env.VULN_REVIEWED_QUERY_PROVIDERS='crowdstrike,elastic';
+    const elasticRevision=await store.dashboardConnectionRevision('elastic');
+    elasticRoutes=[{provider:'elastic',companyId:'CO-A',sourceScope:'["logs-alpha"]',connectionRevision:elasticRevision,bindingKey:'elastic-a'}];
+    const esTile={...contract.DEFAULT_COVERAGE,id:'elastic-reviewed',companyId:'CO-A',enabled:false};
+    const immediate=await store.addDashboardTile(esTile,'es-add');assert.equal(immediate.query.result,null);
+    await assert.rejects(()=>store.previewQuery({...esTile,companyId:'CO-B'},'es-wrong'),/approved/);
+    await store.saveQuery(esTile,'es-save');assert.deepEqual(lastElasticDatasets,['logs-alpha']);
+    const inheritedJob=await jobs.enqueueDashboardJob('preview',{...esTile,companyId:undefined},'es-inherited');await waitFor(()=>!globalThis.__elasticJobs.working);
+    assert.equal((await jobs.readDashboardJob(inheritedJob.jobId,'es-inherited')).result.scopeKey,'elastic-a');
+    assert.equal((await store.readDashboard(true,'CO-A')).queries.find(q=>q.id===esTile.id).result.scopeKey,'elastic-a');
+    assert.equal((await store.readDashboard(true,'CO-B')).availableSources.elastic,false);
+    elasticRoutes=[{...elasticRoutes[0],bindingKey:'elastic-b'}];
+    assert.equal((await store.readDashboard(true,'CO-A')).queries.find(q=>q.id===esTile.id).result,null);
+    assert.ok((await db.query('SELECT result FROM elastic_dashboard_queries WHERE id=$1',[esTile.id])).rows[0].result,'old cache remains stored');
+    let finishEs;hold=new Promise(resolve=>finishEs=resolve);
+    const pendingEs=store.previewQuery(esTile,'es-race');await delay(100);elasticRoutes=[];finishEs(numeric);
+    await assert.rejects(()=>pendingEs,/approval changed/);
+    elasticRoutes=[{provider:'elastic',companyId:'CO-A',sourceScope:'["logs-alpha"]',connectionRevision:elasticRevision,bindingKey:'elastic-c'}];
+    const esJob=await jobs.enqueueDashboardJob('preview',esTile,'es-job');await waitFor(()=>!globalThis.__elasticJobs.working);
+    assert.equal((await jobs.readDashboardJob(esJob.jobId,'es-job')).result.scopeKey,'elastic-c');
+    elasticRoutes=[{...elasticRoutes[0],bindingKey:'elastic-d'}];
+    await assert.rejects(()=>jobs.readDashboardJob(esJob.jobId,'es-job'),/approval changed/);
+    const currentFalcon=(await store.readDashboard(true,'CO-A')).queries.find(q=>q.id==='reviewed').result;
+    // A previously queued refresh may already have completed while the Elastic
+    // cases ran. A current approved refresh is valid; an old proof never is.
+    assert.ok(currentFalcon===null||currentFalcon.scopeKey===reviewedRoutes[0].bindingKey,
+      'separate CrowdStrike result is withheld or bears its current approval');
+    reviewedRoutes=null;elasticRoutes=null;delete process.env.VULN_REVIEWED_QUERY_PROVIDERS;
     // Leave the isolated DB unconnected for the subsequent HTTP authorization checks.
     await db.query("DELETE FROM elastic_dashboard_connection");
     await db.query("DELETE FROM dashboard_source_connections; DELETE FROM dashboard_daily_history; DELETE FROM elastic_dashboard_queries WHERE definition->>'source' = 'crowdstrike'");
-  } finally { await db.end(); }
+  } finally { delete process.env.VULN_REVIEWED_QUERY_PROVIDERS; await db.end(); }
 });

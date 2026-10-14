@@ -1,3 +1,4 @@
+import { withDurablePlatformMutation } from "@/lib/platform-mutation-route";
 import { NextResponse } from "next/server";
 import { createFolder, ensureHydrated, listFolders } from "@/lib/store";
 import { stringFieldError } from "@/lib/validate";
@@ -11,7 +12,7 @@ export async function GET(request: Request) {
   return NextResponse.json({ folders: listFolders(companyId) });
 }
 
-export async function POST(request: Request) {
+async function POSTHandler(request: Request) {
   await ensureHydrated();
   let body: { companyId?: string; name?: string };
   try {
@@ -30,3 +31,5 @@ export async function POST(request: Request) {
   }
   return NextResponse.json({ folder: result }, { status: 201 });
 }
+
+export const POST = withDurablePlatformMutation(POSTHandler);

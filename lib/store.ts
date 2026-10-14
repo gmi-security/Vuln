@@ -1,5 +1,14 @@
+import { buildExecutiveReport, type ExecReport } from "./executive-report";
+import { loadReviewedScannerRoutes } from "@/lib/customer-scanner-routing-server";
+import type { ScannerRoute } from "@/lib/customer-scanner-routing";
+import { scannerTargetMatcher, assertScannerResultScope, scannerExactTargetKey, scannerWebOrigin } from "@/lib/scanner-target-scope";
+import type { NessusConfig, NessusImportFindingsResult } from "@/lib/nessus";
+import { loadReviewedSpotlightRoutes } from "@/lib/customer-spotlight-routing-server";
 import { DEMO_ASSETS, DEMO_PORTS, VULN_CATALOG } from "@/lib/catalog";
 import { normalizeCompanyName, findNearDuplicateCompanyName } from "@/lib/company-name";
+import { connectorImportWarnings } from "@/lib/connector-import-result";
+import { loadReviewedInventoryRoutes } from "@/lib/customer-inventory-routing-server";
+import type { InventoryRoute } from "@/lib/customer-inventory-routing";
 import { getDemoProfile, isPlanned } from "@/lib/connectors";
 import {
   CORRELATED_CONNECTORS,
@@ -28,6 +37,8 @@ import {
   isKev,
   isKevRansomware,
   refreshKevFromCisa,
+  reportingKevCatalog,
+  restoreReportingKevCatalog,
   riskPriority,
 } from "@/lib/threat";
 import {
@@ -44,7 +55,7 @@ import {
   type AutomateAsset,
 } from "@/lib/connectwise-automate";
 import { falconConfigs, falconListAssets, createSpotlightSession, SPOTLIGHT_DISCOVERY_PARTITIONS } from "@/lib/crowdstrike";
-import { selectSpotlightTenant, type SpotlightTenantSelection } from "@/lib/spotlight-import";
+import { selectSpotlightTenant, selectReviewedSpotlightTenant, type SpotlightTenantSelection } from "@/lib/spotlight-import";
 import { runPartitionedSpotlightImport } from "@/lib/spotlight-resumable-import";
 import { acquireSpotlightWorkerLock, nextSpotlightHydrationIds,
   writeSpotlightHydrationBatch, completeResumableSpotlightRun,
@@ -62,6 +73,9 @@ import {
 } from "@/lib/nmap";
 import {
   zapConfig,
+  zapCreateScope,
+  zapRemoveScope,
+  type ZapScope,
   zapStartSpider,
   zapSpiderStatus,
   zapStartActiveScan,
@@ -95,6 +109,7 @@ import {
   artemisAddTargets,
   artemisConfig,
   artemisImportFindings,
+  artemisCollectReviewedFindings,
   type ArtemisFinding,
 } from "@/lib/artemis";
 import {
@@ -108,6 +123,7 @@ import {
   loadSnapshot,
   persistenceEnabled,
   saveSnapshot,
+  strictPlatformPersistence,
 } from "@/lib/persist";
 import {
   emailConfigured,
@@ -484,6 +500,7 @@ function normalizeSettings(raw: unknown): Settings {
 // Bookkeeping the scheduler + alerting need to survive restarts (persisted in
 // the snapshot's meta row so a redeploy never double-runs a sync or report).
 type StoreMeta = {
+  customerConsolidation?: { version: number; mappings: { sourceId: string; destinationId: string }[] };
   defenderGenerations?: Record<string,string>;
   lastAutoSyncAt: number | null; // epoch ms of the last scheduler-launched sync-all
   lastAlertCheckAt: string | null; // ISO — findings first seen after this are "new"
@@ -557,6 +574,7 @@ function normalizeMeta(raw: unknown): StoreMeta {
 }
 
 type StoreShape = {
+  retainedMetadata?: Record<string, unknown>;
   companies: Map<string, InternalCompany>;
   folders: Map<string, InternalFolder>;
   scans: Map<string, InternalScan>;
@@ -628,16 +646,21 @@ function store(): StoreShape {
 
 // --- snapshot persistence --------------------------------------------------
 
-function serializeStore(s: StoreShape) {
+type PlatformChanges = Partial<Record<"companies" | "folders" | "scans" | "findings" | "assets", string[]>>;
+function serializeStore(s: StoreShape, changes?: PlatformChanges) {
+  const entries = <T,>(map: Map<string, T>, kind: keyof PlatformChanges): [string, T][] => changes === undefined
+    ? [...map.entries()] : (changes[kind] ?? []).flatMap(id => map.has(id) ? [[id, map.get(id)!] as [string, T]] : []);
   return {
-    companies: [...s.companies.entries()],
-    folders: [...s.folders.entries()],
-    scans: [...s.scans.entries()],
-    findings: [...s.findings.entries()],
-    assets: [...s.assets.entries()],
+    ...s.retainedMetadata,
+    companies: entries(s.companies, "companies"),
+    folders: entries(s.folders, "folders"),
+    scans: entries(s.scans, "scans"),
+    findings: entries(s.findings, "findings"),
+    assets: entries(s.assets, "assets"),
     compensatingControls: [...s.compensatingControls.entries()],
     identityAliases: [...s.identityAliases.entries()],
     settings: s.settings,
+    reportingKevCatalog: reportingKevCatalog(),
     // Publication markers must describe THESE collection arrays even if a
     // connector publishes a new generation while the database write yields.
     meta: structuredClone(s.meta),
@@ -654,10 +677,14 @@ function deserializeStore(obj: {
   compensatingControls?: [string, CompensatingControl][];
   identityAliases?: [string, string][];
   settings?: unknown;
+  reportingKevCatalog?: unknown;
   meta?: unknown;
   counter?: number;
 }): StoreShape {
+  restoreReportingKevCatalog(obj.reportingKevCatalog);
   return {
+    retainedMetadata: Object.fromEntries(Object.entries(obj).filter(([key]) =>
+      !["companies", "folders", "scans", "findings", "assets", "compensatingControls", "identityAliases", "settings", "reportingKevCatalog", "meta", "counter"].includes(key))),
     companies: new Map(obj.companies ?? []),
     folders: new Map(obj.folders ?? []),
     scans: new Map(obj.scans ?? []),
@@ -685,6 +712,8 @@ const persistGlobal = globalThis as unknown as {
   // Set by mutations, cleared by a successful snapshot save, so the interval
   // flusher can skip serializing an unchanged store.
   __vulnDirty?: boolean;
+  __vulnMutationVersion?: number;
+  __vulnMutationScope?: Partial<Record<keyof PlatformChanges, Set<string>>> | null;
   // 60s scheduler driving auto-sync, daily metrics snapshots, and monthly
   // reports (same singleton pattern as the flusher).
   __vulnScheduler?: ReturnType<typeof setInterval>;
@@ -723,8 +752,15 @@ export function persistenceBlocked(): boolean {
 }
 
 // Record that the in-memory store changed since the last snapshot save.
-function markDirty(): void {
+function markDirty(changes?: PlatformChanges): void {
   persistGlobal.__vulnDirty = true;
+  persistGlobal.__vulnMutationVersion = (persistGlobal.__vulnMutationVersion ?? 0) + 1;
+  if (changes === undefined) persistGlobal.__vulnMutationScope = null;
+  else if (persistGlobal.__vulnMutationScope !== null) {
+    const pending = persistGlobal.__vulnMutationScope ??= {};
+    for (const kind of Object.keys(changes) as (keyof PlatformChanges)[])
+      for (const id of changes[kind] ?? []) (pending[kind] ??= new Set()).add(id);
+  }
 }
 
 // One-time repair, run once per process on hydrate: earlier SpiderFoot
@@ -763,7 +799,7 @@ function migrateAutoSyncDefault(s: StoreShape): void {
     s.settings.schedule.autoSyncEnabled = true;
     console.error("[store] one-time migration: autoSyncEnabled defaulted on");
   }
-  markDirty();
+  markDirty({});
 }
 
 // Serialize all snapshot writes through a single in-flight promise so an
@@ -783,13 +819,35 @@ function persistSnapshot(throwOnError = false): Promise<void> {
       if (throwOnError) throw new Error("Application storage is unavailable; snapshot was not saved.");
       return;
     }
+    if (strictPlatformPersistence() && !persistGlobal.__vulnDirty) return;
     // Clear the dirty flag before serializing so mutations that land during
     // the save re-mark it and get picked up by the next flush.
-    persistGlobal.__vulnDirty = false;
     try {
-      await saveSnapshot(serializeStore(globalStore.__vulnStore));
+      for (let attempt = 0; ; attempt++) {
+        persistGlobal.__vulnDirty = false;
+        const version = persistGlobal.__vulnMutationVersion ?? 0;
+        const changes = strictPlatformPersistence() && persistGlobal.__vulnMutationScope != null
+          ? Object.fromEntries(Object.entries(persistGlobal.__vulnMutationScope).map(([kind, ids]) => [kind, [...ids]])) as PlatformChanges : undefined;
+        try {
+          await saveSnapshot(serializeStore(globalStore.__vulnStore, changes), {
+            changes,
+            guard: () => {
+              if (strictPlatformPersistence() && version !== (persistGlobal.__vulnMutationVersion ?? 0))
+                throw Object.assign(new Error("Platform changed during save; capture will be retried."), { code: "platform-capture-changed" });
+            },
+          });
+          if (version === (persistGlobal.__vulnMutationVersion ?? 0)) persistGlobal.__vulnMutationScope = {};
+          break;
+        } catch (error) {
+          if ((error as { code?: string })?.code !== "platform-capture-changed" || attempt >= 2) throw error;
+        }
+      }
     } catch (err) {
       persistGlobal.__vulnDirty = true;
+      // Do not serve uncommitted RAM as a successful SQL generation. A busy
+      // capture can retry; a database/fence failure requires a fresh hydration.
+      if (strictPlatformPersistence() && (err as { code?: string })?.code !== "platform-capture-changed")
+        persistGlobal.__vulnPersistBlocked = true;
       console.error("[persist] snapshot save failed:", err);
       throw err;
     }
@@ -823,7 +881,15 @@ function hookDrainOnce(): void {
 // before reading/writing, so a request never seeds an empty store ahead of a
 // pending snapshot load.
 export async function ensureHydrated(): Promise<void> {
-  if (persistGlobal.__vulnHydrated) return;
+  if (strictPlatformPersistence() && persistenceBlocked()) throw new Error("Platform storage is unavailable; restart after database recovery.");
+  if (persistGlobal.__vulnHydrated) {
+    if (strictPlatformPersistence()) {
+      await persistGlobal.__vulnFlushing;
+      if (persistenceBlocked()) throw new Error("Platform storage is unavailable; uncommitted results are not served.");
+      if (persistGlobal.__vulnDirty) await flushNow({ throwOnError: true });
+    }
+    return;
+  }
   if (!persistGlobal.__vulnHydrating) persistGlobal.__vulnHydrating = doHydrate();
   await persistGlobal.__vulnHydrating;
 }
@@ -857,6 +923,7 @@ async function doHydrate(): Promise<void> {
     }
     if (loadFailed) {
       persistGlobal.__vulnPersistBlocked = true;
+      if (strictPlatformPersistence()) throw new Error("SQL platform hydration failed; refusing an empty or stale fallback.");
       console.error(
         "[persist] PERSISTENCE BLOCKED: could not load the snapshot after " +
           `${HYDRATE_ATTEMPTS} attempts. Serving from an in-memory store; ` +
@@ -871,6 +938,7 @@ async function doHydrate(): Promise<void> {
   sanitizeSpiderfootAssets(s);
   repairDefenderPublicationMarkers(s);
   migrateAutoSyncDefault(s);
+  if (strictPlatformPersistence()) await persistSnapshot(true);
   persistGlobal.__vulnHydrated = true;
   startFlusher();
   startScheduler();
@@ -976,7 +1044,7 @@ async function scannerElasticExportTick(): Promise<void> {
   const now = Date.now();
   if (!scannerElasticConfig() || now - (s.meta.lastScannerElasticExportAt ?? 0) < 300_000) return;
   s.meta.lastScannerElasticExportAt = now;
-  markDirty();
+  markDirty({});
   try {
     const findings = Array.from(s.findings.values()).filter(
       (f) => f.connector === "nessus" || f.connector === "vulners",
@@ -1038,7 +1106,7 @@ async function vulnersBridgeTick(): Promise<void> {
   const intervalMs = intervalHours * 3_600_000;
   if (syncAllStatus().running || now - (s.meta.lastVulnersBridgeSweepAt ?? 0) < intervalMs) return;
   s.meta.lastVulnersBridgeSweepAt = now;
-  markDirty();
+  markDirty({});
   try {
     console.log("[vulners-bridge] full-inventory sweep starting");
     const result = await importFromVulnersBridge();
@@ -1078,7 +1146,7 @@ async function vulnersBridgeOffsetTick(s: StoreShape, now: number): Promise<void
         const targets = nessusBridgeTargetsForCompany(companyId);
         if (!targets.length) continue;
         s.meta.nessusOffsetLastTriggered[key] = occurrence;
-        markDirty();
+        markDirty({});
         const result = await startScan({
           name: `GMI scan: ${company.name} (1h after Nessus)`,
           connector: "vulners",
@@ -1112,7 +1180,7 @@ async function schedulerTick(): Promise<void> {
     const last = s.meta.lastAutoSyncAt ?? 0;
     if (now - last >= intervalMs) {
       s.meta.lastAutoSyncAt = now;
-      markDirty();
+      markDirty({});
       const r = startSyncAll();
       if (r.started) {
         console.log("[scheduler] auto sync-all started");
@@ -1138,7 +1206,7 @@ async function schedulerTick(): Promise<void> {
     s.meta.lastMonthlyReportMonth !== month
   ) {
     s.meta.lastMonthlyReportMonth = month;
-    markDirty();
+    markDirty({});
     try {
       await sendMonthlyExecReports(month);
     } catch (err) {
@@ -1154,7 +1222,7 @@ async function schedulerTick(): Promise<void> {
     now - (s.meta.lastNessusHealthCheckAt ?? 0) >= 3_600_000
   ) {
     s.meta.lastNessusHealthCheckAt = now;
-    markDirty();
+    markDirty({});
     try {
       const health = await nessusServerStatus();
       if (health.configured) {
@@ -1174,7 +1242,7 @@ async function schedulerTick(): Promise<void> {
         }
         if (previous !== ok) {
           s.meta.lastNessusHealthOk = ok;
-          markDirty();
+          markDirty({});
         }
       }
     } catch (err) {
@@ -1196,7 +1264,7 @@ async function schedulerTick(): Promise<void> {
     now - (s.meta.lastNessusFreshCheckAt ?? 0) >= 3_600_000
   ) {
     s.meta.lastNessusFreshCheckAt = now;
-    markDirty();
+    markDirty({});
     try {
       const FRESHNESS_WINDOW_MS = 30 * 3_600_000; // 30h: daily cadence + scheduling slack
       let mostRecentImport = 0;
@@ -1223,7 +1291,7 @@ async function schedulerTick(): Promise<void> {
       }
       if (previousFresh !== fresh) {
         s.meta.lastNessusFreshOk = fresh;
-        markDirty();
+        markDirty({});
       }
     } catch (err) {
       console.error("[scheduler] nessus freshness check failed:", err);
@@ -1238,7 +1306,7 @@ async function schedulerTick(): Promise<void> {
   // re-sends the same breach.
   if (sched.alertsEnabled && s.meta.lastSlaBreachCheckDay !== todayUtc()) {
     s.meta.lastSlaBreachCheckDay = todayUtc();
-    markDirty();
+    markDirty({});
     try {
       const nowIso = new Date().toISOString();
       const breaching: SlaBreachFinding[] = [];
@@ -1483,7 +1551,7 @@ export async function snapshotMetricsNow(): Promise<{ rows: number }> {
   await ensureHydrated();
   const s = store();
   s.meta.lastMetricsSnapshotDay = todayUtc();
-  markDirty();
+  markDirty({});
 
   const remediation = Array.from(s.findings.values()).filter(isRemediationFinding);
   const demo = demoCompanyIds(s);
@@ -1582,7 +1650,13 @@ export async function storeStatus(): Promise<{
 
 // Force an immediate snapshot write (used right after large imports).
 export async function flushNow(options?: { throwOnError?: boolean }): Promise<void> {
-  await persistSnapshot(options?.throwOnError);
+  await persistSnapshot(options?.throwOnError ?? strictPlatformPersistence());
+}
+
+// Mutation routes call this before acknowledging success. Existing deployments
+// retain their behavior until the explicitly selected SQL authority is active.
+export async function commitPlatformMutation(): Promise<void> {
+  if (strictPlatformPersistence()) await flushNow({ throwOnError: true });
 }
 
 // --- deterministic RNG so demo data is stable per scan -----------------
@@ -1644,10 +1718,11 @@ function demoScansEnabled(): boolean {
   return process.env.DEMO_SCANS === "true";
 }
 
-function nextId(s: StoreShape, prefix: string): string {
+function nextId(s: StoreShape, prefix: string, collection?: keyof PlatformChanges): string {
   s.counter += 1;
-  markDirty(); // every entity creation funnels through here
-  return `${prefix}-${s.counter}`;
+  const id = `${prefix}-${s.counter}`;
+  markDirty(collection ? { [collection]: [id] } : undefined);
+  return id;
 }
 
 function computeProgress(scan: InternalScan, now: number): number {
@@ -1776,16 +1851,64 @@ const NESSUS_STATUS_MAP: Record<string, ScanStatus> = {
 
 // Poll active vendor-backed scans (throttled per scan) and import findings
 // when a scan completes on the scanner.
+type ReviewedNessus = { config: NessusConfig; route: ScannerRoute; folderId: number; targets: string[] };
+async function reviewedNessusContext(companyId?: string, targets?: string[]): Promise<ReviewedNessus | null> {
+  return nessusContextFromRoutes(await loadReviewedScannerRoutes("nessus"), companyId, targets);
+}
+function nessusContextFromRoutes(routes: ScannerRoute[] | null, companyId?: string, targets?: string[]): ReviewedNessus | null {
+  if (routes === null) return null;
+  const matches = routes.filter(r => r.companyId === companyId);
+  const config = nessusConfig();
+  if (!companyId || !store().companies.has(companyId) || demoCompanyIds(store()).has(companyId) || matches.length !== 1 || !config)
+    throw new Error("Nessus requires one reviewed folder assignment for an existing customer.");
+  const route = matches[0];
+  if (targets && (!targets.length || !targets.every(scannerTargetMatcher(route.targets))))
+    throw new Error("Nessus scan targets exceed the reviewed customer scope.");
+  return { config, route, folderId: Number(route.sourceScope), targets: route.targets };
+}
+async function reviewedNessusScan(context: ReviewedNessus, id: number) {
+  const roster = await nessusListScans(context.config, context.folderId);
+  const summary = roster.find(scan => scan.id === id);
+  if (!summary) throw new Error("Nessus scan is no longer in its reviewed customer folder.");
+  return summary;
+}
+async function collectNessusFindings(companyId: string, scanId: number, lastModified?: number | null): Promise<NessusImportFindingsResult> {
+  const context = await reviewedNessusContext(companyId);
+  if (!context) return nessusImportFindings(scanId);
+  const result = await nessusImportFindings(scanId, 500, { ...context, lastModified });
+  const current = await reviewedNessusContext(companyId);
+  if (!current || current.route.candidateId !== context.route.candidateId || current.route.revision !== context.route.revision ||
+      current.route.bindingRevision !== context.route.bindingRevision || current.folderId !== context.folderId ||
+      JSON.stringify(current.targets) !== JSON.stringify(context.targets) || current.config.url !== context.config.url ||
+      current.config.insecure !== context.config.insecure)
+    throw new Error("Nessus assignment changed during import; results were not applied.");
+  assertScannerResultScope(context.targets, result);
+  return result;
+}
+
 async function refreshVendorScans(s: StoreShape): Promise<void> {
   const now = Date.now();
-  for (const scan of s.scans.values()) {
+  const pending = [...s.scans.values()].filter(scan => scan.vendor &&
+    ["Running", "Paused", "Queued"].includes(scan.status) && now - scan.vendor.lastPoll >= 4000);
+  if (!pending.length) return;
+  let routes: ScannerRoute[] | null;
+  try { routes = await loadReviewedScannerRoutes("nessus"); }
+  catch { for (const scan of pending) { scan.vendor!.lastPoll = now; scan.error = "Reviewed scanner routing is unavailable."; } markDirty(); return; }
+  const rosters = new Map<number, Promise<Awaited<ReturnType<typeof nessusListScans>>>>();
+  for (const scan of pending) {
     if (!scan.vendor) continue;
     const active =
       scan.status === "Running" || scan.status === "Paused" || scan.status === "Queued";
     if (!active || now - scan.vendor.lastPoll < 4000) continue;
     scan.vendor.lastPoll = now;
     try {
-      const remote = await nessusScanStatus(scan.vendor.nessusScanId);
+      const context = nessusContextFromRoutes(routes, scan.companyId);
+      if (context) {
+        if (!rosters.has(context.folderId)) rosters.set(context.folderId, nessusListScans(context.config, context.folderId));
+        if (!(await rosters.get(context.folderId)!).some(row => row.id === scan.vendor!.nessusScanId))
+          throw new Error("Nessus scan is no longer in its reviewed customer folder.");
+      }
+      const remote = await nessusScanStatus(scan.vendor.nessusScanId, context?.config);
       scan.progressFrozenAt = remote.progress;
       scan.status = NESSUS_STATUS_MAP[remote.status] ?? scan.status;
       markDirty();
@@ -1808,8 +1931,8 @@ async function refreshVendorScans(s: StoreShape): Promise<void> {
   }
 }
 
-async function importVendorFindings(s: StoreShape, scan: InternalScan): Promise<void> {
-  const { findings: imported, scannedHosts } = await nessusImportFindings(scan.vendor!.nessusScanId);
+async function importVendorFindings(s: StoreShape, scan: InternalScan, prepared?: NessusImportFindingsResult): Promise<void> {
+  const { findings: imported, scannedHosts } = prepared ?? await collectNessusFindings(scan.companyId, scan.vendor!.nessusScanId);
   const completedAt = scan.completedAt ?? new Date().toISOString();
   // Company-scoped, cross-connector correlation: customers can share asset
   // strings (10.x IPs, DESKTOP-XXXX), so one client's finding must never
@@ -2188,6 +2311,8 @@ export function createCompany(input: {
   const s = store();
   const name = input.name.trim();
   if (!name) return { error: "Company name is required." };
+  if (s.meta.customerConsolidation && ["gmi scans", "valor global scans"].includes(normalizeCompanyName(name)))
+    return { error: "This historical customer name was consolidated; use its reviewed canonical customer ID." };
   const existing = Array.from(s.companies.values());
   if (existing.some((c) => normalizeCompanyName(c.name) === normalizeCompanyName(name))) {
     return { error: "A company with that name already exists." };
@@ -2200,7 +2325,7 @@ export function createCompany(input: {
       };
     }
   }
-  const id = nextId(s, "CO");
+  const id = nextId(s, "CO", "companies");
   const company: InternalCompany = {
     id,
     name,
@@ -2246,7 +2371,7 @@ export function updateCompany(
   if (patch.industry !== undefined) company.industry = patch.industry.trim();
   if (patch.contactName !== undefined) company.contactName = patch.contactName.trim();
   if (patch.contactEmail !== undefined) company.contactEmail = patch.contactEmail.trim();
-  markDirty();
+  markDirty(patch.name === undefined ? { companies: [id] } : undefined);
   return toPublicCompany(s, company);
 }
 
@@ -2279,10 +2404,14 @@ export type MergeCompaniesResult = {
 // `fromId`. For cleaning up a duplicate company created by a name-matching
 // miss (see normalizeCompanyName's history in lib/company-name.ts) without
 // having to re-run every sync from scratch.
+// The approved GMI/Valor source and destination IDs are excluded below.
 export function mergeCompanies(
   fromId: string,
   intoId: string,
 ): MergeCompaniesResult | { error: string } {
+  if (["CO-9150", "CO-9153", "CO-229336", "CO-229438"].includes(fromId) ||
+      ["CO-9150", "CO-9153", "CO-229336", "CO-229438"].includes(intoId))
+    return { error: "These customers require the purpose-built consolidation with folder and history checks." };
   const s = store();
   const from = s.companies.get(fromId);
   const into = s.companies.get(intoId);
@@ -2357,7 +2486,7 @@ function ensureFolder(s: StoreShape, companyId: string, name: string): InternalF
     (f) => f.companyId === companyId && f.name.toLowerCase() === trimmed.toLowerCase(),
   );
   if (existing) return existing;
-  const id = nextId(s, "FLD");
+  const id = nextId(s, "FLD", "folders");
   const folder: InternalFolder = {
     id,
     companyId,
@@ -2385,7 +2514,7 @@ export function deleteFolder(id: string): { deleted: true } | { error: string } 
   const hasScans = Array.from(s.scans.values()).some((sc) => sc.folderId === id);
   if (hasScans) return { error: "Move this folder's scans before deleting it." };
   s.folders.delete(id);
-  markDirty();
+  markDirty({ folders: [id] });
   return { deleted: true };
 }
 
@@ -2986,7 +3115,7 @@ export function updateSettings(patch: SettingsPatch): Settings {
     schedule: { ...s.settings.schedule, ...patch.schedule },
     sla: { ...s.settings.sla, ...patch.sla },
   };
-  markDirty();
+  markDirty({});
   return copySettings(s.settings);
 }
 
@@ -3026,7 +3155,7 @@ export type AutoScanResult = {
 // Launch scans for every known-but-unscanned asset, one scan per customer
 // into an "Auto-Scan" folder, targeting that customer's gap assets. Naturally
 // idempotent: once an asset has findings it leaves the gap and won't re-scan.
-export async function autoScanGaps(): Promise<AutoScanResult> {
+export async function autoScanGaps(companyIds?: ReadonlySet<string>): Promise<AutoScanResult> {
   const s = store();
   // Spotlight-merged, not the raw legacy diff -- otherwise every gap-scan
   // (including the automatic one that fires after a CrowdStrike/Intune sync
@@ -3035,6 +3164,7 @@ export async function autoScanGaps(): Promise<AutoScanResult> {
   const coverage = await assetCoverageWithSpotlight();
   const byCompany = new Map<string, string[]>();
   for (const row of coverage.knownNotScanned) {
+    if (companyIds && !companyIds.has(row.companyId)) continue;
     const list = byCompany.get(row.companyId) ?? [];
     list.push(row.identifier);
     byCompany.set(row.companyId, list);
@@ -3105,130 +3235,18 @@ export async function resyncFromNessus(options?: {
 
 // --- executive report (per-client board one-pager) -------------------------
 
-// Single-loss-expectancy per finding by severity (order-of-magnitude, breach-
-// cost flavored) and annual rate of occurrence driven by exploitation signal.
-// ALE = SLE x ARO summed over open findings. Assumptions are shown on the page.
-const SLE_BY_SEVERITY: Record<Severity, number> = {
-  Critical: 250_000,
-  High: 75_000,
-  Medium: 15_000,
-  Low: 2_000,
-  Info: 0,
-};
-
-function annualRate(f: Finding): number {
-  let p = 0.05;
-  if (f.kev) p = 0.6;
-  else if (f.exploitAvailable || f.epss >= 0.3) p = 0.3;
-  if (f.assetExposure === "Internet-facing") p += 0.1;
-  if (f.assetCriticality === "Crown Jewel") p += 0.1;
-  return Math.min(0.9, p);
-}
-
-export type ExecReport = {
-  generatedAt: string;
-  company: { id: string; name: string; industry: string };
-  posture: { compositeScore: number; compositeBand: string; exposureScore: number };
-  findings: { open: number; critical: number; high: number; kevOpen: number };
-  ssvc: { act: number; attend: number; overdue: number; kevOverdue: number };
-  compliance: { framework: string; overall: string; score: number }[];
-  attackSurface: {
-    total: number;
-    exposedAssets: number;
-    leakedCredentials: number;
-    webVulnerabilities: number;
-  };
-  financial: { ale: number };
-  // Remediation SLA rollup: open + overdue counts per severity against the
-  // configured settings.sla days, plus 90-day mean time to remediate.
-  sla: {
-    bySeverity: Record<Severity, { open: number; overdue: number }>;
-    mttrDays: number | null;
-  };
-  topRisks: {
-    cve: string;
-    title: string;
-    asset: string;
-    realRisk: number;
-    decision: SsvcDecision;
-    kev: boolean;
-  }[];
-};
-
+// Preserve the existing executive response while avoiding unused dashboard
+// trends, asset rankings and repeated compliance scans. The pure accumulator
+// also accepts streamed, scoped records for the planned saved SQL report.
+export type { ExecReport } from "./executive-report";
 export function computeExecReport(companyId: string): ExecReport | null {
   const s = store();
   tick(s);
   const company = s.companies.get(companyId);
   if (!company) return null;
-
-  const metrics = computeMetrics({ companyId });
-  const priorities = computePriorities({ companyId, limit: 5000 });
-  const surface = computeAttackSurface({ companyId });
-  const surfaceSummary = surface.summary;
-
-  const open = Array.from(s.findings.values()).filter(
-    (f) => f.companyId === companyId && isOpen(f),
-  );
-  const ale = Math.round(
-    open.reduce((sum, f) => sum + SLE_BY_SEVERITY[f.severity] * annualRate(f), 0),
-  );
-
-  const slaBySeverity = {} as Record<Severity, { open: number; overdue: number }>;
-  for (const sev of SEVERITIES) slaBySeverity[sev] = { open: 0, overdue: 0 };
-  for (const f of open.filter(isRemediationFinding)) {
-    slaBySeverity[f.severity].open += 1;
-    if (findingSlaInfo(f).overdue) slaBySeverity[f.severity].overdue += 1;
-  }
-  const companyRemediation = Array.from(s.findings.values()).filter(
-    (f) => f.companyId === companyId && isRemediationFinding(f),
-  );
-
-  const compliance = FRAMEWORKS.map((fw) => {
-    const p = computeCompliance({ companyId, framework: fw.id }).companies[0];
-    return { framework: fw.name, overall: p?.overall ?? "Pass", score: p?.score ?? 100 };
+  return buildExecutiveReport(company, s.findings.values(), s.scans.values(), s.assets.values(), {
+    now: Date.now(), sla: s.settings.sla, isComplianceKev: isKev,
   });
-
-  return {
-    generatedAt: "",
-    company: { id: company.id, name: company.name, industry: company.industry },
-    posture: {
-      compositeScore: metrics.composite.score,
-      compositeBand: metrics.composite.band,
-      exposureScore: metrics.exposureScore,
-    },
-    findings: {
-      open: metrics.totalOpen,
-      critical: metrics.severityCounts.Critical,
-      high: metrics.severityCounts.High,
-      kevOpen: metrics.kevOpen,
-    },
-    ssvc: {
-      act: priorities.summary.act,
-      attend: priorities.summary.attend,
-      overdue: priorities.summary.overdue,
-      kevOverdue: priorities.summary.kevOverdue,
-    },
-    compliance,
-    attackSurface: {
-      total: surfaceSummary.total,
-      exposedAssets: surfaceSummary.exposedAssets,
-      leakedCredentials: surfaceSummary.byCategory["Leaked Credentials"],
-      webVulnerabilities: surfaceSummary.byCategory["Web Vulnerabilities"],
-    },
-    financial: { ale },
-    sla: {
-      bySeverity: slaBySeverity,
-      mttrDays: mttr90Days(companyRemediation),
-    },
-    topRisks: priorities.items.slice(0, 5).map((i) => ({
-      cve: i.cve,
-      title: i.title,
-      asset: i.asset,
-      realRisk: i.realRisk,
-      decision: i.decision,
-      kev: i.kev,
-    })),
-  };
 }
 
 // --- customer report email data ---------------------------------------------
@@ -3351,7 +3369,7 @@ export function markReportSent(companyId: string): void {
   const company = s.companies.get(companyId);
   if (!company) return;
   company.lastReportSentAt = new Date().toISOString();
-  markDirty();
+  markDirty({ companies: [companyId] });
   void persistSnapshot();
 }
 
@@ -4583,11 +4601,13 @@ export function rescoreFinding(s: StoreShape, f: Finding): void {
 async function rescoreAllFindings(
   s: StoreShape,
   matchesSource: (f: Finding) => boolean,
+  companyIds?: ReadonlySet<string>,
 ): Promise<number> {
   let rescored = 0;
   let i = 0;
   for (const f of s.findings.values()) {
     const before = f.realRisk;
+    if (companyIds && !companyIds.has(f.companyId)) continue;
     rescoreFinding(s, f);
     if (f.realRisk !== before || matchesSource(f)) rescored += 1;
     i += 1;
@@ -4601,12 +4621,41 @@ function upsertAsset(
   input: Omit<InternalAsset, "id" | "lastSynced"> & { id?: string },
 ): InternalAsset {
   const nowIso = new Date().toISOString();
+  if (input.source === "crowdstrike" &&
+      (input.companyId === "CO-229336" || input.companyId === "CO-229438")) {
+    const automate = Array.from(s.assets.values()).find(a =>
+      a.companyId === input.companyId && a.source === "automate" &&
+      a.identifier.toLowerCase() === input.identifier.toLowerCase() &&
+      a.hostname.toLowerCase() === input.hostname.toLowerCase());
+    if (automate) {
+      automate.crowdstrikeObservation = {
+        assetId: automate.crowdstrikeObservation?.assetId,
+        externalId: input.externalId,
+        identifier: input.identifier,
+        hostname: input.hostname,
+        ipAddresses: input.ipAddresses,
+        os: input.os,
+        owner: input.owner,
+        tags: input.tags,
+        exposure: input.exposure,
+        criticality: input.criticality,
+        lastSynced: nowIso,
+      };
+      markDirty();
+      return automate;
+    }
+  }
   // Match an existing asset by external id or identifier, always scoped to
   // the same company — a vendor externalId collision (or a caller passing
   // the wrong companyId) must never reassign an asset across customers.
   const existing = Array.from(s.assets.values()).find(
     (a) =>
       a.companyId === input.companyId &&
+      // The approved consolidation keeps Automate as the canonical asset
+      // record when CrowdStrike reports the same host under the new owner.
+      !(a.source !== input.source &&
+        [a.source, input.source].every(source => source === "automate" || source === "crowdstrike") &&
+        (input.companyId === "CO-229336" || input.companyId === "CO-229438")) &&
       ((input.externalId && a.externalId === input.externalId) ||
         a.identifier.toLowerCase() === input.identifier.toLowerCase()),
   );
@@ -4627,6 +4676,7 @@ export type TidalImportResult = {
   findingsRescored: number;
   errors?: string[];
   autoScan?: AutoScanResult;
+  skipped?: number;
 };
 
 // Pull the Tidal asset inventory, map each asset's customer to a company
@@ -4651,17 +4701,18 @@ function nameTokens(text: string): Set<string> {
   );
 }
 
-// Resolve a SpiderFoot scan to an existing company by token overlap between the
-// scan name/target and the company name. Returns null if nothing matches — we
-// never auto-create companies from OSINT scans to avoid polluting the roster.
-function matchCompanyForScan(
+// Legacy scan name/target matching. Keep all equally ranked candidates so a
+// tie cannot choose a customer by insertion order. Reviewed target bindings
+// are still required before replacing this heuristic with registry routing.
+function matchingCompaniesForScan(
   s: StoreShape,
   scanName: string,
   scanTarget: string,
-): string | null {
+): string[] {
   const scanToks = nameTokens(`${scanName} ${scanTarget}`);
-  if (scanToks.size === 0) return null;
-  let best: { id: string; score: number } | null = null;
+  if (scanToks.size === 0) return [];
+  let bestScore = 0;
+  let best: string[] = [];
   for (const company of s.companies.values()) {
     const compToks = nameTokens(company.name);
     let score = 0;
@@ -4669,23 +4720,28 @@ function matchCompanyForScan(
       if (scanToks.has(t)) score += 1;
       else if ([...scanToks].some((x) => x.includes(t) || t.includes(x))) score += 1;
     }
-    if (score > 0 && (!best || score > best.score)) best = { id: company.id, score };
+    if (score > bestScore) { best = [company.id]; bestScore = score; }
+    else if (score > 0 && score === bestScore) best.push(company.id);
   }
-  return best?.id ?? null;
+  return best;
+}
+function matchCompanyForScan(s: StoreShape, scanName: string, scanTarget: string): string | null {
+  const matches = matchingCompaniesForScan(s, scanName, scanTarget);
+  return matches.length === 1 ? matches[0] : null;
 }
 
 // Resolve a company by name (case-insensitive exact, then substring either way).
 function resolveCompanyByName(s: StoreShape, name: string): string | null {
   const n = name.trim().toLowerCase();
   if (!n) return null;
-  const exact = Array.from(s.companies.values()).find(
+  const exact = Array.from(s.companies.values()).filter(
     (c) => c.name.toLowerCase() === n,
   );
-  if (exact) return exact.id;
-  const partial = Array.from(s.companies.values()).find(
+  if (exact.length) return exact.length === 1 ? exact[0].id : null;
+  const partial = Array.from(s.companies.values()).filter(
     (c) => c.name.toLowerCase().includes(n) || n.includes(c.name.toLowerCase()),
   );
-  return partial?.id ?? null;
+  return partial.length === 1 ? partial[0].id : null;
 }
 
 // Explicit Artemis-tag -> company routing for tags whose label doesn't overlap
@@ -4694,12 +4750,42 @@ const ARTEMIS_TAG_COMPANY: { pattern: RegExp; company: string }[] = [
   { pattern: /^sonar/i, company: "GMI Scans" },
 ];
 
+type OsintProvider = "spiderfoot" | "artemis";
+async function reviewedOsintRoutes(provider: OsintProvider): Promise<ScannerRoute[] | null> {
+  const routes = await loadReviewedScannerRoutes(provider);
+  if (routes !== null && (!routes.length || routes.some(route => route.provider !== provider ||
+      !store().companies.has(route.companyId) || demoCompanyIds(store()).has(route.companyId))))
+    throw new Error("OSINT requires reviewed routes to existing non-demo customers.");
+  return routes;
+}
+function osintConnection(provider: OsintProvider) {
+  const config = provider === "spiderfoot" ? spiderfootConfig() : artemisConfig();
+  return config ? JSON.stringify([config.url, "insecure" in config ? config.insecure : false]) : null;
+}
+async function recheckOsintRoute(provider: OsintProvider, expected: ScannerRoute, connection: string | null) {
+  const current = (await reviewedOsintRoutes(provider))?.find(route => route.companyId === expected.companyId);
+  if (!current || JSON.stringify(current) !== JSON.stringify(expected) || osintConnection(provider) !== connection)
+    throw new Error("OSINT assignment changed during collection; results were withheld.");
+}
+async function pivotImportedOsint(reviewed: boolean, companies: Set<string>) {
+  if (!store().settings.autoScanNewAssets) return;
+  try {
+    if (!reviewed) { await pivotOsintToNessus(); return; }
+    // OSINT discovers related third-party assets. It cannot grant a Nessus scope.
+    const approvals = await loadReviewedScannerRoutes("nessus");
+    if (!approvals) return;
+    for (const companyId of companies) if (approvals.some(route => route.companyId === companyId))
+      await pivotOsintToNessus({ companyId });
+  } catch { /* The import remains available if an independently approved pivot fails. */ }
+}
+
 // Pull finished SpiderFoot scans in as findings, grouped under the matching
 // company. Pull-based (SpiderFoot runs scans in its own UI); no live polling.
 export async function importFromSpiderfoot(): Promise<
   SpiderfootImportResult | { error: string }
 > {
-  if (!spiderfootConfig()) {
+  const config = spiderfootConfig();
+  if (!config) {
     return {
       error:
         "SpiderFoot is not configured. Set SPIDERFOOT_URL (and SPIDERFOOT_USER / SPIDERFOOT_PASS if it requires auth) to import.",
@@ -4707,9 +4793,13 @@ export async function importFromSpiderfoot(): Promise<
   }
   const s = store();
 
+  let routes: ScannerRoute[] | null;
+  const connection = osintConnection("spiderfoot");
+  try { routes = await reviewedOsintRoutes("spiderfoot"); }
+  catch (error) { return { error: error instanceof Error ? error.message : "SpiderFoot routing is unavailable." }; }
   let scans: Awaited<ReturnType<typeof spiderfootListScans>>;
   try {
-    scans = await spiderfootListScans();
+    scans = await spiderfootListScans(routes === null ? undefined : config);
   } catch (err) {
     return {
       error: err instanceof Error ? err.message : "Failed to reach SpiderFoot.",
@@ -4723,27 +4813,37 @@ export async function importFromSpiderfoot(): Promise<
 
   for (const sf of scans) {
     const label = sf.name || sf.target || sf.id;
-    if (!/finish|done|complete/i.test(sf.status)) {
+    if (routes === null ? !/finish|done|complete/i.test(sf.status) : sf.status !== "FINISHED") {
       skipped.push({ scan: label, reason: `status ${sf.status}` });
       continue;
     }
-    // Skip scans already imported (scan record tagged with the SpiderFoot id).
-    const already = Array.from(s.scans.values()).some(
+    let route: ScannerRoute | undefined;
+    if (routes !== null) {
+      try {
+        const key = scannerExactTargetKey(sf.target);
+        const owners = routes.filter(route => route.targets.some(t => scannerExactTargetKey(t) === key));
+        if (owners.length !== 1) throw new Error("SpiderFoot scan has no unique approved target owner.");
+        route = owners[0];
+      } catch { skipped.push({ scan: label, reason: "no unique reviewed target owner" }); continue; }
+    }
+    const companyId = route?.companyId ?? matchCompanyForScan(s, sf.name, sf.target);
+    // Preserve existing records; a new assignment cannot move an imported scan.
+    const already = Array.from(s.scans.values()).filter(
       (sc) => sc.externalRef === `spiderfoot:${sf.id}`,
     );
-    if (already) {
-      skipped.push({ scan: label, reason: "already imported" });
+    if (already.length) {
+      skipped.push({ scan: label, reason: route && already.some(scan => scan.companyId !== companyId) ? "existing scan belongs to a different company; review its mapping" : "already imported" });
       continue;
     }
-    const companyId = matchCompanyForScan(s, sf.name, sf.target);
     if (!companyId) {
-      skipped.push({ scan: label, reason: "no matching company" });
+      skipped.push({ scan: label, reason: "no unambiguous matching company" });
       continue;
     }
 
     let imported: Awaited<ReturnType<typeof spiderfootImportFindings>>;
     try {
-      imported = await spiderfootImportFindings(sf.id);
+      imported = await spiderfootImportFindings(sf.id, route ? { config, targets: route.targets, scan: sf } : undefined);
+      if (route) await recheckOsintRoute("spiderfoot", route, connection);
     } catch (err) {
       skipped.push({
         scan: label,
@@ -4842,13 +4942,7 @@ export async function importFromSpiderfoot(): Promise<
   }
 
   await flushNow();
-  if (s.settings.autoScanNewAssets) {
-    try {
-      await pivotOsintToNessus();
-    } catch {
-      // best-effort
-    }
-  }
+  await pivotImportedOsint(routes !== null, matchedCompanies);
   return {
     scansImported,
     findingsImported,
@@ -5027,14 +5121,15 @@ export function importNmapScan(hosts: NmapHost[]): NmapImportResult {
     if (!identifier) continue;
     // Match by an existing asset first (keeps customer attribution honest) —
     // but only when every inventory match agrees on one owner; asset strings
-    // shared across customers are inconclusive. Then fall back to fuzzy
-    // name/host matching, and scope the asset lookup to the resolved company
+    // shared across customers are inconclusive and cannot be overridden by a
+    // name guess. With no inventory match, fall back to unique name/host
+    // matching, and scope the asset lookup to the resolved company
     // so inventory context is never borrowed cross-tenant.
     const owners = assetOwners(s, host.host, host.ip);
     const companyId =
       owners.size === 1
         ? owners.values().next().value!
-        : matchCompanyForScan(s, host.host, host.ip);
+        : owners.size > 1 ? null : matchCompanyForScan(s, host.host, host.ip);
     if (!companyId) {
       skipped += 1;
       continue;
@@ -5296,6 +5391,9 @@ export async function importFromVulnersBridge(): Promise<
         "Vulners bridge is not configured. Set VULNERS_BRIDGE_URL and VULNERS_BRIDGE_API_KEY.",
     };
   }
+  let routes: ScannerRoute[] | null;
+  try { routes = await reviewedActiveRoutes("vulners"); }
+  catch (error) { return { error: error instanceof Error ? error.message : "Bridge scope is unavailable." }; }
   const s = store();
   const nowIso = new Date().toISOString();
   let hostsScanned = 0;
@@ -5314,9 +5412,17 @@ export async function importFromVulnersBridge(): Promise<
 
   // Collect unique IPs from asset inventory — scan each once.
   const targets = new Map<string, { companyId: string; companyName: string; asset: InternalAsset }>();
+  const conflicted = new Set<string>();
   for (const asset of s.assets.values()) {
     for (const ip of asset.ipAddresses ?? []) {
-      if (!ip || targets.has(ip)) continue;
+      if (!ip) continue;
+      if (routes !== null) {
+        try { activeScannerContext("vulners", routes, asset.companyId, [ip]); } catch { skipped++; continue; }
+      }
+      if (targets.has(ip)) {
+        if (targets.get(ip)!.companyId !== asset.companyId) conflicted.add(ip);
+        continue;
+      }
       targets.set(ip, {
         companyId: asset.companyId,
         companyName: asset.companyName,
@@ -5325,6 +5431,7 @@ export async function importFromVulnersBridge(): Promise<
     }
   }
 
+  for (const ip of conflicted) { targets.delete(ip); skipped++; }
   for (const [ip, { companyId, companyName, asset }] of Array.from(targets.entries())) {
     let results: VulnersBridgeFinding[];
     try {
@@ -5344,7 +5451,8 @@ export async function importFromVulnersBridge(): Promise<
       //
       // Bulk inventory sweep — many targets, so cap each one at ~5 minutes
       // (30 * 10s) rather than the analyst-launched path's 70-minute cap.
-      results = await runBridgeScanToCompletion(ip, `${ip} [Vulners Bridge sync ${nowIso}]`, 30);
+      const context = activeScannerContext("vulners", routes, companyId, [ip]);
+      results = await runBridgeScanToCompletion(ip, `${ip} [Vulners Bridge sync ${nowIso}]`, 30, 10_000, context);
     } catch (err) {
       console.error(`[vulners-bridge] sync target ${ip} (${companyName}) failed:`, err);
       skipped += 1;
@@ -5451,7 +5559,8 @@ export async function importFromVulnersBridge(): Promise<
     }
   }
 
-  for (const [companyId, covered] of coveredByCompany) {
+  // Until the deployed bridge attests report completeness, reviewed imports only add/update.
+  for (const [companyId, covered] of routes === null ? coveredByCompany : []) {
     await closeStaleFindings(s, companyId, "vulners", covered, touchedKeys, nowIso);
   }
 
@@ -5594,7 +5703,7 @@ export async function syncAllConnectors(): Promise<SyncAllEntry[]> {
       connector: "CrowdStrike Spotlight",
       ready: falconConfigs().length > 0,
       run: async () => {
-        const r = startCsSpotlightSync();
+        const r = await startCsSpotlightSync();
         if (!r.started) return { error: r.error ?? "Could not start sync." };
         return { message: "Sync started in background." };
       },
@@ -5646,7 +5755,9 @@ export async function syncAllConnectors(): Promise<SyncAllEntry[]> {
       if (r && typeof r === "object" && "error" in r) {
         out.push({ connector: job.connector, configured: true, ok: false, error: (r as any).error });
       } else {
-        out.push({ connector: job.connector, configured: true, ok: true, result: r });
+        const warnings = connectorImportWarnings(r);
+        out.push({ connector: job.connector, configured: true, ok: warnings.length === 0, result: r,
+          ...(warnings.length ? { error: `Import needs attention: ${warnings.join("; ")}. Successful results were retained.` } : {}) });
       }
     } catch (err) {
       out.push({
@@ -5666,25 +5777,28 @@ export type OsintPreview = {
   perCompany: { company: string; domains: string[] }[];
 };
 
-// Show exactly which customers and root domains a quarterly OSINT sweep would
-// target — without launching anything.
-export function previewOsintTargets(): OsintPreview {
-  const s = store();
-  // This runs unconditionally on every Connectors page load (no click
-  // needed) — osintTargetsForCompany() once per company used to rescan the
-  // whole store per company; build the grouped map once instead.
-  const domainsByCompany = buildDomainsByCompany(s);
-  const perCompany: { company: string; domains: string[] }[] = [];
-  let domainsTotal = 0;
-  for (const company of s.companies.values()) {
-    if (company.kind !== "client") continue;
-    const domains = domainsByCompany.get(company.id) ?? [];
-    if (domains.length === 0) continue;
-    perCompany.push({ company: company.name, domains });
-    domainsTotal += domains.length;
-  }
-  perCompany.sort((a, b) => a.company.localeCompare(b.company));
-  return { companies: perCompany.length, domainsTotal, perCompany };
+// One plan powers the read-only preview and launch selection. Approvals do not
+// enable scanning; the existing launch action/scheduler remains the trigger.
+async function osintLaunchPlan() {
+  const s = store(), sfConfig = spiderfootConfig(), arConfig = artemisConfig();
+  const [sfRoutes, arRoutes] = await Promise.all([reviewedOsintRoutes("spiderfoot"), reviewedOsintRoutes("artemis")]);
+  const legacy = sfRoutes === null || arRoutes === null ? buildDomainsByCompany(s) : new Map<string, string[]>();
+  const rows = [...s.companies.values()].filter(company => company.kind === "client").map(company => {
+    const sfRoute = sfRoutes?.find(route => route.companyId === company.id);
+    const arRoute = arRoutes?.find(route => route.companyId === company.id);
+    const sfTargets = sfRoutes === null ? legacy.get(company.id) ?? [] : sfRoute?.targets ?? [];
+    const arTargets = arRoutes === null ? legacy.get(company.id) ?? [] : arRoute?.targets ?? [];
+    const domains = sfRoutes === null && arRoutes === null ? legacy.get(company.id) ?? [] :
+      [...new Set([...(sfConfig ? sfTargets : []), ...(arConfig ? arTargets : [])])].sort();
+    return { company, sfRoute, arRoute, sfTargets, arTargets, domains };
+  }).filter(row => row.domains.length);
+  return { rows, sfConfig, arConfig, sfConnection: osintConnection("spiderfoot"), arConnection: osintConnection("artemis") };
+}
+
+export async function previewOsintTargets(): Promise<OsintPreview> {
+  const { rows } = await osintLaunchPlan();
+  const perCompany = rows.map(row => ({ company: row.company.name, domains: row.domains })).sort((a, b) => a.company.localeCompare(b.company));
+  return { companies: perCompany.length, domainsTotal: perCompany.reduce((n, row) => n + row.domains.length, 0), perCompany };
 }
 
 export type OsintLaunchResult = {
@@ -5720,42 +5834,33 @@ export async function launchOsintScans(): Promise<OsintLaunchResult> {
     return result;
   }
 
-  const clients = Array.from(s.companies.values()).filter(
-    (c) => c.kind === "client",
-  );
-  const domainsByCompany = buildDomainsByCompany(s);
-  for (const company of clients) {
-    const domains = domainsByCompany.get(company.id) ?? [];
-    if (domains.length === 0) continue;
-    result.companies += 1;
+  let plan: Awaited<ReturnType<typeof osintLaunchPlan>>;
+  try { plan = await osintLaunchPlan(); }
+  catch { result.errors.push("OSINT routing is unavailable or needs review; no scans were launched."); return result; }
+  for (const { company, domains, arRoute, sfRoute, arTargets, sfTargets } of plan.rows) {
+    result.companies++;
     result.domainsTotal += domains.length;
     result.perCompany.push({ company: company.name, domains });
-
-    // Artemis: one batch add for all of the company's domains, tagged by name.
-    if (artemisReady) {
+    if (plan.arConfig && arTargets.length) {
       try {
-        await artemisAddTargets(domains, company.name);
-        result.artemis.launched += 1;
+        if (arRoute) await recheckOsintRoute("artemis", arRoute, plan.arConnection);
+        await artemisAddTargets(arTargets, arRoute?.sourceScope ?? company.name,
+          arRoute ? { config: plan.arConfig, tag: arRoute.sourceScope, targets: arRoute.targets } : undefined);
+        result.artemis.launched++;
       } catch (err) {
-        result.artemis.failed += 1;
-        result.errors.push(
-          `Artemis (${company.name}): ${err instanceof Error ? err.message : "add failed"}`,
-        );
+        result.artemis.failed++;
+        result.errors.push(`Artemis (${company.name}): ${err instanceof Error ? err.message : "add failed"}`);
       }
     }
-
-    // SpiderFoot: one scan per domain, named by company so import maps back.
-    if (sfReady) {
-      for (const domain of domains) {
-        try {
-          await spiderfootStartScan(`${company.name} — ${domain}`, domain, sfUsecase);
-          result.spiderfoot.launched += 1;
-        } catch (err) {
-          result.spiderfoot.failed += 1;
-          result.errors.push(
-            `SpiderFoot (${company.name}/${domain}): ${err instanceof Error ? err.message : "start failed"}`,
-          );
-        }
+    if (plan.sfConfig && sfTargets.length) for (const domain of sfTargets) {
+      try {
+        if (sfRoute) await recheckOsintRoute("spiderfoot", sfRoute, plan.sfConnection);
+        await spiderfootStartScan(`${company.name} - ${domain}`, domain, sfUsecase,
+          sfRoute ? { config: plan.sfConfig, targets: sfRoute.targets } : undefined);
+        result.spiderfoot.launched++;
+      } catch (err) {
+        result.spiderfoot.failed++;
+        result.errors.push(`SpiderFoot (${company.name}/${domain}): ${err instanceof Error ? err.message : "start failed"}`);
       }
     }
   }
@@ -5769,17 +5874,32 @@ export async function launchOsintScans(): Promise<OsintLaunchResult> {
 export async function importFromArtemis(): Promise<
   ArtemisImportResult | { error: string }
 > {
-  if (!artemisConfig()) {
+  const config = artemisConfig();
+  if (!config) {
     return {
       error:
         "Artemis is not configured. Set ARTEMIS_API_URL and ARTEMIS_API_TOKEN to import.",
     };
   }
   const s = store();
+  let routes: ScannerRoute[] | null;
+  const connection = osintConnection("artemis");
+  try { routes = await reviewedOsintRoutes("artemis"); }
+  catch (error) { return { error: error instanceof Error ? error.message : "Artemis routing is unavailable." }; }
+  const skipped: { tag: string; reason: string }[] = [];
 
-  let mapped: ArtemisFinding[];
+  let mapped: ArtemisFinding[] = [];
   try {
-    mapped = await artemisImportFindings();
+    if (routes === null) mapped = await artemisImportFindings();
+    else for (const route of routes) {
+      try {
+        const { findings, incompleteAnalyses } = await artemisCollectReviewedFindings({ config, tag: route.sourceScope, targets: route.targets });
+        if (findings.some(item => item.tag !== route.sourceScope)) throw new Error("Artemis returned a conflicting source tag.");
+        await recheckOsintRoute("artemis", route, connection);
+        if (incompleteAnalyses) skipped.push({ tag: route.sourceScope, reason: `${incompleteAnalyses} pending or stopped analyses were not imported; existing data is retained` });
+        mapped.push(...findings);
+      } catch { skipped.push({ tag: route.sourceScope, reason: "reviewed Artemis collection failed; previous data is retained" }); }
+    }
   } catch (err) {
     return {
       error: err instanceof Error ? err.message : "Failed to reach Artemis.",
@@ -5794,7 +5914,6 @@ export async function importFromArtemis(): Promise<
     byTag.get(tag)!.push(f);
   }
 
-  const skipped: { tag: string; reason: string }[] = [];
   const matchedCompanies = new Set<string>();
   let findingsImported = 0;
   let tagsProcessed = 0;
@@ -5802,21 +5921,33 @@ export async function importFromArtemis(): Promise<
 
   for (const [tag, items] of byTag) {
     // Resolution order: explicit tag->company alias, then token overlap on the
-    // tag, then on the first asset.
+    // tag, then on the first asset only when the tag did not match at all.
+    // An ambiguous tag or explicit alias cannot be overridden by an asset guess.
+    const route = routes?.find(route => route.sourceScope === tag);
+    if (routes !== null) {
+      try {
+        if (!route) throw new Error("No approved Artemis tag owner.");
+        await recheckOsintRoute("artemis", route, connection);
+      } catch { skipped.push({ tag, reason: "reviewed Artemis assignment changed; previous data is retained" }); continue; }
+    }
     const alias = ARTEMIS_TAG_COMPANY.find((a) => a.pattern.test(tag));
-    const companyId =
-      (alias ? resolveCompanyByName(s, alias.company) : null) ??
-      matchCompanyForScan(s, tag, "") ??
-      matchCompanyForScan(s, "", items[0]?.asset ?? "");
+    const tagMatches = matchingCompaniesForScan(s, tag, "");
+    const companyId = route?.companyId ?? (alias ? resolveCompanyByName(s, alias.company) :
+      tagMatches.length ? (tagMatches.length === 1 ? tagMatches[0] : null) : matchCompanyForScan(s, "", items[0]?.asset ?? ""));
     if (!companyId) {
-      skipped.push({ tag, reason: "no matching company" });
+      skipped.push({ tag, reason: "no unambiguous matching company" });
+      continue;
+    }
+    const existingScans = Array.from(s.scans.values()).filter((sc) => sc.externalRef === `artemis:${tag}`);
+    if (existingScans.some(sc => sc.companyId !== companyId)) {
+      skipped.push({ tag, reason: "existing scan belongs to a different company; review its mapping" });
       continue;
     }
     const company = s.companies.get(companyId)!;
     const folder = ensureFolder(s, companyId, "Artemis");
     const externalRef = `artemis:${tag}`;
 
-    let scan = Array.from(s.scans.values()).find((sc) => sc.externalRef === externalRef);
+    let scan = existingScans[0];
     if (!scan) {
       const scanId = nextId(s, "SCAN");
       scan = {
@@ -5908,13 +6039,7 @@ export async function importFromArtemis(): Promise<
   }
 
   await flushNow();
-  if (s.settings.autoScanNewAssets) {
-    try {
-      await pivotOsintToNessus();
-    } catch {
-      // best-effort: never fail the import because the pivot scan failed
-    }
-  }
+  await pivotImportedOsint(routes !== null, matchedCompanies);
   return {
     findingsImported,
     tagsProcessed,
@@ -5923,23 +6048,46 @@ export async function importFromArtemis(): Promise<
   };
 }
 
-// Core inventory loader shared by the CSV import and the (legacy) API sync.
-// Maps each asset's customer to a company (match by name, create if missing),
-// upserts the asset, then reprices every finding so real risk reflects the
-// authoritative environment. Assets come from a Tidal CSV export or the API.
+// Name-based offline import. When reviewed routing is on, CSV cannot establish
+// portal-session ownership; only the live collector can use the private loader.
 export async function importTidalInventory(
   assets: TidalAsset[],
   errors?: string[],
+): Promise<TidalImportResult | { error: string }> {
+  try {
+    if (await loadReviewedInventoryRoutes("tidal") !== null)
+      return { error: "Tidal CSV imports cannot verify the reviewed portal company ID. Use the live Tidal sync while reviewed routing is enabled." };
+    return await applyTidalInventory(assets, errors);
+  } catch (err) { return { error: err instanceof Error ? err.message : "Tidal inventory routing is unavailable." }; }
+}
+async function applyTidalInventory(
+  assets: TidalAsset[],
+  errors?: string[],
+  routes?: InventoryRoute[],
 ): Promise<TidalImportResult> {
   const s = store();
+  const routeBySource = new Map(routes?.map(r=>[r.sourceScope,r]));
+  if (routes && (routes.some(r=>!s.companies.has(r.companyId) || isDemoCompany(s.companies.get(r.companyId)!)) ||
+      assets.some(a=>!a.sourceCompanyId || !routeBySource.has(a.sourceCompanyId))))
+    throw new Error("Tidal inventory or customer no longer matches its approved route; no inventory was applied.");
+  const importedCompanies = new Set<string>();
 
   let companiesCreated = 0;
   let assetsUpserted = 0;
+  const importErrors = [...(errors ?? [])];
+  const ambiguousCustomers = new Set<string>();
   for (const t of assets) {
     const customer = t.customer.trim() || "Unassigned";
-    let company = Array.from(s.companies.values()).find(
+    const route = t.sourceCompanyId ? routeBySource.get(t.sourceCompanyId) : undefined;
+    const candidates = route ? [s.companies.get(route.companyId)!] : Array.from(s.companies.values()).filter(
       (c) => normalizeCompanyName(c.name) === normalizeCompanyName(customer),
     );
+    if (candidates.length > 1) {
+      if (!ambiguousCustomers.has(customer)) importErrors.push(`${customer}: multiple platform companies match; review customer mapping.`);
+      ambiguousCustomers.add(customer);
+      continue;
+    }
+    let company = candidates[0];
     if (!company) {
       const created = createCompany({ name: customer });
       if ("error" in created) continue;
@@ -5963,19 +6111,20 @@ export async function importTidalInventory(
       externalId: t.externalId,
     });
     assetsUpserted += 1;
+    importedCompanies.add(company.id);
   }
 
-  const findingsRescored = await rescoreAllFindings(s, (f) => f.assetSource === "tidal");
+  const findingsRescored = await rescoreAllFindings(s, (f) => f.assetSource === "tidal", routes ? importedCompanies : undefined);
 
   // If auto-scan is enabled, scan any newly-known assets that have no
   // coverage yet.
   let autoScan: AutoScanResult | undefined;
   if (s.settings.autoScanNewAssets) {
-    autoScan = await autoScanGaps();
+    autoScan = await autoScanGaps(routes ? importedCompanies : undefined);
   }
 
   await flushNow();
-  return { companiesCreated, assetsUpserted, findingsRescored, errors, autoScan };
+  return { companiesCreated, assetsUpserted, findingsRescored, errors: importErrors.length ? importErrors : errors, autoScan };
 }
 
 // Live sync: sign in to Tidal with email + password and pull the inventory
@@ -5983,21 +6132,26 @@ export async function importTidalInventory(
 export async function importFromTidal(
   onProgress?: (p: TidalProgress) => void,
 ): Promise<TidalImportResult | { error: string }> {
-  if (!tidalConfig()) {
+  const config = tidalConfig();
+  if (!config) {
     return {
       error:
         "Tidal is not configured. Set TIDAL_EMAIL and TIDAL_PASSWORD to sign in and pull the live inventory (or upload a CSV export).",
     };
   }
-  let listResult;
   try {
-    listResult = await tidalListAssets(onProgress);
+    const routes = await loadReviewedInventoryRoutes("tidal");
+    const s = store();
+    if (routes && (!routes.length || routes.some(r=>!s.companies.has(r.companyId) || isDemoCompany(s.companies.get(r.companyId)!))))
+      return { error: "Tidal requires activated routes to existing non-demo customers." };
+    const listResult = await tidalListAssets(onProgress, {config,...(routes ? {companyIds:new Set(routes.map(r=>r.sourceScope))} : {})});
+    const result = await applyTidalInventory(listResult.assets, listResult.errors, routes ?? undefined);
+    return {...result,...(routes ? {skipped:listResult.skippedCompanies ?? 0} : {})};
   } catch (err) {
     return {
       error: err instanceof Error ? err.message : "Failed to reach the Tidal API.",
     };
   }
-  return importTidalInventory(listResult.assets, listResult.errors);
 }
 
 export type AutomateImportResult = {
@@ -6008,6 +6162,7 @@ export type AutomateImportResult = {
   assetsUpserted: number;
   findingsRescored: number;
   autoScan?: AutoScanResult;
+  skipped?: number;
 };
 
 // Pull ConnectWise Automate's device inventory directly (see
@@ -6028,7 +6183,9 @@ function resolveAutomateAliasCompany(
   clientName: string,
 ): InternalCompany | undefined {
   if (normalizeCompanyName(clientName) === normalizeCompanyName("Global Market Innovators, Inc.")) {
-    return Array.from(s.companies.values()).find((c) => c.kind === "internal");
+    const matches = Array.from(s.companies.values()).filter((c) => c.kind === "internal");
+    if (matches.length > 1) throw new Error("Multiple internal companies match; review customer mapping.");
+    return matches[0];
   }
   return undefined;
 }
@@ -6042,6 +6199,12 @@ export async function importFromAutomate(): Promise<AutomateImportResult | { err
     };
   }
   const s = store();
+  let routes: InventoryRoute[] | null;
+  try {
+    routes = await loadReviewedInventoryRoutes("automate");
+    if (routes && (!routes.length || routes.some(route => !s.companies.has(route.companyId) || isDemoCompany(s.companies.get(route.companyId)!))))
+      return { error: "Automate requires activated routes to existing non-demo customers." };
+  } catch (err) { return { error: err instanceof Error ? err.message : "Automate inventory routing is unavailable." }; }
   let clients;
   try {
     clients = await automateListClients(config);
@@ -6051,16 +6214,32 @@ export async function importFromAutomate(): Promise<AutomateImportResult | { err
     };
   }
 
+  if (routes && new Set(clients.map(c => c.id)).size !== clients.length)
+    return { error: "Automate returned duplicate client identities; no inventory was imported." };
   let companiesMatched = 0;
   let companiesCreated = 0;
   const createdCompanies: string[] = [];
   const errors: string[] = [];
   let assetsUpserted = 0;
+  let skipped = 0;
+  const importedCompanies = new Set<string>();
+  if (routes) for (const route of routes) {
+    if (!clients.some(client => client.id === route.sourceScope)) errors.push("An approved Automate client was not returned by the source; review routing and API access.");
+  }
   for (const client of clients) {
+    const route = routes?.find(route => route.sourceScope === client.id);
+    if (routes && !route) { skipped++; continue; }
     const clientNorm = normalizeCompanyName(client.name);
-    let company =
-      Array.from(s.companies.values()).find((c) => normalizeCompanyName(c.name) === clientNorm) ??
-      resolveAutomateAliasCompany(s, client.name);
+    const candidates = route ? [s.companies.get(route.companyId)].filter((c): c is InternalCompany => !!c) :
+      Array.from(s.companies.values()).filter((c) => normalizeCompanyName(c.name) === clientNorm);
+    if (candidates.length > 1) {
+      errors.push(`${client.name}: multiple platform companies match; review customer mapping.`);
+      continue;
+    }
+    let company: InternalCompany | undefined;
+    try { company = candidates[0] ?? (route ? undefined : resolveAutomateAliasCompany(s, client.name)); }
+    catch { errors.push(`${client.name}: multiple internal companies match; review customer mapping.`); continue; }
+    if (route && (!company || isDemoCompany(company))) { errors.push("An approved Automate customer is no longer available."); continue; }
     if (company) {
       companiesMatched += 1;
     } else {
@@ -6080,6 +6259,11 @@ export async function importFromAutomate(): Promise<AutomateImportResult | { err
       errors.push(`${client.name}: ${err instanceof Error ? err.message : String(err)}`);
       continue;
     }
+    // Recheck after the network await; never recreate a deleted customer.
+    if (route && (!s.companies.has(route.companyId) || isDemoCompany(s.companies.get(route.companyId)!))) {
+      errors.push("An approved Automate customer changed during collection; inventory was not applied."); continue;
+    }
+    importedCompanies.add(company.id);
     for (const a of computers) {
       upsertAsset(s, {
         identifier: a.hostname,
@@ -6099,15 +6283,15 @@ export async function importFromAutomate(): Promise<AutomateImportResult | { err
     }
   }
 
-  const findingsRescored = await rescoreAllFindings(s, (f) => f.assetSource === "automate");
+  const findingsRescored = await rescoreAllFindings(s, (f) => f.assetSource === "automate", routes ? importedCompanies : undefined);
 
   let autoScan: AutoScanResult | undefined;
   if (s.settings.autoScanNewAssets) {
-    autoScan = await autoScanGaps();
+    autoScan = await autoScanGaps(routes ? importedCompanies : undefined);
   }
 
   await flushNow();
-  return { companiesMatched, companiesCreated, createdCompanies, errors, assetsUpserted, findingsRescored, autoScan };
+  return { companiesMatched, companiesCreated, createdCompanies, errors, assetsUpserted, findingsRescored, autoScan, ...(routes ? { skipped } : {}) };
 }
 
 // --- Background Tidal sync with pollable progress ---------------------------
@@ -6330,10 +6514,17 @@ export function startAutomateSync(): { started: boolean; error?: string } {
   return { started: true };
 }
 
-export function startCsSpotlightSync(companyId?: string): { started: boolean; error?: string } {
+async function resolveSpotlightSelection(companyId?: string): Promise<SpotlightTenantSelection> {
+  const routes = await loadReviewedSpotlightRoutes("crowdstrike");
+  const companies = [...store().companies.values()];
+  if (routes === null) return selectSpotlightTenant(falconConfigs(), companies, companyId);
+  const demos = demoCompanyIds(store());
+  return selectReviewedSpotlightTenant(falconConfigs(), companies.filter(c => !demos.has(c.id)), routes, companyId);
+}
+export async function startCsSpotlightSync(companyId?: string): Promise<{ started: boolean; error?: string }> {
   let selection: SpotlightTenantSelection;
   try {
-    selection = selectSpotlightTenant(falconConfigs(), [...store().companies.values()], companyId);
+    selection = await resolveSpotlightSelection(companyId);
   } catch (error) {
     return { started: false, error: error instanceof Error ? error.message : "CrowdStrike tenant selection failed." };
   }
@@ -6441,14 +6632,13 @@ export type IntuneImportResult = {
   autoScan?: AutoScanResult;
 };
 
-// Sync Intune managed devices as inventory assets. Devices belong to the
-// tenant — our own organization — so they attach to the internal company
-// (GMI), created if it doesn't exist yet. Honest linkage: Intune endpoints are
-// never attributed to an external client.
+// Reviewed mode pins the configured Intune tenant to an existing customer.
+// The internal-company fallback is retained only for legacy routing.
 export async function importFromIntune(): Promise<
   IntuneImportResult | { error: string }
 > {
-  if (!intuneConfig()) {
+  const config = intuneConfig();
+  if (!config) {
     return {
       error:
         "Intune is not configured. Set INTUNE_TENANT_ID, INTUNE_CLIENT_ID, and INTUNE_CLIENT_SECRET to sync managed devices.",
@@ -6456,8 +6646,12 @@ export async function importFromIntune(): Promise<
   }
   const s = store();
   try {
-    const devices = await intuneListAssets();
-    return await importEndpoints(s, devices, "intune");
+    const routes = await loadReviewedInventoryRoutes("intune");
+    if (routes && (routes.length !== 1 || routes[0].sourceScope !== config.tenantId.toLowerCase() ||
+        !s.companies.has(routes[0].companyId) || isDemoCompany(s.companies.get(routes[0].companyId)!)))
+      return { error: "Intune requires one activated route matching its tenant and an existing non-demo customer." };
+    const devices = await intuneListAssets(config);
+    return await importEndpoints(s, devices, "intune", undefined, routes?.[0].companyId);
   } catch (err) {
     return {
       error: err instanceof Error ? err.message : "Failed to reach Microsoft Graph.",
@@ -6470,6 +6664,7 @@ export type EndpointImportResult = {
   findingsRescored: number;
   company: string;
   autoScan?: AutoScanResult;
+  skipped?: number;
   // Per-tenant breakdown when more than one CrowdStrike tenant is configured
   // (an MSSP client with their own separate CID gets synced separately from
   // GMI's own devices). Absent/single-entry for the common one-tenant case.
@@ -6494,20 +6689,28 @@ async function importEndpoints(
   }[],
   source: AssetSource,
   customerName?: string,
+  reviewedCompanyId?: string,
 ): Promise<EndpointImportResult> {
   let internal: InternalCompany | undefined;
-  if (customerName) {
+  if (reviewedCompanyId) {
+    internal = s.companies.get(reviewedCompanyId);
+    if (!internal || isDemoCompany(internal)) throw new Error("The reviewed inventory customer is no longer available.");
+  } else if (customerName) {
     // Pin to a named client company; create it if first encounter.
-    internal = Array.from(s.companies.values()).find(
+    const matches = Array.from(s.companies.values()).filter(
       (c) => normalizeCompanyName(c.name) === normalizeCompanyName(customerName),
     );
+    if (matches.length > 1) throw new Error("Multiple platform companies match the endpoint customer; review customer mapping.");
+    internal = matches[0];
     if (!internal) {
       const created = createCompany({ name: customerName });
       if ("error" in created) throw new Error(created.error);
       internal = s.companies.get(created.id)!;
     }
   } else {
-    internal = Array.from(s.companies.values()).find((c) => c.kind === "internal");
+    const matches = Array.from(s.companies.values()).filter((c) => c.kind === "internal");
+    if (matches.length > 1) throw new Error("Multiple internal companies match the endpoint tenant; review customer mapping.");
+    internal = matches[0];
     if (!internal) {
       const created = createCompany({ name: "GMI", kind: "internal" });
       if ("error" in created) throw new Error(created.error);
@@ -6536,22 +6739,24 @@ async function importEndpoints(
     assetsUpserted += 1;
   }
 
-  const findingsRescored = await rescoreAllFindings(s, (f) => f.assetSource === source);
+  const companyIds = reviewedCompanyId ? new Set([reviewedCompanyId]) : undefined;
+  const findingsRescored = await rescoreAllFindings(s, (f) => f.assetSource === source, companyIds);
 
   let autoScan: AutoScanResult | undefined;
-  if (s.settings.autoScanNewAssets) autoScan = await autoScanGaps();
+  if (s.settings.autoScanNewAssets) autoScan = await autoScanGaps(companyIds);
 
   await flushNow();
   return { assetsUpserted, findingsRescored, company: internal.name, autoScan };
 }
 
 // Sync CrowdStrike Falcon host inventory (the scan/coverage perspective).
-// Set FALCON_CUSTOMER to pin devices to a specific client company; omit to
-// attach to the internal GMI org (default for own-estate deployments).
+// Legacy mode uses FALCON_CUSTOMER or the internal-company fallback. Reviewed
+// mode uses exact connection references, validated host CIDs and customer IDs.
 export async function importFromCrowdstrike(
   onProgress?: (fetched: number, total: number) => void,
 ): Promise<EndpointImportResult | { error: string }> {
-  const configs = falconConfigs();
+  const configured = falconConfigs();
+  let configs = configured;
   if (!configs.length) {
     return {
       error:
@@ -6559,6 +6764,16 @@ export async function importFromCrowdstrike(
     };
   }
   const s = store();
+  let routes: InventoryRoute[] | null;
+  try {
+    routes = await loadReviewedInventoryRoutes("crowdstrike");
+    if (routes) {
+      if (!routes.length || routes.some(r=>!s.companies.has(r.companyId) || isDemoCompany(s.companies.get(r.companyId)!) ||
+          configured.filter(c=>c.sourceRef===r.connectionRef).length!==1) || new Set(routes.map(r=>r.connectionRef)).size!==routes.length)
+        return {error:"CrowdStrike requires unambiguous approved connections to existing non-demo customers."};
+      configs = routes.map(r=>configured.find(c=>c.sourceRef===r.connectionRef)!);
+    }
+  } catch (err) { return {error:err instanceof Error ? err.message : "CrowdStrike inventory routing is unavailable."}; }
   const tenants: { label: string; company: string; assetsUpserted: number; error?: string }[] = [];
   let assetsUpserted = 0;
   let findingsRescored = 0;
@@ -6587,7 +6802,7 @@ export async function importFromCrowdstrike(
         const devices = await falconListAssets(config, (f, t) => {
           perTenant[i] = { fetched: f, total: t };
           reportCombined();
-        });
+        }, routes ? {expectedCid:routes.find(r=>r.connectionRef===config.sourceRef)!.sourceScope} : undefined);
         return { config, devices, error: null as string | null };
       } catch (err) {
         return {
@@ -6609,11 +6824,17 @@ export async function importFromCrowdstrike(
       });
       continue;
     }
-    const r = await importEndpoints(s, devices, "crowdstrike", config.customerName);
-    assetsUpserted += r.assetsUpserted;
-    findingsRescored += r.findingsRescored;
-    if (r.autoScan) autoScan = r.autoScan;
-    tenants.push({ label: config.label, company: r.company, assetsUpserted: r.assetsUpserted });
+    try {
+      const route = routes?.find(r=>r.connectionRef===config.sourceRef);
+      const r = await importEndpoints(s, devices, "crowdstrike", config.customerName, route?.companyId);
+      assetsUpserted += r.assetsUpserted;
+      findingsRescored += r.findingsRescored;
+      if (r.autoScan) autoScan = r.autoScan;
+      tenants.push({ label: config.label, company: r.company, assetsUpserted: r.assetsUpserted });
+    } catch (err) {
+      tenants.push({ label: config.label, company: config.customerName ?? "(internal)", assetsUpserted: 0,
+        error: err instanceof Error ? err.message : "Failed to import this tenant's device inventory." });
+    }
   }
   // Every tenant failed — surface as a top-level error rather than a silent
   // "0 assets synced" result.
@@ -6626,6 +6847,7 @@ export async function importFromCrowdstrike(
     company: tenants.map((t) => t.company).join(", "),
     autoScan,
     tenants: tenants.length > 1 ? tenants : undefined,
+    ...(routes ? {skipped:configured.length-configs.length} : {}),
   };
 }
 
@@ -6642,7 +6864,7 @@ export async function importFromCrowdstrikeSpotlight(
 ): Promise<SpotlightImportResult | { error: string }> {
   let selection: SpotlightTenantSelection;
   try {
-    selection = selected ?? selectSpotlightTenant(falconConfigs(), [...store().companies.values()]);
+    selection = await resolveSpotlightSelection(selected?.companyId);
   } catch (error) {
     return { error: error instanceof Error ? error.message : "CrowdStrike tenant selection failed." };
   }
@@ -6659,7 +6881,14 @@ export async function importFromCrowdstrikeSpotlight(
       resetPartition: resetPartitionCursor,
       nextIds: nextSpotlightHydrationIds,
       write: writeSpotlightHydrationBatch,
-      complete: completeResumableSpotlightRun,
+      complete: async (runId, tenantKey, scope) => {
+        if (scope) {
+          const current = await resolveSpotlightSelection(scope.companyId);
+          if (current.reviewedScope?.bindingKey !== scope.bindingKey)
+            throw new Error("Spotlight approval changed during import; completed results were not promoted.");
+        }
+        return completeResumableSpotlightRun(runId, tenantKey, scope);
+      },
       fail: failSpotlightRun,
       prune: pruneSpotlightRuns,
     }, (progress) => {
@@ -6704,7 +6933,7 @@ function repairDefenderPublicationMarkers(s: StoreShape): void {
     const scan = s.scans.get(`defender:${companyId}`);
     if (scan?.externalRef === runId && scan.findingsCount === (counts.get(companyId) ?? 0)) continue;
     delete generations[companyId];
-    markDirty();
+    markDirty({});
     console.error("[defender] Stored publication is incomplete; the completed import will be republished.");
   }
 }
@@ -6715,7 +6944,7 @@ export function invalidateDefenderPublication(companyId: string, runId: string):
   const s = store();
   if (s.meta.defenderGenerations?.[companyId] !== runId) return;
   delete s.meta.defenderGenerations[companyId];
-  markDirty();
+  markDirty({});
 }
 export function publishDefenderSnapshot(snapshot: DefenderSnapshot): void {
   if (persistenceBlocked()) throw new Error("Application storage is unavailable; Defender publication deferred.");
@@ -6760,6 +6989,7 @@ export type NessusImportResult = {
   scansImported: number;
   findingsImported: number;
   skipped: number;
+  errors?: string[];
 };
 
 // Import the scanner's folder structure as companies: each Nessus folder
@@ -6769,13 +6999,21 @@ export type NessusImportResult = {
 export async function importFromNessus(): Promise<
   NessusImportResult | { error: string }
 > {
-  if (!nessusConfig()) {
+  const config = nessusConfig();
+  if (!config) {
     return {
       error:
         "Nessus is not configured. Set NESSUS_URL, NESSUS_ACCESS_KEY, and NESSUS_SECRET_KEY to import.",
     };
   }
+  let routes: ScannerRoute[] | null;
+  try { routes = await loadReviewedScannerRoutes("nessus"); }
+  catch (error) { return { error: error instanceof Error ? error.message : "Nessus routing is unavailable." }; }
   const s = store();
+  if (s.meta.customerConsolidation && routes === null)
+    return { error: "Nessus requires reviewed numeric folder routes after customer consolidation." };
+  if (routes !== null && (!routes.length || routes.some(r => !s.companies.has(r.companyId) || demoCompanyIds(s).has(r.companyId))))
+    return { error: "Nessus requires reviewed folder routes to existing non-demo customers." };
 
   // One-time correction for the recurring-scan-import fix's first backfill
   // pass, which unconditionally trusted Nessus's current lastModified as
@@ -6783,7 +7021,7 @@ export async function importFromNessus(): Promise<
   // completed since a record's own completion. Clear every stamped value so
   // this sync re-evaluates each record against the corrected (completedAt-
   // compared) logic below instead of short-circuiting on the equality check.
-  if (!s.meta.nessusBackfillCorrected) {
+  if (routes === null && !s.meta.nessusBackfillCorrected) {
     for (const scan of s.scans.values()) {
       if (scan.connector === "nessus" && scan.vendor) {
         scan.vendor.nessusLastModified = null;
@@ -6795,7 +7033,7 @@ export async function importFromNessus(): Promise<
 
   let folders;
   try {
-    folders = await nessusListFolders();
+    folders = await nessusListFolders(routes === null ? undefined : config);
   } catch (err) {
     return {
       error: err instanceof Error ? err.message : "Failed to list Nessus folders.",
@@ -6807,15 +7045,34 @@ export async function importFromNessus(): Promise<
   // "My Scans" (type "main"), and the virtual "All Scans" view — since those
   // aren't clients.
   const BUILTIN_FOLDERS = new Set(["my scans", "all scans", "trash"]);
+  const reviewedLegacyFolders = new Map([["gmi scans", "CO-229336"], ["valor global scans", "CO-229438"]]);
   const folderToCompany = new Map<number, string>();
   let companiesCreated = 0;
   let companiesMatched = 0;
+  const errors: string[] = [];
   for (const folder of folders) {
+    if (routes !== null) {
+      const route = routes.find(r => r.sourceScope === String(folder.id));
+      if (!route) continue;
+      if (folder.type !== "custom") { errors.push("Approved Nessus folder is not a customer folder."); continue; }
+      const canonical = reviewedLegacyFolders.get(folder.name.trim().toLowerCase());
+      if (canonical && route.companyId !== canonical) { errors.push("Legacy Nessus folder needs its reviewed canonical customer route."); continue; }
+      folderToCompany.set(folder.id, route.companyId); companiesMatched++; continue;
+    }
     if (folder.type === "trash" || folder.type === "main") continue;
     if (BUILTIN_FOLDERS.has(folder.name.trim().toLowerCase())) continue;
-    const existing = Array.from(s.companies.values()).find(
+    if (reviewedLegacyFolders.has(folder.name.trim().toLowerCase())) {
+      errors.push("Legacy Nessus customer requires a reviewed folder route before import.");
+      continue;
+    }
+    const matches = Array.from(s.companies.values()).filter(
       (c) => normalizeCompanyName(c.name) === normalizeCompanyName(folder.name),
     );
+    if (matches.length > 1) {
+      errors.push(`${folder.name}: multiple platform companies match; review customer mapping.`);
+      continue;
+    }
+    const existing = matches[0];
     let companyId: string;
     if (existing) {
       companyId = existing.id;
@@ -6832,10 +7089,15 @@ export async function importFromNessus(): Promise<
 
   let scans: Awaited<ReturnType<typeof nessusListScans>>;
   try {
-    scans = await nessusListScans();
-  } catch {
-    scans = [];
-  }
+    scans = routes === null ? await nessusListScans() : [];
+    if (routes !== null) {
+      for (const route of routes) {
+        if (!folderToCompany.has(Number(route.sourceScope))) { errors.push("An approved Nessus folder was not found."); continue; }
+        try { scans.push(...await nessusListScans(config, Number(route.sourceScope))); }
+        catch { errors.push("An approved Nessus folder's scan roster could not be verified."); }
+      }
+    }
+  } catch { scans = []; }
 
   let scansImported = 0;
   let findingsImported = 0;
@@ -6849,10 +7111,25 @@ export async function importFromNessus(): Promise<
     // Nessus scans are recurring objects: the same id persists across every
     // scheduled run, only last_modification_date advances. Find any record
     // already linked to this scan id.
-    const existing = Array.from(s.scans.values()).find(
+    const existingScans = Array.from(s.scans.values()).filter(
       (sc) => sc.vendor?.nessusScanId === summary.id,
     );
-    if (existing) {
+    if (existingScans.some(sc => sc.companyId !== companyId)) {
+      errors.push(`${summary.name}: existing scan belongs to a different company; review its folder mapping.`);
+      skipped += 1;
+      continue;
+    }
+    // Reviewed imports follow the most recently observed run. The scan ID is
+    // reused by Nessus, so choosing the oldest local record would reimport a
+    // newer completed run on every sync.
+    const existing = routes === null ? existingScans[0] : existingScans.sort((a, b) =>
+      (b.vendor?.nessusLastModified ?? 0) - (a.vendor?.nessusLastModified ?? 0))[0];
+    if (routes !== null && existing?.vendor && !existing.vendor.imported && summary.status !== "completed") {
+      // The existing pending record is handled by polling; do not duplicate it.
+      skipped++;
+      continue;
+    }
+    if (existing && (routes === null || existing.vendor?.imported)) {
       // Older records (imported before this field existed, or created by the
       // live Start-Scan flow which doesn't set it) have no stamped
       // lastModified yet. Don't just trust Nessus's current value as "already
@@ -6881,6 +7158,15 @@ export async function importFromNessus(): Promise<
       // Otherwise: this scan has completed a new scheduled run since we last
       // imported it. Fall through and import it as a fresh scan record.
     }
+    let prepared: NessusImportFindingsResult | undefined;
+    if (routes !== null) {
+      if (!Object.prototype.hasOwnProperty.call(NESSUS_STATUS_MAP, summary.status)) { errors.push("Nessus returned an unrecognized scan state."); skipped++; continue; }
+      if (summary.status === "completed") {
+        try { prepared = await collectNessusFindings(companyId, summary.id, summary.lastModified); }
+        catch (error) { errors.push(error instanceof Error ? error.message : "Reviewed Nessus result was withheld."); skipped++; continue; }
+      }
+      if (!s.companies.has(companyId) || demoCompanyIds(s).has(companyId)) { errors.push("Nessus destination changed during import."); skipped++; continue; }
+    }
     const company = s.companies.get(companyId)!;
     const folder = ensureFolder(s, companyId, "Nessus");
     const status = NESSUS_STATUS_MAP[summary.status] ?? "Completed";
@@ -6891,6 +7177,24 @@ export async function importFromNessus(): Promise<
           ? new Date(summary.lastModified * 1000).toISOString()
           : nowIso
         : null;
+    if (prepared && existing?.vendor && !existing.vendor.imported) {
+      // A pending or previously failed run keeps its local identity when its
+      // completed result has passed the current ownership checks.
+      existing.completedAt = completedAt;
+      try {
+        await importVendorFindings(s, existing, prepared);
+        existing.status = "Completed";
+        existing.progressFrozenAt = 100;
+        existing.vendor.imported = true;
+        existing.vendor.nessusLastModified = summary.lastModified;
+        existing.error = undefined;
+        findingsImported += existing.findingsCount;
+      } catch (error) {
+        errors.push(error instanceof Error ? error.message : "Nessus result could not be applied.");
+      }
+      markDirty();
+      continue;
+    }
     const id = nextId(s, "SCAN");
     const scan: InternalScan = {
       id,
@@ -6924,10 +7228,11 @@ export async function importFromNessus(): Promise<
     scansImported += 1;
     if (status === "Completed") {
       try {
-        await importVendorFindings(s, scan);
+        await importVendorFindings(s, scan, prepared);
         scan.vendor!.imported = true;
         findingsImported += scan.findingsCount;
-      } catch {
+      } catch (error) {
+        if (routes !== null) errors.push(error instanceof Error ? error.message : "Nessus result could not be applied.");
         // leave imported=false so a later poll retries the findings import
       }
     }
@@ -6940,6 +7245,7 @@ export async function importFromNessus(): Promise<
     scansImported,
     findingsImported,
     skipped,
+    errors,
   };
 }
 
@@ -6985,6 +7291,37 @@ export async function getScan(id: string): Promise<Scan | undefined> {
   return scan ? toPublic(scan, Date.now()) : undefined;
 }
 
+type ActiveScannerProvider = "zap" | "vulners";
+type ReviewedActiveScanner = { provider: ActiveScannerProvider; route: ScannerRoute; config: { baseUrl: string; apiKey: string } };
+function activeScannerConfig(provider: ActiveScannerProvider) {
+  return provider === "zap" ? zapConfig() : vulnersBridgeConfig();
+}
+function activeTargetKey(provider: ActiveScannerProvider, target: string) {
+  return provider === "zap" ? scannerWebOrigin(target, true) : scannerExactTargetKey(target);
+}
+async function reviewedActiveRoutes(provider: ActiveScannerProvider) {
+  const routes = await loadReviewedScannerRoutes(provider);
+  if (routes !== null && (!routes.length || routes.some(route => route.provider !== provider ||
+      !store().companies.has(route.companyId) || demoCompanyIds(store()).has(route.companyId))))
+    throw new Error("Active scanner requires reviewed routes to existing non-demo customers.");
+  return routes;
+}
+function activeScannerContext(provider: ActiveScannerProvider, routes: ScannerRoute[] | null, companyId?: string, targets?: string[]): ReviewedActiveScanner | null {
+  if (routes === null) return null;
+  const matches = routes.filter(route => route.companyId === companyId), config = activeScannerConfig(provider);
+  if (matches.length !== 1 || !config) throw new Error("Customer has no unique approved active scanner connection.");
+  const route = matches[0], approved = new Set(route.targets.map(target => activeTargetKey(provider, target)));
+  if (targets?.some(target => !approved.has(activeTargetKey(provider, target))))
+    throw new Error("Requested scanner target is outside the customer's approved scope.");
+  return { provider, route, config };
+}
+async function recheckActiveScanner(context: ReviewedActiveScanner | null) {
+  if (!context) return;
+  const current = activeScannerContext(context.provider, await reviewedActiveRoutes(context.provider), context.route.companyId);
+  if (!current || JSON.stringify(current) !== JSON.stringify(context))
+    throw new Error("Active scanner approval or connection changed; results were withheld.");
+}
+
 // Launches a Vulners Bridge job for one target and polls it to completion,
 // returning the imported-ready findings. Throws on failure or on exhausting
 // maxPolls (still "running"/"queued") — callers decide whether to skip the
@@ -6994,19 +7331,30 @@ async function runBridgeScanToCompletion(
   scanName: string | undefined,
   maxPolls: number,
   pollMs = 10_000,
+  context: ReviewedActiveScanner | null = null,
 ): Promise<VulnersBridgeFinding[]> {
-  const job = await vulnersBridgeStartScan(target, scanName);
+  await recheckActiveScanner(context);
+  const scope = context ? { config: context.config, target, verify: () => recheckActiveScanner(context) } : undefined;
+  const job = await vulnersBridgeStartScan(target, scanName, scope);
   let terminal = job.status;
   for (let i = 0; i < maxPolls && (terminal === "queued" || terminal === "running"); i++) {
     await new Promise((r) => setTimeout(r, pollMs));
-    const polled = await vulnersBridgeJobStatus(job.jobId);
+    await recheckActiveScanner(context);
+    const polled = await vulnersBridgeJobStatus(job.jobId, scope);
     terminal = polled.status;
     if (terminal === "failed") throw new Error(polled.error ?? "Bridge scan failed.");
   }
   if (terminal !== "complete") {
     throw new Error(`Bridge scan timed out waiting for completion (status: ${terminal}).`);
   }
-  return vulnersBridgeJobFindings(job.jobId, target);
+  await recheckActiveScanner(context);
+  if (scope && (await vulnersBridgeJobStatus(job.jobId, scope)).status !== "complete")
+    throw new Error("Bridge job is not confirmed complete.");
+  const findings = await vulnersBridgeJobFindings(job.jobId, target, scope);
+  if (scope && (await vulnersBridgeJobStatus(job.jobId, scope)).status !== "complete")
+    throw new Error("Bridge job changed during collection.");
+  await recheckActiveScanner(context);
+  return findings;
 }
 
 // Runs Vulners Bridge scans per target asynchronously after startScan() returns.
@@ -7015,6 +7363,7 @@ async function runVulnersBridgeScanAsync(
   scanId: string,
   targets: string[],
   companyId: string,
+  context: ReviewedActiveScanner | null = null,
 ): Promise<void> {
   const s = store();
   const scan = s.scans.get(scanId);
@@ -7024,6 +7373,7 @@ async function runVulnersBridgeScanAsync(
   const company = s.companies.get(companyId);
   const companyName = company?.name ?? scan.companyName;
 
+  let completedTargets = 0, failedTargets = 0;
   try {
     for (const target of targets) {
       let results: VulnersBridgeFinding[];
@@ -7048,7 +7398,9 @@ async function runVulnersBridgeScanAsync(
         //
         // Analyst-launched, small target list — server's own job timeout is
         // 1 hour, so poll comfortably past that (420 * 10s = 70 min).
-        results = await runBridgeScanToCompletion(target, `[${scanId}] ${target} ${scan.name}`, 420);
+        if (s.scans.get(scanId) !== scan || scan.status !== "Running") throw new Error("Local bridge scan changed.");
+        results = await runBridgeScanToCompletion(target, `[${scanId}] ${target} ${scan.name}`, 420, 10_000, context);
+        if (s.scans.get(scanId) !== scan || scan.status !== "Running") throw new Error("Local bridge scan changed.");
       } catch (err) {
         // Deliberately still skip-and-continue (one bad target shouldn't
         // abort the whole scan) but LOG it — a bare `catch { continue }`
@@ -7056,8 +7408,10 @@ async function runVulnersBridgeScanAsync(
         // indistinguishable from "this host is just clean," discoverable
         // only via manual curl against the bridge directly.
         console.error(`[vulners-bridge] scan ${scanId} target ${target} failed:`, err);
+        failedTargets++;
         continue;
       }
+      completedTargets++;
       for (const v of results) {
         const existing = Array.from(s.findings.values()).find(
           (f) =>
@@ -7118,7 +7472,9 @@ async function runVulnersBridgeScanAsync(
       // among this round's results is stale (the CVE it flagged is gone).
       const currentCves = new Set(results.map((v) => v.cve));
       let closedHere = 0;
-      for (const f of s.findings.values()) {
+      // Reviewed bridge completeness is not yet attested by the deployed API.
+      // Preserve prior findings until that source contract is verified.
+      for (const f of context ? [] : s.findings.values()) {
         if (
           f.companyId === companyId &&
           f.connector === "vulners" &&
@@ -7142,23 +7498,24 @@ async function runVulnersBridgeScanAsync(
       current.progressFrozenAt = 0;
       if (current.bridgeScan) current.bridgeScan.done = true;
     }
-    void flushNow();
+    void flushNow().catch(error => console.error("[platform] background save failed:", error));
     return;
   }
 
   const current = s.scans.get(scanId);
-  if (!current || !current.bridgeScan) return;
+  if (!current || current !== scan || !current.bridgeScan) return;
   const all = Array.from(s.findings.values()).filter((f) => f.scanId === scanId);
   current.findingsCount = all.length;
   const counts = emptySeverityCounts();
   for (const f of all) counts[f.severity] = (counts[f.severity] ?? 0) + 1;
   current.severityCounts = counts;
-  current.hostsScanned = new Set(all.map((f) => f.asset)).size || targets.length;
-  current.status = "Completed";
+  current.hostsScanned = completedTargets;
+  current.status = failedTargets ? "Failed" : "Completed";
+  if (failedTargets) current.error = `${failedTargets} of ${targets.length} targets failed or were withheld; ${completedTargets} completed. Inspect remote jobs before retrying.`;
   current.completedAt = new Date().toISOString();
-  current.progressFrozenAt = 100;
+  current.progressFrozenAt = failedTargets ? Math.round(completedTargets / targets.length * 100) : 100;
   current.bridgeScan.done = true;
-  void flushNow();
+  void flushNow().catch(error => console.error("[platform] background save failed:", error));
 }
 
 function zapTargetPort(target: string): string {
@@ -7178,6 +7535,7 @@ async function runZapScanAsync(
   scanId: string,
   targets: string[],
   companyId: string,
+  context: ReviewedActiveScanner | null = null,
 ): Promise<void> {
   const s = store();
   const scan = s.scans.get(scanId);
@@ -7187,54 +7545,50 @@ async function runZapScanAsync(
   const company = s.companies.get(companyId);
   const companyName = company?.name ?? scan.companyName;
 
+  let completedTargets = 0, failedTargets = 0;
   try {
     for (const target of targets) {
       try {
         const current = s.scans.get(scanId);
-        if (!current || !current.zapScan) break; // scan was removed mid-flight
-
+        if (current !== scan || !current.zapScan || current.status !== "Running") throw new Error("Local ZAP scan changed.");
+        await recheckActiveScanner(context);
+        const scope: ZapScope | undefined = context ? await zapCreateScope(context.config, target) : undefined;
+        await recheckActiveScanner(context);
         current.zapScan.phase = "spidering";
         current.progressFrozenAt = 5;
-        const spiderScanId = await zapStartSpider(target);
+        const spiderScanId = await zapStartSpider(target, scope);
         current.zapScan.spiderScanId = spiderScanId;
-
+        let crawled = false;
         for (let i = 0; i < 60; i++) {
-          const progress = await zapSpiderStatus(spiderScanId);
-          current.progressFrozenAt = 5 + Math.round((progress / 100) * 35); // 5..40
-          if (progress >= 100) break;
+          await recheckActiveScanner(context);
+          const progress = await zapSpiderStatus(spiderScanId, scope?.config);
+          current.progressFrozenAt = 5 + Math.round((progress / 100) * 35);
+          if (progress === 100) { crawled = true; break; }
           await new Promise((r) => setTimeout(r, 5000));
         }
-
+        if (!crawled) throw new Error("ZAP crawl timed out; remote scan may still be running.");
+        await recheckActiveScanner(context);
         current.zapScan.phase = "scanning";
         current.progressFrozenAt = 40;
-        const activeScanId = await zapStartActiveScan(target);
+        const activeScanId = await zapStartActiveScan(target, scope);
         current.zapScan.activeScanId = activeScanId;
-
+        let scanned = false;
         for (let i = 0; i < 120; i++) {
-          const progress = await zapActiveScanStatus(activeScanId);
-          current.progressFrozenAt = 40 + Math.round((progress / 100) * 55); // 40..95
-          if (progress >= 100) break;
+          await recheckActiveScanner(context);
+          const progress = await zapActiveScanStatus(activeScanId, scope?.config);
+          current.progressFrozenAt = 40 + Math.round((progress / 100) * 55);
+          if (progress === 100) { scanned = true; break; }
           await new Promise((r) => setTimeout(r, 5000));
         }
+        if (!scanned) throw new Error("ZAP active scan timed out; remote scan may still be running.");
         current.progressFrozenAt = 95;
-
-        let report: ZapFinding[];
-        try {
-          report = await zapFetchReport();
-        } catch {
-          continue; // skip unreachable report; don't abort the whole scan
-        }
-        // The report covers every site ZAP currently holds — keep only the
-        // one matching this target (tolerate a trailing-slash mismatch).
-        const targetNorm = target.replace(/\/+$/, "").toLowerCase();
-        const siteFindings = report.filter((f) => {
-          const assetNorm = f.asset.replace(/\/+$/, "").toLowerCase();
-          return (
-            assetNorm === targetNorm ||
-            assetNorm.startsWith(targetNorm) ||
-            targetNorm.startsWith(assetNorm)
-          );
-        });
+        const report = await zapFetchReport(scope);
+        const siteFindings = report.filter(v => scannerWebOrigin(v.asset) === scannerWebOrigin(target));
+        await recheckActiveScanner(context);
+        if (s.scans.get(scanId) !== scan || scan.status !== "Running") throw new Error("Local ZAP scan changed.");
+        if (scope) await zapRemoveScope(scope);
+        await recheckActiveScanner(context);
+        completedTargets++;
 
         for (const v of siteFindings) {
           const existing = Array.from(s.findings.values()).find(
@@ -7285,8 +7639,10 @@ async function runZapScanAsync(
           rescoreFinding(s, f);
           s.findings.set(fid, f);
         }
-      } catch {
-        continue; // skip a failing target; don't abort the whole scan
+      } catch (error) {
+        console.error(`[zap] scan ${scanId} target failed:`, error);
+        failedTargets++;
+        continue;
       }
     }
   } catch (err) {
@@ -7298,23 +7654,24 @@ async function runZapScanAsync(
       current.progressFrozenAt = 0;
       if (current.zapScan) current.zapScan.phase = "done";
     }
-    void flushNow();
+    void flushNow().catch(error => console.error("[platform] background save failed:", error));
     return;
   }
 
   const current = s.scans.get(scanId);
-  if (!current || !current.zapScan) return;
+  if (!current || current !== scan || !current.zapScan) return;
   const all = Array.from(s.findings.values()).filter((f) => f.scanId === scanId);
   current.findingsCount = all.length;
   const counts = emptySeverityCounts();
   for (const f of all) counts[f.severity] = (counts[f.severity] ?? 0) + 1;
   current.severityCounts = counts;
-  current.hostsScanned = new Set(all.map((f) => f.asset)).size || targets.length;
-  current.status = "Completed";
+  current.hostsScanned = completedTargets;
+  current.status = failedTargets ? "Failed" : "Completed";
+  if (failedTargets) current.error = `${failedTargets} of ${targets.length} targets failed or were withheld; ${completedTargets} completed. Inspect remote jobs before retrying.`;
   current.completedAt = new Date().toISOString();
-  current.progressFrozenAt = 100;
+  current.progressFrozenAt = failedTargets ? Math.round(completedTargets / targets.length * 100) : 100;
   current.zapScan.phase = "done";
-  void flushNow();
+  void flushNow().catch(error => console.error("[platform] background save failed:", error));
 }
 
 export async function startScan(input: {
@@ -7334,6 +7691,16 @@ export async function startScan(input: {
   if (!input.targets.length) {
     return { error: "At least one target is required." };
   }
+  let nessusContext: ReviewedNessus | null = null;
+  if (input.connector === "nessus") {
+    try { nessusContext = await reviewedNessusContext(input.companyId, input.targets); }
+    catch (error) { return { error: error instanceof Error ? error.message : "Nessus scope is unavailable." }; }
+  }
+  let activeContext: ReviewedActiveScanner | null = null;
+  if (input.connector === "zap" || input.connector === "vulners") {
+    try { activeContext = activeScannerContext(input.connector, await reviewedActiveRoutes(input.connector), input.companyId, input.targets); }
+    catch (error) { return { error: error instanceof Error ? error.message : "Active scanner scope is unavailable." }; }
+  }
   const { company, folder } = resolveScanLocation(s, input);
 
   const name = input.name || `${input.connector} scan`;
@@ -7343,7 +7710,7 @@ export async function startScan(input: {
 
   if (input.connector === "nessus" && nessusConfig()) {
     try {
-      const launched = await nessusLaunchScan(name, input.targets, input.profile);
+      const launched = await nessusLaunchScan(name, input.targets, input.profile, nessusContext ?? undefined);
       vendor = { nessusScanId: launched.nessusScanId, lastPoll: 0, imported: false };
     } catch (err) {
       return {
@@ -7392,10 +7759,10 @@ export async function startScan(input: {
   s.scans.set(id, scan);
 
   if (isBridgeScan) {
-    void runVulnersBridgeScanAsync(id, input.targets, company.id);
+    void runVulnersBridgeScanAsync(id, [...input.targets], company.id, activeContext);
   }
   if (isZapScan) {
-    void runZapScanAsync(id, input.targets, company.id);
+    void runZapScanAsync(id, [...input.targets], company.id, activeContext);
   }
 
   return toPublic(scan, Date.now());
@@ -7411,11 +7778,22 @@ export async function scanAction(
   if (!scan) return { error: "Scan not found." };
   const now = Date.now();
 
+  if (scan.bridgeScan || scan.zapScan) {
+    if (["pause", "resume", "stop"].includes(action))
+      return { error: "Remote scanner controls are not available here. Use the scanner console; local status alone cannot stop a remote job." };
+    if ((action === "delete" || action === "rescan") && ["Running", "Queued", "Paused"].includes(scan.status))
+      return { error: "This remote scan is still active. Inspect the scanner before retrying or deleting it." };
+    if (action === "rescan") return startScan({ name: scan.name, connector: scan.connector, profile: scan.profile,
+      targets: [...scan.targets], companyId: scan.companyId, folderId: scan.folderId, requestedBy: scan.requestedBy });
+  }
+
   // Vendor-backed scans forward lifecycle controls to the scanner; local
   // state converges on the next poll.
   if (scan.vendor && (action === "pause" || action === "resume" || action === "stop")) {
     try {
-      await nessusScanControl(scan.vendor.nessusScanId, action);
+      const context = await reviewedNessusContext(scan.companyId);
+      if (context) await reviewedNessusScan(context, scan.vendor.nessusScanId);
+      await nessusScanControl(scan.vendor.nessusScanId, action, context?.config);
       scan.status =
         action === "pause" ? "Paused" : action === "resume" ? "Running" : "Stopped";
       if (action === "stop") scan.completedAt = new Date(now).toISOString();
@@ -7429,7 +7807,8 @@ export async function scanAction(
   }
   if (scan.vendor && action === "rescan") {
     try {
-      const launched = await nessusLaunchScan(scan.name, scan.targets, scan.profile);
+      const context = await reviewedNessusContext(scan.companyId, scan.targets);
+      const launched = await nessusLaunchScan(scan.name, scan.targets, scan.profile, context ?? undefined);
       scan.vendor = { nessusScanId: launched.nessusScanId, lastPoll: 0, imported: false };
       scan.status = "Queued";
       scan.startedAt = new Date(now).toISOString();
@@ -7578,7 +7957,7 @@ export function updateFinding(
         : null;
   }
   if (patch.assignee !== undefined) finding.assignee = patch.assignee || null;
-  markDirty();
+  markDirty({ findings: [id] });
   return finding;
 }
 

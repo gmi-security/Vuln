@@ -1,3 +1,4 @@
+import { withDurablePlatformMutation } from "@/lib/platform-mutation-route";
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
@@ -14,7 +15,7 @@ export async function GET(request: Request) {
   return NextResponse.json({ controls: listCompensatingControls(companyId) });
 }
 
-export async function POST(request: Request) {
+async function POSTHandler(request: Request) {
   await ensureHydrated();
   let body: {
     companyId?: string;
@@ -59,3 +60,5 @@ export async function POST(request: Request) {
   }
   return NextResponse.json({ control: result }, { status: 201 });
 }
+
+export const POST = withDurablePlatformMutation(POSTHandler);

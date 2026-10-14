@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { DashboardError } from "./elastic-dashboard";
 import { patchTicketDatabase, savedConnection } from "./patch-ticket-store";
-import { verifyAgainstCrowdStrike } from "./elastic-dashboard-store";
+import { verifyAgainstCrowdStrike, assertPatchRequestScope } from "./elastic-dashboard-store";
 import { customerFalconTenantIds } from "./reporting-tenant-scope";
 import { atlasFalconReviewPacket } from "./reporting-direct-sources";
+import { requiresConsolidationManualReview } from "./customer-consolidation-hold";
 import type { PatchConsolidation, PatchGroup } from "./patch-request";
 import { automatedGroupTicketBody, type PatchGroupTicketSummary } from "./patch-group-ticket-types";
 import { cwId, cwRequest, findCWRequest, CWRequestError, parseRouting, ticketUrl, uploadPatchCsv, validateCWRouting, type ConnectWiseConnection, type CWRecord, type TicketRouting } from "./connectwise-client";
@@ -54,16 +55,20 @@ export async function persistPreparedGroups(consolidation: PatchConsolidation, a
         // pending draft's risk picture stays current and group-auto-create's
         // gate isn't evaluating stale numbers from whenever this row first
         // got inserted.
-        await client.query(`UPDATE patch_group_ticket_requests SET worst_severity=$2,max_risk=$3,updated_at=now() WHERE id=$1`,
-          [existing.id, group.worstSeverity, group.maxRisk]);
+        await client.query(`UPDATE patch_group_ticket_requests SET worst_severity=$2,max_risk=$3,
+          packet=CASE WHEN $4::boolean THEN jsonb_set(packet,'{manualOnly}','true'::jsonb,true) ELSE packet END,
+          updated_at=now() WHERE id=$1`,
+          [existing.id, group.worstSeverity, group.maxRisk, requiresConsolidationManualReview(group.appCompanyId)]);
         ids[index] = existing.id; continue;
       }
       // An analyst's explicit customer selection at build time always wins.
       // Only fall back to the legacy Atlas tenant-CID allowlist for groups
       // built with no customer selected (e.g. an org-wide, unscoped query).
-      const packet = group.appCompanyId
+      const selectedPacket = group.appCompanyId
         ? group
         : atlasFalconReviewPacket(group, customerFalconTenantIds("CO-147284", process.env.ATLAS_CROWDSTRIKE_TENANT_IDS));
+      const packet = requiresConsolidationManualReview(selectedPacket.appCompanyId)
+        ? { ...selectedPacket, manualOnly: true } : selectedPacket;
       await client.query(`INSERT INTO patch_group_ticket_requests(id,cves,remediation_id,tenant_id,prepared_by,prepared_at,crowdstrike_revision,packet,host_count,finding_count,scope_hash,worst_severity,max_risk)
         VALUES($1,$2::jsonb,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13) ON CONFLICT(id) DO NOTHING`,
         [id, JSON.stringify(group.cves), group.remediationId, group.tenantId, actor, consolidation.collectedAt, revision,
@@ -166,7 +171,10 @@ export async function createGroupTicket(id: string, value: unknown, actor: strin
   requestId(id); const body = value as CWRecord;
   const routing = parseRouting(body?.routing);
   if (typeof body.title !== "string" || !body.title.trim() || body.title.length > 100 || typeof body.body !== "string" || !body.body.trim() || body.body.length > 200000) throw new DashboardError("Provide a ticket title of at most 100 characters and ticket contents of at most 200,000 characters.");
-  const saved = await savedConnection(), db = await patchTicketDatabase(), client = await db.connect();
+  const saved = await savedConnection(), db = await patchTicketDatabase();
+  const preflight = (await db.query("SELECT packet,crowdstrike_revision,state FROM patch_group_ticket_requests WHERE id=$1", [id])).rows[0];
+  if (preflight && !["creating", "uncertain", "created"].includes(preflight.state)) await assertPatchRequestScope(preflight.packet, preflight.crowdstrike_revision);
+  const client = await db.connect();
   let start = false;
   try {
     await client.query("BEGIN"); await client.query("SELECT pg_advisory_xact_lock(804206)");
@@ -175,14 +183,18 @@ export async function createGroupTicket(id: string, value: unknown, actor: strin
     if (["creating", "uncertain", "created"].includes(row.state)) { await client.query("COMMIT"); return readGroupTicket(id); }
     if (row.review_state !== "approved") throw new DashboardError("Approve this consolidation in the review queue before sending a ticket.", 409);
     const packet = row.packet as PatchGroup;
+    if(packet.manualOnly && actor === "auto-create") throw new DashboardError("This draft requires explicit manual sending.",409);
     if (packet.source !== "stored-findings") {
       const cs = (await client.query("SELECT revision FROM dashboard_source_connections WHERE source='crowdstrike' FOR SHARE")).rows[0];
       if (cs?.revision !== row.crowdstrike_revision) throw new DashboardError("CrowdStrike connection changed. Prepare a fresh consolidation before sending.", 409);
     }
     const cw = (await client.query("SELECT revision FROM patch_connectwise_connection WHERE id=1 FOR SHARE")).rows[0];
     if (cw?.revision !== saved.revision || body.connectionRevision !== saved.revision) throw new DashboardError("ConnectWise connection changed. Reload its options before sending.", 409);
-    const existing = (await client.query(`SELECT id,ticket_id FROM patch_group_ticket_requests WHERE cw_target=$1 AND remediation_id=$2 AND tenant_id=$3 AND company_id=$4 AND scope_hash=$5
-      AND state IN ('creating','uncertain','created') AND closed=false AND id<>$6 LIMIT 1`, [saved.target, row.remediation_id, row.tenant_id, routing.companyId, row.scope_hash, id])).rows[0];
+    // Manual drafts use a separate review identity so background draft cleanup
+    // cannot supersede them, but the same patch/scope must still deduplicate at send.
+    const baseRemediation = packet.manualOnly ? row.remediation_id.replace(/^manual:/, "") : row.remediation_id;
+    const existing = (await client.query(`SELECT id,ticket_id FROM patch_group_ticket_requests WHERE cw_target=$1 AND remediation_id=ANY($2::text[]) AND tenant_id=$3 AND company_id=$4 AND scope_hash=$5
+      AND state IN ('creating','uncertain','created') AND closed=false AND id<>$6 LIMIT 1`, [saved.target, [baseRemediation, `manual:${baseRemediation}`], row.tenant_id, routing.companyId, row.scope_hash, id])).rows[0];
     if (existing) throw new DashboardError(`This patch and device scope already has ${existing.ticket_id ? `ticket #${existing.ticket_id}` : "a ticket request in progress"}. Open its saved request below.`, 409);
     await client.query(`UPDATE patch_group_ticket_requests SET state='creating',created_by=$2,cw_target=$3,cw_revision=$4,company_id=$5,routing=$6::jsonb,title=$7,body=$8,
       started_at=now(),updated_at=now(),last_error=NULL WHERE id=$1`, [id, actor, saved.target, saved.revision, routing.companyId, JSON.stringify(routing), body.title.trim(), body.body.trim()]);
@@ -209,6 +221,7 @@ async function runCreation(id: string) {
     await db.query("UPDATE patch_group_ticket_requests SET labels=$2::jsonb,updated_at=now() WHERE id=$1", [id, JSON.stringify(labels)]);
     const current = await savedConnection();
     if (current.revision !== saved.revision) throw new DashboardError("ConnectWise connection changed before sending. Review and submit again.");
+    await assertPatchRequestScope(row.packet, row.crowdstrike_revision);
     writeStarted = true;
     const ticket = await cwRequest(saved.value, "/service/tickets", "POST", { summary: row.title, initialDescription: row.body, recordType: "ServiceTicket",
       board: { id: row.routing.boardId }, company: { id: row.routing.companyId },
@@ -265,7 +278,7 @@ export async function verifyGroupTicketFix(id: string, actor: string, revision: 
   const packet = row.packet as PatchGroup;
   if (packet.source === "stored-findings") throw new DashboardError("Use the source scanner to verify this customer's findings. CrowdStrike verification applies only to Falcon patch groups.", 409);
   if (!packet.hostScope?.length) throw new DashboardError("This saved plan has no device scope to verify. Prepare a fresh consolidation.");
-  const result = await verifyAgainstCrowdStrike(packet.cves, packet.hostScope, row.tenant_id, revision);
+  const result = await verifyAgainstCrowdStrike(packet.cves, packet.hostScope, row.tenant_id, revision, packet);
   const verifiedState = result.stillOpenHosts.length === 0 ? "verified" : "still_open";
   await db.query("UPDATE patch_group_ticket_requests SET fix_verified_at=$2,fix_verified_state=$3,fix_still_open_count=$4,updated_at=now() WHERE id=$1",
     [id, result.checkedAt, verifiedState, result.stillOpenHosts.length]);

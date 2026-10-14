@@ -1,3 +1,4 @@
+import { withDurablePlatformMutation } from "@/lib/platform-mutation-route";
 import { NextResponse } from "next/server";
 import { enrichThreatIntel, ensureHydrated } from "@/lib/store";
 
@@ -7,7 +8,7 @@ export const maxDuration = 300;
 // Session-gated (via the edge proxy): refresh CISA KEV + live EPSS and re-score
 // every finding. Triggered by the "Refresh threat intel" button. No admin
 // token — a logged-in user runs it on demand.
-export async function POST() {
+async function POSTHandler() {
   try {
     await ensureHydrated();
     const result = await enrichThreatIntel();
@@ -20,3 +21,5 @@ export async function POST() {
     );
   }
 }
+
+export const POST = withDurablePlatformMutation(POSTHandler);

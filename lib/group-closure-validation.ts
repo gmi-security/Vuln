@@ -136,7 +136,7 @@ async function runValidation(saved: Awaited<ReturnType<typeof savedConnection>>,
     const packet = row.packet;
     if (packet.source === "stored-findings" || !packet.hostScope?.length || !row.routing?.boardId) return; // no CrowdStrike scope, or no board, to act on
     try {
-      const result = await verifyAgainstCrowdStrike(packet.cves, packet.hostScope, row.tenant_id, crowdstrikeRevision);
+      const result = await verifyAgainstCrowdStrike(packet.cves, packet.hostScope, row.tenant_id, crowdstrikeRevision, packet);
       if (result.stillOpenHosts.length === 0) {
         await recordVerification(row.id, result, "verified");
         confirmedFixed++;

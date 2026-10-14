@@ -1,10 +1,11 @@
+import { withDurablePlatformMutation } from "@/lib/platform-mutation-route";
 import { NextResponse } from "next/server";
 import { ensureHydrated, startCsSpotlightSync, getCsSpotlightSyncStatus,
   getCsSpotlightSyncStatusDurable } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
-export async function POST(request: Request) {
+async function POSTHandler(request: Request) {
   await ensureHydrated();
   let companyId: string | undefined;
   const raw = await request.text();
@@ -19,7 +20,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
     }
   }
-  const launch = startCsSpotlightSync(companyId);
+  const launch = await startCsSpotlightSync(companyId);
   if (!launch.started && launch.error) {
     return NextResponse.json({ error: launch.error }, { status: 400 });
   }
@@ -29,3 +30,5 @@ export async function POST(request: Request) {
 export async function GET() {
   return NextResponse.json({ status: await getCsSpotlightSyncStatusDurable() });
 }
+
+export const POST = withDurablePlatformMutation(POSTHandler);

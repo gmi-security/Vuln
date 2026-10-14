@@ -358,3 +358,29 @@ test("Spotlight rejects a missing continuation cursor when the API total says mo
     await assert.rejects(() => spotlightListFindings(atlas), /pagination incomplete/i);
   });
 });
+
+
+test("reviewed Spotlight rejects foreign/missing CID and success responses containing errors", async () => {
+  for (const payload of [
+    {resources:[{id:'one',cid:'b'.repeat(32)}]}, {resources:[{id:'one'}]},
+    {resources:[{id:'one',cid:'a'.repeat(32),unresolved:true}]},
+    {resources:[],errors:[{code:403,message:'partial failure'}]}, {resources:[],errors:'invalid'},
+  ]) await withFetch(url=>url.includes('/oauth2/token')?json({access_token:'tok'}):json(payload),async()=>{
+    const session=await createSpotlightSession(atlas,{expectedCid:'a'.repeat(32)});
+    await assert.rejects(()=>session.hydrateIds(['one']),/CID|errors/);
+  });
+});
+test("reviewed Spotlight permits only adapter-created unresolved placeholders and verifies real records", async () => {
+  await withFetch(url=>url.includes('/oauth2/token')?json({access_token:'tok'}):json({resources:[{id:'one',cid:'A'.repeat(32),cve:{id:'CVE-2026-1234'}}]}),async()=>{
+    const session=await createSpotlightSession(atlas,{expectedCid:'a'.repeat(32)}),rows=await session.hydrateIds(['one','two']);
+    assert.equal(rows[0].raw.cid,'A'.repeat(32));assert.equal(rows[1].status,'closed');assert.deepEqual(rows[1].raw,{id:'two',unresolved:true});
+  });
+  await withFetch(()=>{throw Error('Must reject before authentication');},async()=>{
+    await assert.rejects(()=>createSpotlightSession(atlas,{expectedCid:'bad'}),/valid reviewed CID/);
+  });
+});
+test("reviewed Spotlight rejects query error payloads even with a 200 status",async()=>{
+ await withFetch(url=>url.includes('/oauth2/token')?json({access_token:'tok'}):json({resources:[],errors:[{code:403}]}),async()=>{
+  const session=await createSpotlightSession(atlas,{expectedCid:'a'.repeat(32)});await assert.rejects(()=>session.queryPage(''),/errors/);
+ });
+});

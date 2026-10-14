@@ -36,6 +36,7 @@ function ReportMetric({ label, value, emphasis = false }: { label: string; value
 
 export default function VulnExecReport({ companyId }: { companyId: string }) {
   const [report, setReport] = useState<ExecReport | null>(null);
+  const [capturedAt, setCapturedAt] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sendPhase, setSendPhase] = useState<"idle" | "confirm" | "sending">("idle");
   const [sendResult, setSendResult] = useState<SendResult | null>(null);
@@ -55,12 +56,13 @@ export default function VulnExecReport({ companyId }: { companyId: string }) {
 
   useEffect(() => {
     let active = true;
+    setReport(null); setCapturedAt(null); setError(null);
     void fetch(`/api/report/${companyId}`, { cache: "no-store" })
       .then(async response => {
         if (!response.ok) throw new Error((await response.json()).error ?? "Failed to load report.");
         return response.json();
       })
-      .then(payload => { if (active) setReport({ ...payload.report, sla: payload.report?.sla ?? payload.sla ?? null, trend: payload.report?.trend ?? payload.trend ?? null }); })
+      .then(payload => { if (active) { setReport({ ...payload.report, sla: payload.report?.sla ?? payload.sla ?? null, trend: payload.report?.trend ?? payload.trend ?? null }); setCapturedAt(payload.savedReport?.capturedAt ?? null); } })
       .catch(cause => { if (active) setError(cause instanceof Error ? cause.message : "Failed to load report."); });
     return () => { active = false; };
   }, [companyId]);
@@ -84,6 +86,7 @@ export default function VulnExecReport({ companyId }: { companyId: string }) {
     </div>
 
     {error && <div role="alert" className={styles.pageState}>{error}</div>}
+    {capturedAt && <p role="status">Data captured {new Date(capturedAt).toLocaleString()}. Reports refresh in the background and can lag by up to 15 minutes.</p>}
     {!error && !report && <div role="status" className={styles.pageState}>Loading customer report...</div>}
     {report && <article className={styles.paper} aria-label={`${report.company.name} report`}>
       <header className={styles.reportHeader}>

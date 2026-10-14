@@ -240,6 +240,18 @@ function readGroupTicketDualMode({ ticketId, state }) {
     withPacket ? { group: { ticketTitle: "T", ticketBody: "B" } } : { request: { ticketId, state } };
 }
 
+test("a manual-only draft is never automatically approved or sent even if returned by the candidate lookup", async () => {
+  const db = fakeDb({ eligible: [{ id: "manual", cves: ["CVE-2026-1234"], app_company_id: "CO-147284" }],
+    routings: [{ app_company_id: "CO-147284", company_id: 55, board_id: 9, team_id: null }] });
+  let writes = 0;
+  const api = await loadAutoCreate({ db, riskDb: fakeRiskDb(1),
+    readGroupTicket: async () => ({ group: { manualOnly: true } }),
+    reviewGroupTicket: async () => { writes++; }, createGroupTicket: async () => { writes++; } });
+  const result = await api.autoCreateHighSeverityTickets();
+  assert.equal(result.created, 0);assert.equal(writes, 0);
+  assert.match(db.calls[0].sql, /COALESCE\(packet->>'manualOnly','false'\) <> 'true'/);
+});
+
 test("a Swath-1 ticket gets ConnectWise's top priority set immediately after creation", async () => {
   const db = fakeDb({
     eligible: [{ id: "a", cves: ["CVE-1"], app_company_id: "CO-147284" }],

@@ -1,3 +1,4 @@
+import { withDurablePlatformMutation } from "@/lib/platform-mutation-route";
 import { NextResponse } from "next/server";
 import { ensureHydrated, importFromArtemis } from "@/lib/store";
 
@@ -5,7 +6,7 @@ export const dynamic = "force-dynamic";
 
 // Pull Artemis "interesting" task results in as findings, grouped by tag ->
 // company.
-export async function POST() {
+async function POSTHandler() {
   try {
     await ensureHydrated();
     const result = await importFromArtemis();
@@ -21,3 +22,5 @@ export async function POST() {
     );
   }
 }
+
+export const POST = withDurablePlatformMutation(POSTHandler);

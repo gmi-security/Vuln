@@ -1,3 +1,4 @@
+import { withDurablePlatformMutation } from "@/lib/platform-mutation-route";
 import { NextResponse } from "next/server";
 import {
   ensureHydrated,
@@ -30,7 +31,7 @@ export async function GET(
   return NextResponse.json({ finding: withSlaInfo(finding) });
 }
 
-export async function PATCH(
+async function PATCHHandler(
   request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -51,3 +52,5 @@ export async function PATCH(
   }
   return NextResponse.json({ finding: withSlaInfo(result) });
 }
+
+export const PATCH = withDurablePlatformMutation(PATCHHandler);

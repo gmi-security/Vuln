@@ -97,8 +97,7 @@ function normalizeIntuneDevice(raw: any): IntuneAsset {
 }
 
 // Pull managed devices from Graph, following @odata.nextLink pagination.
-export async function intuneListAssets(): Promise<IntuneAsset[]> {
-  const config = intuneConfig();
+export async function intuneListAssets(config = intuneConfig()): Promise<IntuneAsset[]> {
   if (!config) throw new Error("Intune is not configured.");
   const token = await graphToken(config);
 
@@ -108,9 +107,15 @@ export async function intuneListAssets(): Promise<IntuneAsset[]> {
   let guard = 0;
   while (url && guard < 100) {
     guard += 1;
+    const pageUrl = new URL(url);
+    if (pageUrl.origin !== "https://graph.microsoft.com" || pageUrl.username || pageUrl.password ||
+        pageUrl.pathname !== "/v1.0/deviceManagement/managedDevices") {
+      throw new Error("Intune returned an unexpected inventory pagination URL.");
+    }
     const res: Response = await fetch(url, {
       headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
       cache: "no-store",
+      redirect: "error",
     });
     if (!res.ok) {
       throw new Error(
@@ -118,11 +123,14 @@ export async function intuneListAssets(): Promise<IntuneAsset[]> {
       );
     }
     const data: any = await res.json();
-    for (const d of data?.value ?? []) {
+    if (!Array.isArray(data?.value)) throw new Error("Intune returned an invalid inventory page.");
+    for (const d of data.value) {
       const asset = normalizeIntuneDevice(d);
       if (asset.hostname) assets.push(asset);
     }
     url = data?.["@odata.nextLink"] ?? null;
+    if (url !== null && (typeof url !== "string" || !url)) throw new Error("Intune returned an invalid pagination link.");
   }
+  if (url) throw new Error("Intune inventory exceeded the pagination limit; no complete inventory was returned.");
   return assets;
 }

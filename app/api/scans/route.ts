@@ -1,3 +1,4 @@
+import { withDurablePlatformMutation } from "@/lib/platform-mutation-route";
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
@@ -15,7 +16,7 @@ export async function GET(request: Request) {
   return NextResponse.json({ scans: await listScans({ companyId, folderId }) });
 }
 
-export async function POST(request: Request) {
+async function POSTHandler(request: Request) {
   await ensureHydrated();
   let body: {
     name?: string;
@@ -69,3 +70,5 @@ export async function POST(request: Request) {
   }
   return NextResponse.json({ scan: result }, { status: 201 });
 }
+
+export const POST = withDurablePlatformMutation(POSTHandler);

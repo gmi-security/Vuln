@@ -1,10 +1,11 @@
+import { withDurablePlatformMutation } from "@/lib/platform-mutation-route";
 import { NextResponse } from "next/server";
 import { ensureHydrated, importFromIntune } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
 // Sync Intune managed devices into the internal org's asset inventory.
-export async function POST() {
+async function POSTHandler() {
   try {
     await ensureHydrated();
     const result = await importFromIntune();
@@ -20,3 +21,5 @@ export async function POST() {
     );
   }
 }
+
+export const POST = withDurablePlatformMutation(POSTHandler);

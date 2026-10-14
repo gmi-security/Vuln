@@ -1,3 +1,4 @@
+import { customerFql, assertQueryCid } from "./customer-query-scope";
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { DashboardError, parseQueryInput, type QueryInput, type QueryResult } from "./elastic-dashboard";
@@ -128,19 +129,25 @@ async function enrichEpss(records: Map<string, Vulnerability>, cache: Map<string
   applyEpss(records.values(), cache);
 }
 
-export async function executeCrowdStrike(connection: CrowdStrikeConnection, value: QueryInput, budgetMs = 300_000): Promise<QueryResult> {
+export async function executeCrowdStrike(connection: CrowdStrikeConnection, value: QueryInput, budgetMs = 300_000, cid?: string): Promise<QueryResult> {
   const input = parseQueryInput(value), options = input.crowdstrike;
   if (!options) throw new DashboardError("Choose a CrowdStrike dataset.");
+  if (cid) input.query = customerFql(input.query, cid);
   const dataset = CROWDSTRIKE_DATASETS[options.dataset];
   const deadline = Date.now() + budgetMs, auth = await session(connection, deadline);
   if (options.history && options.measure === "findings" && options.groupBy === "none") {
     // Daily history needs the matching population count, not millions of
     // finding entities. The API total is independent of the one-row page.
-    const url = new URL(`${auth.base}/spotlight/queries/vulnerabilities/v1`);
+    const url = new URL(`${auth.base}/spotlight/${cid ? "combined" : "queries"}/vulnerabilities/v1`);
     url.searchParams.set("filter", input.query);
     url.searchParams.set("limit", "1");
     const body = await jsonRequest(url, { headers: auth.headers }, deadline, auth.secrets);
     const total = body.meta?.pagination?.total;
+    if (cid) {
+      if (!Array.isArray(body.resources) || (total > 0 && body.resources.length !== 1) || (total === 0 && body.resources.length))
+        throw new DashboardError("CrowdStrike returned inconsistent customer count evidence.");
+      for (const row of body.resources) assertQueryCid(row, cid);
+    }
     if (!Array.isArray(body.resources) || !Number.isSafeInteger(total) || total < 0) {
       throw new DashboardError("CrowdStrike did not return a valid finding total. No daily observation was saved.");
     }
@@ -153,11 +160,16 @@ export async function executeCrowdStrike(connection: CrowdStrikeConnection, valu
     const severities = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "NONE", "UNKNOWN"];
     const counts: number[] = [];
     for (const severity of severities) {
-      const url = new URL(`${auth.base}/spotlight/queries/vulnerabilities/v1`);
+      const url = new URL(`${auth.base}/spotlight/${cid ? "combined" : "queries"}/vulnerabilities/v1`);
       url.searchParams.set("filter", `(${input.query})+cve.severity:'${severity}'`);
       url.searchParams.set("limit", "1");
       const body = await jsonRequest(url, { headers: auth.headers }, deadline, auth.secrets);
       const total = body.meta?.pagination?.total;
+      if (cid) {
+        if (!Array.isArray(body.resources) || (total > 0 && body.resources.length !== 1) || (total === 0 && body.resources.length))
+          throw new DashboardError("CrowdStrike returned inconsistent customer count evidence.");
+        for (const row of body.resources) assertQueryCid(row, cid);
+      }
       if (!Array.isArray(body.resources) || !Number.isSafeInteger(total) || total < 0) {
         throw new DashboardError("CrowdStrike did not return a valid severity total. No partial totals were saved.");
       }
@@ -174,7 +186,7 @@ export async function executeCrowdStrike(connection: CrowdStrikeConnection, valu
     // Finish a complete rating band before ranking. Lower bands cannot
     // displace a full top-N, so stop without collecting the rest of the estate.
     for (const rating of exprt ? ["CRITICAL", "HIGH", "MEDIUM", "LOW"] : ["CRITICAL", "HIGH", "MEDIUM", "LOW", "NONE", "UNKNOWN"]) {
-      const batch = await collectRecords(auth, deadline, `(${input.query})+${field}:'${rating}'`, ["cve"], 1000);
+      const batch = await collectRecords(auth, deadline, `(${input.query})+${field}:'${rating}'`, ["cve"], 1000, cid);
       for (const [id, row] of batch) {
         if ((exprt ? row.exprt : row.severity) !== rating || records.has(id)) throw new DashboardError(`CrowdStrike findings changed ${exprt ? "ExPRT rating" : "severity"} during collection. Retry; no partial device counts were saved.`);
         records.set(id, row);
@@ -185,12 +197,12 @@ export async function executeCrowdStrike(connection: CrowdStrikeConnection, valu
     }
     return dataset.summarize(records.values(), options);
   }
-  const records = await collectRecords(auth, deadline, input.query, dataset.facets, 500);
+  const records = await collectRecords(auth, deadline, input.query, dataset.facets, 500, cid);
   if (options.view === "patch-worklist") await enrichEpss(records, new Map());
   return dataset.summarize(records.values(), options);
 }
 
-async function collectRecords(auth: Awaited<ReturnType<typeof session>>, deadline: number, filter: string, facets: string[], limit: number): Promise<Map<string, Vulnerability>> {
+async function collectRecords(auth: Awaited<ReturnType<typeof session>>, deadline: number, filter: string, facets: string[], limit: number, cid?: string): Promise<Map<string, Vulnerability>> {
   const dataset = CROWDSTRIKE_DATASETS.vulnerabilities;
   const records = new Map<string, Vulnerability>(), cursors = new Set<string>();
   let after = "", received = 0, expected = 0;
@@ -209,6 +221,7 @@ async function collectRecords(auth: Awaited<ReturnType<typeof session>>, deadlin
     received += body.resources.length;
     if (received > 250_000) throw new DashboardError("CrowdStrike collection exceeds 250,000 records. Narrow the filter. No partial totals were saved.");
     for (const raw of body.resources) {
+      assertQueryCid(raw, cid);
       const row = dataset.normalize(raw), key = JSON.stringify([row.cid, row.id]), old = records.get(key);
       if (!old) records.set(key, row);
       else if (JSON.stringify(old) !== JSON.stringify(row)) {

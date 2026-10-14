@@ -1,9 +1,10 @@
+import { withDurablePlatformMutation } from "@/lib/platform-mutation-route";
 import { NextResponse } from "next/server";
 import { deleteFolder, ensureHydrated } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
-export async function DELETE(
+async function DELETEHandler(
   _request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -15,3 +16,5 @@ export async function DELETE(
   }
   return NextResponse.json(result);
 }
+
+export const DELETE = withDurablePlatformMutation(DELETEHandler);

@@ -1,10 +1,11 @@
+import { withDurablePlatformMutation } from "@/lib/platform-mutation-route";
 import { NextResponse } from "next/server";
 import { ensureHydrated, pivotOsintToNessus } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
 // Queue targeted Nessus scans of the assets OSINT flagged as exposed.
-export async function POST() {
+async function POSTHandler() {
   try {
     await ensureHydrated();
     const result = await pivotOsintToNessus();
@@ -17,3 +18,5 @@ export async function POST() {
     );
   }
 }
+
+export const POST = withDurablePlatformMutation(POSTHandler);

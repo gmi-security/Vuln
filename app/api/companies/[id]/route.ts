@@ -1,3 +1,4 @@
+import { withDurablePlatformMutation } from "@/lib/platform-mutation-route";
 import { NextResponse } from "next/server";
 import { deleteCompany, ensureHydrated, getCompany, updateCompany } from "@/lib/store";
 import { stringFieldError } from "@/lib/validate";
@@ -17,7 +18,7 @@ export async function GET(
   return NextResponse.json({ company });
 }
 
-export async function PATCH(
+async function PATCHHandler(
   request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -44,7 +45,7 @@ export async function PATCH(
   return NextResponse.json({ company: result });
 }
 
-export async function DELETE(
+async function DELETEHandler(
   _request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -57,3 +58,7 @@ export async function DELETE(
   }
   return NextResponse.json(result);
 }
+
+export const PATCH = withDurablePlatformMutation(PATCHHandler);
+
+export const DELETE = withDurablePlatformMutation(DELETEHandler);

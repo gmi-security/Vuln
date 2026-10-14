@@ -43,7 +43,7 @@ export function falconConfig(): FalconConfig | null {
 // tenant (an MSSP client with their own separate CrowdStrike CID, distinct
 // from GMI's own) requires a customer name: there can only be one unnamed
 // "default" tenant.
-export type FalconTenant = FalconConfig & { customerName?: string; label: string };
+export type FalconTenant = FalconConfig & { customerName?: string; label: string; sourceRef?: string };
 
 // Reads the base (unsuffixed) tenant plus any FALCON_CLIENT_ID_2,
 // FALCON_CLIENT_ID_3, ... tenants, each with its own FALCON_CLIENT_SECRET_N /
@@ -57,6 +57,7 @@ export function falconConfigs(): FalconTenant[] {
       ...base,
       customerName: process.env.FALCON_CUSTOMER?.trim() || undefined,
       label: "primary",
+      sourceRef: "environment:FALCON",
     });
   }
   for (let n = 2; ; n++) {
@@ -77,6 +78,7 @@ export function falconConfigs(): FalconTenant[] {
       baseUrl: CLOUD_HOSTS[cloud] ?? "https://api.crowdstrike.com",
       customerName,
       label: customerName,
+      sourceRef: `environment:FALCON_${n}`,
     });
   }
   return tenants;
@@ -357,7 +359,8 @@ export const SPOTLIGHT_HYDRATION_ROUND_SIZE = SPOTLIGHT_HYDRATION_CONCURRENCY * 
 
 // Discovery and hydration are separate so a large import can persist the ID
 // set before fetching full records and resume either phase independently.
-export async function createSpotlightSession(config: FalconTenant) {
+export async function createSpotlightSession(config: FalconTenant, scope?: { expectedCid: string }) {
+  if (scope && !/^[a-f0-9]{32}$/i.test(scope.expectedCid)) throw new Error("Spotlight requires a valid reviewed CID.");
   let token = await falconToken(config);
   let renewal: Promise<string> | undefined;
   async function request(url: string): Promise<Response> {
@@ -384,6 +387,8 @@ export async function createSpotlightSession(config: FalconTenant) {
     const response = await request(url.toString());
     if (!response.ok) throw new Error(`Spotlight query ${response.status}: ${await response.text().catch(() => response.statusText)}`);
     const json: any = await response.json();
+    if (scope && json?.errors != null && (!Array.isArray(json.errors) || json.errors.length))
+      throw new Error("Spotlight returned errors; reviewed import withheld.");
     if (!Array.isArray(json?.resources) || json.resources.some((id: unknown) => typeof id !== "string" || !id))
       throw new Error(`Spotlight query returned invalid IDs for ${config.label}.`);
     const next = json?.meta?.pagination?.after ?? "";
@@ -402,12 +407,17 @@ export async function createSpotlightSession(config: FalconTenant) {
       const response = await request(url.toString());
       if (!response.ok) throw new Error(`Spotlight entities ${response.status}: ${await response.text().catch(() => response.statusText)}`);
       const json: any = await response.json();
+      if (scope && json?.errors != null && (!Array.isArray(json.errors) || json.errors.length))
+        throw new Error("Spotlight returned errors; reviewed import withheld.");
       if (!Array.isArray(json?.resources) || json.resources.length > group.length)
         throw new Error(`Spotlight entity hydration returned an invalid response for ${config.label}.`);
       const requested = new Set(group);
       const returnedIds = new Set<string>(json.resources.map((item: any) => String(item?.id ?? "").trim()));
       if (returnedIds.has("") || returnedIds.size !== json.resources.length || Array.from(returnedIds).some(id => !requested.has(id)))
         throw new Error(`Spotlight entity hydration IDs mismatch for ${config.label}.`);
+      if (scope && json.resources.some((v: any) => typeof v?.cid !== "string" || v.cid.toLowerCase() !== scope.expectedCid.toLowerCase() ||
+          v.unresolved === true))
+        throw new Error("Spotlight returned a missing or different customer CID; reviewed import withheld.");
       const findings = json.resources.map((item: any) => parseSpotlightResource(config, item));
       // A multi-hour scan walks a live, constantly-changing dataset -- an ID
       // discovered hours ago can legitimately stop resolving by the time
@@ -535,7 +545,9 @@ export async function spotlightListFindings(config: FalconTenant): Promise<Spotl
 export async function falconListAssets(
   config: FalconConfig,
   onProgress?: (fetched: number, total: number) => void,
+  scope?: { expectedCid: string },
 ): Promise<FalconAsset[]> {
+  if (scope && !/^[a-f0-9]{32}$/i.test(scope.expectedCid)) throw new Error("Falcon inventory requires a valid reviewed CID.");
   const token = await falconToken(config);
   const authHeader = { Authorization: `Bearer ${token}`, Accept: "application/json" };
 
@@ -552,6 +564,11 @@ export async function falconListAssets(
       );
     }
     const j: any = await r.json();
+    if (scope && (!Array.isArray(j?.resources) || j.resources.some((id: unknown)=>typeof id!=="string" || !id.trim()) ||
+        new Set(j.resources).size!==j.resources.length || !Number.isSafeInteger(j?.meta?.pagination?.total) || j.meta.pagination.total<0 ||
+        j.resources.length!==Math.min(PAGE,Math.max(0,j.meta.pagination.total-offset)) ||
+        (j.errors!==undefined && (!Array.isArray(j.errors) || j.errors.length))))
+      throw new Error("Falcon inventory discovery was incomplete or invalid; no inventory was applied.");
     return {
       ids: j?.resources ?? [],
       total: j?.meta?.pagination?.total ?? 0,
@@ -574,6 +591,15 @@ export async function falconListAssets(
       );
     }
     const j: any = await r.json();
+    if (scope) {
+      const wanted=new Set(ids);
+      if (!Array.isArray(j?.resources) || j.resources.length!==ids.length ||
+          (j.errors!==undefined && (!Array.isArray(j.errors) || j.errors.length)) ||
+          j.resources.some((r: any)=>typeof r?.device_id!=="string" || !wanted.has(r.device_id) ||
+            typeof r.cid!=="string" || r.cid.toLowerCase()!==scope.expectedCid.toLowerCase()) ||
+          new Set(j.resources.map((r: any)=>r.device_id)).size!==ids.length)
+        throw new Error("Falcon inventory does not completely match the reviewed CID and requested devices; no inventory was applied.");
+    }
     // A device with a sensor but no resolved hostname yet is still a real,
     // Falcon-covered endpoint -- dropping it outright (rather than keeping
     // it keyed by externalId, same as importEndpoints()'s own fallback)
@@ -585,7 +611,10 @@ export async function falconListAssets(
 
   // Fetch first page to learn the total, then fire remaining pages, bounded.
   const first = await fetchIdPage(0);
-  if (!first.ids.length) return [];
+  if (!first.ids.length) {
+    if (scope) throw new Error("Falcon returned no hosts to verify the reviewed CID; no inventory was applied.");
+    return [];
+  }
 
   const total = first.total || first.ids.length;
   // Falcon's devices/queries/devices/v1 endpoint rejects offset+limit beyond
@@ -597,6 +626,7 @@ export async function falconListAssets(
   // endpoint, which is real work, not something to guess at silently here.
   const OFFSET_CEILING = 10_000;
   if (total > OFFSET_CEILING) {
+    if (scope) throw new Error("Falcon inventory exceeds this adapter's 10,000-device window; a complete CID-verified import was not collected.");
     console.error(
       `[crowdstrike] ${config.baseUrl}: tenant reports ${total} devices, but offset pagination on this endpoint only reaches ${OFFSET_CEILING} -- ${total - OFFSET_CEILING} device(s) will NOT be pulled this sync. Needs a cursor-based rewrite for tenants this size.`,
     );
@@ -610,6 +640,8 @@ export async function falconListAssets(
     onProgress?.(Math.min(walkTotal, first.ids.length + completedPages * PAGE), walkTotal);
   });
   const allIds = [first.ids, ...restPages.map((p) => p.ids)].flat();
+  if (scope && (restPages.some(p=>p.total!==total) || allIds.length!==total || new Set(allIds).size!==total))
+    throw new Error("Falcon inventory changed or repeated devices during discovery; retry a complete import.");
 
   // Hydrate all ID batches, bounded (API accepts up to 500 per POST). This
   // is the real bottleneck (one POST per up-to-500 devices), so progress

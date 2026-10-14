@@ -7,7 +7,8 @@ import type { CWDefaults } from "@/lib/connectwise-client";
 import { ConnectWiseRouting, ConnectWiseSelect, type CWSettings } from "@/components/ConnectWiseFields";
 import styles from "./QueryDashboard.module.css";
 
-export default function ConnectWiseGroupTicket({ group, requestId }: { group: PatchGroup; requestId: string }) {
+export default function ConnectWiseGroupTicket({ group, requestId, customerScope }: { group: PatchGroup; requestId: string; customerScope?: string }) {
+  const requestPath = `patch-group-tickets/${requestId}${customerScope ? `?companyId=${encodeURIComponent(customerScope)}` : ""}`;
   const [settings, setSettings] = useState<CWSettings | null>(null);
   const [current, setCurrent] = useState<PatchGroupTicketSummary | null>(null), [review, setReview] = useState(false);
   const [routing, setRouting] = useState<CWDefaults>({}), [companyId, setCompanyId] = useState<number>();
@@ -16,22 +17,22 @@ export default function ConnectWiseGroupTicket({ group, requestId }: { group: Pa
   const [editingPriority, setEditingPriority] = useState(false), [priorityDraft, setPriorityDraft] = useState<number>();
   const generation = useRef(0);
   const reload = useCallback(async () => {
-    const data = await dashboardRequest<{ request: PatchGroupTicketSummary }>(`patch-group-tickets/${requestId}`);
+    const data = await dashboardRequest<{ request: PatchGroupTicketSummary }>(requestPath);
     setCurrent(data.request);
     return data.request;
-  }, [requestId]);
+  }, [requestId, requestPath]);
   useEffect(() => {
     let live = true;
-    Promise.all([dashboardRequest<CWSettings>("connectwise"), dashboardRequest<{ request: PatchGroupTicketSummary }>(`patch-group-tickets/${requestId}`)])
+    Promise.all([dashboardRequest<CWSettings>("connectwise"), dashboardRequest<{ request: PatchGroupTicketSummary }>(requestPath)])
       .then(([config, data]) => { if (live) { setSettings(config); setRouting(config.defaults); setCurrent(data.request); } })
       .catch(e => { if (live) setError(e.message); });
     return () => { live = false; generation.current++; };
-  }, [requestId]);
+  }, [requestId, requestPath]);
   async function track(token: number) {
     for (let attempt = 0; attempt < 95; attempt++) {
       await new Promise(resolve => setTimeout(resolve, 2000));
       if (generation.current !== token) return;
-      const data = await dashboardRequest<{ request: PatchGroupTicketSummary }>(`patch-group-tickets/${requestId}`);
+      const data = await dashboardRequest<{ request: PatchGroupTicketSummary }>(requestPath);
       if (generation.current !== token) return;
       setCurrent(data.request);
       if (data.request.state !== "creating" && data.request.attachmentState !== "uploading" && !(attempt < 2 && data.request.state === "created" && data.request.attachmentState === "pending" && !data.request.error)) return;
@@ -41,7 +42,7 @@ export default function ConnectWiseGroupTicket({ group, requestId }: { group: Pa
   async function action(operation: string, extra: Record<string, unknown> = {}): Promise<boolean> {
     const token = ++generation.current; setBusy(operation); setError(""); setMessage(""); let ok = false;
     try {
-      const data = await dashboardRequest<{ request: PatchGroupTicketSummary }>(`patch-group-tickets/${requestId}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: operation, ...extra }) });
+      const data = await dashboardRequest<{ request: PatchGroupTicketSummary }>(requestPath, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: operation, ...extra }) });
       if (generation.current !== token) return false;
       setCurrent(data.request); setReview(false); ok = true;
       if (operation === "create" || operation === "retry-attachment") await track(token); else await reload();

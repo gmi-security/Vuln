@@ -1,6 +1,8 @@
 "use client";
 
 import Link from "next/link";
+import CveText, {cveIdentifier} from "../CveText";
+import {useCustomerCve} from "../customer-cve-context";
 import type { CustomerReportingModel } from "@/lib/reporting-customer-model";
 import styles from "../QueryDashboard.module.css";
 
@@ -20,6 +22,7 @@ function Metric({ name, value, note }: { name: string; value: string; note: stri
 function FindingTable({ rows, title, companyId, total, kind = "vuln" }: {
   rows: CustomerReportingModel["priorityRows"]; title: string; companyId: string; total: number; kind?: "vuln" | "osint" | "pentest" | "all";
 }) {
+  const openCve=useCustomerCve();
   const listHref = `/findings?company=${encodeURIComponent(companyId)}&kind=${kind}`;
   return <section className="rounded-xl border border-zinc-800 bg-[#090909] p-5" aria-label={title}>
     <div className="mb-4 flex flex-wrap items-end justify-between gap-3"><div><h3 className="text-lg font-semibold text-white">{title}</h3>
@@ -27,7 +30,7 @@ function FindingTable({ rows, title, companyId, total, kind = "vuln" }: {
       <Link className="text-sm text-red-300 underline underline-offset-4" href={listHref}>View all findings</Link></div>
     {rows.length ? <div className={styles.tableScroll} role="region" tabIndex={0} aria-label={`${title} table`}><table className={styles.table}>
       <thead><tr><th>Finding</th><th>Asset</th><th>Severity</th><th>Source</th><th>Status</th><th>Risk</th><th>Last seen</th></tr></thead>
-      <tbody>{rows.map(row => <tr key={row.id}><td><Link className="text-zinc-100 underline underline-offset-2" href={`${listHref}&focus=${encodeURIComponent(row.id)}`}>{row.cve || row.title}</Link><span className="block max-w-xs truncate text-xs text-zinc-500">{row.title}</span></td>
+      <tbody>{rows.map(row => <tr key={row.id}><td>{openCve && cveIdentifier(row.cve) ? <CveText text={row.cve}/> : <Link className="text-zinc-100 underline underline-offset-2" href={`${listHref}&focus=${encodeURIComponent(row.id)}`}>{row.cve || row.title}</Link>}<span className="block max-w-xs truncate text-xs text-zinc-500">{row.title}</span></td>
         <td>{row.asset}</td><td>{row.severity}</td><td>{row.connectors.map(label).join(", ")}</td><td>{row.status}</td>
         <td className="tabular-nums">{format(row.realRisk)}</td><td>{observed(row.lastSeen)}</td></tr>)}</tbody>
     </table></div> : <p className="text-sm text-zinc-400">No findings in this section.</p>}
@@ -36,6 +39,8 @@ function FindingTable({ rows, title, companyId, total, kind = "vuln" }: {
 
 export default function CustomerReportSections({ model }: { model: CustomerReportingModel }) {
   const { company, metrics, sourceActivity, assets } = model;
+  // Saved reports created before customer consolidation omit this field.
+  const legacyHistory = model.legacyHistory ?? [];
   const lastObserved = sourceActivity.map(row => row.lastObservedAt).filter((value): value is string => Boolean(value)).sort().at(-1) ?? null;
   const severities = Object.entries(metrics.vulnerabilities.bySeverity);
   const maxSeverity = Math.max(1, ...severities.map(([, count]) => count));
@@ -65,6 +70,13 @@ export default function CustomerReportSections({ model }: { model: CustomerRepor
         <h3 className="text-lg font-semibold text-white">Recorded history</h3><p className="mt-1 text-sm text-zinc-400">Stored company snapshots over the past 180 days, when available.</p>
         {model.history.length ? <div className={`${styles.tableScroll} mt-4 max-h-64`} role="region" tabIndex={0} aria-label="Recorded history table"><table className={styles.table}><thead><tr><th>Observed</th><th>Recorded open findings</th></tr></thead>
           <tbody>{model.history.slice(-12).map((point, index) => <tr key={`${point.ts}-${index}`}><td>{observed(point.ts)}</td><td className="tabular-nums">{point.open === null ? "Unavailable" : format(point.open)}</td></tr>)}</tbody></table></div> : <p className="mt-5 text-sm text-zinc-400">No recorded history yet. Current findings are still shown above.</p>}
+        {legacyHistory.length > 0 && <div className="mt-5"><h4 className="text-sm font-medium text-white">Earlier customer record</h4>
+          <p className="mt-1 text-xs text-zinc-400">Preserved separately from the current customer series. Counts and composite measures are not combined.</p>
+          <div className={`${styles.tableScroll} mt-3 max-h-64`} role="region" tabIndex={0} aria-label="Earlier customer history table"><table className={styles.table}>
+            <thead><tr><th>Original customer</th><th>Observed</th><th>Recorded open findings</th></tr></thead><tbody>
+              {legacyHistory.slice(-12).map((point, index) => <tr key={`${point.ts}-${index}`}><td>{point.sourceCompanyName} ({point.sourceCompanyId})</td>
+                <td>{observed(point.ts)}</td><td className="tabular-nums">{point.open === null ? "Unavailable" : format(point.open)}</td></tr>)}
+            </tbody></table></div></div>}
       </section>
     </div>
 

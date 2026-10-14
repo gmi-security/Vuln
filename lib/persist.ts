@@ -1,5 +1,8 @@
 import { Pool } from "pg";
 import { createHash } from "node:crypto";
+import { createReportingInputDigests, publishReportingInputRevisions, publishSqlReportingChanges, reportingSnapshotManifest } from "./db/customer-reporting-revisions.mjs";
+import { readPlatformAuthority, bindPlatformWriter } from "./db/platform-authority.mjs";
+import { loadPlatformStore, savePlatformStore, savePlatformDelta } from "./db/platform-store.mjs";
 
 // Snapshot persistence. The in-memory store (companies, folders, scans,
 // findings, assets, settings, counter) is serialized by store.ts and flushed
@@ -9,17 +12,31 @@ import { createHash } from "node:crypto";
 // bound (Postgres caps a jsonb value at ~255MB and the findings set alone is
 // heading there), and unchanged buckets are skipped on every flush via a
 // per-key content hash, so steady-state writes touch only the rows that
-// actually changed. Single App Platform instance and store.ts serializes all
-// flushes through one in-flight promise chain, so no multi-writer concerns —
-// the in-process hash cache below is therefore authoritative.
+// actually changed. The compatibility path keeps that format. After explicit
+// SQL cutover, row tables are authoritative and this module hydrates their RAM
+// compatibility cache. A database epoch/revision fence prevents stale writers.
 
-let pool: Pool | null = null;
-let ready: Promise<void> | null = null;
-
-// Last committed content hash per vuln_store key, primed by a consistent load
-// after boot and updated only after a successful write commit. A failed
-// transaction retries every changed row on the next flush.
-const lastWrittenHashes = new Map<string, string>();
+// Next may bundle this module separately for instrumentation and API routes.
+// The RAM store is process-global, so its pool and committed writer generation
+// must have the same lifetime. Module-local state loses the loaded SQL token
+// when another route tries to save, or uses an obsolete legacy hash cache.
+type PersistenceRuntime = {
+  pool: Pool | null; ready: Promise<void> | null; target?: string;
+  lastWrittenHashes: Map<string, string>; lastReportingManifest: string | null;
+  reportingDigestCache: Map<string, any>;
+  platformAuthority: Awaited<ReturnType<typeof readPlatformAuthority>>;
+  platformState: Awaited<ReturnType<typeof loadPlatformStore>>["state"] | null;
+};
+const persistenceGlobal = globalThis as typeof globalThis & { __vulnDatabasePersistenceV1?: PersistenceRuntime };
+const persistence: PersistenceRuntime = persistenceGlobal.__vulnDatabasePersistenceV1 ??= {
+  pool: null, ready: null, lastWrittenHashes: new Map(), lastReportingManifest: null,
+  reportingDigestCache: new Map(), platformAuthority: null, platformState: null,
+};
+const lastWrittenHashes = persistence.lastWrittenHashes;
+const reportingDigestCache = persistence.reportingDigestCache;
+export function strictPlatformPersistence(): boolean {
+  return process.env.VULN_PLATFORM_STORE === "sql" || persistence.platformAuthority?.mode === "sql";
+}
 
 // --- sharding layout ---------------------------------------------------------
 // Bucket counts are FROZEN constants: the bucket for an id is
@@ -146,8 +163,10 @@ function diagnoseDatabaseUrl(url: string): string | null {
 
 function getPool(): Pool | null {
   if (!process.env.DATABASE_URL) return null;
-  if (!pool) {
-    pool = new Pool({
+  if (persistence.target && persistence.target !== process.env.DATABASE_URL) throw new Error("Database target changed; restart before using platform storage.");
+  persistence.target = process.env.DATABASE_URL;
+  if (!persistence.pool) {
+    persistence.pool = new Pool({
       connectionString: process.env.DATABASE_URL,
       ssl: { rejectUnauthorized: false },
       // The DigitalOcean managed Postgres cluster backing this allows 397
@@ -173,18 +192,18 @@ function getPool(): Pool | null {
       connectionTimeoutMillis: 15000,
       idleTimeoutMillis: 30000,
     });
-    pool.on("error", (err) => {
+    const activePool = persistence.pool;
+    activePool.on("error", (err) => {
       console.error("[persist] pool error:", err.message);
       // Reset the cached pool on fatal errors so the next getPool() call
       // creates a fresh one that can re-resolve a recovered hostname. Drain
       // the old pool's sockets so abandoned clients don't leak.
-      const old = pool;
-      pool = null;
-      ready = null;
+      const old = activePool;
+      if (persistence.pool === activePool) { persistence.pool = null; persistence.ready = null; }
       old?.end().catch(() => {});
     });
   }
-  return pool;
+  return persistence.pool;
 }
 
 // Reject if the DB op doesn't finish in time, so a slow/unreachable DB never
@@ -206,8 +225,8 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): P
 async function ensureTable(): Promise<void> {
   const p = getPool();
   if (!p) return;
-  if (!ready) {
-    ready = p
+  if (!persistence.ready) {
+    persistence.ready = p
       .query(
         // vuln_snapshot is the LEGACY single-row format, kept so existing
         // deployments migrate on first load (and its last row stays behind
@@ -234,11 +253,11 @@ async function ensureTable(): Promise<void> {
       .then(() => undefined)
       .catch((err) => {
         // Don't cache a rejected promise — allow a later retry.
-        ready = null;
+        persistence.ready = null;
         throw err;
       });
   }
-  return ready;
+  return persistence.ready;
 }
 
 export function persistenceEnabled(): boolean {
@@ -275,6 +294,10 @@ export async function snapshotMeta(): Promise<{ updatedAt: string | null }> {
   if (!p) return { updatedAt: null };
   try {
     await withTimeout(ensureTable(), 10000, "ensureTable");
+    if ((await readPlatformAuthority(p))?.mode === "sql") {
+      const row = (await p.query("SELECT updated_at FROM app_store_authority WHERE id=1")).rows[0];
+      return { updatedAt: row?.updated_at ?? null };
+    }
     const res = await withTimeout(
       p.query("SELECT MAX(updated_at) AS updated_at FROM vuln_store"),
       10000,
@@ -316,6 +339,16 @@ export async function loadSnapshot(): Promise<unknown | null> {
     // Pin one committed generation across all shard reads. Without this a
     // concurrent save could pair old findings with a new publication marker.
     await withTimeout(client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"),10000,"loadSnapshot(begin)");
+    persistence.platformAuthority = await readPlatformAuthority(client);
+    if (persistence.platformAuthority?.mode === "sql") {
+      if (process.env.VULN_PLATFORM_STORE !== "sql") throw new Error("SQL authority requires VULN_PLATFORM_STORE=sql; refusing the frozen legacy snapshot.");
+      const loaded = await loadPlatformStore(client, persistence.platformAuthority);
+      await client.query("COMMIT");
+      persistence.platformState = loaded.state;
+      lastWrittenHashes.clear(); reportingDigestCache.clear();
+      return loaded.data;
+    }
+    if (process.env.VULN_PLATFORM_STORE === "sql") throw new Error("SQL authority has not been activated; run the reviewed maintenance transition first.");
     const keysRes = await withTimeout(
       client.query("SELECT key FROM vuln_store"),
       15000,
@@ -333,7 +366,9 @@ export async function loadSnapshot(): Promise<unknown | null> {
         // Yield so concurrent requests aren't starved during a large load.
         await new Promise((resolve) => setImmediate(resolve));
       }
+      const reportingManifest = process.env.VULN_REPORTING_INPUT_REVISIONS === "true" ? await reportingSnapshotManifest(client) : null;
       await withTimeout(client.query("COMMIT"),10000,"loadSnapshot(commit)");
+      persistence.lastReportingManifest = reportingManifest?.hash ?? null;
       // A restart should not rewrite every unchanged shard. Prime from the
       // committed snapshot; subsequent mutations still compare content hashes.
       lastWrittenHashes.clear();
@@ -350,6 +385,7 @@ export async function loadSnapshot(): Promise<unknown | null> {
     );
     await withTimeout(client.query("COMMIT"),10000,"loadSnapshot(commit)");
     lastWrittenHashes.clear();
+    persistence.lastReportingManifest = null;
     return legacy.rows[0]?.data ?? null;
   } catch (error) {
     releaseError = error instanceof Error ? error : new Error(String(error));
@@ -371,7 +407,7 @@ const UPSERT_SQL = `INSERT INTO vuln_store (key, data, updated_at)
 // snapshot; the hash cache is only updated after COMMIT so a failed write is
 // fully retried on the next flush. Callers (store.ts) already serialize
 // saves through a single promise chain, so saves never overlap.
-export async function saveSnapshot(data: unknown): Promise<void> {
+export async function saveSnapshot(data: unknown, options?: { guard?: () => void; changes?: Record<string, string[]> }): Promise<void> {
   const p = getPool();
   if (!p) return;
   await withTimeout(ensureTable(), 10000, "ensureTable");
@@ -383,17 +419,57 @@ export async function saveSnapshot(data: unknown): Promise<void> {
       ? (data as Record<string, unknown>)
       : { __raw: data };
 
+  if (strictPlatformPersistence()) {
+    if (!persistence.platformState || persistence.platformAuthority?.mode !== "sql") throw new Error("A committed SQL generation must be loaded before writing.");
+    const client = await p.connect();
+    // SQL authority always publishes reporting revisions in the same commit.
+    const reporting = createReportingInputDigests(reportingDigestCache);
+    const deadline = Date.now() + 300000;
+    const guard = () => {
+      if (Date.now() >= deadline) throw new Error("SQL platform save exceeded its five-minute deadline.");
+      options?.guard?.();
+    };
+    try {
+      const next = await withTimeout((async () => {
+      await client.query("BEGIN; SET LOCAL statement_timeout='60s'; SET LOCAL lock_timeout='10s'; SET LOCAL idle_in_transaction_session_timeout='90s'");
+      const next = options?.changes !== undefined
+        ? await savePlatformDelta(client, obj, persistence.platformState, options.changes, { guard })
+        : await savePlatformStore(client, obj, persistence.platformState, { reporting, guard });
+      if ("changedKeys" in next) {
+        await publishSqlReportingChanges(client, next.changedKeys);
+        // Complete-snapshot cache is no longer current after a delta commit.
+        reportingDigestCache.clear();
+      } else await publishReportingInputRevisions(client, reporting.finish());
+      guard();
+      await client.query("COMMIT");
+      return next;
+      })(), 300000, "SQL platform save");
+      persistence.platformState = next; persistence.platformAuthority = next.authority;
+      if (!("changedKeys" in next)) reporting.committed();
+    } catch (error) {
+      client.release(error instanceof Error ? error : new Error(String(error)));
+      throw error;
+    }
+    client.release();
+    return;
+  }
+
   const rows = await shardSnapshot(obj);
+  const reporting = process.env.VULN_REPORTING_INPUT_REVISIONS === "true" ? createReportingInputDigests(reportingDigestCache) : null;
   const changed: { key: string; json: string; hash: string }[] = [];
   for (const [key, value] of rows) {
     const json = JSON.stringify(value);
     const hash = sha1Hex(json);
+    await reporting?.bucket(key, json, hash);
     if (lastWrittenHashes.get(key) !== hash) changed.push({ key, json, hash });
     await new Promise<void>(resolve => setImmediate(resolve));
   }
-  if (changed.length === 0) return;
+  if (changed.length === 0 && !reporting) return;
+  const reportingDigests = reporting?.finish();
 
   const client = await p.connect();
+  let committedReportingManifest: string | null = null;
+  let committedAuthority = persistence.platformAuthority;
   try {
     // Bound each statement/lock wait, but allow a large atomic publication to
     // take longer than the old 60-second budget for ALL shards combined.
@@ -402,9 +478,20 @@ export async function saveSnapshot(data: unknown): Promise<void> {
         await client.query("BEGIN");
         await client.query("SET LOCAL statement_timeout = '60s'");
         await client.query("SET LOCAL lock_timeout = '10s'");
+        await bindPlatformWriter(client, persistence.platformAuthority);
+        if (reportingDigests) {
+          // Detect another/older writer rather than certify its data using this
+          // process's stale hash cache. Readers remain free to use MVCC snapshots.
+          await client.query("LOCK TABLE public.vuln_store IN SHARE ROW EXCLUSIVE MODE");
+          const present = (await client.query("SELECT 1 FROM public.vuln_store LIMIT 1")).rowCount;
+          if (present && (!persistence.lastReportingManifest || (await reportingSnapshotManifest(client)).hash !== persistence.lastReportingManifest))
+            throw new Error("Platform snapshot changed outside this writer; reload before publishing report revisions.");
+        }
         for (const row of changed) {
           await client.query(UPSERT_SQL, [row.key, row.json]);
         }
+        if (persistence.platformAuthority && changed.length) committedAuthority = (await client.query("UPDATE app_store_authority SET revision=revision+1,updated_at=clock_timestamp() WHERE id=1 RETURNING mode,enforced,epoch::text,revision::text")).rows[0];
+        if (reportingDigests) committedReportingManifest = await publishReportingInputRevisions(client, reportingDigests);
         await client.query("COMMIT");
       })(),
       300000,
@@ -419,6 +506,9 @@ export async function saveSnapshot(data: unknown): Promise<void> {
     throw err;
   }
   client.release();
+  persistence.platformAuthority = committedAuthority;
+  persistence.lastReportingManifest = committedReportingManifest;
+  reporting?.committed();
   for (const row of changed) lastWrittenHashes.set(row.key, row.hash);
 }
 
@@ -496,6 +586,40 @@ export async function loadMetricsHistory(
       "[persist] metrics history load failed:",
       err instanceof Error ? err.message : err,
     );
+    return [];
+  }
+}
+
+// Historical snapshots retain their original customer_id and are shown as a
+// separate series after the approved consolidation. Composite measures such
+// as MTTR must never be added to the canonical series.
+export async function loadLegacyCustomerMetricsHistory(
+  companyId: string,
+): Promise<{ ts: string; sourceCompanyId: string; sourceCompanyName: string; data: unknown }[]> {
+  const source = companyId === "CO-229336"
+    ? { id: "CO-9150", name: "GMI Scans" }
+    : companyId === "CO-229438"
+      ? { id: "CO-9153", name: "Valor Global Scans" }
+      : null;
+  if (!source) return [];
+  const p = getPool();
+  if (!p) return [];
+  try {
+    await withTimeout(ensureTable(), 10000, "ensureTable");
+    const res = await withTimeout(p.query(
+      `SELECT ts, data FROM vuln_metrics_history
+       WHERE company_id=$1
+       ORDER BY ts ASC`,
+      [source.id],
+    ), 15000, "loadLegacyCustomerMetricsHistory");
+    return res.rows.map((r: { ts: unknown; data: unknown }) => ({
+      ts: r.ts instanceof Date ? r.ts.toISOString() : String(r.ts),
+      sourceCompanyId: source.id,
+      sourceCompanyName: source.name,
+      data: r.data,
+    }));
+  } catch (err) {
+    console.error("[persist] legacy metrics history load failed:", err instanceof Error ? err.message : err);
     return [];
   }
 }

@@ -1,9 +1,10 @@
+import { withDurablePlatformMutation } from "@/lib/platform-mutation-route";
 import { NextResponse } from "next/server";
 import { ensureHydrated, startCsDevicesSync, getCsDevicesSyncStatus } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
-export async function POST() {
+async function POSTHandler() {
   await ensureHydrated();
   const launch = startCsDevicesSync();
   if (!launch.started && launch.error) {
@@ -15,3 +16,5 @@ export async function POST() {
 export async function GET() {
   return NextResponse.json({ status: getCsDevicesSyncStatus() });
 }
+
+export const POST = withDurablePlatformMutation(POSTHandler);

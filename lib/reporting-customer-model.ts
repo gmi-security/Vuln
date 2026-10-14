@@ -8,6 +8,7 @@ const isOpen = (finding: Finding) => finding.status === "Open" || finding.status
 export function buildCustomerReportingModel(
   company: Pick<Company, "id" | "name">,
   findings: Finding[], scans: Scan[], assets: InventoryAsset[], history: HistoryRow[],
+  legacyHistory: (HistoryRow & { sourceCompanyId: string; sourceCompanyName: string })[] = [],
 ) {
   const ownFindings = findings.filter(finding => finding.companyId === company.id);
   const ownScans = scans.filter(scan => scan.companyId === company.id);
@@ -49,6 +50,10 @@ export function buildCustomerReportingModel(
     history: history.filter(row => row && typeof row.ts === "string" && typeof row.data === "object" && row.data !== null)
       .map(row => ({ ts: row.ts, open: typeof (row.data as { totalOpen?: unknown }).totalOpen === "number" ?
         (row.data as { totalOpen: number }).totalOpen : null })),
+    legacyHistory: legacyHistory.map(row => ({ ts: row.ts, sourceCompanyId: row.sourceCompanyId,
+      sourceCompanyName: row.sourceCompanyName,
+      open: typeof (row.data as { totalOpen?: unknown })?.totalOpen === "number"
+        ? (row.data as { totalOpen: number }).totalOpen : null })),
   };
 }
 

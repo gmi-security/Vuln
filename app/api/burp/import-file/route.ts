@@ -1,3 +1,4 @@
+import { withDurablePlatformMutation } from "@/lib/platform-mutation-route";
 import { NextResponse } from "next/server";
 import { ensureHydrated, importBurpFindings, flushNow } from "@/lib/store";
 import { parseBurpXml } from "@/lib/burp";
@@ -8,7 +9,7 @@ export const dynamic = "force-dynamic";
 // (uploaded from the Connectors page), parses the <issue> blocks, and loads
 // them as pentest-class findings — the same path the Enterprise API pull uses,
 // minus the credentials.
-export async function POST(request: Request) {
+async function POSTHandler(request: Request) {
   await ensureHydrated();
 
   let xml = "";
@@ -63,3 +64,5 @@ export async function POST(request: Request) {
   await flushNow();
   return NextResponse.json({ result: { ...result, issuesParsed: items.length } });
 }
+
+export const POST = withDurablePlatformMutation(POSTHandler);

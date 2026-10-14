@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { ensureHydrated } from "@/lib/store";
-import { loadMetricsHistory } from "@/lib/persist";
+import { loadMetricsHistory, loadLegacyCustomerMetricsHistory } from "@/lib/persist";
 
 export const dynamic = "force-dynamic";
 
@@ -19,12 +19,19 @@ export async function GET(request: Request) {
     ? Math.min(Math.max(daysParam, 1), MAX_DAYS)
     : DEFAULT_DAYS;
 
-  const rows = await loadMetricsHistory(companyId, days);
+  const [rows, legacyRows] = await Promise.all([
+    loadMetricsHistory(companyId, days),
+    companyId ? loadLegacyCustomerMetricsHistory(companyId) : Promise.resolve([]),
+  ]);
   return NextResponse.json({
     snapshots: rows.map((row) => ({
       ts: row.ts,
       companyId,
       ...(row.data as Record<string, unknown>),
+    })),
+    legacySnapshots: legacyRows.map(row => ({
+      ts: row.ts, sourceCompanyId: row.sourceCompanyId,
+      sourceCompanyName: row.sourceCompanyName, ...row.data as Record<string, unknown>,
     })),
   });
 }

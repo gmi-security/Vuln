@@ -1,4 +1,5 @@
 "use client";
+import CveText from "./CveText";
 import { useCallback, useEffect, useState } from "react";
 import { dashboardRequest } from "@/lib/dashboard-browser-client";
 import type { PatchGroupTicketSummary } from "@/lib/patch-group-ticket-types";
@@ -7,7 +8,7 @@ import styles from "./QueryDashboard.module.css";
 const TOP_N = 10;
 const format = (value: number) => value.toLocaleString();
 
-export default function TopFixes({ companyId, refreshToken }: { companyId: string; refreshToken?: number }) {
+export default function TopFixes({ companyId, refreshToken, reviewHref = "#consolidation-review" }: { companyId: string; refreshToken?: number; reviewHref?: string }) {
   const [rows, setRows] = useState<PatchGroupTicketSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -85,7 +86,7 @@ export default function TopFixes({ companyId, refreshToken }: { companyId: strin
                 <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#b30e14] text-xs font-bold text-white">{index + 1}</span>
                 <span className="font-medium text-white">{row.remediationTitle || "Recommended remediation"}</span>
               </div>
-              <p className="mt-2 text-xs text-zinc-500">{row.cves.length === 1 ? row.cves[0] : `${row.cves.length} CVEs, including ${row.cves.slice(0, 2).join(", ")}`}</p>
+              <p className="mt-2 max-h-20 overflow-auto text-xs text-zinc-300"><CveText text={row.cves.join(", ")}/></p>
             </div>
             <div className="shrink-0 text-right">
               <div className="text-2xl font-semibold text-white">{format(row.hostCount)}</div>
@@ -97,7 +98,7 @@ export default function TopFixes({ companyId, refreshToken }: { companyId: strin
           </div>
           <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2 text-[11px] text-zinc-500">
             <span>{share}% of pending exposure · {format(row.findingCount)} findings</span>
-            <a href="#consolidation-review" className="text-sky-300 underline underline-offset-2">Review &amp; approve in queue below</a>
+            <a href={reviewHref} className="text-sky-300 underline underline-offset-2">Review &amp; approve in ticket queue</a>
           </div>
         </li>;
       })}

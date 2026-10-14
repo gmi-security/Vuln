@@ -1,4 +1,5 @@
 import pg from "pg";
+import { applicationDatabaseSsl } from "../lib/db/connection-target.mjs";
 import { loadMigrations, runMigrations } from "../lib/db/migration-runner.mjs";
 
 if (process.argv[2] !== "--apply") {
@@ -7,7 +8,7 @@ if (process.argv[2] !== "--apply") {
 if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required.");
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
+  ssl: applicationDatabaseSsl(process.env.DATABASE_URL),
   max: 1,
   connectionTimeoutMillis: 8000,
 });

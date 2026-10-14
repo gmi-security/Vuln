@@ -1,3 +1,4 @@
+import { withDurablePlatformMutation } from "@/lib/platform-mutation-route";
 import { NextResponse } from "next/server";
 import { ensureHydrated, importFromBurp } from "@/lib/store";
 
@@ -7,7 +8,7 @@ export const maxDuration = 300;
 // Live pull from Burp Suite Enterprise (GraphQL). Session-gated via the edge
 // proxy. Returns 400 with guidance when BURP_API_URL/BURP_API_KEY are unset —
 // use the XML upload route in that case.
-export async function POST() {
+async function POSTHandler() {
   await ensureHydrated();
   const result = await importFromBurp();
   if ("error" in result) {
@@ -15,3 +16,5 @@ export async function POST() {
   }
   return NextResponse.json({ result });
 }
+
+export const POST = withDurablePlatformMutation(POSTHandler);

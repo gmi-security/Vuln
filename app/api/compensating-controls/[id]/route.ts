@@ -1,3 +1,4 @@
+import { withDurablePlatformMutation } from "@/lib/platform-mutation-route";
 import { NextResponse } from "next/server";
 import { deleteCompensatingControl, ensureHydrated, updateCompensatingControl } from "@/lib/store";
 import type { CompensatingControlStatus } from "@/lib/types";
@@ -5,7 +6,7 @@ import { stringFieldError } from "@/lib/validate";
 
 export const dynamic = "force-dynamic";
 
-export async function PATCH(
+async function PATCHHandler(
   request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -46,7 +47,7 @@ export async function PATCH(
   return NextResponse.json({ control: result });
 }
 
-export async function DELETE(
+async function DELETEHandler(
   _request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -58,3 +59,7 @@ export async function DELETE(
   }
   return NextResponse.json(result);
 }
+
+export const PATCH = withDurablePlatformMutation(PATCHHandler);
+
+export const DELETE = withDurablePlatformMutation(DELETEHandler);

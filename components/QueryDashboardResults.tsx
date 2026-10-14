@@ -10,6 +10,7 @@ import { canShowMetrics, columnLabel, isChartDisplay, numericColumn, type QueryD
 import { severityBarColor, severityClass } from "@/lib/format";
 import type { Severity } from "@/lib/types";
 import styles from "./QueryDashboard.module.css";
+import { useCustomerCve } from "./customer-cve-context";
 
 function severity(value: string): Severity | undefined {
   return Object.keys(severityBarColor).find((key) => key.toLowerCase() === value.replace(/_cves$/i, "").toLowerCase()) as Severity | undefined;
@@ -30,6 +31,7 @@ export default function QueryDashboardResults({ result, display, chart, prepareP
   result: QueryResult; display: QueryDefinition["display"]; chart?: QueryDefinition["chart"]; preparePatch?: boolean; companyId?: string;
 }) {
   const [selected, setSelected] = useState<{ cve: string; row?: QueryResult["rows"][number] } | null>(null);
+  const openCustomerCve=useCustomerCve();
   const [consolidating, setConsolidating] = useState<string[] | null>(null);
   const [requestedPage, setRequestedPage] = useState(0);
   const tableScroll = useRef<HTMLDivElement>(null);
@@ -69,11 +71,11 @@ export default function QueryDashboardResults({ result, display, chart, prepareP
         <h2 id={titleId}>{selected?.cve ?? "CVE details"}</h2>
         <p className={styles.resultNote}>{selected?.row ? "Snapshot of the result selected from this tile." : "CVE selected from this tile. Prepare a request for current CrowdStrike details."}</p>
         <dl className={styles.detailFields}>{selected?.row && result.columns.map((column, index) => String(selected.row![index]).toUpperCase() !== selected.cve && <div key={column.name}><dt>{columnLabel(column.name)}</dt><dd>{cell(selected.row![index], column.name)}</dd></div>)}</dl>
-        {preparePatch && selected && <PatchRequestPanel key={selected.cve} cve={selected.cve} />}
+        {preparePatch && selected && <PatchRequestPanel key={`${companyId ?? ""}:${selected.cve}`} cve={selected.cve} companyId={companyId} />}
       </div>
     </dialog>
   );
-  if (isChartDisplay(display)) return <><ElasticResultChart result={result} definition={{ display, chart }} onCveSelect={cve => setSelected({ cve })} />{details}{consolidationPanel}</>;
+  if (isChartDisplay(display)) return <><ElasticResultChart result={result} definition={{ display, chart }} onCveSelect={cve => openCustomerCve ? openCustomerCve(cve) : setSelected({ cve })} />{details}{!openCustomerCve && consolidationPanel}</>;
   if (display !== "table" && canShowMetrics(result)) {
     const uniqueCves = result.columns.every((column) => /^(critical|high|medium|low|none|unknown)_cves$/i.test(column.name));
     const severityMetrics = result.columns.every((column) => severity(column.name) || /^(none|unknown)(_cves)?$/i.test(column.name));
@@ -103,7 +105,7 @@ export default function QueryDashboardResults({ result, display, chart, prepareP
     return formatResultValue(value, name);
   }
   return <div>
-    {preparePatch && allCves.length >= 2 && (
+    {preparePatch && !openCustomerCve && allCves.length >= 2 && (
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[rgba(179,14,20,0.14)] bg-[#0a0a0a] px-4 py-3">
         <p className="text-sm text-zinc-300">{allCves.length} CVEs loaded · {pageCves.length} on this page. Patch plans use this page only.</p>
         <button type="button" className={styles.button} disabled={pageCves.length < 2 || pageCves.length > 100} onClick={() => setConsolidating([...pageCves])}>Build patch plan for this page</button>

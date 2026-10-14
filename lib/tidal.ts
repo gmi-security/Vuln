@@ -134,6 +134,7 @@ export type TidalAsset = {
   os: string;
   owner: string;
   customer: string; // maps onto a Vuln company
+  sourceCompanyId?: string; // assigned only by the live session collector, never guessed from a name/CSV
   tags: string[];
   criticality: AssetCriticality;
   exposure: AssetExposure;
@@ -174,26 +175,12 @@ function joinNonEmpty(parts: unknown[], sep = " "): string {
 // Auvik, SOTI), each with its own device schema. These map every source onto
 // the shared TidalAsset shape.
 //
-// CUSTOMER SEGMENTATION (governance-critical — no cross-tenant bleed):
-// Tidal separates customers by which tenant/folder a device comes from, NOT by
-// a per-device customer field. So each source is attributed by its own tenant
-// boundary, and every distinct boundary becomes its own Vuln company:
-//   Intune -> the user's email domain   (e.g. gmi.com  -> "GMI")
-//   Auvik  -> the Auvik tenant name     (tenant_id -> display_name, e.g. "Ahwatukee")
-//   SOTI   -> the top-level device path (identity.path root, e.g. "Bothell")
-// Anything that can't be attributed is quarantined in a clearly-labelled
-// "Tidal Unmapped (<source>)" bucket — it is NEVER folded into a real customer.
-// Each asset also carries provenance tags (src:*, tenant:*/domain:*/path:*) so
-// the customer attribution is auditable.
-
-// CUSTOMER SEGMENTATION (governance-critical — authoritative, no bleed):
-// Tidal is a multi-company MSP portal (GMI + ~49 client companies) and its
-// integrations (Intune/Auvik/SOTI) are connected PER CLIENT COMPANY. So the
-// customer is the Tidal client company itself: we enumerate companies, switch
-// the session into each one, and pull whatever devices that company exposes —
-// attributing every device to that company. A device can therefore never be
-// credited to the wrong customer. Location signals (Auvik tenant, SOTI path)
-// are kept only as `site:` tags, not as the customer.
+// Customer ownership follows the portal company session. A failed switch
+// prevents device collection for that company. The live collector stamps the
+// roster's exact company ID after normalization; display names and device-site
+// fields cannot override it. This trusts the portal's successful session switch,
+// not an independent per-row ownership attestation. Reviewed routing restricts
+// which company sessions are visited before applying inventory to the store.
 
 // Per-company context for the normalizers: the owning company name (the
 // customer) plus that company's Auvik tenant_id -> display_name map (for site
@@ -316,7 +303,7 @@ function jarHeaders(config: TidalConfig, jar: Jar): Record<string, string> {
 }
 
 // The full client roster (GMI + affiliates + clients). Each is a customer.
-async function listCompanies(config: TidalConfig, jar: Jar): Promise<TidalCompany[]> {
+async function listCompanies(config: TidalConfig, jar: Jar, strict = false): Promise<TidalCompany[]> {
   const companies: TidalCompany[] = [];
   let url: string | null = `${config.url}/api/v1/admin/companies?per_page=100`;
   let guard = 0;
@@ -324,17 +311,22 @@ async function listCompanies(config: TidalConfig, jar: Jar): Promise<TidalCompan
     guard += 1;
     const res: Response = await fetch(url, { headers: jarHeaders(config, jar), cache: "no-store" });
     absorb(jar, res);
-    if (!res.ok) break;
+    if (!res.ok) throw new Error(`Tidal company roster failed (HTTP ${res.status}).`);
     const data: any = await res.json();
-    const rows: any[] = Array.isArray(data) ? data : data?.data ?? [];
+    const rows: any[] = Array.isArray(data) ? data : data?.data;
+    if (!Array.isArray(rows)) throw new Error("Tidal returned an invalid company roster page.");
     for (const r of rows) {
       const id = s(r?.id);
       const name = s(r?.name);
+      if (strict && (!(typeof r?.id === "string" || typeof r?.id === "number" && Number.isSafeInteger(r.id)) || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(id) || !name || companies.some(c => c.id === id)))
+        throw new Error("Tidal returned missing, invalid or duplicate company identities.");
       if (id && name) companies.push({ id, name, type: s(r?.type) });
     }
     const pg = data?.pagination;
+    if (pg?.has_next && !pg?.links?.next) throw new Error("Tidal company roster is missing its next page link.");
     url = pg?.has_next && pg?.links?.next ? rehost(config, String(pg.links.next)) : null;
   }
+  if (url) throw new Error("Tidal company roster exceeded the pagination limit.");
   return companies;
 }
 
@@ -402,19 +394,21 @@ async function pullDevices(
     guard += 1;
     const res: Response = await fetch(url, { headers: jarHeaders(config, jar), cache: "no-store" });
     absorb(jar, res);
-    if (res.status === 400 || res.status === 403 || res.status === 404) return out;
+    if (guard === 1 && (res.status === 400 || res.status === 403 || res.status === 404)) return out;
     if (!res.ok) {
       throw new Error(
         `Tidal ${source.path} ${res.status}: ${await res.text().catch(() => res.statusText)}`,
       );
     }
     const data: any = await res.json();
-    const rows: any[] = Array.isArray(data) ? data : data?.data ?? [];
+    const rows: any[] = Array.isArray(data) ? data : data?.data;
+    if (!Array.isArray(rows)) throw new Error("Tidal returned an invalid device page.");
     for (const r of rows) out.push(source.norm(r, ctx));
 
     // Two pagination shapes: Intune is cursor-based (has_next + links.next);
     // Auvik/SOTI are page-based (current_page/last_page, no has_next).
     const pg = data?.pagination;
+    if (pg?.has_next === true && !pg?.links?.next) throw new Error("Tidal inventory is missing its next page link.");
     let nextUrl: string | null = null;
     if (pg?.has_next === true && pg?.links?.next) {
       // Cursor-based: follow the server-supplied link.
@@ -426,6 +420,9 @@ async function pullDevices(
       // links.next if given, otherwise build the next page ourselves.
       const current = Number(pg.current_page);
       const last = pg.last_page == null ? null : Number(pg.last_page);
+      if (!Number.isSafeInteger(current) || current < 1 || (last !== null && (!Number.isSafeInteger(last) || last < current))) {
+        throw new Error("Tidal returned invalid inventory pagination.");
+      }
       if (last == null || current < last) {
         if (pg.links?.next) {
           nextUrl = rehost(config, String(pg.links.next));
@@ -438,6 +435,7 @@ async function pullDevices(
     }
     url = nextUrl;
   }
+  if (url) throw new Error("Tidal inventory exceeded the pagination limit; no complete source result was returned.");
   return out;
 }
 
@@ -450,12 +448,12 @@ export type TidalProgress = {
   assetsFound?: number;
 };
 
-export type TidalListResult = { assets: TidalAsset[]; errors: string[] };
+export type TidalListResult = { assets: TidalAsset[]; errors: string[]; skippedCompanies?: number };
 
 // Log in, enumerate every client company, and pull each one's devices in its
-// own session context. Every asset is attributed to the company it was pulled
-// under — the authoritative customer boundary, so there is no cross-customer
-// bleed. Keeps only records with something scannable (a hostname or an IP).
+// own session context. Keep that roster's company ID on each asset so the
+// caller can enforce its reviewed destination. Keeps records with something
+// scannable (a hostname or an IP).
 // onProgress (optional) is invoked as each company is processed. A
 // per-company failure is logged immediately (not just collected) and
 // returned alongside the assets -- previously it was only surfaced when
@@ -464,21 +462,28 @@ export type TidalListResult = { assets: TidalAsset[]; errors: string[] };
 // success as long as the other ~48 companies kept working.
 export async function tidalListAssets(
   onProgress?: (p: TidalProgress) => void,
+  options?: { config?: TidalConfig; companyIds?: ReadonlySet<string> },
 ): Promise<TidalListResult> {
-  const config = tidalConfig();
+  const config = options?.config ?? tidalConfig();
   if (!config) throw new Error("Tidal is not configured. Set TIDAL_EMAIL and TIDAL_PASSWORD.");
+  const selected = options?.companyIds;
+  if (selected && (!selected.size || [...selected].some(id=>!/^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(id))))
+    throw new Error("Tidal requires valid approved company IDs before collection.");
 
   onProgress?.({ phase: "Signing in" });
   const jar = await tidalLogin(config);
   onProgress?.({ phase: "Enumerating companies" });
-  const companies = await listCompanies(config, jar);
+  const roster = await listCompanies(config, jar, !!selected);
+  const companies = selected ? roster.filter(c=>selected.has(c.id)) : roster;
   if (companies.length === 0) {
-    throw new Error("Tidal returned no companies for this account.");
+    throw new Error(selected ? "Tidal returned no approved companies; review routing and portal access." : "Tidal returned no companies for this account.");
   }
   onProgress?.({ companiesTotal: companies.length, companiesDone: 0 });
 
   const assets: TidalAsset[] = [];
   const errors: string[] = [];
+  if (selected) for (const id of selected) if (!roster.some(c=>c.id===id))
+    errors.push("An approved Tidal company was not returned; review routing and portal access.");
   let done = 0;
   for (const company of companies) {
     onProgress?.({
@@ -494,7 +499,7 @@ export async function tidalListAssets(
       };
       for (const source of DEVICE_SOURCES) {
         try {
-          assets.push(...(await pullDevices(config, jar, source, ctx)));
+          assets.push(...(await pullDevices(config, jar, source, ctx)).map(asset=>({...asset,sourceCompanyId:company.id})));
         } catch (err) {
           const msg = `${company.name}: ${err instanceof Error ? err.message : String(err)}`;
           errors.push(msg);
@@ -514,7 +519,7 @@ export async function tidalListAssets(
   // Only throw (fail the whole sync) if we got nothing at all; a partial
   // failure still returns its errors for the caller to surface.
   if (scannable.length === 0 && errors.length) throw new Error(errors[0]);
-  return { assets: scannable, errors };
+  return { assets: scannable, errors, ...(selected ? { skippedCompanies: roster.length - companies.length } : {}) };
 }
 
 // --- CSV import (offline fallback) -----------------------------------------

@@ -148,18 +148,18 @@ const MAX_PARTITION_CURSOR_RESETS = 20;
 
 export type PartitionedSpotlightDependencies = {
   acquire: (tenantKey: string) => Promise<{ assertHeld: () => void; release: () => Promise<void> }>;
-  createSession: (config: FalconTenant) => Promise<{
+  createSession: (config: FalconTenant, scope?: { expectedCid: string }) => Promise<{
     queryPage: (after: string, filter: string) => Promise<{ ids: string[]; next: string; total: number | null }>;
     hydrateIds: (ids: string[]) => Promise<SpotlightFinding[]>;
   }>;
-  begin: (tenantKey: string, partitionKeys: string[]) => Promise<SpotlightPartitionedRunCheckpoint>;
+  begin: (tenantKey: string, partitionKeys: string[], scope?: SpotlightTenantSelection["reviewedScope"]) => Promise<SpotlightPartitionedRunCheckpoint>;
   getRunState: (runId: string, tenantKey: string) => Promise<SpotlightPartitionedRunCheckpoint>;
   savePartitionPage: (runId: string, tenantKey: string, partitionKey: string, priorCursor: string,
     ids: string[], nextCursor: string, reportedTotal: number | null) => Promise<SpotlightPartitionedRunCheckpoint>;
   resetPartition: (runId: string, tenantKey: string, partitionKey: string, reason: string) => Promise<void>;
   nextIds: (runId: string, tenantKey: string, afterId: string, limit?: number) => Promise<string[]>;
   write: (runId: string, tenantKey: string, ids: string[], rows: SpotlightRecord[]) => Promise<number>;
-  complete: (runId: string, tenantKey: string) => Promise<{ findingsImported: number; hostsAffected: number }>;
+  complete: (runId: string, tenantKey: string, scope?: SpotlightTenantSelection["reviewedScope"]) => Promise<{ findingsImported: number; hostsAffected: number }>;
   fail: (runId: string, error: string) => Promise<void>;
   prune: (tenantKey: string) => Promise<void>;
 };
@@ -182,11 +182,13 @@ export async function runPartitionedSpotlightImport(
   try {
     lock = await deps.acquire(selection.tenantKey);
     lock.assertHeld();
-    run = await deps.begin(selection.tenantKey, partitions.map(p => p.key));
+    run = await deps.begin(selection.tenantKey, partitions.map(p => p.key), selection.reviewedScope);
     report(run.phase === "discovering" ? "Discovering" : "Hydrating");
-    const session = await deps.createSession(selection.config);
+    const session = await deps.createSession(selection.config, selection.reviewedScope ? { expectedCid: selection.reviewedScope.cid } : undefined);
     const filterByKey = new Map(partitions.map(p => [p.key, p.filter]));
 
+    let discoveryFailed = false;
+    let discoveryError: unknown;
     async function discoverPartition(state: SpotlightPartitionCheckpoint): Promise<void> {
       const filter = filterByKey.get(state.key);
       if (!filter) throw new Error(`No filter configured for Spotlight discovery partition "${state.key}".`);
@@ -194,6 +196,7 @@ export async function runPartitionedSpotlightImport(
       let resets = 0;
       const seenCursors = new Set(cursor ? [cursor] : []);
       while (true) {
+        if (discoveryFailed) throw new Error("Spotlight sibling discovery failed.");
         lock!.assertHeld();
         const priorCursor = cursor;
         let page;
@@ -221,6 +224,7 @@ export async function runPartitionedSpotlightImport(
         }
         if (page.next && seenCursors.has(page.next)) throw new Error(`Spotlight pagination cursor repeated for partition "${state.key}".`);
         if (page.next) seenCursors.add(page.next);
+        if (discoveryFailed) throw new Error("Spotlight sibling discovery failed.");
         lock!.assertHeld();
         run = await deps.savePartitionPage(run!.id, selection.tenantKey, state.key, priorCursor, page.ids, page.next, page.total);
         report(run.phase === "discovering" ? "Discovering" : "Hydrating");
@@ -231,7 +235,11 @@ export async function runPartitionedSpotlightImport(
     }
 
     if (run.phase === "discovering") {
-      await Promise.all(run.partitions.filter(p => !p.done).map(discoverPartition));
+      const discoveries = await Promise.allSettled(run.partitions.filter(p => !p.done).map(async state => {
+        try { await discoverPartition(state); } catch (error) { if (!discoveryFailed) { discoveryFailed = true; discoveryError = error; } throw error; }
+      }));
+      const failed = discoveries.find((r): r is PromiseRejectedResult => r.status === "rejected");
+      if (failed) throw discoveryError;
       // The last write to `run` above is a race between whichever partition's
       // transaction happened to resolve last in JS -- not necessarily the one
       // Postgres actually committed last -- so re-read the true state rather
@@ -273,7 +281,7 @@ export async function runPartitionedSpotlightImport(
     }
     report("Completing");
     lock.assertHeld();
-    const result = await deps.complete(run.id, selection.tenantKey);
+    const result = await deps.complete(run.id, selection.tenantKey, selection.reviewedScope);
     void deps.prune(selection.tenantKey).catch(error => {
       console.error("[spotlight] old generation cleanup failed:", error);
     });

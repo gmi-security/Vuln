@@ -71,6 +71,7 @@ test("the update sweeps only still-pending prepared drafts, never approved ones"
   await dedup.sweepSupersededGroupDrafts();
   const sweep = update.find((c) => c.sql.trim().startsWith("WITH ranked"));
   assert.match(sweep.sql, /state='prepared' AND review_state='pending'/);
+  assert.match(sweep.sql, /COALESCE\(packet->>'manualOnly','false'\) <> 'true'/);
   assert.doesNotMatch(sweep.sql, /review_state='approved'/);
 });
 

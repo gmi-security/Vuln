@@ -18,6 +18,7 @@ import {
 import VulnShell from "@/components/VulnShell";
 import { PanelCard, Pill } from "@/components/ui";
 import type { Connector, ConnectorStatus } from "@/lib/types";
+import { connectorImportWarnings } from "@/lib/connector-import-result";
 
 type CardData = {
   id: string;
@@ -157,22 +158,13 @@ function summarizeSync(result: any): string {
   const skipped = Array.isArray(result.skipped) ? result.skipped.length : (typeof result.skipped === "number" ? result.skipped : 0);
   if (skipped) parts.push(`${skipped} skipped`);
   const summary = parts.length ? `Synced — ${parts.join(", ")}.` : "Sync complete.";
-  if (Array.isArray(result.truncatedTenants) && result.truncatedTenants.length) {
-    return (
-      `${summary} ⚠ Hit the pagination safety limit for ${result.truncatedTenants.join(", ")} — ` +
-      "there are more open findings than this sync fetched. The count above is a floor, not the real total. " +
-      "This should not happen under normal use; investigate before trusting this tenant's numbers."
-    );
-  }
-  return summary;
+  const warnings = connectorImportWarnings(result);
+  return warnings.length ? `${summary} Needs attention: ${warnings.join("; ")}. Successful results were retained.` : summary;
 }
 
-// A sync result carries a truncation warning worth flagging as attention-
-// needed (ok: false) even though data did import — presenting a silently
-// incomplete count as a clean success is exactly the bug this is guarding
-// against.
+// Partial imports and ownership conflicts must not look like a clean success.
 function syncOk(result: any): boolean {
-  return !(result && Array.isArray(result.truncatedTenants) && result.truncatedTenants.length);
+  return connectorImportWarnings(result).length === 0;
 }
 
 function summarizeOsint(result: any): string {
@@ -198,6 +190,7 @@ function OsintLaunchBanner() {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [preview, setPreview] = useState<OsintPreview | null>(null);
+  const [previewError, setPreviewError] = useState(false);
   const [showTargets, setShowTargets] = useState(false);
   const [enriching, setEnriching] = useState(false);
   const [enrichMsg, setEnrichMsg] = useState<{ ok: boolean; text: string } | null>(null);
@@ -229,9 +222,9 @@ function OsintLaunchBanner() {
 
   useEffect(() => {
     void fetch("/api/osint/preview", { cache: "no-store" })
-      .then((r) => r.json())
-      .then((j) => setPreview(j.preview ?? null))
-      .catch(() => undefined);
+      .then(async (r) => { const json = await r.json(); if (!r.ok || !json.preview) throw new Error("Preview unavailable"); return json; })
+      .then((j) => { setPreview(j.preview); setPreviewError(false); })
+      .catch(() => setPreviewError(true));
   }, []);
 
   async function run() {
@@ -263,7 +256,7 @@ function OsintLaunchBanner() {
             OSINT sweep &amp; threat intel
           </h2>
           <p className="mt-1 text-sm text-zinc-400">
-            Launch Artemis + SpiderFoot against every customer&apos;s root domains
+            Launch Artemis + SpiderFoot against the configured customer targets
             for supplemental attack-surface context, and refresh CISA KEV + EPSS to
             re-score every finding. Run either on demand.
           </p>
@@ -282,15 +275,16 @@ function OsintLaunchBanner() {
           <button
             type="button"
             onClick={run}
-            disabled={busy || (preview != null && preview.companies === 0)}
+            disabled={busy || previewError || preview == null || preview.companies === 0}
             className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-[rgba(179,14,20,0.45)] bg-[rgba(179,14,20,0.14)] px-4 py-2 text-sm font-medium text-[#ff4d57] transition hover:bg-[rgba(179,14,20,0.24)] disabled:cursor-not-allowed disabled:opacity-40"
           >
             <RefreshCw size={15} className={busy ? "animate-spin" : ""} />
-            {busy ? "Launching…" : "Run OSINT scans (all customers)"}
+            {busy ? "Launching…" : "Run OSINT scans"}
           </button>
         </div>
       </div>
 
+      {previewError ? <p role="alert" className="mt-3 text-sm text-[#ff8a8a]">OSINT target preview is unavailable. Check connector routing and refresh this page before launching scans.</p> : null}
       {enrichMsg ? (
         <div
           className={`mt-3 rounded-lg border px-3 py-2 text-xs ${
@@ -1114,7 +1108,7 @@ function byStatusThenName(a: { status: string; name: string }, b: { status: stri
   );
 }
 
-export default function VulnConnectorsPage() {
+export default function VulnConnectorsPage({ customerHref }: { customerHref?: string } = {}) {
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [integrations, setIntegrations] = useState<CardData[]>([]);
 
@@ -1133,8 +1127,10 @@ export default function VulnConnectorsPage() {
     <VulnShell
       eyebrow="Connectors"
       title="Connectors & integrations"
+      actions={customerHref ? <a className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-100" href={customerHref}>Back to customer connectors</a> : undefined}
       subtitle="Scan engines, telemetry sources, and asset inventory feeding the console. Each integration runs in demo mode until its credentials are set in the environment."
     >
+      {customerHref && <p className="rounded-xl border border-amber-900 bg-amber-950/20 p-4 text-sm text-amber-100">Shared tools: these existing actions can affect multiple customers. The customer selection does not scope these controls.</p>}
       <OsintLaunchBanner />
       <a href="/defender" className="block rounded-2xl border border-zinc-800 bg-[#090909] p-5 transition hover:border-red-800">
         <h2 className="text-lg font-semibold text-white">Microsoft Defender · Customer connections</h2>
