@@ -63,7 +63,7 @@ export default function VulnScanDetailPage({ scanId }: { scanId: string }) {
       : "Loading scan...";
 
   return (
-    <VulnShell
+    <VulnShell companyId={scan?.companyId ?? ""}
       eyebrow="Scan detail"
       title={scan?.name ?? scanId}
       subtitle={subtitle}

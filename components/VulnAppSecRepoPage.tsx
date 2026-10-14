@@ -52,7 +52,7 @@ export default function VulnAppSecRepoPage({ repository, companyId }: { reposito
   const latest = detail?.scans[0];
 
   return (
-    <VulnShell
+    <VulnShell companyId={companyId}
       eyebrow="AppSec · Repository"
       title={repository}
       subtitle="Trivy scan history and current findings for this repository."

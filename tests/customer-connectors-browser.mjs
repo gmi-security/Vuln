@@ -79,6 +79,9 @@ try {
     if (url.pathname === '/api/auth/session') return json({ user: { name: 'Fixture member' }, expires: '2099-01-01T00:00:00Z' });
     // A shared page's in-flight health request may finish after navigating away.
     if (url.pathname === '/api/nessus/health') return json({reachable:true,status:'Connected'});
+    if (!shared && url.pathname === '/api/connectors') return json({connectors:[]});
+    if (!shared && url.pathname === '/api/connectors/sync-all') return json({status:null});
+    if (!shared && url.pathname === '/api/elastic-vulnerabilities/status') return json({enabled:true,remediationEnabled:true});
     if (shared) {
       if (url.pathname === '/api/connectors') return json({connectors:[{id:'nessus',name:'Fixture Nessus',vendor:'Fixture',kind:'Scanner',
         description:'Synthetic scanner',capabilities:[],envVars:[],configured:true,status:'Connected',docsUrl:'https://example.invalid'}]});

@@ -93,6 +93,8 @@ try{
     if(p==='/api/auth/session')return json({user:{name:'Fixture member'},expires:'2099-01-01T00:00:00Z'});
     if(p==='/api/settings')return json({settings:{sla:null}});
     if(p==='/api/elastic-vulnerabilities/status')return json({enabled:true,remediationEnabled:true});
+    if(p==='/api/connectors')return json({connectors:[]});
+    if(p==='/api/connectors/sync-all')return json({status:null});
     if(p==='/api/defender/results')return json({configured:false});
     if(p==='reporting'){
       if(!url.searchParams.has('companyId'))return json({companies});

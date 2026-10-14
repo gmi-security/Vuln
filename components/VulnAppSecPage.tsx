@@ -76,7 +76,7 @@ export default function VulnAppSecPage({ companyId, selection }: { companyId?: s
   }, [load]);
 
   return (
-    <VulnShell
+    <VulnShell companyId={companyId}
       eyebrow="AppSec"
       title="Application security"
       subtitle={companyId ? "Trivy coverage and software risk for this customer's approved repositories." : "Trivy coverage and software risk across GMI GitHub repositories. Baseline debt stays visible; newly introduced High/Critical findings drive the gate."}

@@ -46,7 +46,7 @@ export default function DefenderConnectionsPage({ initialCompanyId = "" }: { ini
     } catch (err) { setError(err instanceof Error ? err.message : "Request failed."); }
     finally { setBusy(""); }
   }
-  return <VulnShell eyebrow="Customer integrations" title="Microsoft Defender" subtitle="Connect a customer's tenant, import its vulnerability assessment, and browse the saved results.">
+  return <VulnShell companyId={companyId} eyebrow="Customer integrations" title="Microsoft Defender" subtitle="Connect a customer's tenant, import its vulnerability assessment, and browse the saved results.">
     <div className="flex gap-3"><Link className={ghostButtonClass} href="/connectors">Back to connectors</Link>{companyId && <Link className={ghostButtonClass} href={`/companies/${encodeURIComponent(companyId)}`}>Customer page</Link>}</div>
     <section className="space-y-4 rounded-2xl border border-zinc-800 bg-[#090909] p-5">
       <h2 className="text-lg font-semibold">Customer connection</h2>

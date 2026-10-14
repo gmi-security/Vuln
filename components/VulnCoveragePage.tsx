@@ -144,7 +144,7 @@ export default function VulnCoveragePage() {
     s && s.known > 0 ? Math.round((s.matched / s.known) * 100) : -1;
 
   return (
-    <VulnShell
+    <VulnShell companyId={companyFilter === "All" ? "" : companyFilter}
       eyebrow="Coverage"
       title="Asset coverage"
       subtitle="Known assets (Tidal, manual, or CrowdStrike inventory) vs scanned assets (seen in results). Surfaces inventory we haven't scanned and scanned hosts that aren't in inventory — matched per customer."

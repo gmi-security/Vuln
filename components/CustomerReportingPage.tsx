@@ -19,8 +19,7 @@ import CustomerCveProvider from "./CustomerCveProvider";
 import CustomerThreatIntelligence from "./CustomerThreatIntelligence";
 import CustomerSavedSources from "./CustomerSavedSources";
 import CustomerPlatformComparison from "./CustomerPlatformComparison";
-import { baseNavItems, remediationNavItems } from "@/lib/navigation";
-import { customerConnectorsHref, remediationHref, remediationView, remediationViews, type RemediationView } from "@/lib/remediation-view";
+import { remediationHref, remediationView, remediationViews, type RemediationView } from "@/lib/remediation-view";
 
 function CustomerTiles({ companyId, canManage }: { companyId:string; canManage:boolean }) {
   const [dashboard,setDashboard] = useState<ElasticDashboard | null>(null);
@@ -89,12 +88,7 @@ export default function CustomerReportingPage({ initialCompanyId="", canManage, 
   return <CustomerCveProvider key={remediation ? companyId : "legacy"} enabled={remediation} companyId={companyId} canManage={canManage} compareEnabled={remediation && shadowCveReads}><VulnShell variant="dashboard" eyebrow={remediation ? "Customer operations" : "Customer reporting"}
     title={remediation ? "Remediation" : "Vulnerability reporting"}
     subtitle={remediation ? "Understand exposure, prioritize fixes and track patch tickets for the selected customer." : "Select a customer to view its connected sources, findings and patch review."}
-    navigation={remediation ? <nav aria-label="Main navigation" className="mb-7 flex flex-wrap items-center gap-5 text-sm text-zinc-300">
-      <Link href="/" className="text-lg font-semibold tracking-widest text-[#b30e14]">GMI VULN</Link>
-      {remediationNavItems.map(item=><Link key={item.href} href={item.href === "/remediation" ? remediationHref(companyId) : item.href === "/connectors" ? customerConnectorsHref(companyId) : item.href} aria-current={item.href === "/remediation" ? "page" : undefined}
-        className={item.href === "/remediation" ? "border-b border-red-600 pb-1 text-white" : "hover:text-white"}>{item.label}</Link>)}
-      <Link href="/settings" className="hover:text-white">Settings</Link>
-    </nav> : undefined}
+    companyId={companyId}
     actions={<div className="flex flex-wrap gap-2">
       <button className={styles.button} disabled={!companyId} onClick={()=>setRefresh(value=>value+1)}><RefreshCw size={16}/>Refresh report</button>
       {canManage && <Link className={styles.button} href="/query-tiles">Manage shared query tiles</Link>}
@@ -123,12 +117,6 @@ export default function CustomerReportingPage({ initialCompanyId="", canManage, 
         {canManage && <PatchTicketTracker companyId={companyId} sla={sla} allowGlobalActions={false}/>}
       </div>}
     </div>}
-    {remediation && <details className="rounded-xl border border-zinc-800 p-4 text-sm text-zinc-300">
-      <summary className="cursor-pointer font-medium">More tools</summary>
-      <nav aria-label="Operational tools" className="mt-4 flex flex-wrap gap-x-5 gap-y-3">
-        <Link href={companyId ? `/reporting?companyId=${encodeURIComponent(companyId)}` : "/reporting"}>Original reporting</Link>
-        {baseNavItems.filter(item=>!remediationNavItems.some(main=>main.href===item.href)).map(item=><Link key={item.href} href={item.href} className="hover:text-white">{item.label}</Link>)}
-      </nav>
-    </details>}
+
   </VulnShell></CustomerCveProvider>;
 }

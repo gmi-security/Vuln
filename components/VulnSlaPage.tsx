@@ -108,7 +108,7 @@ export default function VulnSlaPage() {
   const selected = data?.clients.find((c) => c.companyId === companyId) ?? null;
 
   return (
-    <VulnShell
+    <VulnShell companyId={companyId}
       eyebrow="Remediation SLA"
       title="Remediation SLA & burndown"
       subtitle="Are findings being fixed inside their remediation window, per client? Backlog burndown, SLA compliance, and mean-time-to-remediate — the operational health of the whole program."

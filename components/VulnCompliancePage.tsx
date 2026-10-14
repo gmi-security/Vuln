@@ -101,7 +101,7 @@ export default function VulnCompliancePage() {
   const agg = data?.aggregate;
 
   return (
-    <VulnShell
+    <VulnShell companyId={companyFilter === "All" ? "" : companyFilter}
       eyebrow="Compliance"
       title={data?.framework ?? "Compliance"}
       subtitle="Vulnerability-management compliance per client, mapped to controls across PCI DSS, NIST, CMMC, HIPAA & FedRAMP — findings → controls, pass/fail with evidence, pushable to your GRC."

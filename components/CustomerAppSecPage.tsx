@@ -29,7 +29,7 @@ export default function CustomerAppSecPage({ initialCompanyId = "" }: { initialC
   </label> : null;
   if (setup && (!setup.reviewed || companyId && setup.companies.some(company => company.id === companyId)))
     return <VulnAppSecPage key={companyId || "organization"} companyId={companyId || undefined} selection={selection} />;
-  return <VulnShell eyebrow="AppSec" title="Application security" subtitle="Customer repository coverage and software risk.">
+  return <VulnShell companyId={companyId} eyebrow="AppSec" title="Application security" subtitle="Customer repository coverage and software risk.">
     {selection}
     <p role="status" className="text-sm text-zinc-300">{error || (setup ? companyId ? "Customer not found. Choose an existing customer." : "Choose a customer to view its approved AppSec repositories." : "Loading customer choices...")}</p>
   </VulnShell>;

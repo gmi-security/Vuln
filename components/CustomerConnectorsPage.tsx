@@ -5,8 +5,7 @@ import { RefreshCw } from "lucide-react";
 import VulnShell from "./VulnShell";
 import ReportingCustomer from "./ReportingCustomer";
 import { readDashboardResponse } from "@/lib/dashboard-browser-client";
-import { customerConnectorsHref, remediationHref } from "@/lib/remediation-view";
-import { remediationNavItems } from "@/lib/navigation";
+import { customerConnectorsHref } from "@/lib/remediation-view";
 import type { CustomerConnectorStatus } from "@/lib/customer-connector-status";
 import CustomerConnectorSync from "./CustomerConnectorSync";
 import styles from "./QueryDashboard.module.css";
@@ -88,12 +87,7 @@ export default function CustomerConnectorsPage({ initialCompanyId = "" }: { init
   function selectCustomer(id: string) { setCompanyId(id); setRefresh(0); window.history.pushState(null, "", customerConnectorsHref(id)); }
   return <VulnShell variant="dashboard" eyebrow="Customer operations" title="Customer connectors"
     subtitle="Review source configuration and proposed assignments for the selected customer."
-    navigation={<nav aria-label="Main navigation" className="mb-7 flex flex-wrap items-center gap-5 text-sm text-zinc-300">
-      <Link href="/" className="text-lg font-semibold tracking-widest text-[#b30e14]">GMI VULN</Link>
-      {remediationNavItems.map(item => <Link key={item.href} href={item.href === "/connectors" ? customerConnectorsHref(companyId) : item.href === "/remediation" ? remediationHref(companyId) : item.href}
-        aria-current={item.href === "/connectors" ? "page" : undefined} className={item.href === "/connectors" ? "border-b border-red-600 pb-1 text-white" : "hover:text-white"}>{item.label}</Link>)}
-      <Link href="/settings">Settings</Link>
-    </nav>}
+    companyId={companyId}
     actions={<div className="flex flex-wrap gap-2"><button className={styles.button} onClick={() => setRefresh(n => n + 1)}><RefreshCw size={16}/>Refresh status</button>
       <Link className={styles.button} href={customerConnectorsHref(companyId, true)}>Shared connector tools</Link></div>}>
     <ReportingCustomer key={`selector-${refresh}`} companyId={companyId} onCompanyChange={selectCustomer} refreshToken={refresh} showReport={false} setupPath="customer-connectors?setup=1"/>
