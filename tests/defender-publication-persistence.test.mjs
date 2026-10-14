@@ -15,11 +15,11 @@ const seed = () => ({ companies:[[company.id,company]], folders:[], scans:[], fi
   settings:{autoScanNewAssets:false,schedule:{autoSyncEnabled:false,alertsEnabled:false,monthlyReportsEnabled:false},sla:{Critical:7,High:30,Medium:60,Low:90}},
   meta:{autoSyncDefaultMigrated:true,defenderGenerations:{}} });
 
-async function harness(disk = { value:seed() }, strict = false) {
+async function harness(disk = { value:seed() }, strict = false, scheduled = false) {
   const intervals = [], logs = [], modules = new Map();
   let failSave = false, saveCalls = 0, snapshotReads = 0, gate, lastChanges;
   const context = createContext({ Buffer, URL, URLSearchParams, TextEncoder, TextDecoder, AbortController, Response, Request, Headers, structuredClone,
-    process:{ env:{VULN_DISABLE_SCHEDULER:"true"},once(){} },
+    process:{ env:{VULN_DISABLE_SCHEDULER:scheduled?"false":"true"},once(){} },
     console:{ log:(...args)=>logs.push(args.join(" ")), info:(...args)=>logs.push(args.join(" ")), error:(...args)=>logs.push(args.join(" ")),warn(){} },
     setTimeout,clearTimeout,setImmediate,clearImmediate,
     setInterval:(fn,ms)=>{ intervals.push({fn,ms});return {unref(){}}; },clearInterval(){} });
@@ -186,6 +186,21 @@ test("SQL Defender publication scopes findings, assets, scan and folder without 
  assert.ok(h.disk.value.findings.some(([id])=>id==='unrelated'));
  const restarted=await harness(h.disk,true);
  assert.equal(restarted.store.computeMetrics({companyId:company.id}).totalOpen,1);
+});
+
+test("routine scheduler ticks defer while a publication is saving and resume afterwards",async()=>{
+ const h=await harness(undefined,true,true);let release;
+ h.block(new Promise(r=>{release=r;}));h.store.publishDefenderSnapshot(snapshot);
+ const saving=h.store.commitPlatformMutation();await new Promise(r=>setImmediate(r));
+ const before=h.context.__vulnMutationVersion;
+ for(const timer of h.intervals.filter(t=>t.ms===60000))timer.fn();
+ assert.equal(h.context.__vulnSchedulerTick,undefined,'routine metadata must not invalidate the publication capture');
+ assert.equal(h.context.__vulnScannerExportTick,undefined);
+ assert.equal(h.context.__vulnMutationVersion,before);
+ release();await saving;h.block(undefined);
+ h.intervals.find(t=>t.ms===60000).fn();
+ assert.ok(h.context.__vulnSchedulerTick,'scheduler remains enabled after the save');
+ await h.context.__vulnSchedulerTick;
 });
 
 test("SQL customer creation saves its new company, default folder and counter together",async()=>{

@@ -2,7 +2,7 @@ import { Pool } from "pg";
 import { createHash } from "node:crypto";
 import { createReportingInputDigests, publishReportingInputRevisions, publishSqlReportingChanges, reportingSnapshotManifest } from "./db/customer-reporting-revisions.mjs";
 import { readPlatformAuthority, bindPlatformWriter } from "./db/platform-authority.mjs";
-import { loadPlatformStore, savePlatformStore, savePlatformDelta } from "./db/platform-store.mjs";
+import { loadPlatformStore, savePlatformStore, savePlatformDelta, platformSaveTimeoutMs } from "./db/platform-store.mjs";
 
 // Snapshot persistence. The in-memory store (companies, folders, scans,
 // findings, assets, settings, counter) is serialized by store.ts and flushed
@@ -424,9 +424,11 @@ export async function saveSnapshot(data: unknown, options?: { guard?: () => void
     const client = await p.connect();
     // SQL authority always publishes reporting revisions in the same commit.
     const reporting = createReportingInputDigests(reportingDigestCache);
-    const deadline = Date.now() + 300000;
+    const startedAt = Date.now(), timeoutMs = platformSaveTimeoutMs(options?.changes);
+    const deadline = startedAt + timeoutMs;
+    if (timeoutMs > 300000) console.info(`[persist] Large SQL publication started: ${options?.changes?.findings?.length} findings; ${timeoutMs / 1000}s limit.`);
     const guard = () => {
-      if (Date.now() >= deadline) throw new Error("SQL platform save exceeded its five-minute deadline.");
+      if (Date.now() >= deadline) throw new Error(`SQL platform save exceeded its ${timeoutMs / 1000}s deadline.`);
       options?.guard?.();
     };
     try {
@@ -443,9 +445,10 @@ export async function saveSnapshot(data: unknown, options?: { guard?: () => void
       guard();
       await client.query("COMMIT");
       return next;
-      })(), 300000, "SQL platform save");
+      })(), timeoutMs, "SQL platform save");
       persistence.platformState = next; persistence.platformAuthority = next.authority;
       if (!("changedKeys" in next)) reporting.committed();
+      if (timeoutMs > 300000) console.info(`[persist] Large SQL publication committed in ${Date.now() - startedAt}ms.`);
     } catch (error) {
       client.release(error instanceof Error ? error : new Error(String(error)));
       throw error;
