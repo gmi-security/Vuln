@@ -83,6 +83,35 @@ try{
   await complete.bucket('meta',JSON.stringify(Object.fromEntries(Object.entries(data).filter(([k])=>!platformCollections[k]))));
   assert.equal(complete.finish()[0].hash,after.hash,'Incremental reporting pieces must equal the independent full-generation digest');
   ok('bounded row edit publishes exactly the same reporting revision content as full comparison');
+  const bulkCount=Number(process.env.VULN_TEST_BULK_ROWS??1501);
+  assert.ok(Number.isInteger(bulkCount)&&bulkCount>=1501&&bulkCount<=800000);
+  const bulk=Array.from({length:bulkCount},(_,i)=>[`B-${i}`,{id:`B-${i}`,companyId:'CO-1',connector:'defender',
+   scanId:'defender:CO-1',cve:`CVE-2026-${10000+i%10000}`,asset:`device-${i%600}`,severity:'High',cvss:8.1,
+   realRisk:44.5,status:'Open',firstSeen:'2026-10-01T00:00:00Z',lastSeen:'2026-10-14T00:00:00Z',
+   remediation:'Synthetic patch instructions. '.repeat(30),defender:{runId:'bulk-run',deviceId:`device-${i%600}`,active:true}}]);
+  const started=performance.now();
+  await runtime.saveSnapshot({...data,findings:bulk,meta:{...data.meta,defenderGenerations:{'CO-1':'bulk-run'}}},{changes:{findings:bulk.map(([id])=>id)}});
+  console.log(JSON.stringify({bulkRows:bulkCount,saveMilliseconds:Math.round(performance.now()-started)}));
+  assert.equal((await db.query("SELECT count(*)::int n FROM app_findings WHERE id LIKE 'B-%'")).rows[0].n,bulkCount);
+  assert.equal((await db.query("SELECT payload->'meta'->'defenderGenerations'->>'CO-1' marker FROM app_store_metadata WHERE id=1")).rows[0].marker,'bulk-run');
+  assert.equal((await db.query("SELECT count(*)::int n FROM (SELECT store_bucket,store_order FROM app_findings GROUP BY store_bucket,store_order HAVING count(*)>1)t")).rows[0].n,0);
+  const bulkRevision=await revisionModule.readReportingInputRevision(db,'CO-1');
+  const bulkDigest=revisionModule.createReportingInputDigests();
+  for(const [kind,c] of Object.entries(platformCollections)){
+   const buckets=Array.from({length:c.buckets},()=>[]);
+   for(const row of kind==='findings'?data.findings.concat(bulk):data[kind])buckets[platformBucket(row[0],c.buckets)].push(row);
+   for(let b=0;b<c.buckets;b++)await bulkDigest.bucket(`${kind}:${String(b).padStart(2,'0')}`,JSON.stringify(buckets[b]));
+  }
+  await bulkDigest.bucket('meta',JSON.stringify(Object.fromEntries(Object.entries(data).filter(([k])=>!platformCollections[k]))));
+  assert.equal(bulkDigest.finish()[0].hash,bulkRevision.hash,'Bulk reporting hash must equal independent full-generation digest');
+  const bulkAuthority=await readPlatformAuthority(db);
+  await assert.rejects(runtime.saveSnapshot({...data,findings:[['B-0',{...bulk[0][1],status:'Resolved'}]],meta:{...data.meta,defenderGenerations:{'CO-1':'must-rollback'}}},
+   {changes:{findings:['B-0']},guard:()=>{throw Error('injected after row and marker writes');}}),/injected after row and marker writes/);
+  assert.equal((await db.query("SELECT status FROM app_findings WHERE id='B-0'")).rows[0].status,'Open');
+  assert.equal((await db.query("SELECT payload->'meta'->'defenderGenerations'->>'CO-1' marker FROM app_store_metadata WHERE id=1")).rows[0].marker,'bulk-run');
+  assert.deepEqual(await readPlatformAuthority(db),bulkAuthority);
+  assert.deepEqual(await revisionModule.readReportingInputRevision(db,'CO-1'),bulkRevision);
+  ok('bulk scoped findings and their publication marker commit together with unique append orders and valid reporting revisions');
   const restarted=await instance();assert.equal((await restarted.loadSnapshot()).findings[0][1].severity,'Critical');
   const a=await readPlatformAuthority(db);await restarted.saveSnapshot(await restarted.loadSnapshot());assert.deepEqual(await readPlatformAuthority(db),a);
   process.env.VULN_PLATFORM_STORE='legacy';await assert.rejects((await instance()).loadSnapshot(),/requires VULN_PLATFORM_STORE/);

@@ -7,7 +7,7 @@ import { storeStatus } from "@/lib/store";
 export const dynamic = "force-dynamic";
 
 // Allow-listed in proxy.ts, so anonymous callers can reach this route. They
-// only get a liveness bit; error text, tenant counts, and snapshot metadata
+// only get readiness/storage booleans; error text, tenant counts and metadata
 // are reserved for signed-in sessions.
 export async function GET(request: NextRequest) {
   const token = await getToken({
@@ -15,19 +15,24 @@ export async function GET(request: NextRequest) {
     secret: process.env.NEXTAUTH_SECRET,
   });
 
-  const ping = await pingDb();
+  const [ping,status] = await Promise.all([pingDb(),storeStatus()]);
+  const ready = (!persistenceEnabled() || ping.ok) && status.hydrated && !status.persistBlocked;
   if (!token) {
     return NextResponse.json({
-      ok: true,
+      ok: ready,
+      ready,
       persistence: {
         enabled: persistenceEnabled(),
         dbReachable: ping.ok,
+        blocked: status.persistBlocked,
       },
-    });
+    }, {status:ready ? 200 : 503});
   }
 
-  const [status, meta] = await Promise.all([storeStatus(), snapshotMeta()]);
+  const meta = await snapshotMeta();
   return NextResponse.json({
+    ok: ready,
+    ready,
     persistence: {
       enabled: persistenceEnabled(),
       dbReachable: ping.ok,

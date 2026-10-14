@@ -189,12 +189,10 @@ export default function VulnDashboardPage() {
         <div className="rounded-2xl border border-red-900/60 bg-red-950/30 px-5 py-4 text-sm">
           <span className="font-semibold text-red-300">⛔ Writes disabled — changes are not being saved</span>
           <span className="ml-2 text-red-400/80">
-            The database was unreachable at startup, so persistence was blocked to protect existing data from
-            being overwritten.
+            A database load or save failed. Saving is paused to protect the last successfully saved data.
           </span>
           <span className="ml-2 text-red-600">
-            Everything you do right now (syncs, triage, settings) will be lost on the next restart. Fix
-            DATABASE_URL / DB connectivity, then restart the app to re-enable saving.
+            Do not make further changes until the storage error is resolved. Unsaved changes may be lost.
           </span>
         </div>
       ) : dbStatus.reachable === false ? (
