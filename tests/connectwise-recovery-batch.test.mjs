@@ -6,7 +6,7 @@ import {tmpdir} from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {preflightRecovery,executeRecovery,retryIndex17,exclusiveWrite,classifyLookup,boundedGet} from '../lib/connectwise-recovery-batch.mjs';
-import {readRecoveryDatabase,sendConnectWiseGet} from '../scripts/connectwise-recovery-batch.mjs';
+import {readRecoveryDatabase,sendConnectWiseGet,runRecoveryCommand} from '../scripts/connectwise-recovery-batch.mjs';
 
 const hash=value=>createHash('sha256').update(value).digest('hex');
 const id=i=>`00000000-0000-4000-8000-${String(i).padStart(12,'0')}`;
@@ -14,12 +14,9 @@ const scope='a'.repeat(64);
 const target=hash('api-na.myconnectwise.net/test');
 const expected={companyId:32628,boardId:159,appCompanyId:'CO-147284'};
 
-test('operator command keeps retry and batch GETs disabled before preflight',()=>{
+test('operator command keeps batch execution disabled before preflight',()=>{
   const script=path.resolve('scripts/connectwise-recovery-batch.mjs');
-  for(const [args,message] of [
-    [['--retry-index-17','--authorize-index-17'],'INDEX_17_RETRY_DISABLED'],
-    [['--execute'],'BATCH_EXECUTION_DISABLED'],
-  ]){
+  for(const [args,message] of [[['--execute'],'BATCH_EXECUTION_DISABLED']]){
     const run=spawnSync(process.execPath,[script,...args],{encoding:'utf8'});
     assert.equal(run.status,1);
     assert.match(run.stderr,new RegExp(message));
@@ -70,6 +67,26 @@ async function seedRateLimit(f){
   for(const name of ['single-17-started.json','single-17-result.json'])
     f.pins[name]=hash(await readFile(path.join(f.dir,name)));
 }
+
+test('CLI dispatch permits only the explicitly authorized index-17 retry',async t=>{
+  const f=await fixture(t);await seedRateLimit(f);let calls=0,dbReads=0;
+  const options={dir:f.dir,pins:f.pins,readDb:async ids=>{dbReads++;return f.readDb(ids);},
+    now:()=>new Date('2026-10-13T00:25:00.000Z'),
+    sendGet:async()=>{calls++;return {status:200,headers:{},body:'[]'};}};
+  for(const args of [['--retry-index-17'],['--authorize-index-17'],['--execute'],
+    ['--authorize-index-17','--retry-index-17'],
+    ['--execute','--authorize-index-17'],['--retry-index-17','--execute'],
+    ['--retry-index-17','--authorize-index-17','--execute'],['--retry-index-17','--retry-index-17'],
+    ['--unknown']]){
+    await assert.rejects(runRecoveryCommand(args,options),/RETRY_AUTHORIZATION_REQUIRED|BATCH_EXECUTION_DISABLED|INVALID_ARGUMENTS/);
+  }
+  assert.equal(calls,0);assert.equal(dbReads,0);
+  const result=await runRecoveryCommand(['--retry-index-17','--authorize-index-17'],options);
+  assert.equal(result.index,17);assert.equal(result.classification,'not_found');
+  assert.equal(calls,1);
+  await assert.rejects(runRecoveryCommand(['--retry-index-17','--authorize-index-17'],options),/RETRY_ALREADY_ATTEMPTED/);
+  assert.equal(calls,1);
+});
 
 test('index-17 rate limit requires pinned originals and blocks normal execution',async t=>{
   const f=await fixture(t);await seedRateLimit(f);let calls=0;

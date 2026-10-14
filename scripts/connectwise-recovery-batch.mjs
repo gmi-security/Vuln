@@ -1,4 +1,4 @@
-// Offline preflight by default. --execute is the only path that sends GETs.
+// Offline preflight by default. Only the authorized index-17 retry can send a GET.
 import {createDecipheriv,createHash,hkdfSync} from 'node:crypto';
 import {lookup as dnsLookup} from 'node:dns/promises';
 import {readFile} from 'node:fs/promises';
@@ -7,7 +7,7 @@ import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {parseEnv} from 'node:util';
 import pg from 'pg';
-import {preflightRecovery,executeRecovery,boundedGet} from '../lib/connectwise-recovery-batch.mjs';
+import {preflightRecovery,retryIndex17,boundedGet} from '../lib/connectwise-recovery-batch.mjs';
 
 const dir='/home/codex/vuln-recovery/cw-get-resume-zm1i62th';
 const socket='/home/codex/vuln-recovery/merge-rehearsal-26PA6Y/restore-vR3gUb/socket';
@@ -91,25 +91,30 @@ export async function sendConnectWiseGet({requestId,row,connection},{lookup=dnsL
   return get({url,ip,headers});
 }
 
-async function main(){
-  const args=process.argv.slice(2);
-  if(args.includes('--retry-index-17')||args.includes('--authorize-index-17'))fail('INDEX_17_RETRY_DISABLED');
+export async function runRecoveryCommand(args,{dir:evidenceDir=dir,pins:evidencePins=pins,
+  readDb=readRecoveryDatabase,sendGet=sendConnectWiseGet,now=()=>new Date()}={}){
   if(args.includes('--execute'))fail('BATCH_EXECUTION_DISABLED');
-  if(args.length>1||(args[0]&&args[0]!=='--execute'))fail('Usage: node scripts/connectwise-recovery-batch.mjs [--execute]');
+  const retry=args.length===2&&args[0]==='--retry-index-17'&&args[1]==='--authorize-index-17';
+  if(!retry&&args.some(arg=>arg==='--retry-index-17'||arg==='--authorize-index-17'))
+    fail('RETRY_AUTHORIZATION_REQUIRED');
+  if(!retry&&args.length!==0)fail('INVALID_ARGUMENTS');
   process.umask(0o077);
-  if(args[0]!=='--execute'){
-    const plan=await preflightRecovery({dir,pins,readDb:readRecoveryDatabase});
+  if(!retry){
+    const plan=await preflightRecovery({dir:evidenceDir,pins:evidencePins,readDb});
     console.log(JSON.stringify({mode:'preflight',checkpointSha256:plan.checkpointSha256,
       nextIndex:plan.nextIndex,remaining:plan.remaining,lastCheckedAt:plan.lastCheckedAt,
       retryRequired:plan.retryRequired,nextAllowedAt:new Date(plan.nextAllowedAt).toISOString(),
       noExternalRequests:true,noDatabaseWrites:true},null,2));
-    return;
+    return plan;
   }
-  const report=await executeRecovery({dir,pins,readDb:readRecoveryDatabase,sendGet:sendConnectWiseGet});
-  console.log(JSON.stringify({mode:'execute',reportFile:`${dir}/batch-14-71-report.json`,
-    processed:report.processed,totalVerified:report.totalVerified,totalUnresolved:report.totalUnresolved,
+  const result=await retryIndex17({dir:evidenceDir,pins:evidencePins,readDb,sendGet,now,authorized:true});
+  console.log(JSON.stringify({mode:'retry-index-17',index:result.index,
+    classification:result.classification,resultSha256:result.resultSha256,
     noDatabaseWrites:true},null,2));
+  return result;
 }
 
 if(process.argv[1]&&pathToFileURL(resolve(process.argv[1])).href===import.meta.url)
-  main().catch(error=>{console.error(error?.message??'RECOVERY_STOPPED');process.exitCode=1;});
+  runRecoveryCommand(process.argv.slice(2)).catch(error=>{
+    console.error(error?.message??'RECOVERY_STOPPED');process.exitCode=1;
+  });

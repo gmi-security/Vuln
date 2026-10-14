@@ -1,6 +1,6 @@
 # ConnectWise recovery batch: index 17 and indexes 18–71
 
-PR #52 and production remain on HOLD. This standalone runner uses the named `recovery_merge_fenced` clone in a read-only transaction. It never changes the database or saves ConnectWise response bodies. **This revision disables both execution flags in the operator command.** The retry and continuation commands below are reserved for a later, separately authorized revision. Running them now fails before evidence, database, DNS, or ConnectWise access.
+PR #52 and production remain on HOLD. This standalone runner uses the named `recovery_merge_fenced` clone in a read-only transaction. It never changes the database or saves ConnectWise response bodies. **Gate 3 enables only the explicitly authorized, single index-17 GET retry.** General `--execute` remains disabled and indexes 18–71 cannot run.
 
 The command pins the original checkpoint, index-12/13 evidence, and the independently verified index-17 attempt and HTTP 429 result. Offline preflight verifies those bytes, sidecars, the 429 classification and `Retry-After: 30`, completed index-14/16 evidence, each request scope, the saved ConnectWise target, and the 96-row recovery cohort. Normal execution cannot skip index 17. The library's retry path requires explicit authorization, verifies the same request in the read-only clone, waits at least five minutes after the original result, writes an exclusive attempt marker before its one GET, and stops on uncertain outcomes. Later GETs use at least five minutes between requests, including restarts, and honor a longer valid `Retry-After`.
 
@@ -41,17 +41,17 @@ SH
 
 Preflight should report `nextIndex: 17`, `retryRequired: true`, and `noExternalRequests: true`. Any unexpected result is a stop condition. It reads the private recovery clone and connection settings; it performs no database write or external GET.
 
-## 2. Explicit index-17 retry — disabled pending separate authorization
+## 2. Explicit one-time index-17 retry
 
-Reserved command:
+After the offline preflight succeeds and confirms index 17 is pending, the operator can initiate the authorized retry with the exact flags below. The runner checks the original evidence pins, read-only database scope, target, and five-minute cooldown again before writing a distinct immutable attempt marker and sending one GET.
 
 ```sh
 sudo -u codex -H node /home/codex/vuln-recovery/cw-runner-pr52/scripts/connectwise-recovery-batch.mjs --retry-index-17 --authorize-index-17
 ```
 
-**Do not run it yet.** This revision returns `INDEX_17_RETRY_DISABLED` before any read or GET. A later reviewed change and separate operator authorization are required to unlock it. Never remove or edit the original index-17 files, and never retry an uncertain retry attempt.
+Do not remove or edit the original index-17 files. If this command stops or leaves incomplete evidence, do not rerun it; review the new evidence first. A completed retry, including another 429, cannot be attempted again by this command.
 
-## 3. Verify retry evidence offline — after an authorized retry
+## 3. Verify retry evidence offline
 
 ```sh
 sudo -u codex -H node /home/codex/vuln-recovery/cw-runner-pr52/scripts/connectwise-recovery-batch.mjs
