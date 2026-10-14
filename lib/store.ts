@@ -999,7 +999,9 @@ function startScheduler(): void {
   if (process.env.VULN_DISABLE_SCHEDULER === "true") return;
   if (persistGlobal.__vulnScheduler) return;
   persistGlobal.__vulnScheduler = setInterval(() => {
-    if (persistGlobal.__vulnSchedulerTick) return; // previous tick still running
+    // A bookkeeping mutation during a large publication invalidates its
+    // capture and rolls back all completed batches. Try again next minute.
+    if (persistGlobal.__vulnSchedulerTick || persistGlobal.__vulnFlushing) return;
     const run = schedulerTick().catch((err) => {
       console.error("[scheduler] tick failed:", err);
     });
@@ -1020,7 +1022,7 @@ function startScheduler(): void {
 function startScannerElasticExportScheduler(): void {
   if (persistGlobal.__vulnScannerExportScheduler) return;
   persistGlobal.__vulnScannerExportScheduler = setInterval(() => {
-    if (persistGlobal.__vulnScannerExportTick) return; // previous tick still running
+    if (persistGlobal.__vulnScannerExportTick || persistGlobal.__vulnFlushing) return;
     const run = scannerElasticExportTick().catch((err) => {
       console.error("[scanner-export] tick failed:", err);
     });
@@ -1081,7 +1083,7 @@ async function scannerElasticExportTick(): Promise<void> {
 function startVulnersBridgeScheduler(): void {
   if (persistGlobal.__vulnVulnersBridgeScheduler) return;
   persistGlobal.__vulnVulnersBridgeScheduler = setInterval(() => {
-    if (persistGlobal.__vulnVulnersBridgeTick) return; // previous tick still running
+    if (persistGlobal.__vulnVulnersBridgeTick || persistGlobal.__vulnFlushing) return;
     const run = vulnersBridgeTick().catch((err) => {
       console.error("[vulners-bridge] tick failed:", err);
     });
