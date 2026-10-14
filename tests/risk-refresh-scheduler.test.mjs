@@ -62,7 +62,7 @@ async function loadScheduler({ tenantRows, refreshTenantResult = { findingsScore
     "./cve-enrichment-refresh": { refreshCveEnrichment: async () => ({ kevEntries: 0, epssUpdated: 0, activeExploitationSignals: 0, errors: 0, skipped: 0 }) },
     "./finding-risk-compute": { computeFindingRiskForTenant: async (tenantKey, companyId) => { computeCalls.push({ tenantKey, companyId }); return refreshTenantResult; } },
     "./risk-scoring-store": { riskScoringDatabase: async () => riskDb, recordRiskSnapshot: async () => {} },
-    "./swath-ticket-priority": { reconcileTicketPriorityToSwath: async () => ({ checked: 0, updated: 0, errors: 0 }) },
+    "./swath-ticket-priority": { reconcileTicketPriorityToSwath: async () => { assert.fail("Risk refresh must not modify tickets"); } },
     "./background-job-runs": { recordJobRun: async () => {} },
   })("lib/risk-refresh-scheduler.ts");
   return { mod, riskDb, computeCalls };
@@ -92,7 +92,7 @@ test("one tenant's failure does not block the others", async () => {
     "./cve-enrichment-refresh": { refreshCveEnrichment: async () => ({ kevEntries: 0, epssUpdated: 0, activeExploitationSignals: 0, errors: 0, skipped: 0 }) },
     "./finding-risk-compute": { computeFindingRiskForTenant: async () => { call++; if (call === 1) throw new Error("CrowdStrike timeout"); return { findingsScored: 5, distinctCves: 5, errors: 0 }; } },
     "./risk-scoring-store": { riskScoringDatabase: async () => riskDb, recordRiskSnapshot: async () => {} },
-    "./swath-ticket-priority": { reconcileTicketPriorityToSwath: async () => ({ checked: 0, updated: 0, errors: 0 }) },
+    "./swath-ticket-priority": { reconcileTicketPriorityToSwath: async () => { assert.fail("Risk refresh must not modify tickets"); } },
     "./background-job-runs": { recordJobRun: async () => {} },
   })("lib/risk-refresh-scheduler.ts");
   const result = await mod.refreshAllTenantsRisk();

@@ -61,7 +61,7 @@ export default function PatchReviewQueue({ companyId, sla }: { companyId: string
 
   async function open(id: string) {
     setBusy(id); setError("");
-    try { setSelected(await dashboardRequest<Detail>(`patch-group-tickets/${id}?packet=1`)); setDetailPage(1); }
+    try { setSelected(await dashboardRequest<Detail>(`patch-group-tickets/${id}?packet=1&companyId=${encodeURIComponent(companyId)}`)); setDetailPage(1); }
     catch (cause) { setError(cause instanceof Error ? cause.message : "Could not open this draft."); }
     finally { setBusy(""); }
   }
@@ -69,7 +69,7 @@ export default function PatchReviewQueue({ companyId, sla }: { companyId: string
     if (!selected) return;
     setBusy(action); setError("");
     try {
-      const data = await dashboardRequest<{ request: PatchGroupTicketSummary }>(`patch-group-tickets/${selected.request.id}`, {
+      const data = await dashboardRequest<{ request: PatchGroupTicketSummary }>(`patch-group-tickets/${selected.request.id}?companyId=${encodeURIComponent(companyId)}`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action }),
       });
       setSelected({ ...selected, request: data.request });
@@ -171,7 +171,7 @@ export default function PatchReviewQueue({ companyId, sla }: { companyId: string
           <button type="button" className={styles.button} disabled={Boolean(busy)} onClick={() => void review("dismiss")}>Dismiss</button></>}
         {selected.request.reviewState === "dismissed" && <button type="button" className={styles.button} disabled={Boolean(busy)} onClick={() => void review("reopen")}>Reopen for review</button>}
       </div>
-      {selected.request.reviewState === "approved" && <ConnectWiseGroupTicket key={`${selected.request.id}-approved`} group={selected.group} requestId={selected.request.id} />}
+      {selected.request.reviewState === "approved" && <ConnectWiseGroupTicket key={`${selected.request.id}-approved`} group={selected.group} requestId={selected.request.id} customerScope={companyId} />}
     </div>}
   </section>;
 }

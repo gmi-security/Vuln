@@ -21,7 +21,7 @@ export const loadDefenderSourceReader = () => loadReader('defender-source-read-m
 export const loadSpotlightSourceReader = () => loadReader('spotlight-source-read-model', 'createSpotlightSourceReader');
 
 export async function loadSpotlightSummaryModules() {
-  const allowed = new Set(['customer-source-read-model','spotlight-summary-model','spotlight-summary-store']);
+  const allowed = new Set(['customer-source-read-model','spotlight-summary-model','spotlight-summary-store','spotlight-top-fixes','patch-recommendations','crowdstrike-dashboard','elastic-dashboard']);
   const cache = new Map();
   function load(name) {
     if (!allowed.has(name)) throw new Error('Unexpected summary dependency.');

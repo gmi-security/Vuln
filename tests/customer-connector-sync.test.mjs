@@ -143,15 +143,15 @@ test('sync service scopes database metadata and dispatch; GET never imports or r
   } finally {if(old===undefined)delete process.env.REPORTING_CUSTOMER_TILE_IDS;else process.env.REPORTING_CUSTOMER_TILE_IDS=old;}
 });
 
-test('customer publication only loads that customer and respects the paused patch scheduler', async () => {
+test('customer publication only loads that customer and never generates drafts with scheduled imports enabled', async () => {
   const published=[],scores=[],listed=[];const previous=process.env.VULN_DISABLE_SCHEDULER;
-  process.env.VULN_DISABLE_SCHEDULER='true';
+  process.env.VULN_DISABLE_SCHEDULER='false';
   try {
     const platform=await load('lib/defender-platform.ts',{
       './defender-store':{defenderStore:()=>({list:async id=>{listed.push(id);return [{companyId:'A',currentRun:'a'},{companyId:'B',currentRun:'b'}].filter(c=>!id||id===c.companyId);},platformSnapshot:async id=>({companyId:id,runId:id,findings:[],devices:[]})})},
       './store':{ensureHydrated:async()=>{},defenderProjectedRun:()=>null,publishDefenderSnapshot:s=>published.push(s.companyId),invalidateDefenderPublication(){},flushNow:async()=>{}},
       './defender-risk':{refreshDefenderRisk:async(...args)=>{scores.push(args);}},
-      './reporting-queue':{refreshReportingQueue:async()=>{assert.fail('Paused draft generator must not run');}},
+      './reporting-queue':{refreshReportingQueue:async()=>{assert.fail('Imports must never generate drafts');}},
     });
     await platform.reconcileDefenderPlatform(true,'A');
     assert.deepEqual(listed,['A']);assert.deepEqual(published,['A']);assert.deepEqual(scores,[[false,'A']]);

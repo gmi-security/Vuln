@@ -1,6 +1,7 @@
 import { emptySeverityCounts, sourceSeverities, type CustomerSourceRead, type SourceCveRow } from "./customer-source-read-model";
+import { createSpotlightTopFixes } from "./spotlight-top-fixes";
 
-export const SPOTLIGHT_SUMMARY_VERSION = 3;
+export const SPOTLIGHT_SUMMARY_VERSION = 4;
 export type SpotlightVendorScope = { version: 2; tenantId: string | null; mixed: boolean; missingRows: number; rows: number; localPlaceholderRows: number };
 export function matchesSpotlightTenant(scope: unknown, tenantId: string, sourceRows: unknown): boolean {
   const value = scope as SpotlightVendorScope | null;
@@ -16,6 +17,7 @@ export type SummaryInput = {
   raw_status: unknown; raw_cve: unknown; raw_severity: unknown; score: unknown; suppressed: unknown;
   // Computed by the trusted SQL reader from the exact local placeholder shape.
   local_placeholder?: boolean;
+  patch?: Record<string,unknown>;
 };
 export const summaryLimits = { records: 5_000_000, pairs: 3_000_000, devices: 100_000, cves: 100_000 };
 const ranks = ["UNKNOWN", "NONE", "LOW", "MEDIUM", "HIGH", "CRITICAL"];
@@ -33,6 +35,7 @@ export function createSpotlightSummaryAccumulator(companyId: string, limits = su
   let tenantId: string | null = null, mixed = false, missingRows = 0, localPlaceholderRows = 0;
   const severity = emptySeverityCounts(), devices = new Map<string, number>();
   const cves = new Map<string, SourceCveRow & { deviceKeys: Set<number> }>();
+  const topFixes = createSpotlightTopFixes(companyId);
   function add(row: SummaryInput) {
     if (row.company_id !== companyId || !row.source_id) throw new Error("Source row does not match the selected customer.");
     if (++scanned > limits.records) throw new Error("Summary record limit exceeded.");
@@ -76,6 +79,7 @@ export function createSpotlightSummaryAccumulator(companyId: string, limits = su
       cves.set(row.cve, cve);
     }
     const device = devices.get(key)!;
+    topFixes.add(row.patch,row.cve,device);
     if (!cve.deviceKeys.has(device)) {
       if (pairs >= limits.pairs) throw new Error("Summary device/CVE limit exceeded.");
       cve.deviceKeys.add(device); cve.affectedDevices++; pairs++;
@@ -93,7 +97,7 @@ export function createSpotlightSummaryAccumulator(companyId: string, limits = su
       inventoryDevices: null, unknownSuppressionInstances: unknownSuppression, excludedSuppressedInstances: suppressed, excludedNonCveInstances: nonCve,
       severity: { sourceInstances: { ...severity }, uniqueCves: unique } };
     const vendorScope: SpotlightVendorScope = { version: 2, tenantId: mixed ? null : tenantId, mixed, missingRows, rows: scanned, localPlaceholderRows };
-    return { scanned, summary, rows, vendorScope };
+    return { scanned, summary, rows, vendorScope, topFixes: topFixes.finish() };
   }
   return { add, finish, get scanned() { return scanned; } };
 }

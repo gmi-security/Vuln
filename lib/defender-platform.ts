@@ -26,12 +26,8 @@ async function reconcile(refreshDependents: boolean, companyId?: string) {
   if (changed && refreshDependents) {
     const { refreshDefenderRisk } = await import("./defender-risk");
     await refreshDefenderRisk(false,companyId);
-    // Respect a maintenance pause: a customer sync must not restart the paused
-    // bulk patch-draft generator as a side effect of publication.
-    if (process.env.VULN_DISABLE_SCHEDULER !== "true") {
-      const { refreshReportingQueue } = await import("./reporting-queue");
-      await refreshReportingQueue(true).catch(()=>{ console.error("[defender] Patch candidate refresh deferred to the reporting scheduler."); });
-    }
+    // Import publication refreshes data and scores. Drafts are only prepared
+    // by a user from a CVE, regardless of the import scheduler setting.
   }
 }
 

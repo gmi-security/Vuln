@@ -6,7 +6,7 @@ import { elasticVulnEnabled } from "./elastic-vuln-server";
 // specific ticket and clicked "check status" — a ticket cut from the
 // dashboard and never revisited again just sat there showing whatever it
 // looked like at creation, even after it closed in ConnectWise weeks later.
-// This polls every open, previously-created ticket on a schedule so our own
+// This polls every previously-created ticket on a schedule so our own
 // tracker and reporting stay in sync with ConnectWise without anyone having
 // to click into each one by hand.
 
@@ -88,8 +88,8 @@ export async function syncTicketStatuses(): Promise<SyncCounts> {
   if (!saved) return { checked: 0, updated: 0, errors: 0 };
   const db = await patchTicketDatabase();
   const [single, group] = await Promise.all([
-    syncTable(db, "patch_ticket_requests", saved.target, saved.value),
-    syncTable(db, "patch_group_ticket_requests", saved.target, saved.value),
+    syncTable(db, "patch_ticket_requests", saved.target, saved.value, { includeClosed: true }),
+    syncTable(db, "patch_group_ticket_requests", saved.target, saved.value, { includeClosed: true }),
   ]);
   return { checked: single.checked + group.checked, updated: single.updated + group.updated, errors: single.errors + group.errors };
 }

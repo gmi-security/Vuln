@@ -6,12 +6,19 @@ const log=(event,details={})=>console.log(JSON.stringify({worker:'spotlight-summ
 async function main() {
   // The disabled path does not read configuration files, load pg or connect to a database.
   if(process.env.VULN_SPOTLIGHT_SUMMARY_WORKER_ENABLED!=='true') {log('disabled');return;}
-  if(process.argv.slice(2).some(arg=>arg!=='--once')) throw new Error('invalid-arguments');
+  if(process.argv.slice(2).some(arg=>!['--once','--load-env'].includes(arg))) throw new Error('invalid-arguments');
   const require=createRequire(import.meta.url);
+  const loadEnv=process.argv.includes('--load-env');
+  if(loadEnv) {
+    process.env.NODE_ENV='production';
+    require('@next/env').loadEnvConfig(process.cwd(),false,{info(){},error(){}});
+  }
   const {summaryWorkerSettings,createSpotlightSummaryWorker}=require('../.worker-build/spotlight-summary/lib/spotlight-summary-worker.js');
   const settings=summaryWorkerSettings(process.env);
   const {Pool}=require('pg');
-  const db=new Pool({connectionString:process.env.DATABASE_URL,max:4,connectionTimeoutMillis:5000,
+  const db=new Pool({connectionString:process.env.DATABASE_URL,
+    // Explicit app-environment mode uses the same managed-Postgres TLS settings as lib/persist.ts.
+    ...(loadEnv?{ssl:{rejectUnauthorized:false}}:{}),max:4,connectionTimeoutMillis:5000,
     statement_timeout:15000,application_name:'vuln-spotlight-summary-worker'});
   const controller=new AbortController();
   const stop=()=>controller.abort();
