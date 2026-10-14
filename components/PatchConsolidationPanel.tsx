@@ -16,7 +16,11 @@ export default function PatchConsolidationPanel({ cves, companyId = "" }: { cves
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const generation = useRef(0);
-  useEffect(() => () => { generation.current++; }, []);
+  const lifetime = useRef<AbortController | null>(null);
+  useEffect(() => {
+    const controller = new AbortController(); lifetime.current = controller;
+    return () => { generation.current++; controller.abort(); };
+  }, [companyId]);
 
   async function prepare() {
     const current = ++generation.current;
@@ -28,7 +32,7 @@ export default function PatchConsolidationPanel({ cves, companyId = "" }: { cves
         await new Promise((resolve) => setTimeout(resolve, 2000));
         if (generation.current !== current) return;
         if (Date.now() >= deadline) throw new Error("The preparation job expired. Please prepare the plan again.");
-        job = await dashboardRequest<Job>(`jobs/${job.jobId}`);
+        job = await dashboardRequest<Job>(`jobs/${job.jobId}`, { signal: lifetime.current?.signal });
       }
       if (generation.current !== current) return;
       if (job.status !== "succeeded" || !job.consolidation) throw new Error(job.error || "The consolidation could not be prepared. Please retry.");

@@ -16,11 +16,17 @@ export async function GET(request: NextRequest) {
   });
 
   const [ping,status] = await Promise.all([pingDb(),storeStatus()]);
-  const ready = (!persistenceEnabled() || ping.ok) && status.hydrated && !status.persistBlocked;
+  const readReady = (!persistenceEnabled() || ping.ok) && status.hydrated && (status.runtimeRole === "web" || !status.persistBlocked);
+  const writeReady = status.runtimeRole === "web"
+    ? Boolean(status.worker?.available && status.worker.ready && !status.worker.blocked)
+    : readReady && !status.persistBlocked;
+  const ready = readReady && writeReady;
   if (!token) {
     return NextResponse.json({
       ok: ready,
       ready,
+      readReady,
+      writeReady,
       persistence: {
         enabled: persistenceEnabled(),
         dbReachable: ping.ok,
@@ -33,6 +39,8 @@ export async function GET(request: NextRequest) {
   return NextResponse.json({
     ok: ready,
     ready,
+    readReady,
+    writeReady,
     persistence: {
       enabled: persistenceEnabled(),
       dbReachable: ping.ok,

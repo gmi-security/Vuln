@@ -98,6 +98,7 @@ export async function persistPreparedGroups(consolidation: PatchConsolidation, a
   return ids;
 }
 async function recoverInterruptedRequests() {
+  if (process.env.VULN_RUNTIME_ROLE === "web") return;
   const db = await patchTicketDatabase();
   await db.query(`UPDATE patch_group_ticket_requests SET state='uncertain',last_error='Creation was interrupted. Check the creation outcome before retrying.',updated_at=now()
     WHERE state='creating' AND started_at < now()-interval '3 minutes'`);

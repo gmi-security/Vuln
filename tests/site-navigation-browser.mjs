@@ -35,17 +35,33 @@ try {
   await context.addCookies([{ name: 'next-auth.session-token', value: token, url: base }]);
   page = await context.newPage(); page.setDefaultTimeout(10000);
   page.on('pageerror', error => errors.push(error.message));
-  let enabled = true;
+  let enabled = true, capabilityMode = 'normal', releaseCapability, sessionName = 'Fixture member';
+  let holdSync = false;
+  const heldSync = [], abortedSync = new Set();
+  let heldPagePath = '';
+  const heldPageReads = [], abortedReads = new Set();
+  page.on('requestfailed', request => {
+    abortedReads.add(request);
+    if (new URL(request.url()).pathname === '/api/connectors/sync-all') abortedSync.add(request);
+  });
   await page.route('**/*', async route => {
     const req = route.request(), url = new URL(req.url());
     if (url.origin !== base) return route.abort();
     if (!url.pathname.startsWith('/api/')) return route.continue();
     calls.push({ path: url.pathname, method: req.method() });
+    if (url.pathname === heldPagePath) await new Promise(resolve => { heldPageReads.push({ request: req, resolve }); });
     const json = (data, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(data) }).catch(() => {});
-    if (url.pathname === '/api/auth/session') return json({ user: { name: 'Fixture member' }, expires: '2099-01-01T00:00:00Z' });
-    if (url.pathname === '/api/elastic-vulnerabilities/status') return json({ enabled, remediationEnabled: enabled });
+    if (url.pathname === '/api/auth/session') return json(sessionName ? { user: { name: sessionName }, expires: '2099-01-01T00:00:00Z' } : null);
+    if (url.pathname === '/api/elastic-vulnerabilities/status') {
+      if (capabilityMode === 'slow') await new Promise(resolve => { releaseCapability = resolve; });
+      if (capabilityMode === 'failed') return json({ error: 'Temporary gateway failure' }, 503);
+      return json({ enabled, remediationEnabled: enabled });
+    }
     if (url.pathname === '/api/connectors') return json({ connectors: [] });
-    if (url.pathname === '/api/connectors/sync-all') return json({ status: null });
+    if (url.pathname === '/api/connectors/sync-all') {
+      if (holdSync) await new Promise(resolve => { heldSync.push({ request: req, resolve }); });
+      return json({ status: null });
+    }
     if (url.pathname === '/api/settings') return json({ settings: {}, isAdmin: false });
     if (url.pathname === '/api/scans') return json({ scans: [] });
     if (url.pathname === '/api/scans/fixture-scan') return json({ scan: { id: 'fixture-scan', name: 'Fixture scan', companyId: 'CO-B', connector: 'nessus', profile: 'Fixture', requestedBy: 'Fixture', status: 'Completed', progress: 100, targets: [], hostsScanned: 0, severityCounts: {}, startedAt: '2026-10-14T00:00:00Z', completedAt: '2026-10-14T00:01:00Z' }, findings: [] });
@@ -141,12 +157,89 @@ try {
   await nav.locator('a[href="/remediation?companyId=CO-B"]').waitFor();
   pass('older page filters update and clear customer links; direct reports carry scope and hide navigation in print');
 
-  enabled = false;
+  capabilityMode = 'slow';
   await page.goto(base + '/dashboard');
+  await nav.getByRole('link', { name: 'Remediation', exact: true }).waitFor({ timeout: 3000 });
+  assert.deepEqual(await nav.getByRole('link').allTextContents(), labels);
+  for (let i = 0; !releaseCapability && i < 50; i++) await delay(20);
+  assert.equal(typeof releaseCapability, 'function');
+  capabilityMode = 'normal'; releaseCapability();
+  pass('a full reload retains the complete navigation while the capability read is delayed');
+
+  capabilityMode = 'failed';
+  await page.reload();
+  await page.getByRole('button', { name: 'Retry navigation', exact: true }).waitFor();
+  assert.deepEqual(await nav.getByRole('link').allTextContents(), labels);
+  await nav.getByRole('link', { name: 'Settings', exact: true }).click();
+  await page.waitForURL('**/settings');
+  assert.deepEqual(await nav.getByRole('link').allTextContents(), labels);
+  capabilityMode = 'normal';
+  await page.getByRole('button', { name: 'Retry navigation', exact: true }).click();
+  await page.getByRole('button', { name: 'Retry navigation', exact: true }).waitFor({ state: 'hidden' });
+  pass('transient capability failures preserve navigation through reload and route changes, and retry recovers');
+
+  await page.clock.install();
+  holdSync = true;
+  await page.goto(base + '/dashboard');
+  for (let i = 0; heldSync.length === 0 && i < 50; i++) await delay(20);
+  assert.equal(heldSync.length, 1);
+  await page.clock.runFor(12_000);
+  assert.equal(heldSync.length, 1, 'A slow sync-status read must not overlap the next 5-second polls');
+  await nav.getByRole('link', { name: 'Settings', exact: true }).click();
+  await page.waitForURL('**/settings');
+  for (let i = 0; !abortedSync.has(heldSync[0].request) && i < 50; i++) await delay(20);
+  assert.equal(abortedSync.has(heldSync[0].request), true, 'Leaving the page aborts its active sidebar request');
+  holdSync = false;
+  for (const held of heldSync) held.resolve();
+  await page.clock.resume();
+  pass('slow sidebar status polls remain single-flight and navigation aborts the abandoned read');
+
+  for (const [path, apiPath, elapsed] of [['/scans', '/api/scans', 9000], ['/companies', '/api/companies', 12000]]) {
+    heldPagePath = apiPath;
+    heldPageReads.length = 0;
+    await page.goto(base + path);
+    await nav.waitFor();
+    for (let i = 0; heldPageReads.length === 0 && i < 50; i++) await delay(20);
+    assert.equal(heldPageReads.length, 1, `Initial ${path} read started`);
+    await page.clock.runFor(elapsed);
+    assert.equal(heldPageReads.length, 1, `${path} must wait for its slow read before polling again`);
+    await nav.getByRole('link', { name: 'Settings', exact: true }).click();
+    await page.waitForURL('**/settings');
+    for (let i = 0; !abortedReads.has(heldPageReads[0].request) && i < 50; i++) await delay(20);
+    assert.equal(abortedReads.has(heldPageReads[0].request), true, `Leaving ${path} aborts its active read`);
+    heldPagePath = '';
+    for (const held of heldPageReads) held.resolve();
+    await page.clock.resume();
+  }
+  pass('Scans and Companies preserve their polling cadence without overlap and abort on navigation');
+
+  await nav.getByRole('link', { name: 'Connectors', exact: true }).click();
+  await page.getByLabel('Customer', { exact: true }).selectOption('CO-B');
+  await nav.getByRole('link', { name: 'Settings', exact: true }).click();
+  await nav.locator('a[href="/remediation?companyId=CO-B"]').waitFor();
+  sessionName = 'Another fixture member';
+  await page.clock.runFor(300_001);
+  await nav.locator('a[href="/remediation"]').waitFor();
+  await nav.getByRole('link', { name: 'Connectors', exact: true }).click();
+  await page.getByLabel('Customer', { exact: true }).selectOption('CO-B');
+  await nav.getByRole('link', { name: 'Settings', exact: true }).click();
+  sessionName = null;
+  await page.clock.runFor(300_001);
+  await nav.getByRole('link', { name: 'Prioritize', exact: true }).waitFor();
+  assert.equal(await nav.getByRole('link', { name: 'Remediation', exact: true }).count(), 0);
+  assert.equal(await nav.getByRole('link', { name: 'Connectors', exact: true }).getAttribute('href'), '/connectors');
+  pass('session identity changes and logout clear remembered customer links');
+
+  sessionName = 'Fixture member';
+  enabled = false;
+  const disabledResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/elastic-vulnerabilities/status');
+  await page.goto(base + '/dashboard');
+  await disabledResponse;
+  await nav.getByRole('link', { name: 'Remediation', exact: true }).waitFor({state:'hidden'});
   await nav.getByRole('link', { name: 'Prioritize', exact: true }).waitFor();
   assert.equal(await nav.getByRole('link', { name: 'Remediation', exact: true }).count(), 0);
   assert.equal(await nav.getByRole('link', { name: 'Reporting', exact: true }).count(), 0);
-  assert.equal(calls.filter(c => c.method !== 'GET').length, 0);
+  assert.equal(calls.filter(c => c.method !== 'GET' && c.path !== '/api/auth/_log').length, 0);
   assert.deepEqual(errors, []);
   pass('disabled feature flags retain legacy links and navigation never triggers sync or mutation');
   await writeFile(join(artifacts, 'result.json'), JSON.stringify({ checks, errors, syntheticData: true }, null, 2));

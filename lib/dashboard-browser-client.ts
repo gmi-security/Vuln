@@ -36,27 +36,41 @@ export async function readDashboardResponse<T>(response: Response): Promise<T> {
 // backoff; only a failure that persists across all of them is a real outage.
 const READ_RETRY_BACKOFF_MS = [500, 1500, 3000, 5000];
 
+function retryDelay(ms: number, signal?: AbortSignal | null) {
+  return new Promise<void>((resolve, reject) => {
+    signal?.throwIfAborted();
+    const aborted = () => { clearTimeout(timer); reject(signal?.reason); };
+    const timer = setTimeout(() => { signal?.removeEventListener("abort", aborted); resolve(); }, ms);
+    signal?.addEventListener("abort", aborted, { once: true });
+  });
+}
+
 export async function dashboardRequest<T = Record<string, any>>(path: string, init: RequestInit = {}): Promise<T> {
   const readOnly = !init.method || init.method.toUpperCase() === "GET";
   for (let attempt = 0; ; attempt++) {
+    init.signal?.throwIfAborted();
     try {
       let response: Response;
       try {
         response = await fetch(`/api/elastic-dashboard${path ? `/${path}` : ""}`, {
           ...init, cache: "no-store", headers: { Accept: "application/json", ...init.headers },
-          signal: AbortSignal.timeout(20_000),
+          signal: init.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000),
         });
       } catch {
+        init.signal?.throwIfAborted();
         throw new DashboardRequestError(readOnly
           ? "Unable to reach the dashboard. Previously loaded results are still shown."
           : "The server did not confirm the request. Your open form has been kept. Check the dashboard before retrying, as the request may have completed.", true);
       }
-      return await readDashboardResponse<T>(response);
+      const data = await readDashboardResponse<T>(response);
+      init.signal?.throwIfAborted();
+      return data;
     } catch (error) {
+      init.signal?.throwIfAborted();
       // Reads are safe to retry. Never replay a save/preview/delete without
       // knowing whether the first attempt committed on the server.
       if (readOnly && attempt < READ_RETRY_BACKOFF_MS.length && error instanceof DashboardRequestError && error.retryable) {
-        await new Promise((resolve) => setTimeout(resolve, READ_RETRY_BACKOFF_MS[attempt]));
+        await retryDelay(READ_RETRY_BACKOFF_MS[attempt], init.signal);
         continue;
       }
       throw error;

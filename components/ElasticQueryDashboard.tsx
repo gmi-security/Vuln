@@ -6,6 +6,7 @@ import { ArrowDown, ArrowUp, Download, ExternalLink, GripVertical, LayoutGrid, P
 import { applyTileOrder, moveTileIds } from "@/lib/dashboard-layout";
 import { dashboardCsv } from "@/lib/dashboard-csv";
 import { dashboardRequest } from "@/lib/dashboard-browser-client";
+import { startPolling, type BrowserPoller } from "@/lib/browser-polling";
 import VulnShell from "@/components/VulnShell";
 import Results from "@/components/QueryDashboardResults";
 import ConnectWiseSettings from "@/components/ConnectWiseSettings";
@@ -65,27 +66,29 @@ export default function ElasticQueryDashboard({ initial, companyId = "" }: { ini
   const [now, setNow] = useState<number | null>(null);
   const actionSequence = useRef(0);
   const dashboardVersion = useRef(0);
-  const reloadInFlight = useRef(false);
+  const poller = useRef<BrowserPoller | null>(null);
+  const lifetime = useRef<AbortController | null>(null);
+  const pollInterval = useRef(initial.queries.some(query => !query.result && !query.error) ? 3000 : 15_000);
   const dragging = useRef<string | null>(null);
   const reordering = useRef(false);
-  const reload = useCallback(async () => {
-    if (reloadInFlight.current || dragging.current || reordering.current) return;
-    reloadInFlight.current = true;
-    try {
+  const read = useCallback(async (signal: AbortSignal) => {
+    if (dragging.current || reordering.current) return;
       const version = dashboardVersion.current;
-      const data = await dashboardRequest<ElasticDashboard>(companyId ? customerPath : "");
-      if (version !== dashboardVersion.current) return;
+      const data = await dashboardRequest<ElasticDashboard>(companyId ? customerPath : "", { signal });
+      if (signal.aborted || version !== dashboardVersion.current) return;
       if (!data.storageReady) throw new Error("Dashboard storage is unavailable. Previously loaded results are still shown.");
+      pollInterval.current = data.queries.some(query => !query.result && !query.error) ? 3000 : 15_000;
       setDashboard(data); setLoadError("");
       setNow(Date.now());
-    } finally { reloadInFlight.current = false; }
   }, [companyId,customerPath]);
-  const pending = dashboard.queries.some((query) => !query.result && !query.error);
+  const reload = useCallback(async () => { await poller.current?.refresh({ afterCurrent: true }); }, []);
   useEffect(() => {
-    void reload().catch((err) => setLoadError(err.message));
-    const timer = setInterval(() => { setNow(Date.now()); void reload().catch((err) => setLoadError(err.message)); }, pending ? 3000 : 15_000);
-    return () => clearInterval(timer);
-  }, [reload, pending]);
+    const controller = new AbortController(); lifetime.current = controller;
+    const poll = startPolling(read, { intervalMs: () => pollInterval.current,
+      onError: cause => setLoadError(cause instanceof Error ? cause.message : "Dashboard refresh is unavailable.") });
+    poller.current = poll;
+    return () => { poll.stop(); controller.abort(); poller.current = null; actionSequence.current++; dashboardVersion.current++; };
+  }, [read]);
   // The org's real, configurable per-severity remediation SLA (Settings >
   // SLA) -- fetched once here and threaded down so the review queue and
   // ticket tracker judge "overdue" against it instead of a guessed number.
@@ -114,7 +117,7 @@ export default function ElasticQueryDashboard({ initial, companyId = "" }: { ini
       setMessage("Query queued or running in the background. Execution can take up to five minutes; this page will update when it finishes.");
       await new Promise((resolve) => setTimeout(resolve, 3000));
       if (sequence !== actionSequence.current) return null;
-      const status = await dashboardRequest(`jobs/${encodeURIComponent(job.jobId)}`);
+      const status = await dashboardRequest(`jobs/${encodeURIComponent(job.jobId)}`, { signal: lifetime.current?.signal });
       if (sequence !== actionSequence.current) return null;
       if (status.status === "failed") throw new Error(status.error || "The background query failed.");
       if (status.status === "succeeded") { setMessage(""); return status; }

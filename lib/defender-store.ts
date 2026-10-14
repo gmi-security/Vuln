@@ -11,6 +11,7 @@ export type DefenderSummary = { findings: number; cves: number; affectedDevices:
 export function createDefenderStore(db: Database) {
   let ready: Promise<unknown> | undefined;
   function schema() {
+    if (process.env.VULN_RUNTIME_ROLE === "web") return Promise.resolve();
     return ready ??= db.query(`
       CREATE TABLE IF NOT EXISTS defender_connections (
         company_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL UNIQUE, client_id TEXT NOT NULL,
@@ -50,10 +51,10 @@ export function createDefenderStore(db: Database) {
       );
     `).catch(error => { ready = undefined; throw error; });
   }
-  async function transaction<T>(action: (client: PoolClient) => Promise<T>): Promise<T> {
+  async function transaction<T>(action: (client: PoolClient) => Promise<T>, readOnly = false): Promise<T> {
     await schema();
     const client = await db.connect();
-    try { await client.query("BEGIN"); const result = await action(client); await client.query("COMMIT"); return result; }
+    try { await client.query(readOnly ? "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY" : "BEGIN"); const result = await action(client); await client.query("COMMIT"); return result; }
     catch (error) { await client.query("ROLLBACK").catch(() => {}); throw error; }
     finally { client.release(); }
   }
@@ -193,7 +194,7 @@ export function createDefenderStore(db: Database) {
     return transaction(async client => {
       // Pin one generation across totals, rows and summaries while a new import publishes.
       const saved = (await client.query(`SELECT c.current_run,r.summary,c.last_success_at FROM defender_connections c
-        LEFT JOIN defender_import_runs r ON r.id=c.current_run WHERE c.company_id=$1 FOR SHARE OF c`, [companyId])).rows[0];
+        LEFT JOIN defender_import_runs r ON r.id=c.current_run WHERE c.company_id=$1`, [companyId])).rows[0];
       if (!saved?.current_run) return { runId:null, configured:Boolean(saved), summary:null, rows:[], total:0, history:[], updatedAt:null };
       const id = saved.current_run;
       let rows, total;
@@ -211,7 +212,7 @@ export function createDefenderStore(db: Database) {
       }
       const history = (await client.query("SELECT day::text,summary,observed_at FROM defender_daily_history WHERE company_id=$1 ORDER BY day DESC LIMIT 90", [companyId])).rows.reverse();
       return { runId:id, configured:true, summary:saved.summary as DefenderSummary, rows, total, history, updatedAt:saved.last_success_at };
-    });
+    }, true);
   }
   async function prune(companyId: string) {
     await schema();

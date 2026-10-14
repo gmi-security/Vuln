@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { createReportingInputDigests, publishReportingInputRevisions, publishSqlReportingChanges, reportingSnapshotManifest } from "./db/customer-reporting-revisions.mjs";
 import { readPlatformAuthority, bindPlatformWriter } from "./db/platform-authority.mjs";
 import { loadPlatformStore, savePlatformStore, savePlatformDelta, platformSaveTimeoutMs } from "./db/platform-store.mjs";
+import { loadCommittedPlatform } from "./db/platform-reader.mjs";
 
 // Snapshot persistence. The in-memory store (companies, folders, scans,
 // findings, assets, settings, counter) is serialized by store.ts and flushed
@@ -180,7 +181,8 @@ function getPool(): Pool | null {
       // shared with other apps on the same cluster) while giving real
       // headroom for several concurrent discovery partitions plus
       // everything else the app does at the same time.
-      max: 20,
+      max: process.env.VULN_RUNTIME_ROLE === "web" ? 6 : 20,
+      ...(process.env.VULN_RUNTIME_ROLE === "web" ? { options: "-c default_transaction_read_only=on", query_timeout: 35000 } : {}),
       // Fail fast if the DB is unreachable so hydration can fall back to
       // in-memory instead of hanging every request. 8s was too tight under
       // the Spotlight sync's sustained concurrent DB load (a worker-lock
@@ -223,6 +225,7 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): P
 }
 
 async function ensureTable(): Promise<void> {
+  if (process.env.VULN_RUNTIME_ROLE === "web") return;
   const p = getPool();
   if (!p) return;
   if (!persistence.ready) {
@@ -268,6 +271,26 @@ export function persistenceEnabled(): boolean {
 // They must not modify the scanner snapshot tables or persistence bookkeeping.
 export function applicationDatabase(): Pool | null {
   return getPool();
+}
+
+// Reader bookkeeping never touches the writer's epoch/index/dirty state.
+export async function loadCommittedRead(previous?: Awaited<ReturnType<typeof loadCommittedPlatform>>) {
+  if (process.env.VULN_PLATFORM_STORE !== "sql") throw new Error("The committed reader requires SQL platform storage.");
+  const pool = getPool();
+  if (!pool) throw new Error("Platform database is not configured.");
+  const client = await pool.connect();
+  let failed: Error | undefined;
+  try {
+    await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    await client.query("SET LOCAL statement_timeout = '30s'");
+    const snapshot = await loadCommittedPlatform(client, previous);
+    await client.query("COMMIT");
+    return snapshot;
+  } catch (error) {
+    failed = error instanceof Error ? error : new Error(String(error));
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally { client.release(failed); }
 }
 
 // Explicit connectivity probe: connect, run SELECT 1, return ok/error.
@@ -408,6 +431,7 @@ const UPSERT_SQL = `INSERT INTO vuln_store (key, data, updated_at)
 // fully retried on the next flush. Callers (store.ts) already serialize
 // saves through a single promise chain, so saves never overlap.
 export async function saveSnapshot(data: unknown, options?: { guard?: () => void; changes?: Record<string, string[]> }): Promise<void> {
+  if (process.env.VULN_RUNTIME_ROLE === "web") throw new Error("The web reader cannot save platform data.");
   const p = getPool();
   if (!p) return;
   await withTimeout(ensureTable(), 10000, "ensureTable");

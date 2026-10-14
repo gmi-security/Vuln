@@ -26,11 +26,11 @@ function CustomerTiles({ companyId, canManage }: { companyId:string; canManage:b
   const [error,setError] = useState("");
   const [retry,setRetry] = useState(0);
   useEffect(()=>{
-    let active=true;
-    dashboardRequest<ElasticDashboard>(`customer-tiles?companyId=${encodeURIComponent(companyId)}`)
-      .then(data=>{if(active){setDashboard(data);setError("");}})
-      .catch(cause=>{if(active)setError(cause instanceof Error ? cause.message : "Customer tiles are unavailable.");});
-    return()=>{active=false;};
+    const controller = new AbortController();
+    dashboardRequest<ElasticDashboard>(`customer-tiles?companyId=${encodeURIComponent(companyId)}`, { signal: controller.signal })
+      .then(data=>{if(!controller.signal.aborted){setDashboard(data);setError("");}})
+      .catch(cause=>{if(!controller.signal.aborted)setError(cause instanceof Error ? cause.message : "Customer tiles are unavailable.");});
+    return()=>controller.abort();
   },[companyId,retry]);
   if(error) return <div role="alert"><p>{error}</p><button className={styles.button} onClick={()=>setRetry(value=>value+1)}>Retry customer tiles</button></div>;
   if(!dashboard) return <p role="status" className="text-sm text-zinc-300">Loading this customer's saved tiles...</p>;

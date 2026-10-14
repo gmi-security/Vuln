@@ -26,6 +26,7 @@ let ready: Promise<void> | undefined;
 export async function riskScoringDatabase() {
   const db = applicationDatabase();
   if (!db) throw new DashboardError("Database storage is not configured.", 503);
+  if (process.env.VULN_RUNTIME_ROLE === "web") return db;
   ready ??= db.query(`
     CREATE TABLE IF NOT EXISTS finding_risk (
       id UUID PRIMARY KEY, tenant_key TEXT NOT NULL, company_id TEXT NOT NULL,

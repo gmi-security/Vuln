@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useRef, useState } from "react";
+import { useBrowserPolling } from "@/lib/useBrowserPolling";
 import { RefreshCcw } from "lucide-react";
 import {
   IconAlertTriangle,
@@ -24,30 +25,26 @@ export default function VulnScannerTelemetryPage() {
   const [loading, setLoading] = useState(false);
   const loadSeq = useRef(0);
 
-  const load = useCallback(async () => {
+  const read = useCallback(async (signal: AbortSignal) => {
     const seq = ++loadSeq.current;
     setLoading(true);
     try {
-      const res = await fetch("/api/scanner-dashboard", { cache: "no-store" });
+      const res = await fetch("/api/scanner-dashboard", { cache: "no-store", signal });
       const json = await res.json();
-      if (seq !== loadSeq.current) return;
+      if (signal.aborted || seq !== loadSeq.current) return;
       setConfigured(json.configured !== false);
       setSummary(json.summary ?? null);
       setCompanies(json.companies ?? null);
       setError(json.error ?? null);
     } catch {
-      if (seq !== loadSeq.current) return;
+      if (seq !== loadSeq.current || (signal.aborted && signal.reason?.name !== "TimeoutError")) return;
       setError("Failed to reach the API.");
     } finally {
-      if (seq === loadSeq.current) setLoading(false);
+      if (seq === loadSeq.current && (!signal.aborted || signal.reason?.name === "TimeoutError")) setLoading(false);
     }
   }, []);
 
-  useEffect(() => {
-    void load();
-    const timer = setInterval(() => void load(), 60_000);
-    return () => clearInterval(timer);
-  }, [load]);
+  const load = useBrowserPolling(read, 60_000);
 
   return (
     <VulnShell

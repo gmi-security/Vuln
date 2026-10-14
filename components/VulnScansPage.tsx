@@ -1,6 +1,8 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useBrowserPolling } from "@/lib/useBrowserPolling";
+import { startPolling } from "@/lib/browser-polling";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useCompanyFilter } from "@/lib/useCompanyFilter";
@@ -59,32 +61,33 @@ export default function VulnScansPage({
   // Scoped server-side (not fetched-then-filtered client-side) -- this used
   // to request every company's scans on every 3s poll regardless of the
   // dropdown, then throw most of the response away in the filter below.
-  const load = useCallback(async () => {
+  const read = useCallback(async (signal: AbortSignal) => {
     const seq = ++loadSeq.current;
     try {
       const qs = companyFilter !== "All" ? `?companyId=${encodeURIComponent(companyFilter)}` : "";
-      const res = await fetch(`/api/scans${qs}`, { cache: "no-store" });
+      const res = await fetch(`/api/scans${qs}`, { cache: "no-store", signal });
+      if (!res.ok) return;
       const json = await res.json();
-      if (seq !== loadSeq.current) return; // superseded by a newer request
+      if (signal.aborted || seq !== loadSeq.current) return; // superseded by a newer request
       setScans(json.scans ?? []);
     } catch {
       // keep last snapshot
     }
   }, [companyFilter]);
+  const load = useBrowserPolling(read, 3000);
 
   useEffect(() => {
-    void load();
-    void fetch("/api/connectors", { cache: "no-store" })
-      .then((res) => res.json())
-      .then((json) => setConnectors(json.connectors ?? []))
-      .catch(() => undefined);
-    void fetch("/api/companies", { cache: "no-store" })
-      .then((res) => res.json())
-      .then((json) => setCompanies(json.companies ?? []))
-      .catch(() => undefined);
-    const timer = setInterval(() => void load(), 3000);
-    return () => clearInterval(timer);
-  }, [load]);
+    const options = startPolling(async signal => {
+      const [connectorResponse, companyResponse] = await Promise.all([
+        fetch("/api/connectors", { cache: "no-store", signal }),
+        fetch("/api/companies", { cache: "no-store", signal }),
+      ]);
+      if (!connectorResponse.ok || !companyResponse.ok) return;
+      const [connectorJson, companyJson] = await Promise.all([connectorResponse.json(), companyResponse.json()]);
+      if (!signal.aborted) { setConnectors(connectorJson.connectors ?? []); setCompanies(companyJson.companies ?? []); }
+    }, { intervalMs: () => null });
+    return options.stop;
+  }, []);
 
   // Company scoping now happens server-side in load() above; `scans` is
   // already just this selection's rows.

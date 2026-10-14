@@ -30,7 +30,7 @@ const state: NonNullable<typeof runtime.__elasticDashboard> = runtime.__elasticD
 export async function dashboardDatabase(): Promise<Pool> {
   const url = process.env.ELASTIC_VULN_DATABASE_URL;
   if (url && !dedicatedPool) {
-    dedicatedPool = new Pool({ connectionString: url, max: 2, connectionTimeoutMillis: 5000, idleTimeoutMillis: 30_000, statement_timeout: 5000 });
+    dedicatedPool = new Pool({ connectionString: url, ...(process.env.VULN_RUNTIME_ROLE === "web" ? { options: "-c default_transaction_read_only=on" } : {}), max: 2, connectionTimeoutMillis: 5000, idleTimeoutMillis: 30_000, statement_timeout: 5000 });
     dedicatedPool.on("error", () => {
       const old = dedicatedPool;
       dedicatedPool = undefined;
@@ -40,6 +40,7 @@ export async function dashboardDatabase(): Promise<Pool> {
   }
   const db = url ? dedicatedPool : applicationDatabase();
   if (!db) throw new DashboardError("Dashboard storage is not configured.", 503);
+  if (process.env.VULN_RUNTIME_ROLE === "web") return db;
   if (!ready) {
     ready = (async () => {
       await db.query(`CREATE TABLE IF NOT EXISTS elastic_dashboard_connection (
@@ -629,6 +630,7 @@ export async function requestCustomerQueryRefresh(companyId: string, id: string,
 }
 
 export function triggerRefresh(force = false, ids?: string[], companyId?: string): void {
+  if (process.env.VULN_RUNTIME_ROLE === "web") return;
   if (ids?.length === 0) return;
   if (state.ticking) {
     // Preserve the customer's requested scope while another pass completes.

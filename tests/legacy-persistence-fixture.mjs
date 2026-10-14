@@ -1,6 +1,7 @@
 import * as reportingRevisions from "../lib/db/customer-reporting-revisions.mjs";
 import * as platformAuthority from "../lib/db/platform-authority.mjs";
 import * as platformStore from "../lib/db/platform-store.mjs";
+import * as platformReader from "../lib/db/platform-reader.mjs";
 import {readFile} from 'node:fs/promises';
 import {createContext,SourceTextModule,SyntheticModule} from 'node:vm';
 import * as crypto from 'node:crypto';
@@ -25,6 +26,7 @@ export async function legacyPersistenceFixture(pool,env={}){
       ['./db/customer-reporting-revisions.mjs',reportingRevisions],
       ['./db/platform-authority.mjs',platformAuthority],
       ['./db/platform-store.mjs',platformStore],
+      ['./db/platform-reader.mjs',platformReader],
     ]);
     await mod.link(async name=>{if(!dependencies.has(name))throw Error('Unexpected persistence dependency');
       const values=dependencies.get(name);

@@ -52,6 +52,8 @@ export async function register(): Promise<void> {
     console.error("[instrumentation] boot hydration failed:", err);
   });
 
+  if (process.env.VULN_RUNTIME_ROLE === "web") return;
+
   delayedStart("elastic dashboard scheduler", 15_000, () =>
     import("@/lib/elastic-dashboard-store").then((m) => m.startElasticDashboardScheduler()),
   );

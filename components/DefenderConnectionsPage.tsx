@@ -1,5 +1,6 @@
 "use client";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
+import { startPolling, type BrowserPoller } from "@/lib/browser-polling";
 import Link from "next/link";
 import VulnShell from "./VulnShell";
 import DefenderCustomerPanel, { defenderFetch } from "./DefenderCustomerPanel";
@@ -8,28 +9,29 @@ type Connection = { companyId:string; tenantId:string; clientId:string; daily:bo
   status:string | null; phase:string; fetched:number; skipped:number; error:string | null; lastSuccessAt:string | null };
 export default function DefenderConnectionsPage({ initialCompanyId = "" }: { initialCompanyId?: string }) {
   const [companies,setCompanies] = useState<{ id:string; name:string }[]>([]), [companyId,setCompanyId] = useState(initialCompanyId);
-  const [connections,setConnections] = useState<Connection[]>([]), [loaded,setLoaded] = useState(false), [reload,setReload] = useState(0);
+  const [connections,setConnections] = useState<Connection[]>([]), [loaded,setLoaded] = useState(false);
+  const poller = useRef<BrowserPoller | null>(null);
   const [busy,setBusy] = useState(""), [message,setMessage] = useState(""), [error,setError] = useState("");
   const saved = connections.find(row => row.companyId === companyId);
-  const running = connections.some(row => row.status === "running" || row.status === "queued");
   const selectedRunning = saved?.status === "running" || saved?.status === "queued";
   useEffect(() => {
     const controller = new AbortController();
-    defenderFetch("/api/companies", { signal:controller.signal }).then(body => setCompanies(body.companies))
+    defenderFetch("/api/companies", { signal:controller.signal }).then(body => { if (!controller.signal.aborted) setCompanies(body.companies); })
       .catch(err => { if (!controller.signal.aborted) setError(err.message); });
     return () => controller.abort();
   },[]);
   useEffect(() => {
-    const controller = new AbortController();
-    defenderFetch("/api/defender/connections", { signal:controller.signal }).then(body => { setConnections(body.connections); setLoaded(true); })
-      .catch(err => { if (!controller.signal.aborted) setError(err.message); });
-    return () => controller.abort();
-  },[reload]);
-  useEffect(() => {
-    if (!running) return;
-    const timer = setInterval(() => setReload(value=>value+1),10_000);
-    return () => clearInterval(timer);
-  },[running]);
+    let running = false;
+    const poll = startPolling(async signal => {
+      const body = await defenderFetch("/api/defender/connections", { signal });
+      if (signal.aborted) return;
+      running = body.connections.some((row: Connection) => row.status === "running" || row.status === "queued");
+      setConnections(body.connections); setLoaded(true);
+    }, { intervalMs: () => running ? 10_000 : null,
+      onError: cause => setError(cause instanceof Error ? cause.message : "Could not load Defender connections.") });
+    poller.current = poll;
+    return () => { poll.stop(); poller.current = null; };
+  },[]);
   useEffect(() => {
     setMessage(""); setError("");
   },[companyId,loaded]);
@@ -42,7 +44,7 @@ export default function DefenderConnectionsPage({ initialCompanyId = "" }: { ini
       });
       if (kind === "sync") setMessage("Import queued. You can leave this page; the import continues in the background.");
       else setMessage(data.message);
-      setReload(value=>value+1);
+      await poller.current?.refresh({ afterCurrent: true });
     } catch (err) { setError(err instanceof Error ? err.message : "Request failed."); }
     finally { setBusy(""); }
   }

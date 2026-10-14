@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useState } from "react";
+import { useBrowserPolling } from "@/lib/useBrowserPolling";
 import Link from "next/link";
 import { Building2, FolderKanban, Plus, Radar, RefreshCw, ShieldAlert, X } from "lucide-react";
 import { IconAlertTriangle, IconBug } from "@tabler/icons-react";
@@ -26,21 +27,18 @@ export default function VulnCompaniesPage() {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  const load = useCallback(async () => {
+  const read = useCallback(async (signal: AbortSignal) => {
     try {
-      const res = await fetch("/api/companies", { cache: "no-store" });
+      const res = await fetch("/api/companies", { cache: "no-store", signal });
+      if (!res.ok) return;
       const json = await res.json();
-      setCompanies(json.companies ?? []);
+      if (!signal.aborted) setCompanies(json.companies ?? []);
     } catch {
       // keep last snapshot
     }
   }, []);
 
-  useEffect(() => {
-    void load();
-    const timer = setInterval(() => void load(), 5000);
-    return () => clearInterval(timer);
-  }, [load]);
+  const load = useBrowserPolling(read, 5000);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();

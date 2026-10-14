@@ -8,6 +8,8 @@ import React, {
   useState,
 } from "react";
 import Link from "next/link";
+import { useBrowserPolling } from "@/lib/useBrowserPolling";
+import { startPolling } from "@/lib/browser-polling";
 import {
   ArrowLeft,
   Bug,
@@ -124,21 +126,22 @@ export default function VulnCompanyDetailPage({
     setAssetPage(0);
   }, [companyId]);
 
-  const load = useCallback(async () => {
+  const read = useCallback(async (signal: AbortSignal) => {
     const seq = ++loadSeq.current;
     try {
       const [companyRes, foldersRes, scansRes, metricsRes, assetsRes] =
         await Promise.all([
-          fetch(`/api/companies/${companyId}`, { cache: "no-store" }),
-          fetch(`/api/folders?companyId=${companyId}`, { cache: "no-store" }),
-          fetch(`/api/scans?companyId=${companyId}`, { cache: "no-store" }),
-          fetch(`/api/metrics?companyId=${companyId}`, { cache: "no-store" }),
-          fetch(`/api/assets?companyId=${companyId}`, { cache: "no-store" }),
+          fetch(`/api/companies/${companyId}`, { cache: "no-store", signal }),
+          fetch(`/api/folders?companyId=${companyId}`, { cache: "no-store", signal }),
+          fetch(`/api/scans?companyId=${companyId}`, { cache: "no-store", signal }),
+          fetch(`/api/metrics?companyId=${companyId}`, { cache: "no-store", signal }),
+          fetch(`/api/assets?companyId=${companyId}`, { cache: "no-store", signal }),
         ]);
       if (companyRes.status === 404) {
-        if (seq === loadSeq.current) setNotFound(true);
+        if (!signal.aborted && seq === loadSeq.current) setNotFound(true);
         return;
       }
+      if ([companyRes, foldersRes, scansRes, metricsRes, assetsRes].some(response => !response.ok)) return;
       const [companyJson, foldersJson, scansJson, metricsJson, assetsJson] =
         await Promise.all([
           companyRes.json(),
@@ -147,7 +150,7 @@ export default function VulnCompanyDetailPage({
           metricsRes.json(),
           assetsRes.json(),
         ]);
-      if (seq !== loadSeq.current) return; // stale — superseded by a newer load
+      if (signal.aborted || seq !== loadSeq.current) return; // stale — superseded by a newer load
       setNotFound(false);
       setCompany(companyJson.company ?? null);
       setFolders(foldersJson.folders ?? []);
@@ -158,16 +161,17 @@ export default function VulnCompanyDetailPage({
       // keep last snapshot
     }
   }, [companyId]);
+  const load = useBrowserPolling(read, 4000);
 
   useEffect(() => {
-    void load();
-    void fetch("/api/connectors", { cache: "no-store" })
-      .then((res) => res.json())
-      .then((json) => setConnectors(json.connectors ?? []))
-      .catch(() => undefined);
-    const timer = setInterval(() => void load(), 4000);
-    return () => clearInterval(timer);
-  }, [load]);
+    const options = startPolling(async signal => {
+      const response = await fetch("/api/connectors", { cache: "no-store", signal });
+      if (!response.ok) return;
+      const json = await response.json();
+      if (!signal.aborted) setConnectors(json.connectors ?? []);
+    }, { intervalMs: () => null });
+    return options.stop;
+  }, []);
 
   const runningScans = useMemo(
     () =>

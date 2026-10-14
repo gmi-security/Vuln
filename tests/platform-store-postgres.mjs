@@ -5,9 +5,11 @@ import {randomUUID} from 'node:crypto';
 import pg from 'pg';
 import {platformCollections,platformBucket,platformJson} from '../lib/db/platform-records.mjs';
 import {readPlatformAuthority,bindPlatformWriter} from '../lib/db/platform-authority.mjs';
-import {loadPlatformStore,savePlatformStore,transitionPlatformStore} from '../lib/db/platform-store.mjs';
+import {loadPlatformStore,savePlatformStore,savePlatformDelta,transitionPlatformStore} from '../lib/db/platform-store.mjs';
+import {loadCommittedPlatform} from '../lib/db/platform-reader.mjs';
 import * as authorityModule from '../lib/db/platform-authority.mjs';
 import * as storeModule from '../lib/db/platform-store.mjs';
+import * as readerModule from '../lib/db/platform-reader.mjs';
 import * as revisionModule from '../lib/db/customer-reporting-revisions.mjs';
 import * as crypto from 'node:crypto';
 import {SourceTextModule,SyntheticModule} from 'node:vm';
@@ -18,6 +20,9 @@ const name='vuln2_platform_test_'+randomUUID().replaceAll('-','');
 const admin=new pg.Client({...config,database:'postgres'});let db,other,created=false,checks=0;
 const ok=message=>{checks++;console.log('PASS '+message);};
 async function tx(client,fn){await client.query('BEGIN');try{const r=await fn();await client.query('COMMIT');return r;}catch(e){await client.query('ROLLBACK');throw e;}}
+async function readTx(client,fn){await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');try{const r=await fn();await client.query('COMMIT');return r;}catch(e){await client.query('ROLLBACK');throw e;}}
+const readerData=snapshot=>({...snapshot.metadata,...Object.fromEntries(Object.keys(platformCollections).map(kind=>[kind,
+ [...snapshot.buckets].filter(([key])=>key.startsWith(kind+':')).flatMap(([,rows])=>rows)]))});
 const sources=['crowdstrike','defender','nessus','spiderfoot','artemis','zap','vulners','github'];
 const fixture={companies:[['CO-1',{id:'CO-1',name:'Test',kind:'client'}]],folders:[],scans:[],assets:[],
  findings:Array.from({length:1400},(_,i)=>[`F-${i}`,{id:`F-${i}`,companyId:'CO-1',connector:sources[i%sources.length],cve:`CVE-2026-${10000+i}`,realRisk:44.5,status:'Open',future:{providerField:i}}]),
@@ -41,14 +46,64 @@ try{
  assert.deepEqual(await readPlatformAuthority(db),initial);assert.equal((await db.query('SELECT count(*)::int n FROM app_findings')).rows[0].n,0);ok('interrupted backfill rolls back rows and authority');
  const activated=await tx(db,()=>transitionPlatformStore(db,'sql',initial,{actor:'test'}));assert.equal(activated.counts.findings,1400);
  const loaded=await tx(db,()=>loadPlatformStore(db,activated.authority));assert.deepEqual(normalized(loaded.data),normalized(fixture));ok('all source payloads, metadata and fractional scores survive verified backfill');
+ const initialView=await readTx(other,()=>loadCommittedPlatform(other));
+ assert.deepEqual(normalized(readerData(initialView)),normalized(fixture));
+ const initialChangedId=loaded.data.findings[0][0],deletedId=loaded.data.findings[2][0];
  await assert.rejects(db.query("UPDATE vuln_store SET data=data WHERE key='meta'"),/stale|registered/);
  await assert.rejects(tx(db,()=>bindPlatformWriter(db,initial)),/authority changed/);ok('old and stale writers are fenced after cutover');
  let changed=structuredClone(loaded.data);changed.findings[0][1].status='Resolved';changed.findings.splice(2,1);changed.findings.push(['F-new',{id:'F-new',companyId:'CO-1',connector:'defender',status:'Open',future:{new:true}}]);changed.meta.sourceGenerations.defender='two';
  await assert.rejects(tx(db,()=>savePlatformStore(db,changed,loaded.state,{guard:()=>{throw Error('capture changed');}})),/capture changed/);
  assert.deepEqual((await tx(db,()=>loadPlatformStore(db,activated.authority))).data,loaded.data);ok('failed save preserves the complete prior generation');
- const saved=await tx(db,()=>savePlatformStore(db,changed,loaded.state));assert.deepEqual(saved.counts,{inserted:1,updated:1,deleted:1,metadata:1});
+ // The web reader must neither wait for the writer's authority lock nor see
+ // uncommitted findings/deletions/publication markers.
+ await db.query('BEGIN');let saved;
+ try{
+  saved=await savePlatformStore(db,changed,loaded.state);
+  assert.equal(await readTx(other,()=>loadCommittedPlatform(other,initialView)),initialView);
+  assert.equal(initialView.metadata.meta.sourceGenerations.defender,'one');
+  await db.query('COMMIT');
+ }catch(error){await db.query('ROLLBACK');throw error;}
+ assert.deepEqual(saved.counts,{inserted:1,updated:1,deleted:1,metadata:1});
+ const readerQueries=[],observedReader={query:(sql,params)=>{readerQueries.push(sql);return other.query(sql,params);}};
+ let committedView=await readTx(other,()=>loadCommittedPlatform(observedReader,initialView));
+ const touched=[...new Set([initialChangedId,deletedId,'F-new'].map(id=>`findings:${String(platformBucket(id,64)).padStart(2,'0')}`)),'meta'].sort();
+ assert.deepEqual(committedView.changedKeys,touched);
+ assert.deepEqual(normalized(readerData(committedView)),normalized(changed));
+ assert.equal(committedView.buckets.get('companies:00'),initialView.buckets.get('companies:00'));
+ assert.ok(!readerData(committedView).findings.some(([id])=>id===deletedId));
+ assert.ok(readerData(initialView).findings.some(([id])=>id===deletedId));
+ assert.equal(readerData(initialView).findings.find(([id])=>id===initialChangedId)[1].status,'Open');
+ assert.ok(readerQueries.every(sql=>!/^SELECT id,payload,record_hash,store_order FROM app_(companies|folders|assets|scans)/.test(sql)));
+ ok('committed reader stays on its old generation during an open writer transaction then refreshes changed buckets and deletions atomically');
  assert.deepEqual(normalized((await tx(db,()=>loadPlatformStore(db,saved.authority))).data),normalized(changed));ok('incremental insert/update/delete commits one complete generation');
  const unchanged=await tx(db,()=>savePlatformStore(db,changed,saved));assert.deepEqual(unchanged.counts,{inserted:0,updated:0,deleted:0,metadata:0});assert.deepEqual(unchanged.authority,saved.authority);ok('unchanged restart flush does not rewrite records');
+ const beforeMetadata=committedView;changed.counter++;
+ saved=await tx(db,()=>savePlatformDelta(db,changed,saved,{}));readerQueries.length=0;
+ committedView=await readTx(other,()=>loadCommittedPlatform(observedReader,beforeMetadata));
+ assert.equal(committedView.buckets,beforeMetadata.buckets);assert.deepEqual(committedView.changedKeys,['meta']);
+ assert.equal(committedView.metadata.counter,changed.counter);assert.equal(beforeMetadata.metadata.counter,changed.counter-1);
+ assert.ok(!readerQueries.some(sql=>sql.startsWith('SELECT id,payload,record_hash,store_order')));
+ ok('metadata-only SQL commit refreshes the read view without reading finding payloads');
+ // Corrupt only this disposable fixture using a fenced, audited transaction.
+ // Restore its exact checksum afterwards so later writer/report tests continue.
+ const hashId=initialChangedId,hashBucket=`findings:${String(platformBucket(hashId,64)).padStart(2,'0')}`;
+ const originalHash=(await db.query('SELECT record_hash FROM app_findings WHERE id=$1',[hashId])).rows[0].record_hash;
+ async function replaceFixtureHash(expected,hash){return tx(db,async()=>{
+  await bindPlatformWriter(db,expected);
+  await db.query('UPDATE app_findings SET record_hash=$2 WHERE id=$1',[hashId,hash]);
+  const current=(await db.query('UPDATE app_store_authority SET revision=revision+1,updated_at=clock_timestamp() WHERE id=1 RETURNING mode,enforced,epoch::text,revision::text')).rows[0];
+  await db.query("INSERT INTO app_store_commits(id,epoch,revision,operation,actor,counts) VALUES($1,$2,$3,'save','reader-integrity-fixture',$4)",
+   [randomUUID(),current.epoch,current.revision,JSON.stringify({inserted:0,updated:1,deleted:0,metadata:0,changedKeys:[hashBucket]})]);return current;
+ });}
+ const corruptAuthority=await replaceFixtureHash(saved.authority,'0'.repeat(64));
+ await assert.rejects(readTx(other,()=>loadCommittedPlatform(other,committedView)),/checksum/);
+ assert.equal(committedView.metadata.counter,changed.counter);assert.equal(committedView.authority.revision,saved.authority.revision);
+ assert.equal(readerData(committedView).findings.find(([id])=>id===hashId)[1].status,'Resolved');
+ const restoredAuthority=await replaceFixtureHash(corruptAuthority,originalHash);
+ const recoveredView=await readTx(other,()=>loadCommittedPlatform(other,committedView));
+ assert.deepEqual(normalized(readerData(recoveredView)),normalized(changed));
+ saved=(await tx(db,()=>loadPlatformStore(db,restoredAuthority))).state;
+ ok('corrupt committed payload checksum rejects refresh without mutating the previous read view and a corrected generation recovers');
  await assert.rejects(tx(db,()=>savePlatformStore(db,loaded.data,loaded.state)),/authority changed/);ok('second process cannot overwrite a newer commit');
  // Hold a reader snapshot while a writer commits. It must see one generation.
  await other.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');const pinned=await readPlatformAuthority(other);
@@ -70,7 +125,7 @@ try{
  try{
   const code=ts.transpileModule(await readFile('lib/persist.ts','utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText;
   async function instance(sameProcess=false){if(!sameProcess)delete globalThis.__vulnDatabasePersistenceV1;const m=new SourceTextModule(code);await m.link(name=>{
-   const values=name==='pg'?{Pool:class{constructor(){return nativePool;}}}:name.endsWith('customer-reporting-revisions.mjs')?revisionModule:name.endsWith('platform-authority.mjs')?authorityModule:name.endsWith('platform-store.mjs')?storeModule:crypto;
+   const values=name==='pg'?{Pool:class{constructor(){return nativePool;}}}:name.endsWith('customer-reporting-revisions.mjs')?revisionModule:name.endsWith('platform-authority.mjs')?authorityModule:name.endsWith('platform-store.mjs')?storeModule:name.endsWith('platform-reader.mjs')?readerModule:crypto;
    return new SyntheticModule(Object.keys(values),function(){for(const k of Object.keys(values))this.setExport(k,values[k]);});});await m.evaluate();return m.namespace;}
   const runtime=await instance(),data=await runtime.loadSnapshot();
   const otherRoute=await instance(true);

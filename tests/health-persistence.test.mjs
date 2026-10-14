@@ -28,6 +28,15 @@ test('health distinguishes hydration from a ready saving application',async()=>{
  assert.equal((await response.json()).ready,true);
  assert.equal((await health({hydrated:true,persistBlocked:false},{ok:false,error:'private connection details'})).status,503);
 });
+
+test('split health distinguishes available committed reads from unavailable writes',async()=>{
+  for(const worker of [undefined,{available:false,ready:false,blocked:false},{available:true,ready:false,blocked:false},{available:true,ready:true,blocked:true}]){
+    const response=await health({hydrated:true,persistBlocked:worker?.blocked??false,runtimeRole:'web',worker});
+    assert.equal(response.status,503);const body=await response.json();assert.equal(body.readReady,true);assert.equal(body.writeReady,false);
+  }
+  const response=await health({hydrated:true,persistBlocked:false,runtimeRole:'web',worker:{available:true,ready:true,blocked:false}});
+  assert.equal(response.status,200);assert.equal((await response.json()).writeReady,true);
+});
 test('an intentional in-memory preview is healthy once hydrated',async()=>{
  const response=await health({hydrated:true,persistBlocked:false},{ok:false},false);
  assert.equal(response.status,200);assert.equal((await response.json()).persistence.enabled,false);

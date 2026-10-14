@@ -21,7 +21,7 @@ async function POSTHandler() {
 
 // Poll the current sync status/progress.
 export async function GET() {
-  await ensureHydrated();
+  // Progress is process-local job metadata, not uncommitted platform findings.
   return NextResponse.json({ status: getTidalSyncStatus() });
 }
 

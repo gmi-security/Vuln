@@ -50,7 +50,7 @@ export const remediationNavItems: VulnNavItem[] = [
 
 export function siteNavigation(capabilities: { enabled: boolean; remediationEnabled: boolean } | null) {
   const primary = capabilities === null
-    ? remediationNavItems.filter(item => item.href !== "/remediation")
+    ? remediationNavItems
     : capabilities.remediationEnabled ? remediationNavItems : baseNavItems;
   return {
     primary: [

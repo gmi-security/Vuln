@@ -9,6 +9,7 @@ import { cwId, cwOptions, cwRequest, cwTarget, CWRequestError, findCWRequest, no
 let ready: Promise<void> | undefined;
 export async function patchTicketDatabase() {
   const db = await dashboardDatabase();
+  if (process.env.VULN_RUNTIME_ROLE === "web") return db;
   ready ??= db.query(`CREATE TABLE IF NOT EXISTS patch_connectwise_connection (
     id INT PRIMARY KEY CHECK(id=1), secret TEXT NOT NULL, revision INT NOT NULL DEFAULT 1,
     target TEXT NOT NULL, defaults JSONB NOT NULL DEFAULT '{}', updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -179,6 +180,7 @@ export async function persistPreparedPatch(id: string, packet: PatchRequest, act
   return id;
 }
 async function recoverInterruptedRequests() {
+  if (process.env.VULN_RUNTIME_ROLE === "web") return;
   const db = await patchTicketDatabase();
   await db.query(`UPDATE patch_ticket_requests SET state='uncertain',last_error='Creation was interrupted. Check the creation outcome before retrying.',updated_at=now()
     WHERE state='creating' AND started_at < now()-interval '3 minutes'`);
