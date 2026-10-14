@@ -8,6 +8,7 @@ import { readDashboardResponse } from "@/lib/dashboard-browser-client";
 import { customerConnectorsHref, remediationHref } from "@/lib/remediation-view";
 import { remediationNavItems } from "@/lib/navigation";
 import type { CustomerConnectorStatus } from "@/lib/customer-connector-status";
+import CustomerConnectorSync from "./CustomerConnectorSync";
 import styles from "./QueryDashboard.module.css";
 
 const names: Record<string, string> = { appsec: "AppSec", defender: "Microsoft Defender", crowdstrike: "CrowdStrike", elastic: "Elasticsearch",
@@ -50,6 +51,7 @@ function Status({ companyId, refresh }: { companyId: string; refresh: number }) 
         </p>}
         <p className="mt-2 text-xs text-zinc-300">Selection review is separate from import approval and reporting activation.</p>
       </section>}
+      <CustomerConnectorSync key={companyId} companyId={companyId} refresh={refresh}/>
       {!data.registryAvailable && <p className="rounded-xl border border-amber-900/70 bg-amber-950/20 p-4 text-sm text-amber-100">
         Registry review has not been initialized. Existing customer configuration is shown; source routing remains unchanged.
       </p>}
@@ -96,7 +98,7 @@ export default function CustomerConnectorsPage({ initialCompanyId = "" }: { init
       <Link className={styles.button} href={customerConnectorsHref(companyId, true)}>Shared connector tools</Link></div>}>
     <ReportingCustomer key={`selector-${refresh}`} companyId={companyId} onCompanyChange={selectCustomer} refreshToken={refresh} showReport={false} setupPath="customer-connectors?setup=1"/>
     <p className="rounded-xl border border-zinc-800 bg-zinc-950 p-4 text-sm leading-relaxed text-zinc-300">
-      This view reads saved configuration. It does not test live access or start imports and scans. Reviewing an assignment does not enable it. Inventory, Spotlight, supported scanners and saved CrowdStrike/Elasticsearch queries require separate operational approvals and provider switches; other imports continue through existing configuration.
+      Sync status shows recorded imports and query refreshes. Use Sync now to request an import, or Refresh query to update a saved tile. Configuration review below is separate: reviewing an assignment does not enable it or test live access. Shared tools may affect multiple customers.
     </p>
     {companyId ? <Status key={companyId} companyId={companyId} refresh={refresh}/> : <p className="text-sm text-zinc-300">Choose a customer to see its source configuration. Shared connections are not automatically assigned to every customer.</p>}
   </VulnShell>;

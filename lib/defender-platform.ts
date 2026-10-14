@@ -1,11 +1,11 @@
 import { defenderStore } from "./defender-store";
 import { ensureHydrated,defenderProjectedRun,publishDefenderSnapshot,invalidateDefenderPublication,flushNow } from "./store";
 
-async function reconcile(refreshDependents: boolean) {
+async function reconcile(refreshDependents: boolean, companyId?: string) {
   await ensureHydrated();
   const store = defenderStore();
   let changed = false;
-  for (const connection of await store.list()) {
+  for (const connection of await store.list(companyId)) {
     if (!connection.currentRun || defenderProjectedRun(connection.companyId) === connection.currentRun) continue;
     const snapshot = await store.platformSnapshot(connection.companyId);
     if (!snapshot) continue;
@@ -25,9 +25,13 @@ async function reconcile(refreshDependents: boolean) {
   }
   if (changed && refreshDependents) {
     const { refreshDefenderRisk } = await import("./defender-risk");
-    await refreshDefenderRisk(false);
-    const { refreshReportingQueue } = await import("./reporting-queue");
-    await refreshReportingQueue(true).catch(()=>{ console.error("[defender] Patch candidate refresh deferred to the reporting scheduler."); });
+    await refreshDefenderRisk(false,companyId);
+    // Respect a maintenance pause: a customer sync must not restart the paused
+    // bulk patch-draft generator as a side effect of publication.
+    if (process.env.VULN_DISABLE_SCHEDULER !== "true") {
+      const { refreshReportingQueue } = await import("./reporting-queue");
+      await refreshReportingQueue(true).catch(()=>{ console.error("[defender] Patch candidate refresh deferred to the reporting scheduler."); });
+    }
   }
 }
 
@@ -36,8 +40,8 @@ const publishing = runtime.__defenderPublishing ??= new Set<string>();
 export function defenderPublicationPending(companyId: string): boolean {
   return publishing.has(companyId);
 }
-export function reconcileDefenderPlatform(refreshDependents = true): Promise<void> {
-  if (runtime.__defenderPublication) return runtime.__defenderPublication;
-  runtime.__defenderPublication = reconcile(refreshDependents).finally(()=>{runtime.__defenderPublication=undefined;});
+export function reconcileDefenderPlatform(refreshDependents = true, companyId?: string): Promise<void> {
+  if (runtime.__defenderPublication) return companyId ? runtime.__defenderPublication.then(()=>reconcileDefenderPlatform(refreshDependents,companyId)) : runtime.__defenderPublication;
+  runtime.__defenderPublication = reconcile(refreshDependents,companyId).finally(()=>{runtime.__defenderPublication=undefined;});
   return runtime.__defenderPublication;
 }

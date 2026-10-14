@@ -296,6 +296,26 @@ test("Postgres integration: persistence, source isolation, stale-result retentio
     assert.ok(scopedAttempts.find(row=>row.id === "extra").attempted_at.getUTCFullYear() > 2000);
     store.triggerRefresh(true,[]);
     assert.ok(!globalThis.__elasticDashboard.ticking,"empty customer scope cannot fall back to a global refresh");
+    await db.query("UPDATE elastic_dashboard_queries SET definition=jsonb_set(definition,'{companyId}','\"CO-A\"'),next_attempt='2000-01-01',attempted_at='2000-01-01' WHERE id='extra'");
+    store.triggerRefresh(true,["extra"],"CO-B");
+    await waitFor(()=>!globalThis.__elasticDashboard.ticking);
+    assert.equal((await db.query("SELECT attempted_at FROM elastic_dashboard_queries WHERE id='extra'")).rows[0].attempted_at.getUTCFullYear(),2000);
+    await assert.rejects(()=>store.requestCustomerQueryRefresh("CO-B","extra","member"));
+    // With the scheduler paused, a manual request must survive busy previews.
+    globalThis.__elasticDashboard.running=2;
+    await store.requestCustomerQueryRefresh("CO-A","extra","member");
+    await store.requestCustomerQueryRefresh("CO-A","extra","member"); // wakes the same queued request
+    await delay(100);
+    assert.equal((await db.query("SELECT attempted_at FROM elastic_dashboard_queries WHERE id='extra'")).rows[0].attempted_at.getUTCFullYear(),2000);
+    globalThis.__elasticDashboard.running=0;
+    await waitFor(()=>!globalThis.__elasticDashboard.ticking);
+    assert.ok((await db.query("SELECT attempted_at FROM elastic_dashboard_queries WHERE id='extra'")).rows[0].attempted_at.getUTCFullYear()>2000,'queued refresh must run after capacity returns without the scheduler');
+    // A second dispatch after a long refresh must not consume the same request
+    // again merely because the thirty-second retry throttle has elapsed.
+    await db.query("UPDATE elastic_dashboard_queries SET attempted_at='2000-01-01' WHERE id='extra'");
+    store.triggerRefresh(true,["extra"],"CO-A");await waitFor(()=>!globalThis.__elasticDashboard.ticking);
+    assert.equal((await db.query("SELECT attempted_at FROM elastic_dashboard_queries WHERE id='extra'")).rows[0].attempted_at.getUTCFullYear(),2000);
+    await db.query("UPDATE elastic_dashboard_queries SET definition=definition-'companyId' WHERE id='extra'");
     const old = (await store.readDashboard(true)).queries.find((q) => q.id === "extra");
     fail = true;
     await db.query("UPDATE elastic_dashboard_queries SET next_attempt = now() - interval '1 hour', attempted_at = now() - interval '1 hour'");

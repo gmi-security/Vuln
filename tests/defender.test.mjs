@@ -150,6 +150,12 @@ test("PostgreSQL: customer isolation, complete publication, duplicates, leases a
       await assert.rejects(()=>store.credentials(companyA,{clientId:randomUUID()}),/secret again/);
     });
     const id=await store.enqueue(companyA,"test"); assert.equal(await store.enqueue(companyA,"test"),id);
+    await t.test("manual claim selects the requested customer instead of the oldest queued import",async()=>{
+      const other=await store.enqueue(companyB,"test");
+      assert.equal((await store.claim(companyB)).id,other);
+      await store.fail(other,"fixture completed");
+      assert.equal(await store.claim(companyB),null);
+    });
     const run=await store.claim(); assert.equal(run.id,id);assert.equal(await store.claim(),null);
     await t.test("edits cannot race active imports",async()=>{
       await assert.rejects(()=>store.save({...credentials,companyId:companyA,daily:false},"test"),/finish/);
@@ -184,6 +190,14 @@ test("PostgreSQL: customer isolation, complete publication, duplicates, leases a
       await store.claim();await assert.rejects(()=>store.writeRecords(next,rows,4,0),/lease expired/);
       await assert.rejects(()=>store.finish(claimed),/lease expired/);
       assert.equal((await store.results(companyA,"cves",0)).summary.findings,4);
+    });
+    await t.test("manual retry fences an expired job and queues a replacement while the scheduler is paused",async()=>{
+      const abandoned=await store.enqueue(companyA,"test");const claimed=await store.claim(companyA);
+      await db.query("UPDATE defender_import_runs SET lease_until=now()-interval '1 second' WHERE id=$1",[abandoned]);
+      const replacement=await store.enqueue(companyA,"test");assert.notEqual(replacement,abandoned);
+      assert.equal(await store.enqueue(companyA,"test"),replacement);
+      await assert.rejects(()=>store.finish(claimed),/lease expired/);
+      assert.equal((await store.claim(companyA)).id,replacement);await store.fail(replacement,"fixture done");
     });
     await t.test("complete empty snapshot shows zero; history has one UTC observation per day",async()=>{
       await store.enqueue(companyA,"test");const next=await store.claim();await store.writeDevices(next.id,[{id:"device-A"}]);await store.finish(next);

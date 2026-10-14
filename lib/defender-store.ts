@@ -103,6 +103,9 @@ export function createDefenderStore(db: Database) {
       const saved = (await client.query("SELECT revision,daily,last_attempt_at,current_run FROM defender_connections WHERE company_id=$1 FOR UPDATE", [companyId])).rows[0];
       if (!saved) throw new DefenderError("Save this customer's Defender connection first.");
       if (actor === "daily-scheduler" && (!saved.daily || !saved.current_run || new Date(saved.last_attempt_at).getTime() > Date.now()-86_400_000)) return null;
+      await client.query(`UPDATE defender_import_runs SET status='failed',phase='Interrupted',finished_at=now(),
+        error='The previous worker lease expired. A replacement import was requested.'
+        WHERE company_id=$1 AND status='running' AND lease_until<now()`,[companyId]);
       const existing = (await client.query("SELECT id FROM defender_import_runs WHERE company_id=$1 AND status IN ('queued','running')", [companyId])).rows[0];
       if (existing) return String(existing.id);
       const id = randomUUID();
@@ -111,7 +114,7 @@ export function createDefenderStore(db: Database) {
       return id;
     });
   }
-  async function claim(): Promise<DefenderRun | null> {
+  async function claim(companyId?: string): Promise<DefenderRun | null> {
     return transaction(async client => {
       // One Defender import at a time across all web processes, without a connection held during network requests.
       await client.query("SELECT pg_advisory_xact_lock(804231)");
@@ -120,7 +123,8 @@ export function createDefenderStore(db: Database) {
         WHERE status='running' AND lease_until < now()`);
       if ((await client.query("SELECT 1 FROM defender_import_runs WHERE status='running' LIMIT 1")).rowCount) return null;
       const row = (await client.query(`UPDATE defender_import_runs SET status='running',phase='Devices',lease_until=now()+interval '10 minutes'
-        WHERE id=(SELECT id FROM defender_import_runs WHERE status='queued' ORDER BY started_at LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING *`)).rows[0];
+        WHERE id=(SELECT id FROM defender_import_runs WHERE status='queued' AND ($1::text IS NULL OR company_id=$1)
+          ORDER BY started_at LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING *`,[companyId ?? null])).rows[0];
       return row ?? null;
     });
   }

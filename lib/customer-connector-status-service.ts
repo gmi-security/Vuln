@@ -14,7 +14,7 @@ import { inventoryRouteEvidenceSelect, inventoryRoutingStatus, type InventoryRou
 let dedicated: { url: string; pool: Pool } | undefined;
 // Reuse the application pool without schema initialization; keep the optional
 // dashboard pool bounded and separate from dashboardDatabase's write hooks.
-function dashboardPool(app: Pool) {
+export function customerDashboardPool(app: Pool) {
   const url = process.env.ELASTIC_VULN_DATABASE_URL;
   if (!url || url === process.env.DATABASE_URL) return app;
   if (!dedicated || dedicated.url !== url) {
@@ -35,7 +35,7 @@ export async function readCustomerConnectorStatus(companyId: string | null) {
     const companies = application.companies.filter(c => !c.isDemo).map(c => ({ id: c.id, name: c.name }));
     if (companyId === null) return { companies };
     if (!companies.some(c => c.id === companyId)) throw new DashboardError("Customer not found.", 404);
-    const dashboard = dashboardPool(app);
+    const dashboard = customerDashboardPool(app);
     const sourceClient = dashboard === app ? client : await dashboard.connect();
     let saved;
     try { saved = await readDashboardConnectorMetadata(sourceClient); }
