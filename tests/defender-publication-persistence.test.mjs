@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { resolve, dirname } from "node:path";
 import { createContext, SourceTextModule, SyntheticModule } from "node:vm";
 import ts from "typescript";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 const company = { id:"CO-TEST", name:"Example Customer", kind:"client", industry:"Test", createdAt:"2026-10-01T00:00:00Z", contactName:"", contactEmail:"" };
 const snapshot = { companyId:company.id, runId:"run-1", observedAt:"2026-10-07T12:00:00Z",
@@ -15,11 +16,11 @@ const seed = () => ({ companies:[[company.id,company]], folders:[], scans:[], fi
   settings:{autoScanNewAssets:false,schedule:{autoSyncEnabled:false,alertsEnabled:false,monthlyReportsEnabled:false},sla:{Critical:7,High:30,Medium:60,Low:90}},
   meta:{autoSyncDefaultMigrated:true,defenderGenerations:{}} });
 
-async function harness(disk = { value:seed() }, strict = false, scheduled = false) {
+async function harness(disk = { value:seed() }, strict = false, scheduled = false, role = undefined) {
   const intervals = [], logs = [], modules = new Map();
   let failSave = false, saveCalls = 0, snapshotReads = 0, gate, lastChanges;
   const context = createContext({ Buffer, URL, URLSearchParams, TextEncoder, TextDecoder, AbortController, Response, Request, Headers, structuredClone,
-    process:{ env:{VULN_DISABLE_SCHEDULER:scheduled?"false":"true"},once(){} },
+    process:{ env:{VULN_DISABLE_SCHEDULER:scheduled?"false":"true", VULN_RUNTIME_ROLE:role},once(){} },
     console:{ log:(...args)=>logs.push(args.join(" ")), info:(...args)=>logs.push(args.join(" ")), error:(...args)=>logs.push(args.join(" ")),warn(){} },
     setTimeout,clearTimeout,setImmediate,clearImmediate,
     setInterval:(fn,ms)=>{ intervals.push({fn,ms});return {unref(){}}; },clearInterval(){} });
@@ -28,6 +29,12 @@ async function harness(disk = { value:seed() }, strict = false, scheduled = fals
     persistenceEnabled:()=>true, applicationDatabase:()=>null,
     strictPlatformPersistence:()=>strict,
     loadSnapshot:async()=>clone(disk.value),
+    loadCommittedRead:async(previous)=>{
+      if(previous?.revision===disk.revision)return previous;
+      const data=clone(disk.value),buckets=new Map();
+      for(const kind of ['companies','folders','scans','findings','assets']){buckets.set(kind+':00',data[kind]);delete data[kind];}
+      return {metadata:data,buckets,changedKeys:[...buckets.keys(),'meta'],revision:disk.revision??1};
+    },
     saveSnapshot:async (value,options)=>{saveCalls++;if(gate)await gate;if(failSave)throw new Error("simulated database save failure");options?.guard?.();
       lastChanges=options?.changes;const next=clone(value);
       if(options?.changes!==undefined)for(const kind of ['companies','folders','scans','findings','assets']){
@@ -50,14 +57,15 @@ async function harness(disk = { value:seed() }, strict = false, scheduled = fals
     return modules.get(path);
   }
   async function linker(name,parent) {
-    if(name.startsWith("."))return moduleAt(resolve(dirname(parent.identifier),`${name}.ts`));
+    if(name.startsWith("."))return moduleAt(resolve(dirname(parent.identifier),name.endsWith(".mjs")?name:`${name}.ts`));
     if(name.startsWith("@/"))return moduleAt(resolve(`${name.slice(2)}.ts`));
     const imported=await import(name);return synthetic(name === "rrule"?{...imported.default,...imported}:imported);
   }
+  const requestContext=new AsyncLocalStorage();context[Symbol.for("vuln.readContext")]=requestContext;
   const mod=await moduleAt("lib/defender-platform.ts");await mod.link(linker);await mod.evaluate();
   const store=(await moduleAt("lib/store.ts")).namespace;
   await store.ensureHydrated();await context.__vulnFlushing;
-  return { context,store,platform:mod.namespace,disk,logs,intervals,
+  return { requestContext,context,store,platform:mod.namespace,disk,logs,intervals,
     fail:()=>{failSave=true;},recover:()=>{failSave=false;},block:value=>{gate=value;},
     saves:()=>saveCalls,reads:()=>snapshotReads,changes:()=>lastChanges };
 }
@@ -213,4 +221,26 @@ test("SQL customer creation saves its new company, default folder and counter to
  const restarted=await harness(h.disk,true),second=restarted.store.createCompany({name:'Next scoped customer',allowNearDuplicate:true});
  assert.notEqual(second.id,created.id);await restarted.store.commitPlatformMutation();
  assert.ok(restarted.disk.value.companies.some(([id])=>id===created.id));
+});
+
+
+test("web reader never waits for writer flush or starts mutating schedulers",async()=>{
+  const h=await harness({value:seed(),revision:1},true,true,"web");
+  h.context.__vulnFlushing=new Promise(()=>{});h.context.__vulnDirty=true;
+  await Promise.race([h.store.ensureHydrated(),new Promise((_,reject)=>setTimeout(()=>reject(Error("reader blocked on write")),100))]);
+  assert.equal(h.saves(),0);assert.equal(h.intervals.length,0);
+  assert.equal(h.store.getCompanyIdentity(company.id).name,company.name);
+  await assert.rejects(h.store.flushNow(),/web reader/);
+  h.context.__vulnCommittedReader.stop();
+});
+test("requests pin one committed generation across refresh and later requests see replacement",async()=>{
+  const disk={value:seed(),revision:1};const h=await harness(disk,true,false,"web");
+  await h.requestContext.run({},async()=>{
+    await h.store.ensureHydrated();assert.equal(h.store.getCompanyIdentity(company.id).name,company.name);
+    disk.value.companies[0][1]={...disk.value.companies[0][1],name:"Changed"};disk.revision=2;
+    await h.context.__vulnCommittedReader.refresh();
+    assert.equal(h.store.getCompanyIdentity(company.id).name,company.name);
+  });
+  await h.requestContext.run({},async()=>{await h.store.ensureHydrated();assert.equal(h.store.getCompanyIdentity(company.id).name,"Changed");});
+  assert.equal(h.saves(),0);h.context.__vulnCommittedReader.stop();
 });

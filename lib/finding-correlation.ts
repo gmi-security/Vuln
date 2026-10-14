@@ -46,7 +46,8 @@ export function findIdentityRoot(aliases: Map<string, string>, key: string): str
     if (next === root) break;
     root = next;
   }
-  for (const step of path) if (step !== root) aliases.set(step, root);
+  if (process.env.VULN_RUNTIME_ROLE !== "web")
+    for (const step of path) if (step !== root) aliases.set(step, root);
   return root;
 }
 export function resolveIdentity(aliases: Map<string, string>, companyId: string, id: string): string {

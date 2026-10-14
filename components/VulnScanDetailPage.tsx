@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
+import { startPolling } from "@/lib/browser-polling";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import VulnShell from "@/components/VulnShell";
@@ -21,40 +22,34 @@ export default function VulnScanDetailPage({ scanId }: { scanId: string }) {
   const [findings, setFindings] = useState<Finding[]>([]);
   const [notFound, setNotFound] = useState(false);
 
-  const load = useCallback(async () => {
-    try {
-      const res = await fetch(`/api/scans/${scanId}`, { cache: "no-store" });
-      if (res.status === 404) {
-        // Clear any stale scan so the not-found panel renders on its own.
-        setScan(null);
-        setFindings([]);
-        setNotFound(true);
-        return;
-      }
-      const json = await res.json();
-      setNotFound(false);
-      setScan(json.scan ?? null);
-      setFindings(json.findings ?? []);
-    } catch {
-      // keep last snapshot
-    }
-  }, [scanId]);
-
-  // Poll while the scan is active; stop once it reaches a terminal state or
-  // no longer exists.
-  const settled =
-    notFound ||
-    (scan !== null &&
-      (scan.status === "Completed" ||
-        scan.status === "Failed" ||
-        scan.status === "Stopped"));
-
   useEffect(() => {
-    void load();
-    if (settled) return;
-    const timer = setInterval(() => void load(), 3000);
-    return () => clearInterval(timer);
-  }, [load, settled]);
+    let settled = false;
+    setScan(null); setFindings([]); setNotFound(false);
+    const poll = startPolling(async signal => {
+      try {
+        const res = await fetch(`/api/scans/${scanId}`, { cache: "no-store", signal });
+        if (signal.aborted) return;
+        if (res.status === 404) {
+          // Clear any stale scan so the not-found panel renders on its own.
+          setScan(null);
+          setFindings([]);
+          setNotFound(true);
+          settled = true;
+          return;
+        }
+        if (!res.ok) return;
+        const json = await res.json();
+        if (signal.aborted) return;
+        settled = ["Completed", "Failed", "Stopped"].includes(json.scan?.status);
+        setNotFound(false);
+        setScan(json.scan ?? null);
+        setFindings(json.findings ?? []);
+      } catch {
+        // keep last snapshot
+      }
+    }, { intervalMs: () => settled ? null : 3000 });
+    return poll.stop;
+  }, [scanId]);
 
   const subtitle = scan
     ? `${connectorLabels[scan.connector]} · ${scan.profile} · requested by ${scan.requestedBy}`

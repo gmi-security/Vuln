@@ -16,23 +16,27 @@ export default function ConnectWiseGroupTicket({ group, requestId, customerScope
   const [error, setError] = useState(""), [message, setMessage] = useState("");
   const [editingPriority, setEditingPriority] = useState(false), [priorityDraft, setPriorityDraft] = useState<number>();
   const generation = useRef(0);
+  const lifetime = useRef<AbortController | null>(null);
   const reload = useCallback(async () => {
-    const data = await dashboardRequest<{ request: PatchGroupTicketSummary }>(requestPath);
+    const signal = lifetime.current?.signal;
+    const data = await dashboardRequest<{ request: PatchGroupTicketSummary }>(requestPath, { signal });
+    if (signal?.aborted) return data.request;
     setCurrent(data.request);
     return data.request;
   }, [requestId, requestPath]);
   useEffect(() => {
+    const controller = new AbortController(); lifetime.current = controller;
     let live = true;
-    Promise.all([dashboardRequest<CWSettings>("connectwise"), dashboardRequest<{ request: PatchGroupTicketSummary }>(requestPath)])
+    Promise.all([dashboardRequest<CWSettings>("connectwise", { signal: controller.signal }), dashboardRequest<{ request: PatchGroupTicketSummary }>(requestPath, { signal: controller.signal })])
       .then(([config, data]) => { if (live) { setSettings(config); setRouting(config.defaults); setCurrent(data.request); } })
       .catch(e => { if (live) setError(e.message); });
-    return () => { live = false; generation.current++; };
+    return () => { live = false; generation.current++; controller.abort(); };
   }, [requestId, requestPath]);
   async function track(token: number) {
     for (let attempt = 0; attempt < 95; attempt++) {
       await new Promise(resolve => setTimeout(resolve, 2000));
       if (generation.current !== token) return;
-      const data = await dashboardRequest<{ request: PatchGroupTicketSummary }>(requestPath);
+      const data = await dashboardRequest<{ request: PatchGroupTicketSummary }>(requestPath, { signal: lifetime.current?.signal });
       if (generation.current !== token) return;
       setCurrent(data.request);
       if (data.request.state !== "creating" && data.request.attachmentState !== "uploading" && !(attempt < 2 && data.request.state === "created" && data.request.attachmentState === "pending" && !data.request.error)) return;
@@ -59,7 +63,7 @@ export default function ConnectWiseGroupTicket({ group, requestId, customerScope
         await new Promise(resolve => setTimeout(resolve, 2000));
         if (generation.current !== token) return;
         if (Date.now() >= deadline) throw new Error("The verification job expired. Please try again.");
-        job = await dashboardRequest(`jobs/${job.jobId}`);
+        job = await dashboardRequest(`jobs/${job.jobId}`, { signal: lifetime.current?.signal });
       }
       if (generation.current !== token) return;
       if (job.status !== "succeeded" || !job.ticket) throw new Error(job.error || "Verification failed. Please retry.");

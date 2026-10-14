@@ -108,6 +108,7 @@ async function work() {
 }
 
 export function triggerDashboardJobs() {
+  if (process.env.VULN_RUNTIME_ROLE === "web") return;
   if (state.working) return;
   state.working = work().catch(() => console.error("[elastic-dashboard] Background job worker could not complete."))
     .finally(() => { state.working = undefined; });

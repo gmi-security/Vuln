@@ -1,3 +1,4 @@
+import { createCommittedCache } from "./committed-cache.mjs";
 import { buildExecutiveReport, type ExecReport } from "./executive-report";
 import { cachedTopFixes } from "./reporting-top-fixes";
 import { loadReviewedScannerRoutes } from "@/lib/customer-scanner-routing-server";
@@ -122,6 +123,7 @@ import { dueInfo, ssvc, type SsvcDecision } from "@/lib/ssvc";
 import {
   appendMetricsSnapshots,
   loadSnapshot,
+  loadCommittedRead,
   persistenceEnabled,
   saveSnapshot,
   strictPlatformPersistence,
@@ -625,7 +627,19 @@ type InternalScan = Omit<Scan, "progress" | "status"> & {
 
 const globalStore = globalThis as unknown as { __vulnStore?: StoreShape };
 
+function readerRole(): boolean { return process.env.VULN_RUNTIME_ROLE === "web"; }
+function readRequestContext(): { platform?: StoreShape } | undefined {
+  return (globalThis as any)[Symbol.for("vuln.readContext")]?.getStore();
+}
 function store(): StoreShape {
+  if (readerRole()) {
+    const context = readRequestContext();
+    if (context?.platform) return context.platform;
+    const committed = committedReader().current()?.view as StoreShape | undefined;
+    if (!committed) throw new Error("Committed platform data is still loading.");
+    if (context) context.platform = committed;
+    return committed;
+  }
   if (!globalStore.__vulnStore) {
     globalStore.__vulnStore = {
       companies: new Map(),
@@ -681,8 +695,8 @@ function deserializeStore(obj: {
   reportingKevCatalog?: unknown;
   meta?: unknown;
   counter?: number;
-}): StoreShape {
-  restoreReportingKevCatalog(obj.reportingKevCatalog);
+}, restoreCatalog = true): StoreShape {
+  if (restoreCatalog) restoreReportingKevCatalog(obj.reportingKevCatalog);
   return {
     retainedMetadata: Object.fromEntries(Object.entries(obj).filter(([key]) =>
       !["companies", "folders", "scans", "findings", "assets", "compensatingControls", "identityAliases", "settings", "reportingKevCatalog", "meta", "counter"].includes(key))),
@@ -698,6 +712,69 @@ function deserializeStore(obj: {
     seeded: true,
     counter: obj.counter ?? 1000,
   };
+}
+
+// Collection payloads come from one verified PostgreSQL snapshot. Requests pin
+// this view; a background refresh prepares the next view without editing it.
+// Completed read aggregates are reused until their data/configuration changes.
+// A one-minute lifetime keeps time-based SLA/trend calculations current.
+const readMemo = new WeakMap<object, Map<string, { at: number; dependencies: unknown[]; settings: string; value: any }>>();
+function memoRead<T>(s: StoreShape, key: string, calculate: () => T): T {
+  if (!readerRole()) return calculate();
+  let entries = readMemo.get(s.findings);
+  if (!entries) { entries = new Map(); readMemo.set(s.findings, entries); }
+  const dependencies = [s.companies, s.folders, s.scans, s.assets];
+  const settings = JSON.stringify(s.settings), previous = entries.get(key);
+  if (previous && Date.now() - previous.at < 60000 && previous.settings === settings &&
+      dependencies.every((value, index) => value === previous.dependencies[index])) return previous.value;
+  const value = calculate();
+  if (entries.size >= 64) entries.delete(entries.keys().next().value!);
+  entries.set(key, {at: Date.now(), dependencies, settings, value});
+  return value;
+}
+function immutableMap<K, V>(map: Map<K, V>): Map<K, V> {
+  const reject = () => { throw new Error("Committed platform reads cannot mutate data."); };
+  Object.defineProperties(map, { set: {value: reject}, delete: {value: reject}, clear: {value: reject} });
+  return Object.freeze(map);
+}
+function freezeReadMetadata(value: any): any {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    for (const child of Object.values(value)) freezeReadMetadata(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+async function prepareCommittedView(snapshot: Awaited<ReturnType<typeof loadCommittedRead>>, previous: any): Promise<StoreShape> {
+  const view = deserializeStore(snapshot.metadata as never, false);
+  for (const kind of ["companies", "folders", "scans", "findings", "assets"] as const) {
+    const changed = !previous || snapshot.changedKeys.some((key: string) => key.startsWith(`${kind}:`));
+    if (!changed) { (view as any)[kind] = previous.view[kind]; continue; }
+    const map = new Map<string, any>(); let processed = 0;
+    for (const [key, rows] of snapshot.buckets) if (key.startsWith(`${kind}:`)) {
+      for (const [id, payload] of rows) {
+        map.set(id, payload);
+        if (++processed % 2000 === 0) await new Promise<void>(resolve => setImmediate(resolve));
+      }
+    }
+    (view as any)[kind] = immutableMap(map);
+  }
+  view.identityAliases = immutableMap(view.identityAliases);
+  view.compensatingControls = immutableMap(view.compensatingControls);
+  freezeReadMetadata(view.settings); freezeReadMetadata(view.meta); freezeReadMetadata(view.retainedMetadata);
+  return Object.freeze(view);
+}
+const readerGlobal = globalThis as typeof globalThis & { __vulnCommittedReader?: ReturnType<typeof createCommittedCache> };
+function committedReader() {
+  return readerGlobal.__vulnCommittedReader ??= createCommittedCache({
+    load: loadCommittedRead, build: prepareCommittedView,
+    onPublish: (entry: any) => {
+      globalStore.__vulnStore = entry.view;
+      restoreReportingKevCatalog(entry.snapshot.metadata.reportingKevCatalog);
+      persistGlobal.__vulnHydrated = true;
+      persistGlobal.__vulnPersistBlocked = false;
+    },
+    onError: (error: unknown) => console.error("[platform-reader] Refresh failed; retaining the last committed view:", error instanceof Error ? error.message : String(error)),
+  });
 }
 
 const persistGlobal = globalThis as unknown as {
@@ -749,11 +826,13 @@ const persistGlobal = globalThis as unknown as {
 // True when persistence is fail-closed after a hydration failure. Lib callers
 // (health endpoints, admin UI) can surface this state.
 export function persistenceBlocked(): boolean {
+  if (readerRole()) return (globalThis as any)[Symbol.for("vuln.workerHealth")]?.blocked === true;
   return Boolean(persistGlobal.__vulnPersistBlocked);
 }
 
 // Record that the in-memory store changed since the last snapshot save.
 function markDirty(changes?: PlatformChanges): void {
+  if (readerRole()) throw new Error("Platform mutations must run in the worker.");
   persistGlobal.__vulnDirty = true;
   persistGlobal.__vulnMutationVersion = (persistGlobal.__vulnMutationVersion ?? 0) + 1;
   if (changes === undefined) persistGlobal.__vulnMutationScope = null;
@@ -807,6 +886,7 @@ function migrateAutoSyncDefault(s: StoreShape): void {
 // interval tick and a flushNow() (or two mutations) can never commit out of
 // order and let a stale snapshot clobber a newer one.
 function persistSnapshot(throwOnError = false): Promise<void> {
+  if (readerRole()) return Promise.reject(new Error("The web reader cannot persist platform data."));
   if (
     !persistenceEnabled() ||
     persistGlobal.__vulnPersistBlocked ||
@@ -882,6 +962,13 @@ function hookDrainOnce(): void {
 // before reading/writing, so a request never seeds an empty store ahead of a
 // pending snapshot load.
 export async function ensureHydrated(): Promise<void> {
+  if (readerRole()) {
+    const reader = committedReader(); reader.start();
+    if (!reader.current()) await reader.refresh();
+    // No wait on the worker's imports, dirty RAM or in-flight transaction.
+    store();
+    return;
+  }
   if (strictPlatformPersistence() && persistenceBlocked()) throw new Error("Platform storage is unavailable; restart after database recovery.");
   if (persistGlobal.__vulnHydrated) {
     if (strictPlatformPersistence()) {
@@ -942,6 +1029,7 @@ async function doHydrate(): Promise<void> {
   if (strictPlatformPersistence()) await persistSnapshot(true);
   persistGlobal.__vulnHydrated = true;
   startFlusher();
+  startWorkerScanPolling();
   startScheduler();
   startScannerElasticExportScheduler();
   startVulnersBridgeScheduler();
@@ -949,6 +1037,24 @@ async function doHydrate(): Promise<void> {
   // anyway and we must not block the first request waiting for a DB write.
   // (No-op while persistence is blocked.)
   void persistSnapshot();
+}
+
+// Scan completion must not depend on opening the Scans page. One worker
+// polling loop remains responsive to scheduler disable and never overlaps saves.
+function startWorkerScanPolling(): void {
+  if (process.env.VULN_RUNTIME_ROLE !== "worker" || process.env.VULN_DISABLE_SCHEDULER === "true") return;
+  const state = globalThis as any;
+  if (state.__vulnWorkerScanPoll) return;
+  const poll = async () => {
+    try {
+      if (!persistGlobal.__vulnFlushing && !persistenceBlocked()) {
+        const s = store(); tick(s); await refreshVendorScans(s);
+        if (persistGlobal.__vulnDirty) await flushNow({throwOnError: true});
+      }
+    } catch (error) { console.error("[scan-worker] Poll failed:", error); }
+    finally { state.__vulnWorkerScanPoll = setTimeout(poll, 10000); state.__vulnWorkerScanPoll.unref(); }
+  };
+  state.__vulnWorkerScanPoll = setTimeout(poll, 10000); state.__vulnWorkerScanPoll.unref();
 }
 
 function startFlusher(): void {
@@ -1628,6 +1734,9 @@ export async function storeStatus(): Promise<{
   persistBlocked: boolean;
   counts: { companies: number; scans: number; findings: number; assets: number };
   oldestCompanyCreatedAt: string | null;
+  runtimeRole: string;
+  worker?: { available: boolean; ready: boolean; blocked: boolean; checkedAt: string };
+  committedRead?: { refreshing: boolean; refreshError: string | null; checkedAt: string | null };
 }> {
   // Deliberately does NOT await hydration: /api/health must answer instantly
   // even while a large snapshot is streaming in, so monitoring can tell
@@ -1651,6 +1760,9 @@ export async function storeStatus(): Promise<{
       assets: s?.assets.size ?? 0,
     },
     oldestCompanyCreatedAt: oldest ?? null,
+    runtimeRole: process.env.VULN_RUNTIME_ROLE ?? "legacy",
+    ...(readerRole() ? {worker: (globalThis as any)[Symbol.for("vuln.workerHealth")]} : {}),
+    ...(readerRole() ? {committedRead: committedReader().status()} : {}),
   };
 }
 
@@ -1837,6 +1949,7 @@ function toPublic(scan: InternalScan, now: number): Scan {
 }
 
 function tick(s: StoreShape): void {
+  if (readerRole()) return;
   const now = Date.now();
   for (const scan of s.scans.values()) settleScan(s, scan, now);
 }
@@ -1893,6 +2006,7 @@ async function collectNessusFindings(companyId: string, scanId: number, lastModi
 }
 
 async function refreshVendorScans(s: StoreShape): Promise<void> {
+  if (readerRole()) return;
   const now = Date.now();
   const pending = [...s.scans.values()].filter(scan => scan.vendor &&
     ["Running", "Paused", "Queued"].includes(scan.status) && now - scan.vendor.lastPoll >= 4000);
@@ -2194,6 +2308,7 @@ function rollupFromLists(
 }
 
 function companyRollup(s: StoreShape, companyId: string) {
+  if (readerRole()) return buildAllCompanyRollups(s).get(companyId) ?? rollupFromLists([], [], [], 0, s.settings.sla);
   // Single pass per collection instead of Array.from(map.values()).filter(...)
   // — with tens of thousands of findings in production, materializing a full
   // array just to discard almost all of it (this company's slice is always a
@@ -2215,6 +2330,9 @@ function companyRollup(s: StoreShape, companyId: string) {
 // Grouping each collection by companyId in one pass first drops that to
 // O(store size) total regardless of how many companies there are.
 function buildAllCompanyRollups(s: StoreShape): Map<string, ReturnType<typeof rollupFromLists>> {
+  return memoRead(s, "company-rollups", () => calculateAllCompanyRollups(s));
+}
+function calculateAllCompanyRollups(s: StoreShape): Map<string, ReturnType<typeof rollupFromLists>> {
   const scansBy = new Map<string, InternalScan[]>();
   for (const sc of s.scans.values()) {
     const list = scansBy.get(sc.companyId);
@@ -7937,6 +8055,7 @@ export function listFindings(filter?: {
 }): Finding[] {
   const s = store();
   tick(s);
+  return memoRead(s, `findings:${JSON.stringify(filter ?? {})}`, () => {
   let all = Array.from(s.findings.values());
   if (filter?.scanId) all = all.filter((f) => f.scanId === filter.scanId);
   if (filter?.companyId) all = all.filter((f) => f.companyId === filter.companyId);
@@ -7944,6 +8063,7 @@ export function listFindings(filter?: {
   if (kind !== "all") all = all.filter((f) => findingClass(f) === kind);
   // Default to real-risk order so the most dangerous findings surface first.
   return all.sort((a, b) => b.realRisk - a.realRisk || b.cvss - a.cvss);
+  }).slice();
 }
 
 // Every host a company's Nessus connector has actually scanned -- the
@@ -8004,6 +8124,10 @@ function isOpen(f: Finding): boolean {
 }
 
 export function computeMetrics(filter?: { companyId?: string }): QuantifyMetrics {
+  const s = store();
+  return memoRead(s, `metrics:${filter?.companyId ?? "all"}`, () => calculateMetrics(filter));
+}
+function calculateMetrics(filter?: { companyId?: string }): QuantifyMetrics {
   const s = store();
   tick(s);
   // For a specific company, honor the filter; for the all-company rollup,

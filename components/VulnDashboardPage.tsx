@@ -25,6 +25,7 @@ import {
   severityClass,
 } from "@/lib/format";
 import type { Connector, QuantifyMetrics, Scan, Severity } from "@/lib/types";
+import { startPolling } from "@/lib/browser-polling";
 
 const SEVERITIES: Severity[] = ["Critical", "High", "Medium", "Low", "Info"];
 
@@ -85,21 +86,22 @@ export default function VulnDashboardPage() {
     status: Connector["status"];
   }[] | null>(null);
 
-  // Monotonic request id — a slow older response must never overwrite a newer one.
-  const loadSeq = useRef(0);
+  const pollInterval = useRef(60_000);
 
-  const load = useCallback(async () => {
-    const seq = ++loadSeq.current;
+  const load = useCallback(async (signal: AbortSignal) => {
     try {
       const [scansRes, metricsRes] = await Promise.all([
-        fetch("/api/scans", { cache: "no-store" }),
-        fetch("/api/metrics", { cache: "no-store" }),
+        fetch("/api/scans", { cache: "no-store", signal }),
+        fetch("/api/metrics", { cache: "no-store", signal }),
       ]);
       if (!scansRes.ok || !metricsRes.ok) return; // keep last good state on server errors
       const scansJson = await scansRes.json();
       const metricsJson = await metricsRes.json();
-      if (seq !== loadSeq.current) return; // superseded by a newer request
-      if (scansJson.scans) setScans(scansJson.scans);
+      if (signal.aborted) return;
+      if (scansJson.scans) {
+        setScans(scansJson.scans);
+        pollInterval.current = scansJson.scans.some((scan: Scan) => ["Queued", "Running", "Paused"].includes(scan.status)) ? 10_000 : 60_000;
+      }
       if (metricsJson.metrics) setMetrics(metricsJson.metrics);
     } catch {
       // keep the last good snapshot on transient errors
@@ -108,50 +110,51 @@ export default function VulnDashboardPage() {
 
   // Check DB health once on mount to surface connection errors early.
   useEffect(() => {
-    void fetch("/api/health", { cache: "no-store" })
-      .then((r) => r.json())
-      .then((j) => {
+    const read = startPolling(async signal => {
+      const response = await fetch("/api/health", { cache: "no-store", signal });
+      if (!response.ok) throw new Error("Health check failed.");
+      const j = await response.json();
+      if (!signal.aborted) {
         setDbStatus({
           reachable: j.persistence?.dbReachable ?? null,
           error: j.persistence?.dbError ?? null,
           persistBlocked: Boolean(j.persistBlocked),
         });
-      })
-      .catch(() =>
+      }
+    }, { intervalMs: () => null, onError: () =>
         setDbStatus({ reachable: false, error: "Health check failed.", persistBlocked: false }),
-      );
+    });
+    return read.stop;
   }, []);
 
   // Connector config summary — once on mount, config-only (no live probes).
   useEffect(() => {
-    void Promise.all([
-      fetch("/api/connectors", { cache: "no-store" }).then((r) => r.json()),
-      fetch("/api/integrations", { cache: "no-store" }).then((r) => r.json()),
-    ])
-      .then(([connJson, intJson]) => {
+    const read = startPolling(async signal => {
+      const [connJson, intJson] = await Promise.all([
+        fetch("/api/connectors", { cache: "no-store", signal }).then((r) => r.ok ? r.json() : Promise.reject()),
+        fetch("/api/integrations", { cache: "no-store", signal }).then((r) => r.ok ? r.json() : Promise.reject()),
+      ]);
+      if (!signal.aborted) {
         const all = [...(connJson.connectors ?? []), ...(intJson.integrations ?? [])];
         setConnectorSummary(
           all.map((c: any) => ({ id: c.id, name: c.name, status: c.status })),
         );
-      })
-      .catch(() => undefined);
+      }
+    }, { intervalMs: () => null });
+    return read.stop;
   }, []);
 
   // 90-day global history for the trend panel. Snapshots accrue daily, so a
   // single fetch on mount is enough; guard against out-of-order settles.
   useEffect(() => {
-    let cancelled = false;
-    void fetch("/api/history?days=90", { cache: "no-store" })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((json) => {
-        if (!cancelled && json && Array.isArray(json.snapshots)) {
+    const read = startPolling(async signal => {
+      const response = await fetch("/api/history?days=90", { cache: "no-store", signal });
+      const json = response.ok ? await response.json() : null;
+      if (!signal.aborted && json && Array.isArray(json.snapshots)) {
           setSnapshots(json.snapshots);
-        }
-      })
-      .catch(() => undefined); // panel keeps its cold-start message
-    return () => {
-      cancelled = true;
-    };
+      }
+    }, { intervalMs: () => null });
+    return read.stop;
   }, []);
 
   const running = scans.filter(
@@ -160,13 +163,11 @@ export default function VulnDashboardPage() {
   );
 
   // Poll fast when scans are active (10s), slow when idle (60s).
-  // Interval resets whenever running-scan count changes.
+  // The next read waits for the current read to settle, even during an import.
   useEffect(() => {
-    void load();
-    const interval = running.length > 0 ? 10_000 : 60_000;
-    const timer = setInterval(() => void load(), interval);
-    return () => clearInterval(timer);
-  }, [load, running.length]);
+    const poll = startPolling(load, { intervalMs: () => pollInterval.current });
+    return poll.stop;
+  }, [load]);
 
   const recentScans = scans.slice(0, 6);
 

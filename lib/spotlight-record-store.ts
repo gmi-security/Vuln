@@ -93,6 +93,7 @@ type Database = Pick<Pool, "query" | "connect">;
 export function createSpotlightRecordStore(db: Database) {
   let schemaReady: Promise<void> | undefined;
   function ensureSchema(): Promise<void> {
+    if (process.env.VULN_RUNTIME_ROLE === "web") return Promise.resolve();
     if (!schemaReady) {
       schemaReady = db.query(`
         CREATE TABLE IF NOT EXISTS spotlight_import_runs (

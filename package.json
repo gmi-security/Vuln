@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
+    "start": "node scripts/start-app.mjs",
     "lint": "eslint",
     "build:summary-worker": "tsc -p tsconfig.summary-worker.json",
     "worker:summary": "node --max-old-space-size=512 scripts/spotlight-summary-worker.mjs",

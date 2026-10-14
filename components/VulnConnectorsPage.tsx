@@ -19,6 +19,7 @@ import VulnShell from "@/components/VulnShell";
 import { PanelCard, Pill } from "@/components/ui";
 import type { Connector, ConnectorStatus } from "@/lib/types";
 import { connectorImportWarnings } from "@/lib/connector-import-result";
+import { startPolling, type BrowserPoller } from "@/lib/browser-polling";
 
 type CardData = {
   id: string;
@@ -365,6 +366,10 @@ function SyncAllButton() {
   >(null);
   const [enrichSummary, setEnrichSummary] = useState<string | null>(null);
   const [errMsg, setErrMsg] = useState<string | null>(null);
+  const statusPoller = React.useRef<BrowserPoller | null>(null);
+  const watching = React.useRef(false);
+  const attempts = React.useRef(0);
+  const statusRevision = React.useRef(0);
   // Stops the poll loop when the page unmounts — otherwise it keeps polling
   // (and calling setState) for up to 15 minutes after navigation.
   const aliveRef = React.useRef(true);
@@ -389,52 +394,52 @@ function SyncAllButton() {
     }
   }
 
-  async function poll() {
-    let finished = false;
-    for (let i = 0; i < 450; i += 1) {
-      // ~15 min at 2s per tick
-      await new Promise((r) => setTimeout(r, 2000));
-      if (!aliveRef.current) return; // unmounted — stop polling
-      let st: SyncAllStatus | null = null;
-      try {
-        const r = await fetch("/api/connectors/sync-all", { method: "GET", cache: "no-store" });
-        const j = await r.json().catch(() => ({}));
-        st = j.status ?? null;
-      } catch {
-        continue; // transient — keep polling
-      }
-      if (!aliveRef.current) return;
-      if (!st) break;
-      if (!st.running) {
-        finished = true;
-        applyFinished(st);
-        break;
-      }
-    }
-    if (!aliveRef.current) return;
-    if (!finished) {
-      setErrMsg("Sync timed out waiting for a response. It may still be running — refresh to check.");
-    }
+  function stopWaiting() {
+    watching.current = false;
+    setErrMsg("Sync timed out waiting for a response. It may still be running — refresh to check.");
     setBusy(false);
   }
 
   // On mount: if a sync-all is already in flight (started before a refresh or
   // in another tab), resume showing its progress instead of a stale idle button.
   useEffect(() => {
-    void fetch("/api/connectors/sync-all", { cache: "no-store" })
-      .then((r) => r.json())
-      .then((j) => {
-        const st: SyncAllStatus | null = j.status ?? null;
-        if (!aliveRef.current || !st?.running) return;
+    const current = startPolling(async (signal) => {
+      const revision = statusRevision.current;
+      if (watching.current) attempts.current += 1;
+      const r = await fetch("/api/connectors/sync-all", { cache: "no-store", signal });
+      if (!r.ok) throw new Error(`Sync status unavailable (HTTP ${r.status})`);
+      const j = await r.json();
+      if (signal.aborted || revision !== statusRevision.current) return;
+      const st: SyncAllStatus | null = j.status ?? null;
+      if (st?.running) {
+        watching.current = true;
         setBusy(true);
-        void poll();
-      })
-      .catch(() => undefined);
+        if (attempts.current >= 450) stopWaiting();
+      } else if (watching.current) {
+        if (!st) stopWaiting();
+        else {
+          watching.current = false;
+          applyFinished(st);
+          setBusy(false);
+        }
+      }
+    }, {
+      intervalMs: () => watching.current ? 2000 : null,
+      onError: () => {
+        if (watching.current && attempts.current >= 450) stopWaiting();
+      },
+    });
+    statusPoller.current = current;
+    return () => {
+      current.stop();
+      statusPoller.current = null;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function run() {
     if (busy) return;
+    statusRevision.current += 1;
     setBusy(true);
     setRows(null);
     setEnrichSummary(null);
@@ -442,14 +447,18 @@ function SyncAllButton() {
     try {
       const res = await fetch("/api/connectors/sync-all", { method: "POST" });
       const json = await res.json().catch(() => ({}));
+      if (!aliveRef.current) return;
       if (!res.ok || json.error) {
         setErrMsg(json.error ?? `Failed (HTTP ${res.status})`);
         setBusy(false);
         return;
       }
       // Started (or joined an already-running sweep) — poll until it finishes.
-      await poll();
+      attempts.current = 0;
+      watching.current = true;
+      await statusPoller.current?.refresh({ afterCurrent: true });
     } catch (err) {
+      if (!aliveRef.current) return;
       setErrMsg(err instanceof Error ? err.message : "Request failed.");
       setBusy(false);
     }
@@ -526,6 +535,10 @@ function IntegrationCard({ card }: { card: CardData }) {
   const [syncMsg, setSyncMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [progress, setProgress] = useState<TidalSyncStatus | null>(null);
   const [csProgress, setCsProgress] = useState<CsSyncStatus | null>(null);
+  const statusPoller = React.useRef<BrowserPoller | null>(null);
+  const watching = React.useRef(false);
+  const attempts = React.useRef(0);
+  const statusRevision = React.useRef(0);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   // Stops the sync poll loops when the card unmounts — otherwise they keep
   // polling (and calling setState) for up to an hour after navigation.
@@ -594,35 +607,29 @@ function IntegrationCard({ card }: { card: CardData }) {
 
   useEffect(() => {
     if (!healthUrl || !card.configured) return;
-    let alive = true;
-    const poll = () =>
-      fetch(healthUrl, { cache: "no-store" })
-        .then((r) => r.json())
-        .then((j) => {
-          if (alive) {
-            setHealth({
-              reachable: Boolean(j.reachable),
-              message: j.message ?? "",
-              tenants: Array.isArray(j.tenants) ? j.tenants : undefined,
-            });
-          }
-        })
-        .catch(() => {
-          if (alive) setHealth({ reachable: false, message: "unreachable" });
-        });
-    void poll();
+    const poller = startPolling(async (signal) => {
+      const response = await fetch(healthUrl, { cache: "no-store", signal });
+      if (!response.ok) throw new Error(`Health unavailable (HTTP ${response.status})`);
+      const j = await response.json();
+      if (signal.aborted) return;
+      setHealth({
+        reachable: Boolean(j.reachable),
+        message: j.message ?? "",
+        tenants: Array.isArray(j.tenants) ? j.tenants : undefined,
+      });
+    }, {
+      intervalMs: 20_000,
+      onError: () => setHealth({ reachable: false, message: "unreachable" }),
+    });
     // Live reachability, not just a one-shot check — the server's own cache
     // (30-60s per route) bounds how often this actually hits the real
     // appliance, so polling here doesn't add external load beyond that.
-    const id = setInterval(poll, 20_000);
-    return () => {
-      alive = false;
-      clearInterval(id);
-    };
+    return () => poller.stop();
   }, [healthUrl, card.configured]);
 
   async function runSync() {
     if (!syncUrl || syncing) return;
+    statusRevision.current += 1;
     setSyncing(true);
     setSyncMsg(null);
     setProgress(null);
@@ -630,6 +637,7 @@ function IntegrationCard({ card }: { card: CardData }) {
     try {
       const res = await fetch(syncUrl, { method: "POST" });
       const json = await res.json().catch(() => ({}));
+      if (!aliveRef.current) return;
       if (!res.ok || json.error) {
         setSyncMsg({ ok: false, text: json.error ?? `Sync failed (HTTP ${res.status})` });
         setSyncing(false);
@@ -637,88 +645,33 @@ function IntegrationCard({ card }: { card: CardData }) {
       }
       if (isTidal) {
         setProgress(json.status ?? null);
-        await pollTidal();
       } else if (isCrowdstrike) {
         setCsProgress(json.status ?? null);
-        await pollCrowdstrike();
       } else {
         const result = json.result ?? json;
         setSyncMsg({ ok: syncOk(result), text: summarizeSync(result) });
         setSyncing(false);
       }
+      if (isTidal || isCrowdstrike) {
+        attempts.current = 0;
+        watching.current = true;
+        await statusPoller.current?.refresh({ afterCurrent: true });
+      }
     } catch (err) {
+      if (!aliveRef.current) return;
       setSyncMsg({ ok: false, text: err instanceof Error ? err.message : "Sync failed." });
       setSyncing(false);
     }
   }
 
-  async function pollCrowdstrike() {
-    let finished = false;
-    // 20 minutes (600 * 2s) was sized for a typical sync, but a large
-    // Spotlight tenant's discovery+hydration genuinely runs for hours (seen
-    // in production: Atlas alone is ~2M findings) -- give the client loop a
-    // runway that matches the server-side sync instead of declaring a false
-    // timeout while it's still healthy. The server's own `running` flag is
-    // the real source of truth; this is just a backstop against a hung tab.
-    for (let i = 0; i < 21_600; i += 1) {
-      await new Promise((r) => setTimeout(r, 2000));
-      if (!aliveRef.current) return; // unmounted — stop polling
-      let st: CsSyncStatus | null = null;
-      try {
-        const r = await fetch(syncUrl!, { method: "GET", cache: "no-store" });
-        const j = await r.json().catch(() => ({}));
-        st = j.status ?? null;
-      } catch {
-        continue;
-      }
-      if (!aliveRef.current) return;
-      if (!st) break;
-      setCsProgress(st);
-      if (!st.running) {
-        finished = true;
-        if (st.error) setSyncMsg({ ok: false, text: st.error });
-        else if (st.result) setSyncMsg({ ok: syncOk(st.result), text: summarizeSync(st.result) });
-        else setSyncMsg({ ok: true, text: "Sync complete." });
-        break;
-      }
-    }
-    if (!aliveRef.current) return;
-    if (!finished) {
-      setSyncMsg({
-        ok: false,
-        text: "Sync polling stopped waiting for a response, but it may still be running on the server -- refresh to check /api/crowdstrike/debug before retrying.",
-      });
-    }
-    setSyncing(false);
-  }
-
-  async function pollTidal() {
-    let finished = false;
-    // See pollCrowdstrike above -- a large Tidal inventory can take a while
-    // too, so this backstop should be generous rather than a real deadline.
-    for (let i = 0; i < 36_000; i += 1) {
-      await new Promise((r) => setTimeout(r, 1200));
-      if (!aliveRef.current) return; // unmounted — stop polling
-      let st: TidalSyncStatus | null = null;
-      try {
-        const r = await fetch(syncUrl, { method: "GET", cache: "no-store" });
-        const j = await r.json().catch(() => ({}));
-        st = j.status ?? null;
-      } catch {
-        continue; // transient — keep polling
-      }
-      if (!aliveRef.current) return;
-      if (!st) break;
-      setProgress(st);
-      if (!st.running) {
-        finished = true;
-        if (st.error) setSyncMsg({ ok: false, text: st.error });
-        else if (st.result) setSyncMsg({ ok: syncOk(st.result), text: summarizeSync(st.result) });
-        break;
-      }
-    }
-    if (!aliveRef.current) return;
-    if (!finished) setSyncMsg({ ok: false, text: "Sync timed out waiting for a response. Check the Tidal connector and try again." });
+  function stopWaiting() {
+    watching.current = false;
+    setSyncMsg({
+      ok: false,
+      text: isTidal
+        ? "Sync timed out waiting for a response. Check the Tidal connector and try again."
+        : "Sync polling stopped waiting for a response, but it may still be running on the server -- refresh to check /api/crowdstrike/debug before retrying.",
+    });
     setSyncing(false);
   }
 
@@ -728,25 +681,46 @@ function IntegrationCard({ card }: { card: CardData }) {
   // still going -- same convention as the page-level sync-all poller.
   useEffect(() => {
     if (!syncUrl || !(isCrowdstrike || isTidal)) return;
-    void fetch(syncUrl, { method: "GET", cache: "no-store" })
-      .then((r) => r.json())
-      .then((j) => {
-        if (!aliveRef.current) return;
-        if (isCrowdstrike) {
-          const st: CsSyncStatus | null = j.status ?? null;
-          if (!st?.running) return;
-          setCsProgress(st);
-          setSyncing(true);
-          void pollCrowdstrike();
-        } else {
-          const st: TidalSyncStatus | null = j.status ?? null;
-          if (!st?.running) return;
-          setProgress(st);
-          setSyncing(true);
-          void pollTidal();
-        }
-      })
-      .catch(() => undefined);
+    // Keep the original generous backstops for large inventories: 12 hours
+    // of polling delays, plus the time spent waiting for each status read.
+    const maxAttempts = isTidal ? 36_000 : 21_600;
+    const current = startPolling(async (signal) => {
+      const revision = statusRevision.current;
+      if (watching.current) attempts.current += 1;
+      const r = await fetch(syncUrl, { cache: "no-store", signal });
+      if (!r.ok) throw new Error(`Sync status unavailable (HTTP ${r.status})`);
+      const j = await r.json();
+      if (signal.aborted || revision !== statusRevision.current) return;
+      const st: CsSyncStatus | TidalSyncStatus | null = j.status ?? null;
+      if (!st) {
+        if (watching.current) stopWaiting();
+        return;
+      }
+      if (!st.running && !watching.current) return;
+      if (isTidal) setProgress(st as TidalSyncStatus);
+      else setCsProgress(st);
+      if (st.running) {
+        watching.current = true;
+        setSyncing(true);
+        if (attempts.current >= maxAttempts) stopWaiting();
+      } else {
+        watching.current = false;
+        if (st.error) setSyncMsg({ ok: false, text: st.error });
+        else if (st.result) setSyncMsg({ ok: syncOk(st.result), text: summarizeSync(st.result) });
+        else if (!isTidal) setSyncMsg({ ok: true, text: "Sync complete." });
+        setSyncing(false);
+      }
+    }, {
+      intervalMs: () => watching.current ? (isTidal ? 1200 : 2000) : null,
+      onError: () => {
+        if (watching.current && attempts.current >= maxAttempts) stopWaiting();
+      },
+    });
+    statusPoller.current = current;
+    return () => {
+      current.stop();
+      statusPoller.current = null;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [syncUrl, isCrowdstrike, isTidal]);
 

@@ -22,8 +22,9 @@ let ready: Promise<void> | undefined;
 async function database(): Promise<Pool> {
   const url = process.env.ELASTIC_VULN_DATABASE_URL;
   if (!url) throw new Error("Elastic snapshot storage is not configured.");
-  pool ??= new Pool({ connectionString: url, max: 2, connectionTimeoutMillis: 5000,
+  pool ??= new Pool({ connectionString: url, ...(process.env.VULN_RUNTIME_ROLE === "web" ? { options: "-c default_transaction_read_only=on" } : {}), max: 2, connectionTimeoutMillis: 5000,
     idleTimeoutMillis: 30_000, statement_timeout: 5000 });
+  if (process.env.VULN_RUNTIME_ROLE === "web") return pool;
   if (!ready) {
     ready = pool.query(`CREATE TABLE IF NOT EXISTS elastic_query_snapshots (
       query_id TEXT PRIMARY KEY,

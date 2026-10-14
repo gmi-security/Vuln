@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useRef, useState } from "react";
+import { useBrowserPolling } from "@/lib/useBrowserPolling";
 import Link from "next/link";
 import { RefreshCcw } from "lucide-react";
 import {
@@ -46,13 +47,13 @@ export default function VulnAppSecPage({ companyId, selection }: { companyId?: s
   const [loading, setLoading] = useState(false);
   const loadSeq = useRef(0);
 
-  const load = useCallback(async () => {
+  const read = useCallback(async (signal: AbortSignal) => {
     const seq = ++loadSeq.current;
     setLoading(true);
     try {
-      const res = await fetch(`/api/appsec${companyId ? `?companyId=${encodeURIComponent(companyId)}` : ""}`, { cache: "no-store" });
+      const res = await fetch(`/api/appsec${companyId ? `?companyId=${encodeURIComponent(companyId)}` : ""}`, { cache: "no-store", signal });
       const json = await res.json();
-      if (seq !== loadSeq.current) return;
+      if (signal.aborted || seq !== loadSeq.current) return;
       if (companyId && json.companyId !== companyId) throw new Error("Customer response did not match.");
       if (!res.ok) { setSummary(null); setTrend(null); setError(json.error || "AppSec data is unavailable."); return; }
       setTrendError(json.trendError ?? null);
@@ -61,19 +62,15 @@ export default function VulnAppSecPage({ companyId, selection }: { companyId?: s
       setTrend(json.trend ?? null);
       setError(json.error ?? null);
     } catch {
-      if (seq !== loadSeq.current) return;
+      if (seq !== loadSeq.current || (signal.aborted && signal.reason?.name !== "TimeoutError")) return;
       setSummary(null); setTrend(null);
       setError("Failed to reach the API.");
     } finally {
-      if (seq === loadSeq.current) setLoading(false);
+      if (seq === loadSeq.current && (!signal.aborted || signal.reason?.name === "TimeoutError")) setLoading(false);
     }
   }, [companyId]);
 
-  useEffect(() => {
-    void load();
-    const timer = setInterval(() => void load(), 60_000);
-    return () => { ++loadSeq.current; clearInterval(timer); };
-  }, [load]);
+  const load = useBrowserPolling(read, 60_000);
 
   return (
     <VulnShell companyId={companyId}

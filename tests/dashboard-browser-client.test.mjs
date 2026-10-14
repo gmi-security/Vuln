@@ -89,3 +89,28 @@ test("save, preview and delete requests are never automatically replayed", async
     }
   }
 });
+
+test("an abandoned dashboard read never starts or retries another request", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  await withFetch([json({ queries: [] })], async calls => {
+    await assert.rejects(() => dashboardRequest("", { signal: controller.signal }), error => error.name === "AbortError");
+    assert.equal(calls.length, 0);
+  });
+});
+
+test("unmount cancellation reaches the active fetch and does not become a retryable outage", async () => {
+  const original = globalThis.fetch, controller = new AbortController();
+  let calls = 0, requestSignal;
+  globalThis.fetch = async (url, init) => {
+    calls++; requestSignal = init.signal;
+    controller.abort();
+    if (init.signal.aborted) throw init.signal.reason;
+    return json({ queries: [] });
+  };
+  try {
+    await assert.rejects(() => dashboardRequest("", { signal: controller.signal }), error => error.name === "AbortError");
+    assert.equal(requestSignal.aborted, true);
+    assert.equal(calls, 1);
+  } finally { globalThis.fetch = original; }
+});

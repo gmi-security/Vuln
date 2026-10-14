@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { startPolling } from "@/lib/browser-polling";
 import VulnShell from "@/components/VulnShell";
 import { PanelCard, Pill } from "@/components/ui";
 
@@ -53,17 +54,16 @@ export default function VulnSchedulePage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const load = () =>
-      fetch("/api/schedule-matrix", { cache: "no-store" })
-        .then((res) => res.json())
-        .then((json) => {
+    const poll = startPolling(async signal => {
+      const response = await fetch("/api/schedule-matrix", { cache: "no-store", signal });
+      if (!response.ok) throw new Error("Could not load the schedule.");
+      const json = await response.json();
+      if (!signal.aborted) {
           setData(json);
           setError(null);
-        })
-        .catch(() => setError("Could not load the schedule."));
-    void load();
-    const timer = setInterval(load, 30_000);
-    return () => clearInterval(timer);
+      }
+    }, { intervalMs: 30_000, onError: () => setError("Could not load the schedule.") });
+    return poll.stop;
   }, []);
 
   const rows = data?.companies.flatMap((company) =>

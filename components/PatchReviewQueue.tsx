@@ -1,8 +1,9 @@
 "use client";
 import CveText from "./CveText";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { dashboardRequest } from "@/lib/dashboard-browser-client";
+import { startPolling, type BrowserPoller } from "@/lib/browser-polling";
 import type { PatchGroup } from "@/lib/patch-request";
 import { patchReviewRows } from "@/lib/patch-review-rows";
 import { ageDays, patchGroupTicketState, type PatchGroupTicketSummary } from "@/lib/patch-group-ticket-types";
@@ -43,21 +44,34 @@ export default function PatchReviewQueue({ companyId, sla }: { companyId: string
   const [error, setError] = useState("");
   const [stateFilter, setStateFilter] = useState<"all" | "pending" | "approved" | "dismissed">("all");
   const [search, setSearch] = useState("");
-  const load = useCallback(async (nextPage = 1) => {
+  const poller = useRef<BrowserPoller | null>(null);
+  const requestedPage = useRef(1);
+  const read = useCallback(async (signal: AbortSignal) => {
+    const nextPage = requestedPage.current;
+    requestedPage.current = 1;
     setBusy("load"); setError("");
     try {
-      const data = await dashboardRequest<Page>(`patch-group-tickets?review=1&page=${nextPage}&companyId=${encodeURIComponent(companyId)}`);
+      const data = await dashboardRequest<Page>(`patch-group-tickets?review=1&page=${nextPage}&companyId=${encodeURIComponent(companyId)}`, { signal });
+      if (signal.aborted) return;
       setRows(current => nextPage === 1 ? data.requests : [...current, ...data.requests]);
       setPage(nextPage); setMore(data.more);
       setCounts({ total: data.total, pending: data.pending, approved: data.approved });
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not load the review queue."); }
-    finally { setBusy(""); }
+    } catch (cause) {
+      if (signal.aborted) throw cause;
+      setError(cause instanceof Error ? cause.message : "Could not load the review queue.");
+    }
+    finally { if (!signal.aborted) setBusy(""); }
   }, [companyId]);
+  const load = useCallback(async (nextPage = 1) => {
+    requestedPage.current = nextPage;
+    await poller.current?.refresh({ afterCurrent: true });
+  }, []);
   useEffect(() => {
-    void load();
-    const timer = setInterval(() => { void load(); }, 60_000);
-    return () => clearInterval(timer);
-  }, [load]);
+    const poll = startPolling(read, { intervalMs: 60_000,
+      onError: cause => { setBusy(""); setError(cause instanceof Error ? cause.message : "Could not load the review queue."); } });
+    poller.current = poll;
+    return () => { poll.stop(); poller.current = null; };
+  }, [read]);
 
   async function open(id: string) {
     setBusy(id); setError("");
