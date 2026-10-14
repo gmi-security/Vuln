@@ -8,6 +8,7 @@ import {platformBucketKeys} from '../lib/db/platform-store.mjs';
 import {platformJson} from '../lib/db/platform-records.mjs';
 import {readPlatformAuthority,bindPlatformWriter} from '../lib/db/platform-authority.mjs';
 import {planCustomerConsolidation} from '../lib/db/customer-consolidation.mjs';
+import {assertDisposableIdentity,parseDisposableTarget} from '../lib/db/gate3-disposable.mjs';
 
 const fail=message=>{throw Error(message);};
 const approved=[
@@ -122,8 +123,16 @@ async function unknownReferences(client){
 }
 export {argumentsFor,coreCounts,digest,verifiedExternalIdentities,internalFolderEvidence,validateManifest};
 
-if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
- const {mode,args}=argumentsFor(process.argv.slice(2));
+export async function runConsolidation({mode,args,target=cloneTarget,faultAt=null}){
+ if(target!==cloneTarget)parseDisposableTarget(target);
+ assert(['--inspect','--dry-run','--commit'].includes(mode),'Invalid consolidation mode.');
+ assert(args?.['--socket']===target.socket&&args['--database']===target.database&&
+  args['--port']===String(target.port)&&args['--user']===target.user,
+  'Connection arguments differ from the approved target.');
+ assert(faultAt===null||target!==cloneTarget,'Fault injection requires a disposable target.');
+ assert(faultAt===null||mode==='--commit','Fault injection requires a commit rehearsal.');
+ assert(faultAt===null||['before','companies','scans','findings','assets','tickets','commit'].includes(faultAt),
+  'Invalid fault boundary.');
  const manifest=mode==='--inspect'?null:JSON.parse(await readFile(args['--manifest'],'utf8'));
  if(manifest)validateManifest(mode,manifest);
  const client=new pg.Client({host:args['--socket'],database:args['--database'],port:Number(args['--port']),
@@ -134,9 +143,14 @@ if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
   await client.query("SET LOCAL search_path=public;SET LOCAL lock_timeout='5s';SET LOCAL idle_in_transaction_session_timeout='1800s'");
   await client.query('SELECT pg_advisory_xact_lock(804209)');
   const identity=(await client.query(`SELECT current_database() database,current_setting('server_version_num') version,
-   current_setting('unix_socket_directories') sockets,inet_server_addr() server_address`)).rows[0];
-  assert(identity.database===cloneTarget.database&&identity.server_address===null&&
-   identity.sockets.split(',').map(v=>v.trim()).includes(cloneTarget.socket),'Connected to an unexpected database server.');
+   current_setting('unix_socket_directories') sockets,inet_server_addr() server_address,
+   current_setting('data_directory') data_directory,current_setting('listen_addresses') listen_addresses`)).rows[0];
+  if(target===cloneTarget){
+   assert(identity.database===cloneTarget.database&&identity.server_address===null&&
+    identity.sockets.split(',').map(v=>v.trim()).includes(cloneTarget.socket),'Connected to an unexpected database server.');
+  }else assertDisposableIdentity(target,{database:identity.database,version:Number(identity.version),
+   sockets:identity.sockets,serverAddress:identity.server_address,dataDirectory:identity.data_directory,
+   listenAddresses:identity.listen_addresses});
   const peers=Number((await client.query(`SELECT count(*)::text n FROM pg_stat_activity
    WHERE datname=current_database() AND pid<>pg_backend_pid()`)).rows[0].n);
   assert(peers===0,'Other database sessions remain; stop all writers and retry.');
@@ -189,6 +203,9 @@ if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
    if(mode==='--dry-run'){
     console.log(JSON.stringify(report));await client.query('ROLLBACK');transaction=false;
    }else{
+    let injected=false;
+    const inject=async boundary=>{if(faultAt===boundary){injected=true;await client.query('SELECT 1/0')}};
+    await inject('before');
     await bindPlatformWriter(client,authority);
     await client.query(`CREATE TABLE IF NOT EXISTS customer_consolidation_runs (
      id text PRIMARY KEY, before_hash text NOT NULL, after_hash text NOT NULL,
@@ -199,10 +216,19 @@ if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
     await client.query(`INSERT INTO customer_consolidation_runs(id,before_hash,after_hash,plan_hash,lineage,report)
       VALUES('gmi-valor-v1',$1,$2,$3,$4,$5)`,
      [beforeHash,afterHash,planHash,JSON.stringify(plan.lineage),JSON.stringify(report)]);
-    for(const [key,data] of plan.buckets){
+    const ordered=[...plan.buckets].sort(([a],[b])=>{
+     const rank=key=>['companies','folders','scans','findings','assets','meta'].indexOf(key.split(':')[0]);
+     return rank(a)-rank(b)||a.localeCompare(b);
+    });
+    let priorKind=null;
+    for(const [key,data] of ordered){
+     const kind=key.split(':')[0];
+     if(priorKind==='folders'&&kind==='scans')await inject('companies');
      if(platformJson(snapshot.get(key))===platformJson(data))continue;
      const result=await client.query('UPDATE vuln_store SET data=$2,updated_at=clock_timestamp() WHERE key=$1',[key,JSON.stringify(data)]);
      assert(result.rowCount===1,`Store bucket ${key} disappeared.`);
+     if(['scans','findings','assets'].includes(kind))await inject(kind);
+     priorKind=kind;
     }
     const held=await client.query(`UPDATE patch_group_ticket_requests
       SET packet=jsonb_set(packet,'{manualOnly}','true'::jsonb,true),updated_at=clock_timestamp()
@@ -214,6 +240,7 @@ if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
       WHERE tenant_id='CO-9150' AND packet->>'appCompanyId'='CO-9150' AND packet->>'source'='stored-findings'
        AND state='prepared' AND review_state='pending' AND ticket_id IS NULL AND packet->>'manualOnly'='true'`);
     assert(audited.rowCount===39353,'Draft quarantine audit count drifted.');
+    await inject('tickets');
     const stored=await loadSnapshot(client);
     assert(digest(stored)===afterHash,'Stored snapshot verification failed.');
     const post=await ancillary(client);
@@ -225,8 +252,15 @@ if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
     await client.query(`INSERT INTO app_store_commits(id,epoch,revision,operation,actor,counts)
       VALUES($1,$2,$3,'save','private-customer-consolidation',$4)`,
      [randomUUID(),nextAuthority.epoch,nextAuthority.revision,JSON.stringify({customers:2,scans:206,findings:106256,assetCollisions:93,draftsQuarantined:39353})]);
+    await inject('commit');
+    assert(faultAt===null||injected,'Requested fault boundary was not reached.');
     await client.query('COMMIT');transaction=false;console.log(JSON.stringify(report));
    }
   }
  }finally{if(transaction)await client.query('ROLLBACK').catch(()=>{});await client.end();}
+}
+
+if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
+ const {mode,args}=argumentsFor(process.argv.slice(2));
+ await runConsolidation({mode,args});
 }
