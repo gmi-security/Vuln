@@ -1,4 +1,6 @@
 import * as reportingRevisions from "../lib/db/customer-reporting-revisions.mjs";
+import * as platformAuthority from "../lib/db/platform-authority.mjs";
+import * as platformStore from "../lib/db/platform-store.mjs";
 import {readFile} from 'node:fs/promises';
 import {createContext,SourceTextModule,SyntheticModule} from 'node:vm';
 import * as crypto from 'node:crypto';
@@ -17,8 +19,15 @@ export async function legacyPersistenceFixture(pool,env={}){
     const context=createContext({process:{env:{DATABASE_URL:'postgresql://localhost/disposable-test-only',...env}},console,Buffer,Date,setTimeout,clearTimeout,setImmediate});
     const code=ts.transpileModule(await readFile('lib/persist.ts','utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText;
     const mod=new SourceTextModule(code,{context});
-    await mod.link(async name=>{if(!['pg','node:crypto','./db/customer-reporting-revisions.mjs'].includes(name))throw Error('Unexpected persistence dependency');
-      const values=name==='pg'?{Pool:class{constructor(){return wrapper;}}}:name.endsWith("customer-reporting-revisions.mjs")?reportingRevisions:crypto;
+    const dependencies=new Map([
+      ['pg',{Pool:class{constructor(){return wrapper;}}}],
+      ['node:crypto',crypto],
+      ['./db/customer-reporting-revisions.mjs',reportingRevisions],
+      ['./db/platform-authority.mjs',platformAuthority],
+      ['./db/platform-store.mjs',platformStore],
+    ]);
+    await mod.link(async name=>{if(!dependencies.has(name))throw Error('Unexpected persistence dependency');
+      const values=dependencies.get(name);
       return new SyntheticModule(Object.keys(values),function(){for(const key of Object.keys(values))this.setExport(key,values[key]);},{context});
     });await mod.evaluate();return mod.namespace;
   }

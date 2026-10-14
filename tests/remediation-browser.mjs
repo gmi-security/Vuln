@@ -36,7 +36,7 @@ const summary=(companyId)=>({id,cves:[cve],hostCount:2,findingCount:2,remediatio
 const group=(companyId)=>({manualOnly:true,source:'stored-findings',appCompanyId:companyId,companyName:companyId===companies[0].id?'Fixture A':'Fixture B',connectors:['defender'],title:'Install recommended patch',action:'Install recommended update',tenantId:companyId,remediationId:'manual:fixture',cves:[cve],deviceCount:2,findingCount:2,hostScope:[],deviceCves:[],maxRisk:72,worstSeverity:'High',label:cve,csv:`cve,hostname,cvss,remediation\r\n${cve},${companyId}-device,8.1,Install recommended update\r\n`,ticketTitle:`${companyId}: ${cve}`,ticketBody:`Customer: ${companyId}\nCVE: ${cve}\nRecommended remediation: Install recommended update\nCVSS: 8.1\nSee attached CSV for devices.`});
 const detail=companyId=>({companyId,cve,companyName:companyId===companies[0].id?'Fixture A':'Fixture B',observedAt:when,sourceObservations:{platform:when,crowdstrike:null},findingCount:2,deviceCount:2,hosts:[{host:`${companyId}-device`,source:'defender',severity:'High',cvss:8.1}],enrichment:{cvss_score:8.1,epss_probability:0.9,cisa_kev:true,active_exploitation:true,active_exploitation_source:'MISP',active_exploitation_detail:'Synthetic retained signal',updated_at:when},tickets:[],moreTickets:false});
 let approved=false,created=false,failPrepare=false,failIntel=false,delayDetail=false,releaseDetail;
-let mismatchOverview=false,delayOverview=false,releaseOverview;
+let mismatchOverview=false,delayOverview=false,releaseOverview,withLegacyHistory=false;
 function overviewModel(companyId){
   const company=companies.find(c=>c.id===companyId),count=companyId===companies[0].id?1:2;
   return {company,metrics:{vulnerabilities:{open:count,critical:0,high:count,kev:0,exploitable:0,cveOpen:count,
@@ -44,7 +44,10 @@ function overviewModel(companyId){
     assessmentState:'assessed',sourceActivity:[],priorityTotal:count,priorityRows:[{id:'overview-finding',cve,title:'Overview patch',
       asset:`${companyId}-overview-device`,severity:'High',realRisk:72,status:'Open',lastSeen:when,connectors:['defender']}],
     scanTotal:0,recentScans:[],assets:{inventoryCount:2,authoritativeFindingCount:0,contextCoveragePercent:0,scanCoveragePercent:null,sourceCounts:[]},
-    attackSurfaceRows:[],webTestingRows:[],history:[]};
+    attackSurfaceRows:[],webTestingRows:[],history:[],
+    ...(withLegacyHistory?{legacyHistory:companyId===companies[0].id?
+      [{ts:when,sourceCompanyId:'CO-OLD-A',sourceCompanyName:'Earlier fixture A',open:37}]:[]}:{}),
+  };
 }
 let sourceState='available',failSource=false,delaySource=false,releaseSource;
 function savedResult(companyId,source,offset){
@@ -146,6 +149,19 @@ try{
   assert.equal(await page.getByLabel('Customer',{exact:true}).count(),1);
   await page.getByText(/Saved platform report as of/).waitFor();
   pass('Overview loads the sections-only contract with one selector and preserves the full-report link');
+  assert.equal(await page.getByRole('region',{name:'Earlier customer history table',exact:true}).count(),0);
+  withLegacyHistory=true;await page.reload();
+  const legacyTable=page.getByRole('region',{name:'Earlier customer history table',exact:true});
+  await legacyTable.getByText('Earlier fixture A (CO-OLD-A)',{exact:true}).waitFor();
+  await legacyTable.getByRole('cell',{name:'37',exact:true}).waitFor();
+  assert.equal(await page.getByRole('region',{name:'Recorded findings history',exact:true})
+    .getByText('No recorded history yet. Current findings are still shown above.',{exact:true}).count(),1);
+  await page.getByLabel('Customer',{exact:true}).selectOption(companies[1].id);
+  await page.getByText(`${companies[1].id}-overview-device`,{exact:true}).waitFor();
+  assert.equal(await page.getByRole('region',{name:'Earlier customer history table',exact:true}).count(),0);
+  await page.getByLabel('Customer',{exact:true}).selectOption(companies[0].id);
+  await legacyTable.getByText('Earlier fixture A (CO-OLD-A)',{exact:true}).waitFor();
+  pass('older saved reports render without consolidation history; new history stays separate and customer scoped');
   await page.getByRole('region',{name:'Highest risk vulnerability findings',exact:true}).getByRole('button',{name:`View ${cve} details`,exact:true}).click();
   await page.getByRole('dialog',{name:cve,exact:true}).getByText(`${companies[0].id}-device`,{exact:true}).waitFor();
   await page.keyboard.press('Escape');
