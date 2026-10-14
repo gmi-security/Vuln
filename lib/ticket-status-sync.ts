@@ -1,6 +1,7 @@
 import { patchTicketDatabase, savedConnection } from "./patch-ticket-store";
 import { cwId, cwRequest, type ConnectWiseConnection } from "./connectwise-client";
 import { elasticVulnEnabled } from "./elastic-vuln-server";
+import { claimDailyJob, recordJobRun } from "./background-job-runs";
 
 // Ticket status/closed only ever got refreshed when a human opened a
 // specific ticket and clicked "check status" — a ticket cut from the
@@ -101,12 +102,20 @@ export function startTicketStatusSyncScheduler(): void {
   if (state.timer || !elasticVulnEnabled() || process.env.VULN_DISABLE_SCHEDULER === "true") return;
   const trigger = () => {
     if (state.working) return;
-    state.working = syncTicketStatuses().then(
-      () => {},
-      (err) => console.error("[ticket-status-sync] Could not complete:", err instanceof Error ? err.message : err),
-    ).finally(() => { state.working = undefined; });
+    state.working = (async () => {
+      if (!await savedConnection() || !await claimDailyJob("ticket-status-sync")) return;
+      try {
+        const result = await syncTicketStatuses();
+        await recordJobRun("ticket-status-sync", result.errors ? "failed" : "succeeded", result);
+      } catch (error) {
+        await recordJobRun("ticket-status-sync", "failed", undefined, "Ticket status sync failed; retry manually or on the next daily run.").catch(() => {});
+        throw error;
+      }
+    })().catch((err) => console.error("[ticket-status-sync] Could not complete:", err instanceof Error ? err.message : err))
+      .finally(() => { state.working = undefined; });
   };
-  state.timer = setInterval(trigger, 15 * 60_000);
+  // A minute is the due-check frequency, not the provider-sync frequency.
+  state.timer = setInterval(trigger, 60_000);
   state.timer.unref();
   trigger();
 }

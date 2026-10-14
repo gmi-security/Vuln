@@ -10,6 +10,19 @@ import { patchTicketDatabase } from "./patch-ticket-store";
 export type JobRunStatus = "running" | "succeeded" | "failed";
 export type JobRun = { job: string; status: JobRunStatus; result: unknown; error: string | null; startedAt: string; finishedAt: string | null };
 
+// Persist the daily attempt before contacting a provider. The atomic claim
+// survives restarts and prevents two app processes starting the same job.
+// A failed automatic attempt waits until tomorrow; manual refresh is separate.
+export async function claimDailyJob(job: string): Promise<boolean> {
+  const db = await patchTicketDatabase();
+  const result = await db.query(`INSERT INTO background_job_runs(job,status,result,error,started_at,finished_at)
+    VALUES($1,'running',NULL,NULL,now(),NULL)
+    ON CONFLICT(job) DO UPDATE SET status='running',result=NULL,error=NULL,started_at=now(),finished_at=NULL
+    WHERE background_job_runs.started_at <= now()-interval '24 hours'
+    RETURNING job`, [job]);
+  return result.rows.length === 1;
+}
+
 export async function recordJobRun(job: string, status: JobRunStatus, result?: unknown, error?: string): Promise<void> {
   const db = await patchTicketDatabase();
   await db.query(`INSERT INTO background_job_runs(job,status,result,error,started_at,finished_at)
