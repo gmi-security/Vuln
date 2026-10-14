@@ -1187,7 +1187,7 @@ async function schedulerTick(): Promise<void> {
     if (now - last >= intervalMs) {
       s.meta.lastAutoSyncAt = now;
       markDirty({});
-      const r = startSyncAll();
+      const r = startSyncAll({ scheduled: true });
       if (r.started) {
         console.log("[scheduler] auto sync-all started");
       }
@@ -5693,7 +5693,7 @@ export type SyncAllEntry = {
 // One-shot: pull results from every *configured* connector, so an analyst can
 // bring the whole console up to date with a single click. Unconfigured
 // connectors are reported (configured:false) rather than errored.
-export async function syncAllConnectors(): Promise<SyncAllEntry[]> {
+export async function syncAllConnectors(options: { scheduled?: boolean } = {}): Promise<SyncAllEntry[]> {
   const jobs: {
     connector: string;
     ready: boolean;
@@ -5720,7 +5720,7 @@ export async function syncAllConnectors(): Promise<SyncAllEntry[]> {
         return { message: "Sync started in background." };
       },
     },
-    { connector: "Defender", ready: process.env.DATABASE_URL ? (await defenderStore().list().catch(() => [])).length > 0 : false, run: importFromDefender },
+    { connector: "Defender", ready: process.env.DATABASE_URL ? (await defenderStore().list().catch(() => [])).length > 0 : false, run: () => importFromDefender(options) },
     { connector: "Tidal", ready: Boolean(tidalConfig()), run: importFromTidal },
     {
       connector: "ConnectWise Automate",
@@ -6586,7 +6586,7 @@ export function syncAllStatus(): SyncAllStatus {
 }
 
 // Kick off the background sync-all. Returns immediately; poll syncAllStatus().
-export function startSyncAll(): { started: boolean; error?: string } {
+export function startSyncAll(options: { scheduled?: boolean } = {}): { started: boolean; error?: string } {
   if (syncAllStatus().running) return { started: false, error: "A sync-all is already running." };
   syncJobGlobal.__vulnSyncAll = {
     running: true,
@@ -6601,7 +6601,7 @@ export function startSyncAll(): { started: boolean; error?: string } {
   // continues running after the POST response returns.
   void (async () => {
     try {
-      const results = await syncAllConnectors();
+      const results = await syncAllConnectors(options);
       let enrich: Record<string, unknown> | null = null;
       if (results.some((r) => r.ok)) {
         try {
@@ -6983,18 +6983,21 @@ export function publishDefenderSnapshot(snapshot: DefenderSnapshot): void {
 }
 
 // Sync-all uses the same server-managed configuration and background importer.
-export async function importFromDefender(): Promise<{ queued: number; message: string } | { error: string }> {
+export async function importFromDefender(options: { scheduled?: boolean } = {}): Promise<{ queued: number; message: string } | { error: string }> {
   if (!process.env.DATABASE_URL) return { error: "Defender requires database storage." };
   const { syncDefenderEnvironment } = await import("./defender-config");
   await syncDefenderEnvironment();
   const connections = await defenderStore().list();
   if (!connections.length) return { error: "Set the Defender customer and credentials in the server environment first." };
+  let queued = 0;
   for (const connection of connections) {
-    await defenderStore().enqueue(connection.companyId, "sync-all");
+    // Use the same persisted daily gate as the independent Defender worker.
+    // Manual Sync now can still request an import before 24 hours elapse.
+    if (await defenderStore().enqueue(connection.companyId, options.scheduled ? "daily-scheduler" : "sync-all")) queued++;
   }
   const { triggerDefenderWorker } = await import("./defender-worker");
   void triggerDefenderWorker();
-  return { queued: connections.length, message: `${connections.length} Defender customer import(s) queued.` };
+  return { queued, message: `${queued} Defender customer import(s) queued.` };
 }
 
 export type NessusImportResult = {

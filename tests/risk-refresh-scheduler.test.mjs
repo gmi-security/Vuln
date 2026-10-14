@@ -63,7 +63,7 @@ async function loadScheduler({ tenantRows, refreshTenantResult = { findingsScore
     "./finding-risk-compute": { computeFindingRiskForTenant: async (tenantKey, companyId) => { computeCalls.push({ tenantKey, companyId }); return refreshTenantResult; } },
     "./risk-scoring-store": { riskScoringDatabase: async () => riskDb, recordRiskSnapshot: async () => {} },
     "./swath-ticket-priority": { reconcileTicketPriorityToSwath: async () => { assert.fail("Risk refresh must not modify tickets"); } },
-    "./background-job-runs": { recordJobRun: async () => {} },
+    "./background-job-runs": { recordJobRun: async () => {}, claimDailyJob: async () => true },
   })("lib/risk-refresh-scheduler.ts");
   return { mod, riskDb, computeCalls };
 }
@@ -93,7 +93,7 @@ test("one tenant's failure does not block the others", async () => {
     "./finding-risk-compute": { computeFindingRiskForTenant: async () => { call++; if (call === 1) throw new Error("CrowdStrike timeout"); return { findingsScored: 5, distinctCves: 5, errors: 0 }; } },
     "./risk-scoring-store": { riskScoringDatabase: async () => riskDb, recordRiskSnapshot: async () => {} },
     "./swath-ticket-priority": { reconcileTicketPriorityToSwath: async () => { assert.fail("Risk refresh must not modify tickets"); } },
-    "./background-job-runs": { recordJobRun: async () => {} },
+    "./background-job-runs": { recordJobRun: async () => {}, claimDailyJob: async () => true },
   })("lib/risk-refresh-scheduler.ts");
   const result = await mod.refreshAllTenantsRisk();
   assert.deepEqual(result, { tenantsProcessed: 2, findingsScored: 5, errors: 1 });

@@ -143,10 +143,12 @@ test("PostgreSQL: customer isolation, complete publication, duplicates, leases a
   try {
     await store.save({...credentials,companyId:companyA,daily:true},"test");
     await store.save({...credentials,tenantId:randomUUID(),companyId:companyB,daily:false},"test");
-    await t.test("connection reads never expose ciphertext or secret; daily waits for manual baseline",async()=>{
+    await t.test("connection reads never expose secrets; enabled daily sync starts the first import once",async()=>{
       const list=await store.list(companyA);assert.equal(list.length,1);assert.equal(list[0].hasSecret,true);
       assert.ok(!JSON.stringify(list).includes(credentials.clientSecret));assert.equal(list[0].secret,undefined);
-      await store.schedule();assert.equal(await store.claim(),null);
+      await store.schedule();const first=await store.claim(companyA);assert.ok(first);
+      await store.fail(first.id,"fixture first attempt failed");
+      await store.schedule();assert.equal(await store.claim(companyA),null);
       await assert.rejects(()=>store.credentials(companyA,{clientId:randomUUID()}),/secret again/);
     });
     const id=await store.enqueue(companyA,"test"); assert.equal(await store.enqueue(companyA,"test"),id);

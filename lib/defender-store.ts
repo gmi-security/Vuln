@@ -102,7 +102,7 @@ export function createDefenderStore(db: Database) {
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 804230))", [companyId]);
       const saved = (await client.query("SELECT revision,daily,last_attempt_at,current_run FROM defender_connections WHERE company_id=$1 FOR UPDATE", [companyId])).rows[0];
       if (!saved) throw new DefenderError("Save this customer's Defender connection first.");
-      if (actor === "daily-scheduler" && (!saved.daily || !saved.current_run || new Date(saved.last_attempt_at).getTime() > Date.now()-86_400_000)) return null;
+      if (actor === "daily-scheduler" && (!saved.daily || (saved.last_attempt_at && new Date(saved.last_attempt_at).getTime() > Date.now()-86_400_000))) return null;
       await client.query(`UPDATE defender_import_runs SET status='failed',phase='Interrupted',finished_at=now(),
         error='The previous worker lease expired. A replacement import was requested.'
         WHERE company_id=$1 AND status='running' AND lease_until<now()`,[companyId]);
@@ -182,9 +182,10 @@ export function createDefenderStore(db: Database) {
   }
   async function schedule() {
     await schema();
-    // First import is manual. Daily retries are bounded to one attempt per day.
-    const due = (await db.query(`SELECT company_id FROM defender_connections WHERE daily AND current_run IS NOT NULL
-      AND last_attempt_at < now()-interval '24 hours' ORDER BY last_attempt_at`)).rows;
+    // Include the first import and failed-first retries for enabled customers.
+    // Both this worker and general sync-all share the same daily attempt gate.
+    const due = (await db.query(`SELECT company_id FROM defender_connections WHERE daily
+      AND (last_attempt_at IS NULL OR last_attempt_at <= now()-interval '24 hours') ORDER BY last_attempt_at NULLS FIRST`)).rows;
     for (const row of due) await enqueue(row.company_id,"daily-scheduler");
   }
   async function results(companyId: string, view: string, offset: number, cve = "") {

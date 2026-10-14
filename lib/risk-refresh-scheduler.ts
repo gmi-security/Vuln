@@ -4,7 +4,7 @@ import { reconcileDefenderPlatform } from "./defender-platform";
 import { refreshDefenderRisk } from "./defender-risk";
 import { computeFindingRiskForTenant } from "./finding-risk-compute";
 import { riskScoringDatabase, recordRiskSnapshot } from "./risk-scoring-store";
-import { recordJobRun } from "./background-job-runs";
+import { claimDailyJob, recordJobRun } from "./background-job-runs";
 
 const RISK_REFRESH_JOB = "risk-refresh";
 
@@ -63,15 +63,16 @@ const RISK_REFRESH_LOCK_KEY = 804212; // next free advisory-lock key after close
 const runtime = globalThis as typeof globalThis & { __riskRefresh?: { timer?: ReturnType<typeof setInterval>; working?: Promise<void> } };
 const state = runtime.__riskRefresh ??= {};
 
-// 30 minutes: KEV/EPSS don't change minute-to-minute, and a full tenant
-// rescore is meaningfully heavier than the 5/15-minute ticket-status loops.
-function runOnce(): Promise<void> {
+// Refresh external threat data daily. Manual refresh deliberately bypasses
+// cadence while retaining the existing in-flight and database lock guards.
+function runOnce(manual = false): Promise<void> {
   if (state.working) return state.working;
   state.working = (async () => {
     const db = await riskScoringDatabase();
     const lock = await db.query("SELECT pg_try_advisory_lock($1) AS locked", [RISK_REFRESH_LOCK_KEY]);
     if (!lock.rows[0].locked) return;
     try {
+      if (!manual && !await claimDailyJob(RISK_REFRESH_JOB)) return;
       // Job-run bookkeeping is diagnostic, not load-bearing -- a failure
       // writing to background_job_runs (e.g. a permissions gap on that one
       // table) must never abort the actual refresh, and must never happen
@@ -80,7 +81,7 @@ function runOnce(): Promise<void> {
       // try block, so when it threw, pg_advisory_unlock never ran and the
       // lock stayed held forever -- every future scheduled pass silently
       // no-op'd until the process restarted.
-      await recordJobRun(RISK_REFRESH_JOB, "running").catch((err) => console.error("[risk-refresh] could not record job start:", err instanceof Error ? err.message : err));
+      if (manual) await recordJobRun(RISK_REFRESH_JOB, "running").catch((err) => console.error("[risk-refresh] could not record job start:", err instanceof Error ? err.message : err));
       const result = await refreshAllTenantsRisk();
       await recordJobRun(RISK_REFRESH_JOB, "succeeded", result).catch((err) => console.error("[risk-refresh] could not record job success:", err instanceof Error ? err.message : err));
     } catch (err) {
@@ -96,7 +97,7 @@ function runOnce(): Promise<void> {
 
 export function startRiskRefreshScheduler(): void {
   if (state.timer || !elasticVulnEnabled() || process.env.VULN_DISABLE_SCHEDULER === "true") return;
-  state.timer = setInterval(runOnce, 30 * 60_000);
+  state.timer = setInterval(() => runOnce(), 60_000);
   state.timer.unref();
   runOnce();
 }
@@ -107,6 +108,6 @@ export function startRiskRefreshScheduler(): void {
 // progress via GET .../job-status?job=risk-refresh.
 export function triggerRiskRefreshNow(): { started: boolean } {
   if (state.working) return { started: false };
-  void runOnce();
+  void runOnce(true);
   return { started: true };
 }
