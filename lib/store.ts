@@ -6975,7 +6975,9 @@ export function publishDefenderSnapshot(snapshot: DefenderSnapshot): void {
   for (const [id,asset] of plan.assets) s.assets.set(id,asset);
   for (const [id,finding] of plan.findings) s.findings.set(id,finding);
   s.meta.defenderGenerations = { ...s.meta.defenderGenerations,[company.id]:snapshot.runId };
-  markDirty();
+  // Keep this generation and its marker atomic without reserializing every
+  // other customer's findings. The delta writer supports bounded bulk inserts.
+  markDirty({ findings:[...plan.findings.keys()], assets:[...plan.assets.keys()], scans:[scanId], folders:[folder.id] });
 }
 
 // Sync-all uses the same server-managed configuration and background importer.

@@ -174,6 +174,20 @@ test("SQL analyst edits declare only their finding and preserve unrelated data a
  h.store.updateSettings({sla:{Critical:4}});await h.store.commitPlatformMutation();assert.deepEqual(JSON.parse(JSON.stringify(h.changes())),{});assert.equal(h.disk.value.findings.length,2);
 });
 
+test("SQL Defender publication scopes findings, assets, scan and folder without rewriting unrelated customers",async()=>{
+ const data=seed();data.findings=[['unrelated',{id:'unrelated',companyId:'CO-OTHER',status:'Open'}]];
+ const h=await harness({value:data},true);await h.platform.reconcileDefenderPlatform(false);
+ assert.ok(h.changes(),'Defender must use a scoped publication');
+ const changes=clone(h.changes());
+ assert.equal(changes.findings.length,1);assert.ok(!changes.findings.includes('unrelated'));
+ assert.equal(changes.assets.length,1);assert.deepEqual(changes.scans,[`defender:${company.id}`]);
+ assert.equal(changes.folders.length,1);
+ assert.equal(h.disk.value.meta.defenderGenerations[company.id],snapshot.runId);
+ assert.ok(h.disk.value.findings.some(([id])=>id==='unrelated'));
+ const restarted=await harness(h.disk,true);
+ assert.equal(restarted.store.computeMetrics({companyId:company.id}).totalOpen,1);
+});
+
 test("SQL customer creation saves its new company, default folder and counter together",async()=>{
  const h=await harness(undefined,true);
  const created=h.store.createCompany({name:'Scoped creation fixture',allowNearDuplicate:true});assert.ok(!created.error);
