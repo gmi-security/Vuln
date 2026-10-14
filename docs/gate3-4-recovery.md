@@ -1,5 +1,7 @@
 # Gate 3.4 disposable recovery rehearsal — operator procedure
 
+**October 14 revised rollout:** This is retained rehearsal history, not the current deployment checklist. The operator waived new backup/restore work and chose to preserve existing customer records, deferring GMI/Valor consolidation. See [the current rollout scope](rollout-step-one.md). Unfinished checks here remain unverified; they are not converted to passes. No merge or deployment is authorized by this note.
+
 Production remains on HOLD. This document prepares tests; it does not authorize running them. Stop after the read-only preflight until the operator separately approves disposable database creation, fault injection, authority changes, and an isolated application launch. Codex has no server access. Do not use `/opt/vuln`, PM2, a production connection string, provider credentials, or the recovery baseline databases as targets.
 
 The verified **pre-commit** dump is `/home/codex/vuln-recovery/gate3-precommit-ZSHf45/precommit.dump`, SHA-256 `e8a52f902c834f8485ccdb6e2622e9355944d17596d569164d6c7b71512e1a23`. It is only for fault injection. No verified post-commit backup exists yet. First make a new consistent, read-only `pg_dump` of `recovery_merge_fenced`, then independently check its SHA-256 and restore it into a newly named disposable database. Never use the pre-commit dump for the repeat-run test.

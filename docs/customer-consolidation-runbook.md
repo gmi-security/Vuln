@@ -1,5 +1,7 @@
 # GMI and Valor customer consolidation: private clone rehearsal
 
+**October 14 rollout decision:** The operator chose to keep the existing GMI Scans and Valor Global Scans customer records for this rollout. This private-clone procedure is not part of the deployment. See [the current rollout scope](rollout-step-one.md); do not use this command against production or treat its unfinished full-data rehearsals as passed.
+
 The approved Vuln mappings are `CO-9150` → `CO-229336` and `CO-9153` → `CO-229438`. The first source owns Vuln folder `FLD-9152` (71 scans); the second owns `FLD-9155` (67 scans). Those `FLD-*` values are **Vuln record IDs**, not Nessus numeric folder IDs. The `CO-*` suffixes are **Vuln IDs**, not proof of ConnectWise numeric company IDs.
 
 ## Status and boundaries

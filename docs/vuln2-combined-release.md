@@ -1,5 +1,7 @@
 # Vuln2.0 combined release
 
+**October 14 revised rollout:** [Step-one readiness and current rollout scope](rollout-step-one.md) takes precedence over conflicting backup, customer-consolidation and initial worker/connector activation requirements below. The operator waived new backup/restore work and chose to preserve existing customer records for this rollout. Historical checks retain their actual pass/unverified status. This revision does not authorize merge or deployment.
+
 This is the release preparation document, not permission to deploy. Production has not been restarted, reconfigured or migrated. The last verified production and `origin/main` commit is `a6c485b`. The verified application runtime is committed as `3e2357686f2140136b4923430c947c1ddf5ce865` on `Vuln2.0`. Subsequent release-review scripts/documentation do not change that runtime. The final archive and its checksum are recorded separately after those files are committed.
 
 **October 11 publication direction:** The user supplied the root runtime inventory and authorized pushing the prepared commits to the existing `Vuln2.0` branch only. Do not merge into `main`, deploy, restart services, migrate production schemas or change production configuration as part of this push. The `89703cb` source archive remains an immutable earlier review artifact; this runtime-inventory documentation update is a later commit with no application changes.
