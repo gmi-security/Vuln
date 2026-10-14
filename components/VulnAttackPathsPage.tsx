@@ -53,7 +53,7 @@ export default function VulnAttackPathsPage() {
   const s = data?.summary;
 
   return (
-    <VulnShell
+    <VulnShell companyId={companyFilter === "All" ? "" : companyFilter}
       eyebrow="Attack Paths"
       title="Blast radius"
       subtitle="Full kill chains: each exploitable internet-facing entry, traced hop-by-hop across lateral (same-subnet) and perimeter pivots to the highest-value crown jewel it can reach. Reachability is modeled from exposure, criticality, and /24 adjacency — connect firewall/identity data for observed topology."

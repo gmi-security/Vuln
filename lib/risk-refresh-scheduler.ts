@@ -4,7 +4,6 @@ import { reconcileDefenderPlatform } from "./defender-platform";
 import { refreshDefenderRisk } from "./defender-risk";
 import { computeFindingRiskForTenant } from "./finding-risk-compute";
 import { riskScoringDatabase, recordRiskSnapshot } from "./risk-scoring-store";
-import { reconcileTicketPriorityToSwath } from "./swath-ticket-priority";
 import { recordJobRun } from "./background-job-runs";
 
 const RISK_REFRESH_JOB = "risk-refresh";
@@ -55,9 +54,7 @@ export async function refreshAllTenantsRisk(): Promise<RiskRefreshResult> {
     defenderScored = result.findingsScored; findingsScored += result.findingsScored; errors += result.errors;
   } catch { errors++; console.error("[risk-refresh] Defender pass failed; previous scores retained."); }
   if (tenants.length || defenderScored) await recordRiskSnapshot(db, "global").catch(() => {});
-  // Ticket priority reconciliation reads finding_risk, so it runs after
-  // scoring completes for this pass, not interleaved per-tenant.
-  await reconcileTicketPriorityToSwath().catch((err) => { errors++; console.error("[risk-refresh] priority reconciliation failed:", err instanceof Error ? err.message : err); });
+  // Scoring updates platform evidence only. Ticket changes require an analyst.
   console.error(`[risk-refresh] pass complete: tenantsProcessed=${tenants.length} findingsScored=${findingsScored} errors=${errors}`);
   return { tenantsProcessed: tenants.length, findingsScored, errors };
 }

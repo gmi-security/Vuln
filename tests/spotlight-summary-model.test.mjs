@@ -3,6 +3,18 @@ import test from 'node:test';
 import {loadSpotlightSummaryModules} from '../scripts/source-read-model-loader.mjs';
 const {createSpotlightSummaryAccumulator:create,validateSpotlightSummary:validate,matchesSpotlightTenant,summaryLimits}=await loadSpotlightSummaryModules();
 const row=(extra={})=>({source_id:'1',id:'1',company_id:'A',cve:'CVE-2026-1000',status:'open',cid:'tenant',aid:'host',raw_cve:'CVE-2026-1000',raw_status:'open',raw_severity:'HIGH',score:7.5,suppressed:false,...extra});
+test('completed summaries include recommended fixes without any ticket drafts',()=>{
+  const patch={id:'1',cid:'tenant',aid:'host',status:'open',cve:{id:'CVE-2026-1000',severity:'HIGH',base_score:7.5},
+    apps:[{remediation_info:{recommended_id:'recommended',minimum_id:'minimum'}}],remediation:{entities:[
+      {id:'recommended',title:'Recommended update',action:'Install version 3',recommendation_type:'recommended'},
+      {id:'minimum',title:'Minimum update',action:'Install version 2',recommendation_type:'minimum'}]}};
+  const a=create('A');a.add(row({patch}));a.add(row({source_id:'2',id:'2',aid:'host2',patch:{...patch,id:'2',aid:'host2'}}));
+  a.add(row({source_id:'3',id:'3',suppressed:true,patch:{...patch,id:'3'}}));
+  const result=a.finish().topFixes;
+  assert.ok(result,'a saved top-fix summary is required');
+  assert.equal(result.totalFixes,1);assert.equal(result.affectedDevices,2);assert.equal(result.findingCount,2);
+  assert.equal(result.rows[0].remediation,'Install version 3');assert.equal(result.rows[0].deviceCount,2);
+});
 test('deduplicates device/CVE pairs but retains source instances, nullable scores and highest CVE severity',()=>{
   const a=create('A');a.add(row());a.add(row({source_id:'2',id:'2',raw_severity:'CRITICAL',score:null}));
   a.add(row({source_id:'3',id:'3',cid:'other',raw_severity:'LOW',score:1}));

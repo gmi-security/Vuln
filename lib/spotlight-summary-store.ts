@@ -72,11 +72,15 @@ export function createSpotlightSummaryStore(db: Database) {
         const rows: SummaryInput[] = (await source.query(`SELECT r.source_id,r.cve,r.status,r.company_id,
           v.id,v.cid,v.aid,v.status AS raw_status,v.cve->>'id' AS raw_cve,v.cve->>'severity' AS raw_severity,
           v.cve->'base_score' AS score,v.suppression_info->'is_suppressed' AS suppressed,
+          jsonb_build_object('id',v.id,'cid',v.cid,'aid',v.aid,'status',v.status,'apps',COALESCE(v.apps,'[]'::jsonb),'remediation',v.remediation,
+            'cve',jsonb_build_object('id',v.cve->'id','severity',v.cve->'severity','base_score',v.cve->'base_score',
+              'exprt_rating',v.cve->'exprt_rating','exploit_status',v.cve->'exploit_status','cisa_info',v.cve->'cisa_info','is_cisa_kev',v.cve->'is_cisa_kev',
+              'exploitability_score',v.cve->'exploitability_score')) AS patch,
           (r.status='closed' AND r.cve='CS-'||r.source_id AND
             r.raw=jsonb_build_object('id',r.source_id,'unresolved',true)) AS local_placeholder
           FROM (SELECT source_id,cve,status,company_id,raw FROM public.spotlight_import_records
             WHERE run_id=$1 AND tenant_key=$2 AND source_id>$3 ORDER BY source_id LIMIT 2000) r
-          CROSS JOIN LATERAL jsonb_to_record(r.raw) AS v(id text,cid jsonb,aid jsonb,status text,cve jsonb,suppression_info jsonb)
+          CROSS JOIN LATERAL jsonb_to_record(r.raw) AS v(id text,cid jsonb,aid jsonb,status text,cve jsonb,suppression_info jsonb,apps jsonb,remediation jsonb)
           ORDER BY r.source_id`, [runId, companyId, after])).rows;
         if (!rows.length) break;
         for (const row of rows) accumulator.add(row);
@@ -103,7 +107,7 @@ export function createSpotlightSummaryStore(db: Database) {
       await writer.query(`INSERT INTO public.spotlight_summary_generations
         (company_id,run_id,model_version,source_completed_at,source_rows,count_verification,summary,cve_count,built_by)
         VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9)`, [companyId, runId, VERSION, current.finished_at, total,
-        verified ? "import-count-reconciled" : "completion-marker-only", JSON.stringify({ ...artifact.summary, vendorScope: artifact.vendorScope }), artifact.rows.length, actor]);
+        verified ? "import-count-reconciled" : "completion-marker-only", JSON.stringify({ ...artifact.summary, vendorScope: artifact.vendorScope, topFixes: artifact.topFixes }), artifact.rows.length, actor]);
       for (let offset=0; offset<artifact.rows.length; offset+=500) {
         deadline(); await options.checkpoint?.(artifact.scanned);
         await writer.query(`INSERT INTO public.spotlight_summary_cves(company_id,run_id,model_version,cve,severity,cvss,affected_devices,source_instances)
@@ -148,21 +152,21 @@ export function createSpotlightSummaryStore(db: Database) {
         else {
           const saved = (await client.query(`SELECT g.* FROM public.spotlight_summary_current p JOIN public.spotlight_summary_generations g
             ON g.company_id=p.company_id AND g.run_id=p.run_id AND g.model_version=p.model_version
-            WHERE p.company_id=$1 AND p.model_version=$2`, [companyId, VERSION])).rows[0];
-          base.projection = { state: saved?.run_id === current.run_id ? "ready" : "pending", currentImportId: current.run_id,
+            WHERE p.company_id=$1 AND p.model_version IN (3,$2)`, [companyId, VERSION])).rows[0];
+          base.projection = { state: saved?.run_id === current.run_id && saved.model_version === VERSION ? "ready" : "pending", currentImportId: current.run_id,
             builtAt: saved ? iso(saved.built_at) : null, modelVersion: VERSION };
           if (!saved) result = unavailable("summary-pending");
           else if (request.spotlightTenant && (saved.run_id !== current.run_id ||
               !matchesSpotlightTenant(saved.summary?.vendorScope, request.spotlightTenant, saved.source_rows))) result = unavailable("inconsistent");
           else {
             const aggregate = (await client.query(`SELECT severity,COUNT(*) AS cves,SUM(affected_devices) AS devices,SUM(source_instances) AS findings
-              FROM public.spotlight_summary_cves WHERE company_id=$1 AND run_id=$2 AND model_version=$3 GROUP BY severity`, [companyId,saved.run_id,VERSION])).rows;
+              FROM public.spotlight_summary_cves WHERE company_id=$1 AND run_id=$2 AND model_version=$3 GROUP BY severity`, [companyId,saved.run_id,saved.model_version])).rows;
             const page = (await client.query(`SELECT cve,severity,cvss,affected_devices,source_instances FROM public.spotlight_summary_cves
               WHERE company_id=$1 AND run_id=$2 AND model_version=$3 ORDER BY severity_rank DESC,affected_devices DESC,cve LIMIT $4 OFFSET $5`,
-              [companyId,saved.run_id,VERSION,limit,offset])).rows;
+              [companyId,saved.run_id,saved.model_version,limit,offset])).rows;
             try {
               // Vendor CID is private routing evidence, never browser metadata.
-              const { vendorScope: _privateScope, ...summary } = saved.summary as SpotlightSummary & { vendorScope?: unknown };
+              const { vendorScope: _privateScope, topFixes: _fixes, ...summary } = saved.summary as SpotlightSummary & { vendorScope?: unknown; topFixes?: unknown };
               validateSpotlightSummary(summary, aggregate);
               if (summaryCount(saved.cve_count) !== summary.uniqueCves || page.length !== Math.min(limit,Math.max(0,summary.uniqueCves-offset))) throw new Error("Incomplete summary page.");
               if (summaryCount(saved.source_rows) < summary.sourceInstances + summaryCount(summary.excludedSuppressedInstances) + summary.excludedNonCveInstances) throw new Error("Invalid source row count.");

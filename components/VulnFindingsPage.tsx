@@ -350,7 +350,7 @@ export default function VulnFindingsPage() {
   }
 
   return (
-    <VulnShell
+    <VulnShell companyId={companyFilter === "All" ? "" : companyFilter}
       eyebrow="Findings"
       title="Finding triage"
       subtitle="Vulnerability-scan findings (CVE-based) are kept separate from OSINT / attack-surface findings. Filter, assign, and track through remediation."

@@ -25,6 +25,7 @@ const artifacts = await mkdtemp(join(tmpdir(), 'vuln2-connectors-browser-'));
 const companies = [{ id: 'CO-A', name: 'Fixture Alpha' }, { id: 'CO-B', name: 'Fixture Beta' }, { id: 'CO-EMPTY', name: 'Fixture Empty' }];
 const calls = [], errors = [], unexpected = []; let fail = false, pending = false, release;
 let previewFailure=false, sourceNeedsReview=false;
+let syncView=false,syncRunning=false,syncFailure=false,syncReject=false,syncRelease;
 let shared = false, partial = true, inventoryRouting = false, inventoryProvider = "automate", spotlightRouting = false, scannerRouting = false, scannerProvider = "nessus", queryRouting = false, queryProvider = "crowdstrike";
 function status(id) {
   const result = { companyId: id, companyName: companies.find(c => c.id === id).name, checkedAt: '2026-10-09T19:00:00Z', registryAvailable: id !== 'CO-A',
@@ -60,7 +61,27 @@ try {
     if (!url.pathname.startsWith('/api/')) return route.continue();
     calls.push({ path: url.pathname, company: url.searchParams.get('companyId'), method: request.method() });
     const json = (data, code = 200) => route.fulfill({ status: code, contentType: 'application/json', body: JSON.stringify(data) }).catch(() => {});
+    if (url.pathname === '/api/elastic-dashboard/customer-sync') {
+      const companyId=url.searchParams.get('companyId');
+      if(request.method()==='POST') {
+        assert.equal(companyId,'CO-A');assert.deepEqual(request.postDataJSON(),{id:'defender'});
+        if(syncReject)return json({error:'Fixture worker unavailable'},503);
+        await new Promise(resolve=>syncRelease=resolve);syncRunning=true;
+        return json({queued:true},202);
+      }
+      if(syncFailure)return json({error:'Fixture sync status unavailable'},503);
+      return json({companyId,checkedAt:new Date().toISOString(),schedulerPaused:true,rows:!syncView || companyId!=='CO-A'?[]:[
+        {id:'defender',label:'Microsoft Defender · vulnerabilities and devices',scope:'customer',state:syncRunning?'running':'succeeded',
+          lastSuccessAt:'2026-10-13T10:00:00Z',lastAttemptAt:'2026-10-13T10:00:00Z',detail:syncRunning?'32 source rows processed.':'Imports this customer only.',action:'sync',canSync:!syncRunning},
+        {id:'shared:nessus',label:'Nessus',scope:'shared',state:'unavailable',lastSuccessAt:null,lastAttemptAt:null,detail:'No customer-specific timestamp recorded.',action:'shared',canSync:false},
+      ]});
+    }
     if (url.pathname === '/api/auth/session') return json({ user: { name: 'Fixture member' }, expires: '2099-01-01T00:00:00Z' });
+    // A shared page's in-flight health request may finish after navigating away.
+    if (url.pathname === '/api/nessus/health') return json({reachable:true,status:'Connected'});
+    if (!shared && url.pathname === '/api/connectors') return json({connectors:[]});
+    if (!shared && url.pathname === '/api/connectors/sync-all') return json({status:null});
+    if (!shared && url.pathname === '/api/elastic-vulnerabilities/status') return json({enabled:true,remediationEnabled:true});
     if (shared) {
       if (url.pathname === '/api/connectors') return json({connectors:[{id:'nessus',name:'Fixture Nessus',vendor:'Fixture',kind:'Scanner',
         description:'Synthetic scanner',capabilities:[],envVars:[],configured:true,status:'Connected',docsUrl:'https://example.invalid'}]});
@@ -196,6 +217,40 @@ try {
   previewFailure=false;await page.reload();await page.waitForFunction(()=>[...document.querySelectorAll('button')].some(b=>b.textContent==='Run OSINT scans'&&!b.disabled));
   assert.equal(calls.filter(c=>c.method==='POST').length,2);
   pass('OSINT preview failure is visible and disables launch; restored preview recovers without launching scans');
+
+  shared=false;syncView=true;inventoryRouting=false;spotlightRouting=false;scannerRouting=false;queryRouting=false;
+  await page.goto(base+'/connectors?companyId=CO-A');
+  const syncPanel=page.getByRole('region',{name:'Sync status',exact:true});
+  const syncButton=syncPanel.getByRole('button',{name:'Sync Microsoft Defender · vulnerabilities and devices',exact:true});
+  await syncButton.waitFor();assert.equal(await syncButton.isEnabled(),true);
+  await syncPanel.getByText('General scheduled processing is paused.',{exact:false}).waitFor();
+  assert.equal(await page.getByRole('combobox').count(),1);
+  await syncPanel.getByText('Shared operation',{exact:true}).waitFor();
+  assert.ok((await syncPanel.getByRole('link',{name:'Shared tools',exact:true}).getAttribute('href')).includes('companyId=CO-A'));
+  await syncButton.click();await page.waitForFunction(()=>[...document.querySelectorAll('button')].some(b=>b.textContent.includes('Starting')));
+  assert.equal(await syncButton.isDisabled(),true);
+  assert.equal(calls.filter(c=>c.path.endsWith('/customer-sync')&&c.method==='POST').length,1);
+  syncRelease();await syncPanel.getByText('32 source rows processed.',{exact:true}).waitFor();
+  assert.equal(await syncButton.isDisabled(),true);
+  await page.screenshot({path:join(artifacts,'customer-sync-desktop.png'),fullPage:true});
+  pass('customer sync sends one scoped request, shows progress and prevents duplicate clicks without changing the scheduler');
+  syncFailure=true;await syncPanel.getByRole('button',{name:'Check sync status'}).click();
+  await syncPanel.getByRole('alert').waitFor();assert.equal(await syncButton.isDisabled(),true);
+  assert.ok((await syncPanel.innerText()).includes('Previously loaded status'));
+  syncFailure=false;syncRunning=false;syncReject=true;
+  await syncPanel.getByRole('button',{name:'Check sync status'}).click();await syncButton.waitFor();
+  await page.waitForFunction(()=>!document.querySelector('button[aria-label="Sync Microsoft Defender · vulnerabilities and devices"]').disabled);
+  await syncButton.click();await syncPanel.getByRole('alert').filter({hasText:'Fixture worker unavailable'}).waitFor();
+  await syncPanel.getByText('Succeeded',{exact:true}).waitFor();
+  await delay(200);assert.ok((await syncPanel.innerText()).includes('Fixture worker unavailable'));
+  await page.setViewportSize({width:390,height:844});
+  await page.screenshot({path:join(artifacts,'customer-sync-mobile.png'),fullPage:true});
+  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+  await page.getByLabel('Customer',{exact:true}).selectOption('CO-B');
+  await page.getByText('No sync operations are recorded for this customer.',{exact:true}).waitFor();
+  assert.equal(await page.getByRole('button',{name:'Sync Microsoft Defender · vulnerabilities and devices',exact:true}).count(),0);
+  assert.deepEqual(errors,[]);assert.deepEqual(unexpected,[]);
+  pass('stale status disables sync, failed start remains visible, mobile table scrolls internally and switching customer clears prior actions');
 
   await writeFile(join(artifacts, 'result.json'), JSON.stringify({ checks, unexpected, errors, calls }, null, 2));
   console.log(JSON.stringify({ passed: checks, artifacts }));

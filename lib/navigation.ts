@@ -7,10 +7,13 @@ import {
   Database,
   Flame,
   GitBranch,
+  LayoutDashboard,
   PlugZap,
   Radar,
   ScanSearch,
   Share2,
+  ShieldCheck,
+  SlidersHorizontal,
   Timer,
 } from "lucide-react";
 
@@ -20,13 +23,9 @@ export type VulnNavItem = {
   href: string;
 };
 
-// Dashboard, Attack Surface, and Quantify are intentionally not linked here
-// -- their routes/components still exist (/dashboard, /attack-surface,
-// /quantify), but their functionality is now superseded by the Reporting
-// page (per-customer report, attack-surface exposures, and the
-// Risk-Based Vulnerability Management Total-Open-Risk/Swath system
-// respectively), so surfacing both was duplicate navigation, not duplicate
-// capability worth keeping two entry points for.
+// Existing operational tools. Attack Surface and Quantify remain available
+// through reporting rather than duplicate menu entries. The shared navigation
+// adds the Dashboard home link and the feature-enabled customer views below.
 export const baseNavItems: VulnNavItem[] = [
   { label: "Prioritize", icon: Flame, href: "/priorities" },
   { label: "Companies", icon: Building2, href: "/companies" },
@@ -48,3 +47,32 @@ export const remediationNavItems: VulnNavItem[] = [
   { label: "Remediation", icon: Flame, href: "/remediation" },
   ...baseNavItems.filter(item => ["/companies", "/appsec", "/scanner-telemetry", "/connectors"].includes(item.href)),
 ];
+
+export function siteNavigation(capabilities: { enabled: boolean; remediationEnabled: boolean } | null) {
+  const primary = capabilities === null
+    ? remediationNavItems.filter(item => item.href !== "/remediation")
+    : capabilities.remediationEnabled ? remediationNavItems : baseNavItems;
+  return {
+    primary: [
+      { label: "Dashboard", icon: LayoutDashboard, href: "/dashboard" },
+      ...primary,
+      ...(capabilities?.enabled && !capabilities.remediationEnabled ? [{ label: "Reporting", icon: ShieldCheck, href: "/reporting" }] : []),
+      { label: "Settings", icon: SlidersHorizontal, href: "/settings" },
+    ],
+    tools: capabilities?.remediationEnabled ? [
+      { label: "Original reporting", icon: ShieldCheck, href: "/reporting" },
+      ...baseNavItems.filter(item => !remediationNavItems.some(main => main.href === item.href)),
+    ] : [],
+  };
+}
+
+export function navigationHref(href: string, companyId: string) {
+  if (companyId && ["/findings", "/scans", "/coverage", "/attack-paths", "/compliance"].includes(href))
+    return `${href}?${new URLSearchParams({ company: companyId })}`;
+  return companyId && ["/remediation", "/connectors", "/reporting", "/appsec"].includes(href)
+    ? `${href}?${new URLSearchParams({ companyId })}` : href;
+}
+
+export function isNavigationActive(pathname: string, href: string) {
+  return pathname === href || pathname.startsWith(`${href}/`);
+}

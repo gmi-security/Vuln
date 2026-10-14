@@ -296,7 +296,7 @@ export default function VulnCompanyDetailPage({
 
   if (notFound) {
     return (
-      <VulnShell
+      <VulnShell companyId={companyId}
         eyebrow="Company"
         title="Not found"
         subtitle="This company no longer exists."
@@ -319,7 +319,7 @@ export default function VulnCompanyDetailPage({
   }
 
   return (
-    <VulnShell
+    <VulnShell companyId={companyId}
       eyebrow="Company"
       title={company?.name ?? companyId}
       subtitle={

@@ -148,3 +148,17 @@ test("companyIds scopes the select to just those tenants' tickets", async () => 
   assert.match(select.sql, /packet->>'appCompanyId' = ANY\(\$2::text\[\]\)/);
   assert.deepEqual(select.params, ["my-target", ["CO-147284"]]);
 });
+
+
+test("scheduled status tracking uses GET-only reads for open and closed tickets, including external reopen",async()=>{
+  const queries=[],provider=[];
+  const db={query:async(sql,params)=>{queries.push({sql,params});return sql.startsWith('SELECT')?{rows:[{id:'tracked',ticket_id:900,merged_parent_id:null}]}:{rowCount:1,rows:[]};}};
+  const sync=await loader({
+    './patch-ticket-store':{patchTicketDatabase:async()=>db,savedConnection:async()=>({target:'configured-target',value:{}})},
+    './connectwise-client':{cwId:v=>Number.isSafeInteger(v)&&v>0,cwRequest:async(...args)=>{provider.push(args);assert.equal(args.length,2,'no POST or PATCH options');return {status:{name:'Reopened'},closedFlag:false};}},
+    './elastic-vuln-server':{elasticVulnEnabled:()=>true},
+  })('lib/ticket-status-sync.ts');
+  const result=await sync.syncTicketStatuses();assert.equal(result.checked,2);assert.equal(provider.length,2);
+  for(const {sql,params} of queries.filter(q=>q.sql.startsWith('SELECT'))){assert.doesNotMatch(sql,/closed=false/);assert.match(sql,/state='created'/);assert.deepEqual(params,['configured-target']);}
+  for(const {params} of queries.filter(q=>q.sql.trim().startsWith('UPDATE'))){assert.equal(params[1],'Reopened');assert.equal(params[2],false);}
+});

@@ -58,47 +58,11 @@ export async function register(): Promise<void> {
   delayedStart("elastic dashboard job worker", 30_000, () =>
     import("@/lib/elastic-dashboard-jobs").then((m) => m.startDashboardJobWorker()),
   );
-  delayedStart("reporting queue scheduler", 45_000, () =>
-    import("@/lib/reporting-queue").then((m) => m.startReportingQueueScheduler()),
-  );
+  // Tickets are prepared from a CVE and explicitly approved in the Tickets
+  // view. Background processing only reads their ConnectWise status; it must
+  // never prepare, approve, send, reprioritize or reopen tickets.
   delayedStart("ticket status sync scheduler", 60_000, () =>
     import("@/lib/ticket-status-sync").then((m) => m.startTicketStatusSyncScheduler()),
-  );
-  delayedStart("ticket SLA escalation scheduler", 75_000, () =>
-    import("@/lib/ticket-sla-escalation").then((m) => m.startTicketSlaEscalationScheduler()),
-  );
-  delayedStart("group draft dedup scheduler", 90_000, () =>
-    import("@/lib/group-draft-dedup").then((m) => m.startGroupDraftDedupScheduler()),
-  );
-
-  // Backfills worst_severity and appCompanyId on drafts prepared before those
-  // existed / before ATLAS_CROWDSTRIKE_TENANT_IDS was configured, and seeds
-  // patch_customer_routing from an already-created ticket if nothing taught
-  // it yet, then starts auto-create -- sequenced so its first pass already
-  // sees the real values for the existing backlog, not just newly-prepared
-  // drafts. Backfill errors never block the scheduler from starting;
-  // register() itself is never blocked either.
-  delayedStart("group auto-create scheduler (after backfill)", 105_000, async () => {
-    const { backfillWorstSeverity } = await import("@/lib/group-severity-backfill");
-    const { backfillAppCompanyId, backfillCustomerRouting } = await import("@/lib/group-company-backfill");
-    const { backfillTicketPriority } = await import("@/lib/group-priority-backfill");
-    await Promise.all([
-      backfillWorstSeverity().catch((err) => { console.error("[instrumentation] worst_severity backfill failed:", err); }),
-      backfillAppCompanyId().catch((err) => { console.error("[instrumentation] appCompanyId backfill failed:", err); }),
-      backfillCustomerRouting().catch((err) => { console.error("[instrumentation] customer routing backfill failed:", err); }),
-      // One-time catch-up for tickets created before auto-create started
-      // setting priority at creation time -- see group-priority-backfill.ts.
-      backfillTicketPriority().catch((err) => { console.error("[instrumentation] ticket priority backfill failed:", err); }),
-    ]);
-    const { startGroupAutoCreateScheduler } = await import("@/lib/group-auto-create");
-    startGroupAutoCreateScheduler();
-  });
-
-  // Independent of the backfills above -- re-checks every closed Atlas
-  // ticket against CrowdStrike and reopens anything closed without a
-  // verified fix. Runs on its own schedule regardless of backfill outcome.
-  delayedStart("group closure validation scheduler", 150_000, () =>
-    import("@/lib/group-closure-validation").then((m) => m.startClosureValidationScheduler()),
   );
 
   // Risk-Based Vulnerability Management: refreshes CISA KEV/EPSS for CVEs

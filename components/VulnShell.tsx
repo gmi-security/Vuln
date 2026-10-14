@@ -6,6 +6,9 @@ import Image from "next/image";
 import { signOut, useSession } from "next-auth/react";
 import { ChevronDown, LogOut, PlugZap, Settings, UserCircle2 } from "lucide-react";
 import VulnSidebar from "@/components/VulnSidebar";
+import { usePathname } from "next/navigation";
+import { useVulnNavigation } from "./VulnNavigationProvider";
+import { navigationHref } from "@/lib/navigation";
 
 // Page chrome shared by every screen: SONAR-style sidebar + header over a
 // black radial-red console backdrop.
@@ -17,7 +20,7 @@ export default function VulnShell({
   children,
   variant = "default",
   printable = false,
-  navigation,
+  companyId,
 }: {
   eyebrow: string;
   title: string;
@@ -26,9 +29,11 @@ export default function VulnShell({
   children: React.ReactNode;
   variant?: "default" | "dashboard";
   printable?: boolean;
-  navigation?: React.ReactNode;
+  companyId?: string;
 }) {
-  const [collapsed, setCollapsed] = useState(false);
+  const pathname = usePathname();
+  const { companyId: rememberedCompany, setCompanyId } = useVulnNavigation();
+  const navigationCompany = companyId ?? rememberedCompany;
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const { data: session } = useSession();
@@ -37,6 +42,13 @@ export default function VulnShell({
     | undefined;
   const displayName = user?.name || user?.login || "Analyst";
   const displayRole = user?.role === "ADMIN" ? "Org Admin" : "Member";
+
+  useEffect(() => {
+    const params = new URL(window.location.href).searchParams;
+    const selected = companyId ?? params.get("companyId") ?? params.get("company")
+      ?? (pathname.startsWith("/companies/") ? decodeURIComponent(pathname.split("/")[2]) : undefined);
+    if (selected !== undefined) setCompanyId(selected);
+  }, [companyId, pathname, setCompanyId]);
 
   useEffect(() => {
     function onClick(event: MouseEvent) {
@@ -49,24 +61,17 @@ export default function VulnShell({
   }, []);
 
   return (
-    <div className={`flex min-h-screen bg-[radial-gradient(circle_at_18%_22%,rgba(179,14,20,0.08),transparent_26%),linear-gradient(180deg,#000_0%,#020202_100%)] text-white ${printable ? "print:min-h-0 print:bg-white print:text-black" : ""}`}>
-      {variant === "default" && (printable ? <div className="print:hidden"><VulnSidebar
-        collapsed={collapsed}
-        onToggle={() => setCollapsed((prev) => !prev)}
-      /></div> : <VulnSidebar
-        collapsed={collapsed}
-        onToggle={() => setCollapsed((prev) => !prev)}
-      />)}
+    <div className={`flex min-h-screen flex-col xl:flex-row bg-[radial-gradient(circle_at_18%_22%,rgba(179,14,20,0.08),transparent_26%),linear-gradient(180deg,#000_0%,#020202_100%)] text-white ${printable ? "print:min-h-0 print:bg-white print:text-black" : ""}`}>
+      <div className={`shrink-0 ${printable ? "print:hidden" : ""}`}><VulnSidebar companyId={navigationCompany} /></div>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className={`${variant === "dashboard" ? "border-b border-zinc-800 bg-[radial-gradient(ellipse_at_55%_0%,rgba(179,14,20,0.16),transparent_68%)] px-4 py-5 sm:px-8" : "border-b border-[rgba(179,14,20,0.12)] bg-black px-6 py-6 lg:px-8"} ${printable ? "print:hidden" : ""}`}>
-          {variant === "dashboard" && (navigation ?? <nav aria-label="Main navigation" className="mb-7 flex flex-wrap items-center gap-6 text-xs text-zinc-400"><Link href="/" className="text-lg font-semibold tracking-widest text-[#b30e14]">GMI VULN</Link><Link href="/" className="hover:text-white">Overview</Link><Link href="/reporting" aria-current="page" className="border-b border-[#b30e14] pb-1 text-white">Reporting</Link><Link href="/settings" className="hover:text-white">Settings</Link></nav>)}
-          <div className={variant === "dashboard" ? "flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between" : "flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between"}>
+        <header className={`border-b border-[rgba(179,14,20,0.12)] bg-black px-4 py-6 sm:px-6 lg:px-8 ${printable ? "print:hidden" : ""}`}>
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <div className="text-[13px] uppercase tracking-[0.35em] text-[#b30e14]">
                 {eyebrow}
               </div>
-              <h1 className={variant === "dashboard" ? "mt-2 bg-gradient-to-b from-white to-zinc-400 bg-clip-text text-3xl font-medium tracking-tight text-transparent sm:text-4xl" : "mt-2 text-4xl font-semibold text-white"}>{title}</h1>
+              <h1 className="mt-2 text-3xl font-semibold text-white sm:text-4xl">{title}</h1>
               <p className="mt-2 max-w-3xl text-zinc-400">{subtitle}</p>
             </div>
 
@@ -126,7 +131,7 @@ export default function VulnShell({
                       Settings
                     </Link>
                     <Link
-                      href="/connectors"
+                      href={navigationHref("/connectors", navigationCompany)}
                       onClick={() => setMenuOpen(false)}
                       className="flex items-center gap-3 rounded-xl px-3 py-3 text-sm text-zinc-200 transition hover:bg-zinc-900"
                     >

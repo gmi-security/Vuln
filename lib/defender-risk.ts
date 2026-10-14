@@ -18,9 +18,9 @@ export function defenderRiskInput(f: Finding, asset?: InventoryAsset,
     production:false,healthcareIomt:false,criticalBusinessApp:false,clientDesignatedCritical:f.assetCriticality === "Crown Jewel" };
 }
 
-export async function refreshDefenderRisk(enrich = true) {
+export async function refreshDefenderRisk(enrich = true, companyId?: string) {
   await ensureHydrated();
-  const companies = (await defenderStore().list()).filter(c=>c.currentRun);
+  const companies = (await defenderStore().list(companyId)).filter(c=>c.currentRun);
   if (!companies.length) return { findingsScored:0,errors:0 };
   const db = await riskScoringDatabase(), config = await getRiskConfig(db);
   let findingsScored = 0, errors = 0;

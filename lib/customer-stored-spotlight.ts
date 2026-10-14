@@ -43,14 +43,15 @@ export async function storedSpotlightProof(client: Pick<PoolClient, "query">, co
  * finding also cannot be split safely into independent source assessments.
  */
 export function reviewedPlatformFindings(findings: Finding[], context: StoredSpotlightContext, hasGeneration: boolean) {
-  if (!context.reviewed) return findings.filter(row => !hasGeneration || row.connector.toLowerCase() !== "crowdstrike");
-  return findings.filter(row => {
+  return findings.filter(row => reviewedPlatformFinding(row,context,hasGeneration));
+}
+export function reviewedPlatformFinding(row: Finding, context: StoredSpotlightContext, hasGeneration: boolean): boolean {
+    if (!context.reviewed) return !hasGeneration || row.connector.toLowerCase() !== "crowdstrike";
     const sources = new Set([row.connector, ...(row.seenBy ?? [])].map(source => source.toLowerCase()));
     if (!sources.has("crowdstrike")) return true;
     if (sources.size > 1 || row.defender?.active) return fail("This CVE has merged CrowdStrike and other source evidence. Source ownership must be reconciled before showing or preparing it.");
     if (!hasGeneration) return stale();
     return false;
-  });
 }
 
 /** Rechecks approval/configuration and the current generation after other async

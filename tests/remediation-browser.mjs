@@ -36,6 +36,7 @@ const summary=(companyId)=>({id,cves:[cve],hostCount:2,findingCount:2,remediatio
 const group=(companyId)=>({manualOnly:true,source:'stored-findings',appCompanyId:companyId,companyName:companyId===companies[0].id?'Fixture A':'Fixture B',connectors:['defender'],title:'Install recommended patch',action:'Install recommended update',tenantId:companyId,remediationId:'manual:fixture',cves:[cve],deviceCount:2,findingCount:2,hostScope:[],deviceCves:[],maxRisk:72,worstSeverity:'High',label:cve,csv:`cve,hostname,cvss,remediation\r\n${cve},${companyId}-device,8.1,Install recommended update\r\n`,ticketTitle:`${companyId}: ${cve}`,ticketBody:`Customer: ${companyId}\nCVE: ${cve}\nRecommended remediation: Install recommended update\nCVSS: 8.1\nSee attached CSV for devices.`});
 const detail=companyId=>({companyId,cve,companyName:companyId===companies[0].id?'Fixture A':'Fixture B',observedAt:when,sourceObservations:{platform:when,crowdstrike:null},findingCount:2,deviceCount:2,hosts:[{host:`${companyId}-device`,source:'defender',severity:'High',cvss:8.1}],enrichment:{cvss_score:8.1,epss_probability:0.9,cisa_kev:true,active_exploitation:true,active_exploitation_source:'MISP',active_exploitation_detail:'Synthetic retained signal',updated_at:when},tickets:[],moreTickets:false});
 let approved=false,created=false,failPrepare=false,failIntel=false,delayDetail=false,releaseDetail;
+let emptyQueue=false,failFixes=false;
 let mismatchOverview=false,delayOverview=false,releaseOverview,withLegacyHistory=false;
 function overviewModel(companyId){
   const company=companies.find(c=>c.id===companyId),count=companyId===companies[0].id?1:2;
@@ -93,6 +94,8 @@ try{
     if(p==='/api/auth/session')return json({user:{name:'Fixture member'},expires:'2099-01-01T00:00:00Z'});
     if(p==='/api/settings')return json({settings:{sla:null}});
     if(p==='/api/elastic-vulnerabilities/status')return json({enabled:true,remediationEnabled:true});
+    if(p==='/api/connectors')return json({connectors:[]});
+    if(p==='/api/connectors/sync-all')return json({status:null});
     if(p==='/api/defender/results')return json({configured:false});
     if(p==='reporting'){
       if(!url.searchParams.has('companyId'))return json({companies});
@@ -111,7 +114,9 @@ try{
       return failSource?json({error:'Fixture saved read failed'},400):json(result);
     }
     if(p==='customer-tiles')return json({canManage:true,storageReady:true,connected:true,crowdstrike:{connected:true},availableSources:{elastic:true,crowdstrike:true},queries:['table','bar'].map(display=>({id:display,title:`Fixture ${display}`,companyId,source:'crowdstrike',query:'fixture',display,chart:{category:'cve',value:'devices'},enabled:false,refreshMinutes:1440,refreshedAt:when,attemptedAt:when,error:null,result:{columns:[{name:'cve',type:'keyword'},{name:'devices',type:'long'}],rows:[[cve,2]],truncated:false}}))});
-    if(p==='patch-group-tickets')return json({requests:[summary(companyId)],more:false,total:1});
+    if(p==='top-fixes')return failFixes ? json({error:'Top fixes temporarily unavailable.'},503) : json({companyId,calculatedAt:when,totalFixes:1,affectedDevices:18,findingCount:20,uniqueCves:1,missingRemediation:0,missingDevice:0,limit:50,
+      rows:[{id:'fixture-fix',cve,remediation:'Install the open vulnerability update',deviceCount:18,findingCount:20,maxRisk:72,severity:'High'}]});
+    if(p==='patch-group-tickets')return json({requests:emptyQueue?[]:[summary(companyId)],more:false,total:emptyQueue?0:1});
     if(p==='risk/summary')return json({totalOpenRisk:1,criticalRiskCount:0,swath1Open:0,swath2Open:1,kevOpen:1,internetFacingCriticalRisk:0,verifiedRemediations:0,awaitingVerification:0});
     if(p==='risk/top')return json({rows:[{id:'risk-1',cve,companyId,hostname:'fixture-host',severity:'High',riskScore:720,effectiveSwath:2,calculatedSwath:2,reasons:[],cisaKev:true,epssProbability:0.9,verificationStatus:'detected',lastSeen:when}],total:1});
     if(p==='customer-threat-intelligence')return failIntel?json({error:'Fixture refresh unavailable'},503):json({companyId,available:true,total:1,rows:[{cve,cisa_kev:true,epss_probability:0.9,active_exploitation:true,active_exploitation_source:'MISP',active_exploitation_detail:'Synthetic retained signal',updated_at:when}]});
@@ -138,7 +143,7 @@ try{
     if(p===`patch-group-tickets/${id}`){
       if(body?.action==='approve')approved=true;
       if(body?.action==='create'){assert.ok(approved);created=true;}
-      return json({request:{...summary(companyId),reviewState:approved?'approved':'pending',state:created?'created':'prepared',ticketId:created?999:null,attachmentState:created?'attached':'not_started',ticketStatus:created?'New':null}});
+      return json({group:group(companyId),request:{...summary(companyId),reviewState:approved?'approved':'pending',state:created?'created':'prepared',ticketId:created?999:null,attachmentState:created?'attached':'not_started',ticketStatus:created?'New':null}});
     }
     unexpected.push(p);return json({error:'Unexpected fixture request'},500);
   });
@@ -195,19 +200,36 @@ try{
   const download=await downloadPromise;let csv='';for await(const chunk of await download.createReadStream())csv+=chunk;
   assert.match(csv,/CO-TEST-A-device/);assert.doesNotMatch(csv,/CO-TEST-B/);
   await panel.getByText('Ticket contents',{exact:true}).click();assert.doesNotMatch(await panel.locator('pre').innerText(),/CO-TEST-A-device/);
-  await panel.getByRole('button',{name:'Approve draft for manual sending'}).click();await panel.getByRole('button',{name:'Review ConnectWise ticket'}).click();
-  await panel.getByLabel('ConnectWise company',{exact:true}).selectOption('55');await panel.getByLabel('Service board',{exact:true}).selectOption('9');
-  await panel.getByRole('button',{name:'Create ConnectWise ticket',exact:true}).click();await panel.getByText(/#999/).first().waitFor();
+  assert.equal(await panel.getByRole('button',{name:/Approve|Create ConnectWise|Review ConnectWise/}).count(),0);
+  assert.equal(calls.filter(c=>c.body?.action==='approve'||c.body?.action==='create').length,0);
+  await panel.getByRole('link',{name:'Review on Tickets page'}).click();await page.waitForURL(/view=tickets/);
+  await panel.waitFor({state:'hidden'});
+  await page.getByRole('button',{name:'Review',exact:true}).first().click();
+  await page.getByRole('button',{name:'Approve for ticket',exact:true}).click();
+  await page.getByRole('button',{name:'Review ConnectWise ticket',exact:true}).click();
+  await page.getByLabel('ConnectWise company',{exact:true}).selectOption('55');await page.getByLabel('Service board',{exact:true}).selectOption('9');
+  await page.getByRole('button',{name:'Create ConnectWise ticket',exact:true}).click();await page.getByText(/#999/).first().waitFor();
   const sent=calls.find(c=>c.body?.action==='create');assert.equal(sent.companyId,companies[0].id);assert.equal(sent.body.routing.companyId,55);assert.equal(sent.body.routing.boardId,9);
   assert.ok(calls.filter(c=>c.path===`patch-group-tickets/${id}`).every(c=>c.companyId===companies[0].id));
-  await panel.evaluate(e=>{e.scrollTop=0;window.scrollTo(0,0);});
+  await page.evaluate(()=>window.scrollTo(0,0));
   await page.screenshot({path:join(artifacts,'shared-cve-fixture.png')});
-  pass('chart CVE uses the same panel; failed preparation saves no partial UI; CSV, approval and simulated ticket send remain scoped');
+  pass('chart CVE uses the same panel; failed preparation saves no partial UI; CSV stays scoped and approval plus simulated ticket send require the Tickets page');
 
-  await page.keyboard.press('Escape');await page.getByRole('button',{name:'Prioritize',exact:true}).click();
+  await page.keyboard.press('Escape');emptyQueue=true;await page.getByRole('button',{name:'Prioritize',exact:true}).click();
+  const fixes=page.getByRole('region',{name:'Patching posture — top fixes',exact:true});
+  await fixes.getByText('Install the open vulnerability update',{exact:true}).waitFor();
+  assert.match(await fixes.innerText(),/18/);
+  assert.equal(calls.filter(c=>c.path==='top-fixes').at(-1).companyId,companies[0].id);
+  await fixes.getByRole('button',{name:`View ${cve} details`,exact:true}).click();
+  await panel.getByText(`${companies[0].id}-device`,{exact:true}).waitFor();await page.keyboard.press('Escape');
+  failFixes=true;await fixes.getByRole('button',{name:'Refresh',exact:true}).click();await fixes.getByRole('alert').waitFor();
+  assert.match(await fixes.innerText(),/Install the open vulnerability update/);
+  assert.doesNotMatch(await fixes.innerText(),/nothing to patch|No open CVE findings/);
+  failFixes=false;emptyQueue=false;
+  pass('Top Fixes ranks open vulnerability data with an empty ticket queue; CVEs open the shared panel and failed refresh retains results');
   const intel=page.getByRole('region',{name:'Threat Intelligence'});await intel.getByRole('button',{name:`View ${cve} details`}).click();await panel.getByText(`${companies[0].id}-device`,{exact:true}).waitFor();await page.keyboard.press('Escape');
   failIntel=true;await intel.getByRole('button',{name:'Refresh saved evidence'}).click();await intel.getByRole('alert').waitFor({timeout:15000});assert.match(await intel.innerText(),/Synthetic retained signal/);
-  await page.getByRole('link',{name:'Review & approve in ticket queue'}).first().click();
+  await page.getByRole('link',{name:'View ticket queue',exact:true}).click();
   await page.waitForURL(/view=tickets/);await page.getByRole('button',{name:`View ${cve} details`}).first().click();await panel.getByText(`${companies[0].id}-device`,{exact:true}).waitFor();await page.keyboard.press('Escape');
   pass('Prioritize threat and Tickets CVE links share the flow; failed enrichment refresh keeps its last result');
 

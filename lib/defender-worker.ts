@@ -20,23 +20,24 @@ export async function importDefenderRun(run: DefenderRun, store = defenderStore(
 }
 const runtime = globalThis as typeof globalThis & { __defenderWorker?: { timer?: ReturnType<typeof setInterval>; working?: Promise<void> } };
 const state = runtime.__defenderWorker ??= {};
-export function triggerDefenderWorker(): Promise<void> {
-  if (state.working) return state.working;
+export function triggerDefenderWorker(companyId?: string): Promise<void> {
+  // A manual request must not be lost behind a different customer's job.
+  if (state.working) return companyId ? state.working.then(()=>triggerDefenderWorker(companyId)) : state.working;
   state.working = (async () => {
     const { syncDefenderEnvironment } = await import("./defender-config");
-    await syncDefenderEnvironment();
+    if (!companyId) await syncDefenderEnvironment();
     const { reconcileDefenderPlatform } = await import("./defender-platform");
     // Also repairs already-completed imports and interrupted snapshot writes.
-    await reconcileDefenderPlatform();
+    await reconcileDefenderPlatform(true,companyId);
     const store = defenderStore();
-    await store.schedule();
-    const run = await store.claim();
+    if (!companyId) await store.schedule();
+    const run = await store.claim(companyId);
     if (!run) return;
     const { ensureHydrated, getCompany } = await import("./store");
     await ensureHydrated();
     if (!getCompany(run.company_id)) { await store.fail(run.id,"The mapped customer no longer exists. Import stopped."); return; }
     await importDefenderRun(run,store);
-    await reconcileDefenderPlatform();
+    await reconcileDefenderPlatform(true,companyId);
     await store.prune(run.company_id).catch(() => {});
   })().catch(() => { console.error("[defender] Worker unavailable; queued imports will retry on the next worker tick."); })
     .finally(() => { state.working = undefined; });

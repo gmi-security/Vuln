@@ -37,6 +37,9 @@ try {
   assert.equal((await store.build('CO-A','tester')).state,'built');
   assert.equal((await store.build('CO-A','tester')).state,'reused');
   const result=await store.read({...request,limit:1});assert.equal(result.state,'available');assert.equal(result.projection.state,'ready');
+  const savedFixes=(await db.query("SELECT summary->'topFixes' AS fixes FROM spotlight_summary_generations WHERE run_id=$1",[first])).rows[0].fixes;
+  assert.equal(savedFixes.companyId,'CO-A');assert.equal(savedFixes.missingRemediation,3);assert.equal(savedFixes.totalFixes,0);
+  assert.equal('topFixes' in result.summary,false);
   assert.equal(result.summary.sourceInstances,3);assert.equal(result.summary.deviceCveFindings,2);assert.equal(result.cves.total,2);
   assert.equal((await db.query('SELECT count(*)::int n FROM spotlight_summary_generations')).rows[0].n,1);
   const noRaw=create({connect:async()=>{const client=await db.connect();return{release:()=>client.release(),query:(sql,args)=>{assert.ok(!sql.includes('spotlight_import_records'),'page reader must not scan raw records');return client.query(sql,args);}};}});
@@ -47,6 +50,16 @@ try {
   assert.equal(guarded.state,'available');assert.doesNotMatch(JSON.stringify(guarded),/vendorScope|aaaaaaaa/);
   assert.equal((await noRaw.read({...request,spotlightTenant:'b'.repeat(32)})).state,'inconsistent');
   ok('tenant guarded reader validates whole-generation CID without returning it or scanning source rows');
+  // Preserve a v3 generation while a v4 worker catches up: counts/CVE pages must
+  // remain available, but the projection reports pending until v4 is published.
+  await db.query(`INSERT INTO spotlight_summary_generations SELECT company_id,run_id,3,source_completed_at,source_rows,count_verification,summary-'topFixes',cve_count,built_at,built_by FROM spotlight_summary_generations WHERE run_id=$1 AND model_version=4`,[first]);
+  await db.query(`INSERT INTO spotlight_summary_cves(company_id,run_id,model_version,cve,severity,cvss,affected_devices,source_instances) SELECT company_id,run_id,3,cve,severity,cvss,affected_devices,source_instances FROM spotlight_summary_cves WHERE run_id=$1 AND model_version=4`,[first]);
+  await db.query("UPDATE spotlight_summary_current SET model_version=3 WHERE company_id='CO-A'");
+  const compatible=await noRaw.read(request);assert.equal(compatible.state,'available');assert.equal(compatible.summary.sourceInstances,3);assert.equal(compatible.cves.total,2);assert.equal(compatible.projection.state,'pending');
+  await db.query("UPDATE spotlight_summary_current SET model_version=4 WHERE company_id='CO-A'");
+  await db.query("DELETE FROM spotlight_summary_generations WHERE model_version=3");
+  ok('v3 summary remains readable with projection pending during the v4 worker upgrade');
+
   const hold=await db.connect();await hold.query('SELECT pg_advisory_lock(804244,1)');
   assert.equal((await store.build('CO-A','tester')).state,'busy');await hold.query('SELECT pg_advisory_unlock(804244,1)');hold.release();
   ok('global build lock prevents overlapping memory-heavy builders');
@@ -124,6 +137,17 @@ try {
   await install('CO-LOOKALIKE',[local],{...localFields,cve:'CS-other'});await store.build('CO-LOOKALIKE','tester');
   assert.equal((await noRaw.read({...request,companyId:'CO-LOOKALIKE',spotlightTenant:'a'.repeat(32)})).state,'inconsistent');
   ok('extra fields, string booleans, real closed vendor findings and incorrect persisted placeholder identity remain untrusted');
+
+  const recommendation={id:'recommended',action:'Install recommended update'},minimum={id:'minimum',action:'Install minimum update'};
+  const patchSample=(id,aid,kev)=>({...sample(id,'CVE-2026-9999',aid),cve:{...sample(id).cve,id:'CVE-2026-9999',is_cisa_kev:kev},
+    apps:[{product_name_version:'Test software',remediation_info:{minimum_id:'minimum',recommended_id:'recommended'}}],remediation:{entities:[recommendation,minimum]}});
+  const patchRun=await install('CO-PATCH',[patchSample('patch-1','h1',true),patchSample('patch-2','h1',false),patchSample('patch-3','h2',false)]);
+  await store.build('CO-PATCH','tester');
+  const fixes=(await db.query("SELECT summary->'topFixes' AS fixes FROM spotlight_summary_generations WHERE run_id=$1",[patchRun])).rows[0].fixes;
+  assert.equal(fixes.rows.length,1);assert.equal(fixes.rows[0].remediation,'Install recommended update');assert.equal(fixes.rows[0].deviceCount,2);assert.equal(fixes.rows[0].findingCount,3);
+  // HIGH severity (3) + CVSS 8 (12) + direct KEV (20). The SQL projection must retain the direct KEV flag.
+  assert.equal(fixes.rows[0].maxRisk,35);assert.equal(fixes.missingRemediation,0);
+  ok('real SQL projection retains direct KEV risk and recommended-only remediation with device deduplication');
   console.log(JSON.stringify({passed:checks,productionChanges:0}));
 } finally {
   await db?.end();await Promise.all(disconnected);if(created)await admin.query(`DROP DATABASE ${name}`);await admin.end();

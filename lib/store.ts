@@ -1,4 +1,5 @@
 import { buildExecutiveReport, type ExecReport } from "./executive-report";
+import { cachedTopFixes } from "./reporting-top-fixes";
 import { loadReviewedScannerRoutes } from "@/lib/customer-scanner-routing-server";
 import type { ScannerRoute } from "@/lib/customer-scanner-routing";
 import { scannerTargetMatcher, assertScannerResultScope, scannerExactTargetKey, scannerWebOrigin } from "@/lib/scanner-target-scope";
@@ -1002,11 +1003,12 @@ function startScheduler(): void {
     const run = schedulerTick().catch((err) => {
       console.error("[scheduler] tick failed:", err);
     });
-    persistGlobal.__vulnSchedulerTick = run.finally(() => {
-      if (persistGlobal.__vulnSchedulerTick === run) {
+    const tracked = run.finally(() => {
+      if (persistGlobal.__vulnSchedulerTick === tracked) {
         persistGlobal.__vulnSchedulerTick = null;
       }
     });
+    persistGlobal.__vulnSchedulerTick = tracked;
   }, 60_000);
 }
 
@@ -1022,11 +1024,12 @@ function startScannerElasticExportScheduler(): void {
     const run = scannerElasticExportTick().catch((err) => {
       console.error("[scanner-export] tick failed:", err);
     });
-    persistGlobal.__vulnScannerExportTick = run.finally(() => {
-      if (persistGlobal.__vulnScannerExportTick === run) {
+    const tracked = run.finally(() => {
+      if (persistGlobal.__vulnScannerExportTick === tracked) {
         persistGlobal.__vulnScannerExportTick = null;
       }
     });
+    persistGlobal.__vulnScannerExportTick = tracked;
   }, 60_000);
 }
 
@@ -1082,11 +1085,12 @@ function startVulnersBridgeScheduler(): void {
     const run = vulnersBridgeTick().catch((err) => {
       console.error("[vulners-bridge] tick failed:", err);
     });
-    persistGlobal.__vulnVulnersBridgeTick = run.finally(() => {
-      if (persistGlobal.__vulnVulnersBridgeTick === run) {
+    const tracked = run.finally(() => {
+      if (persistGlobal.__vulnVulnersBridgeTick === tracked) {
         persistGlobal.__vulnVulnersBridgeTick = null;
       }
     });
+    persistGlobal.__vulnVulnersBridgeTick = tracked;
   }, 60_000);
 }
 
@@ -2287,6 +2291,12 @@ export function getCompany(id: string): Company | undefined {
   tick(s);
   const c = s.companies.get(id);
   return c ? toPublicCompany(s, c) : undefined;
+}
+
+// Identity-only reads must not settle scans or calculate full company rollups.
+export function getCompanyIdentity(id: string) {
+  const company = store().companies.get(id);
+  return company ? { id: company.id, name: company.name, isDemo: isDemoCompany(company) } : undefined;
 }
 
 export function createCompany(input: {
@@ -7900,6 +7910,17 @@ export function isOsintFinding(f: Finding): boolean {
 // attack-surface exposures you shrink. Drives the SSVC queue and SLA clock.
 export function isRemediationFinding(f: Finding): boolean {
   return findingClass(f) !== "osint";
+}
+
+// Caller resolves the customer and awaits ensureHydrated first. This read
+// deliberately avoids tick(), full-collection copying and risk sorting.
+export async function customerTopFixes(companyId: string, policyKey = "platform", include?: (finding: Finding) => boolean) {
+  const findings = store().findings, revision = persistGlobal.__vulnMutationVersion ?? 0;
+  const result = await cachedTopFixes(companyId, findings, revision, policyKey, include);
+  if (findings !== store().findings || revision !== (persistGlobal.__vulnMutationVersion ?? 0)) {
+    throw new Error("Findings changed while calculating top fixes. Refresh to load the latest results.");
+  }
+  return result;
 }
 
 export function listFindings(filter?: {

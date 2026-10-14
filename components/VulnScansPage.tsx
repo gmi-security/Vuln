@@ -165,7 +165,7 @@ export default function VulnScansPage({
   }
 
   return (
-    <VulnShell
+    <VulnShell companyId={companyFilter === "All" ? "" : companyFilter}
       eyebrow="Scans"
       title="Scan management"
       subtitle="Scans are organized by client company and folder. Launch, monitor, pause, and re-run across Nessus, Vulners, and CrowdStrike Spotlight."

@@ -523,20 +523,26 @@ export async function saveQuery(value: unknown, actor: string, job?: { id: strin
   } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
 }
 
-async function refreshQueries(force = false, ids?: string[]): Promise<void> {
+async function refreshQueries(force = false, ids?: string[], companyId?: string): Promise<void> {
   if (!elasticVulnEnabled()) return;
   const db = await database();
   const due = await db.query(`SELECT id, definition, revision FROM elastic_dashboard_queries
     WHERE deleted_at IS NULL AND ((definition->>'enabled')::boolean = true OR refresh_requested = true OR $1)
     AND ($2::text[] IS NULL OR id = ANY($2::text[]))
+    AND ($3::text IS NULL OR refresh_requested=true)
     AND (refresh_lease_until IS NULL OR refresh_lease_until <= now())
     AND (next_attempt <= now() OR ($1 AND (attempted_at IS NULL OR attempted_at < now() - interval '30 seconds')))
-    ORDER BY next_attempt LIMIT 24`, [force,ids ?? null]);
+    ORDER BY next_attempt LIMIT 24`, [force,ids ?? null,companyId ?? null]);
   for (const row of due.rows) {
     // Leave pending tiles due while previews occupy the execution slots.
-    if (state.running >= 2) break;
+    if (companyId) {
+      // Manual requests remain pending while previews occupy both slots, even
+      // when the general scheduler is paused. No DB connection is held here.
+      while (state.running >= 2) await new Promise<void>(resolve=>setTimeout(resolve,500));
+    } else if (state.running >= 2) break;
     const definition = parseDefinition(row.definition, row.id);
     definition.companyId = reportingTileCompanyId({ ...definition, id: row.id }, process.env.REPORTING_CUSTOMER_TILE_IDS, process.env.ATLAS_REPORTING_TILE_IDS);
+    if (companyId && definition.companyId !== companyId) continue;
     let saved;
     try { saved = await connection(querySource(definition)); }
     catch (error) {
@@ -546,14 +552,21 @@ async function refreshQueries(force = false, ids?: string[]): Promise<void> {
         [row.id, row.revision, error.message, definition.refreshMinutes]);
       continue;
     }
-    if (!saved) continue;
-    if (state.running >= 2) break;
+    if (!saved) {
+      if (companyId) await db.query(`UPDATE elastic_dashboard_queries SET last_error='Source connection is not configured.',
+        attempted_at=now(),refresh_requested=false WHERE id=$1 AND revision=$2`,[row.id,row.revision]);
+      continue;
+    }
+    if (companyId) {
+      while (state.running >= 2) await new Promise<void>(resolve=>setTimeout(resolve,500));
+    } else if (state.running >= 2) break;
     // Atomic claim across app instances. A refresh never erases the last success.
     const claim = await db.query(`UPDATE elastic_dashboard_queries SET attempted_at = now(), refresh_requested = false,
       next_attempt = now() + $3 * interval '1 minute', refresh_lease_until = now() + interval '7 minutes'
-      WHERE id = $1 AND revision = $2 AND (refresh_lease_until IS NULL OR refresh_lease_until <= now()) AND (next_attempt <= now() OR
+      WHERE id = $1 AND revision = $2 AND ($5::text IS NULL OR refresh_requested=true)
+      AND (refresh_lease_until IS NULL OR refresh_lease_until <= now()) AND (next_attempt <= now() OR
       ($4 AND (attempted_at IS NULL OR attempted_at < now() - interval '30 seconds'))) RETURNING id`,
-      [row.id, row.revision, definition.refreshMinutes, force]);
+      [row.id, row.revision, definition.refreshMinutes, force,companyId ?? null]);
     if (!claim.rowCount) continue;
     let result: QueryResult | null = null;
     let error: string | null = null;
@@ -563,6 +576,7 @@ async function refreshQueries(force = false, ids?: string[]): Promise<void> {
       if (err instanceof DashboardError && err.status === 429 && state.running >= 2) {
         await db.query(`UPDATE elastic_dashboard_queries SET refresh_requested = true,
           refresh_lease_until = NULL, next_attempt = now() WHERE id = $1 AND revision = $2`, [row.id, row.revision]);
+        if (companyId) void state.ticking?.then(()=>triggerRefresh(force,ids,companyId));
         break;
       }
       result = null;
@@ -594,14 +608,34 @@ async function refreshQueries(force = false, ids?: string[]): Promise<void> {
   }
 }
 
-export function triggerRefresh(force = false, ids?: string[]): void {
+export async function requestCustomerQueryRefresh(companyId: string, id: string, actor: string): Promise<void> {
+  await validateDashboardCustomer(companyId);
+  const db = await database(), client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(804201)");
+    const row = (await client.query("SELECT definition,revision FROM elastic_dashboard_queries WHERE id=$1 AND deleted_at IS NULL FOR UPDATE",[id])).rows[0];
+    if (!row || reportingTileCompanyId({...row.definition,id},process.env.REPORTING_CUSTOMER_TILE_IDS,process.env.ATLAS_REPORTING_TILE_IDS) !== companyId)
+      throw new DashboardError("This query no longer belongs to the selected customer.",409);
+    const requested = await client.query(`UPDATE elastic_dashboard_queries SET refresh_requested=true,next_attempt=now()
+      WHERE id=$1 AND revision=$2
+      AND (refresh_lease_until IS NULL OR refresh_lease_until<=now())
+      AND (attempted_at IS NULL OR attempted_at<now()-interval '30 seconds') RETURNING id`,[id,row.revision]);
+    if (!requested.rowCount) throw new DashboardError("This query is running or was just refreshed. Check status before retrying.",409);
+    await client.query("INSERT INTO elastic_dashboard_audit(actor,action,query_id) VALUES($1,'query.refresh.requested',$2)",[actor,id]);
+    await client.query("COMMIT");
+  } catch(error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
+  triggerRefresh(true,[id],companyId);
+}
+
+export function triggerRefresh(force = false, ids?: string[], companyId?: string): void {
   if (ids?.length === 0) return;
   if (state.ticking) {
     // Preserve the customer's requested scope while another pass completes.
-    if (ids) void state.ticking.then(()=>triggerRefresh(force,ids));
+    if (ids) void state.ticking.then(()=>triggerRefresh(force,ids,companyId));
     return;
   }
-  state.ticking = refreshQueries(force,ids).catch(() => {
+  state.ticking = refreshQueries(force,ids,companyId).catch(() => {
     // No credentials, query text, or result content in process logs.
     console.error("[elastic-dashboard] Refresh could not complete.");
   }).finally(() => { state.ticking = undefined; });

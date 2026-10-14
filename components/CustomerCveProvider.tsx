@@ -4,7 +4,7 @@ import { CustomerCveContext, type CveComparisonSelection } from "./customer-cve-
 import { dashboardRequest } from "@/lib/dashboard-browser-client";
 import type { readCustomerCve, prepareCustomerCve } from "@/lib/customer-cve-service";
 import type { PatchGroup } from "@/lib/patch-request";
-import ConnectWiseGroupTicket from "./ConnectWiseGroupTicket";
+import Link from "next/link";
 import styles from "./QueryDashboard.module.css";
 
 type Detail=Awaited<ReturnType<typeof readCustomerCve>> & {scope?:"published-defender-cohort";projectionId?:string;enrichmentState?:"available"|"unavailable"|"not-recorded"};
@@ -14,22 +14,14 @@ function download(group:PatchGroup) {
   const anchor=document.createElement("a");anchor.href=url;anchor.download=`${group.label}-patch-request.csv`;anchor.click();
   setTimeout(()=>URL.revokeObjectURL(url),1000);
 }
-function Draft({entry,companyId}:{entry:Packet["groups"][number];companyId:string}) {
-  const [approved,setApproved]=useState(false),[error,setError]=useState(""),[busy,setBusy]=useState(false);
-  async function approve() {
-    setBusy(true);setError("");
-    try {await dashboardRequest(`patch-group-tickets/${entry.id}?companyId=${encodeURIComponent(companyId)}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"approve"})});setApproved(true);}
-    catch(error){setError(error instanceof Error?error.message:"Approval failed.");}finally{setBusy(false);}
-  }
+function Draft({entry,companyId,close}:{entry:Packet["groups"][number];companyId:string;close:()=>void}) {
   return <section className="rounded-xl border border-zinc-700 p-4">
     <h3 className="font-semibold">{entry.group.title}</h3>
     <p className="my-2 text-sm text-zinc-300">{entry.group.deviceCount.toLocaleString()} devices · {entry.group.findingCount.toLocaleString()} findings</p>
     <p className="whitespace-pre-wrap text-sm">{entry.group.action}</p>
     <button className={`${styles.button} my-3`} onClick={()=>download(entry.group)}>Download host CSV</button>
     <details><summary className="cursor-pointer text-sm">Ticket contents</summary><pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap rounded-lg bg-black p-3 text-sm text-zinc-200">{entry.group.ticketBody}</pre></details>
-    {!approved && <button className={`${styles.button} mt-3`} disabled={busy} onClick={()=>void approve()}>{busy?"Approving…":"Approve draft for manual sending"}</button>}
-    {error && <p role="alert" className={styles.patchError}>{error}</p>}
-    <ConnectWiseGroupTicket key={`${entry.id}:${approved}`} group={entry.group} requestId={entry.id} customerScope={companyId}/>
+    <Link className={`${styles.button} mt-3 inline-flex`} onClick={close} href={`/remediation?companyId=${encodeURIComponent(companyId)}&view=tickets`}>Review on Tickets page</Link>
   </section>;
 }
 function Panel({companyId,cve,canManage,compareEnabled,selection,close}:{companyId:string;cve:string;canManage:boolean;compareEnabled:boolean;selection?:CveComparisonSelection;close:()=>void}) {
@@ -89,8 +81,8 @@ function Panel({companyId,cve,canManage,compareEnabled,selection,close}:{company
         <ul className="mt-2 space-y-1 text-sm">{detail.tickets.map(ticket=><li key={ticket.id}>{ticket.ticket_url ? <a className="text-sky-300 underline" href={ticket.ticket_url} target="_blank" rel="noopener noreferrer">Ticket #{ticket.ticket_id}</a> : "Draft request"} · {ticket.state} · {ticket.review_state}{ticket.closed?" · Closed":""}</li>)}</ul>
         {detail.moreTickets && <p>Showing the latest 100 requests. The Tickets view contains the full register.</p>}</section>}
       {!comparison && canManage && <button className={styles.primaryButton} disabled={busy} onClick={()=>void prepare()}>{busy?"Preparing saved evidence…":packet?"Refresh patch request":"Prepare patch request"}</button>}
-      {!comparison && packet && <section className="space-y-4"><p className="text-sm text-zinc-300">{packet.groups.length} draft actions saved. Review each action and CSV, approve it, then use the ConnectWise form to send. These drafts are excluded from automatic creation.</p>
-        {packet.groups.map(entry=><Draft key={entry.id} entry={entry} companyId={companyId}/>)}</section>}
+      {!comparison && packet && <section className="space-y-4"><p className="text-sm text-zinc-300">{packet.groups.length} draft actions saved. Review and approve these drafts on the Tickets page, then send them to ConnectWise. Nothing is sent automatically.</p>
+        {packet.groups.map(entry=><Draft key={entry.id} entry={entry} companyId={companyId} close={close}/>)}</section>}
     </div>}
   </dialog>;
 }

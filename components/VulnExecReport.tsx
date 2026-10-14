@@ -68,7 +68,7 @@ export default function VulnExecReport({ companyId }: { companyId: string }) {
   }, [companyId]);
 
   const date = report ? new Date(report.generatedAt).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" }) : "";
-  return <VulnShell eyebrow="Reporting" title="Customer report" subtitle={report?.company.name ?? "Customer vulnerability and compliance report"} printable>
+  return <VulnShell companyId={companyId} eyebrow="Reporting" title="Customer report" subtitle={report?.company.name ?? "Customer vulnerability and compliance report"} printable>
     <div className={styles.page}>
     <div className={styles.chrome}>
       <div className={styles.toolbar}>

@@ -87,8 +87,6 @@ export default function PatchTicketTracker({ companyId, sla, allowGlobalActions 
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [autoCreating, setAutoCreating] = useState(false);
-  const [autoCreateResult, setAutoCreateResult] = useState("");
   const [validating, setValidating] = useState(false);
   const [validateResult, setValidateResult] = useState("");
   const [findingUntracked, setFindingUntracked] = useState(false);
@@ -125,26 +123,10 @@ export default function PatchTicketTracker({ companyId, sla, allowGlobalActions 
   }, [companyId]);
   useEffect(() => { void reload(); }, [reload]);
 
-  async function runAutoCreateNow() {
-    setAutoCreating(true); setAutoCreateResult(""); setError("");
-    try {
-      const result = await dashboardRequest<{ checked: number; created: number; errors: number; paused?: boolean; priorityBackfill: { checked: number; updated: number; errors: number } }>("patch-group-tickets/auto-create", { method: "POST" });
-      const p = result.priorityBackfill;
-      const priorityNote = p.checked ? ` Priority backfill: updated ${p.updated} of ${p.checked} existing ticket${p.checked === 1 ? "" : "s"}${p.errors ? ` · ${p.errors} failed` : ""}.` : "";
-      const creationNote = result.paused
-        ? "Auto-create is paused for Atlas -- no new tickets until this is turned back on."
-        : `Checked ${result.checked} eligible draft${result.checked === 1 ? "" : "s"} · created ${result.created}${result.errors ? ` · ${result.errors} failed` : ""}.`;
-      setAutoCreateResult(`${creationNote}${priorityNote}`);
-      await reload();
-    } catch (e) { setError(e instanceof Error ? e.message : "Could not run auto-create."); }
-    finally { setAutoCreating(false); }
-  }
-
   // A full pass can mean a live CrowdStrike re-collection for every closed
   // ticket -- some of this pilot's consolidated tickets carry 40+ CVEs each
   // -- which can run for minutes, well past this app's 20-second request
-  // timeout. This only starts the pass (the same one the 5-minute background
-  // scheduler runs) and returns right away; it does not wait for or report
+  // timeout. This explicit action starts the pass and returns right away; it does not wait for or report
   // counts. Check the table below (or click Refresh) after a bit to see the
   // result -- per-ticket failures show as a note under that ticket's state.
   async function runValidateClosuresNow() {
@@ -175,7 +157,7 @@ export default function PatchTicketTracker({ companyId, sla, allowGlobalActions 
   // A manually-pasted ticket's attached CSV is named after the exact draft
   // row it came from (a UUID) -- an unambiguous link, not a guess. This
   // relinks each one so it becomes a normal tracked ticket, visible to
-  // auto-create/priority/closure-validation from then on.
+  // ticket status tracking from then on.
   async function adoptUntrackedNow() {
     setAdopting(true); setAdoptResult(""); setError("");
     try {
@@ -278,7 +260,6 @@ export default function PatchTicketTracker({ companyId, sla, allowGlobalActions 
       <h2 className="text-lg text-zinc-100">Patch ticket tracker</h2>
       <div className="flex flex-wrap gap-2">
         {allowGlobalActions && <>
-        <button type="button" className={styles.button} disabled={autoCreating} onClick={() => void runAutoCreateNow()}>{autoCreating ? "Running…" : "Run auto-create now"}</button>
         <button type="button" className={styles.button} disabled={validating} onClick={() => void runValidateClosuresNow()}>{validating ? "Validating…" : "Validate closures now"}</button>
         <button type="button" className={styles.button} disabled={findingUntracked} onClick={() => void findUntrackedNow()}>{findingUntracked ? "Checking…" : "Find untracked Atlas tickets"}</button>
         <button type="button" className={styles.button} disabled={adopting} onClick={() => void adoptUntrackedNow()}>{adopting ? "Adopting…" : "Adopt untracked tickets"}</button>
@@ -289,10 +270,9 @@ export default function PatchTicketTracker({ companyId, sla, allowGlobalActions 
       </div>
     </div>
     <p className={styles.resultNote}>Customer-linked consolidation plans prepared for review and their ConnectWise ticket status.</p>
-    {autoCreateResult && <p role="status" className={`${styles.resultNote} mt-1`}>{autoCreateResult}</p>}
     {validateResult && <p role="status" className={`${styles.resultNote} mt-1`}>{validateResult} <button type="button" className="underline" disabled={!!checkingJob} onClick={() => void checkJobStatus("validate-closures", "Validate closures")}>{checkingJob === "validate-closures" ? "Checking…" : "Check status"}</button></p>}
     {adoptResult && <p role="status" className={`${styles.resultNote} mt-1`}>{adoptResult} Adopted tickets will be reopened on the next "Validate closures now" run.</p>}
-    {abandonResult && <p role="status" className={`${styles.resultNote} mt-1`}>{abandonResult} New drafts appear below under "Awaiting review"; Critical/High ones are cut automatically by "Run auto-create now". <button type="button" className="underline" disabled={!!checkingJob} onClick={() => void checkJobStatus("abandon-and-replace", "Abandon + replace")}>{checkingJob === "abandon-and-replace" ? "Checking…" : "Check status"}</button></p>}
+    {abandonResult && <p role="status" className={`${styles.resultNote} mt-1`}>{abandonResult} New drafts appear below under "Awaiting review". Review and approve each draft before sending it to ConnectWise. <button type="button" className="underline" disabled={!!checkingJob} onClick={() => void checkJobStatus("abandon-and-replace", "Abandon + replace")}>{checkingJob === "abandon-and-replace" ? "Checking…" : "Check status"}</button></p>}
     {recutResult && <p role="status" className={`${styles.resultNote} mt-1`}>{recutResult} Closed tickets show "Closed in ConnectWise" above; new drafts appear below under "Awaiting review". <button type="button" className="underline" disabled={!!checkingJob} onClick={() => void checkJobStatus("close-and-recut", "Close + recut")}>{checkingJob === "close-and-recut" ? "Checking…" : "Check status"}</button></p>}
     {jobStatus && <p role="status" className={`${styles.resultNote} mt-1 font-medium`}>{jobStatus}</p>}
     {untracked && (untracked.length
