@@ -256,6 +256,7 @@ export function resolveIdentity(s: StoreShape, companyId: string, id: string): s
 // Safe to call every import — already-linked identifiers are a no-op.
 export function linkIdentities(s: StoreShape, companyId: string, ids: (string | undefined | null)[]): void {
   linkIdentitiesAliases(s.identityAliases, companyId, ids);
+  markDirty({});
 }
 
 export function canonicalAssetKey(s: StoreShape, companyId: string, asset: string): string {
@@ -397,13 +398,13 @@ async function closeStaleFindings(
       ) {
         f.status = "Resolved";
         f.resolvedAt = observedAtIso;
+        markDirty({ findings: [f.id] });
         closed += 1;
       }
     }
     i += 1;
     if (i % 500 === 0) await new Promise((resolve) => setImmediate(resolve));
   }
-  if (closed > 0) markDirty();
   return closed;
 }
 
@@ -4726,7 +4727,8 @@ export function computeAttackPaths(filter?: {
 // Recompute a finding's environmental context + real risk against the current
 // inventory. Used after an inventory sync so existing findings reprice.
 export function rescoreFinding(s: StoreShape, f: Finding): void {
-  markDirty();
+  // Callers can have changed assessment/evidence fields before rescoring.
+  markDirty({ findings: [f.id] });
   Object.assign(
     f,
     riskFields(s, {
@@ -4793,7 +4795,7 @@ function upsertAsset(
         criticality: input.criticality,
         lastSynced: nowIso,
       };
-      markDirty();
+      markDirty({ assets: [automate.id] });
       return automate;
     }
   }
@@ -4813,12 +4815,13 @@ function upsertAsset(
   );
   if (existing) {
     Object.assign(existing, input, { lastSynced: nowIso });
-    markDirty();
+    markDirty({ assets: [existing.id] });
     return existing;
   }
-  const id = input.id ?? nextId(s, "AST");
+  const id = input.id ?? nextId(s, "AST", "assets");
   const asset: InternalAsset = { ...input, id, lastSynced: nowIso };
   s.assets.set(id, asset);
+  markDirty({ assets: [id] });
   return asset;
 }
 

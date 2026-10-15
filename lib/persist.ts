@@ -449,6 +449,9 @@ export async function saveSnapshot(data: unknown, options?: { guard?: () => void
     // limit. Prepare BEFORE borrowing a connection or locking the authority row.
     const reporting = createReportingInputDigests(reportingDigestCache);
     const startedAt = Date.now();
+    const candidateRecords = options?.changes === undefined
+      ? ["companies", "folders", "scans", "findings", "assets"].reduce((n, kind) => n + (Array.isArray(obj[kind]) ? obj[kind].length : 0), 0)
+      : Object.values(options.changes).reduce((n, ids) => n + ids.length, 0);
     let deadline = startedAt + 300000, cancelled = false, captureFrozen = false, phase = "prepare";
     let client: PoolClient | undefined;
     const guard = () => {
@@ -491,7 +494,7 @@ export async function saveSnapshot(data: unknown, options?: { guard?: () => void
       persistence.platformState = next; persistence.platformAuthority = next.authority;
       if ("changedKeys" in next) reportingDigestCache.clear();
       else reporting.committed();
-      console.info(`[persist] SQL save committed: scope=${prepared ? "full" : "delta"} prepareMs=${preparedMs} totalMs=${Date.now() - startedAt} inserted=${next.counts.inserted} updated=${next.counts.updated} deleted=${next.counts.deleted} metadata=${next.counts.metadata}.`);
+      console.info(`[persist] SQL save committed: scope=${prepared ? "full" : "delta"} reason=${options?.changes === undefined ? "scope-not-declared" : "declared-records"} candidates=${candidateRecords} compared=${next.comparedRecords} prepareMs=${preparedMs} totalMs=${Date.now() - startedAt} inserted=${next.counts.inserted} updated=${next.counts.updated} deleted=${next.counts.deleted} metadata=${next.counts.metadata}.`);
     } catch (error) {
       cancelled = true;
       console.error(`[persist] SQL save stopped: phase=${phase} scope=${options?.changes === undefined ? "full" : "delta"} elapsedMs=${Date.now() - startedAt} code=${(error as {code?: string})?.code ?? "none"}.`);

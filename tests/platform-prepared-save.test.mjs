@@ -80,3 +80,13 @@ test('actual full-import changes receive the same bounded budget as explicit imp
  assert.equal(store.platformSaveTimeoutMs(undefined,1),300000);
  assert.equal(store.platformSaveTimeoutMs(undefined,100000),900000);
 });
+
+test('comparison counts distinguish a scoped save from hashing the whole collection',async()=>{
+ const f=fixture();f.data.scans[0][1].progress=50;
+ const full=await store.preparePlatformStore(f.data,f.state);
+ assert.equal(full.comparedRecords,1002);
+ f.data.findings[0][1].toJSON=()=>{throw Error('Unrelated finding was serialized');};
+ const delta=await store.savePlatformDelta(f.client,f.data,f.state,{scans:['S-1']});
+ assert.equal(delta.comparedRecords,1);
+ assert.equal(delta.counts.updated,1);
+});
