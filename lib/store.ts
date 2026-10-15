@@ -2028,7 +2028,7 @@ async function refreshVendorScans(s: StoreShape): Promise<void> {
   if (readerRole()) return;
   const now = Date.now();
   const pending = [...s.scans.values()].filter(scan => scan.vendor &&
-    ["Running", "Paused", "Queued"].includes(scan.status) && now - scan.vendor.lastPoll >= 4000);
+    (["Running", "Paused", "Queued"].includes(scan.status) || scan.status === "Completed" && !scan.vendor.imported) && now - scan.vendor.lastPoll >= 4000);
   if (!pending.length) return;
   let routes: ScannerRoute[] | null;
   try { routes = await loadReviewedScannerRoutes("nessus"); }
@@ -2037,9 +2037,11 @@ async function refreshVendorScans(s: StoreShape): Promise<void> {
   for (const scan of pending) {
     if (!scan.vendor) continue;
     const active =
-      scan.status === "Running" || scan.status === "Paused" || scan.status === "Queued";
+      scan.status === "Running" || scan.status === "Paused" || scan.status === "Queued" ||
+      scan.status === "Completed" && !scan.vendor.imported;
     if (!active || now - scan.vendor.lastPoll < 4000) continue;
     scan.vendor.lastPoll = now;
+    markDirty({ scans: [scan.id] });
     try {
       const context = nessusContextFromRoutes(routes, scan.companyId);
       if (context) {
@@ -2060,12 +2062,9 @@ async function refreshVendorScans(s: StoreShape): Promise<void> {
       if (scan.status === "Completed" && !scan.vendor.imported) {
         // Mark imported only after the import succeeds, so a transient
         // Nessus failure leaves it false and the next poll retries.
-        // Completion changes findings and aliases as well as scan progress.
-        // Promote even on a partial import failure; no findings may be omitted
-        // from the next capture just because no stale findings were closed.
-        try { await importVendorFindings(s, scan); }
-        finally { markDirty(); }
+        await importVendorFindings(s, scan);
         scan.vendor.imported = true;
+        markDirty({ scans: [scan.id] });
       }
     } catch (err) {
       scan.error = err instanceof Error ? err.message : "Nessus polling failed.";
@@ -2096,7 +2095,7 @@ async function importVendorFindings(s: StoreShape, scan: InternalScan, prepared?
       continue;
     }
     const created: Finding = {
-      id: `VLN-${(s.counter += 1)}`,
+      id: nextId(s, "VLN", "findings"),
       scanId: scan.id,
       companyId: scan.companyId,
       companyName: scan.companyName,
@@ -2149,6 +2148,7 @@ async function importVendorFindings(s: StoreShape, scan: InternalScan, prepared?
   // covers hosts with at least one finding, missing every host Nessus
   // scanned clean.
   scan.scannedHostAliases = Array.from(coveredAliases);
+  markDirty({ scans: [scan.id] });
   await closeStaleFindings(s, scan.companyId, scan.connector, coveredAssetKeys, touchedKeys, completedAt);
   const all = Array.from(s.findings.values()).filter((f) => f.scanId === scan.id);
   scan.findingsCount = all.length;
@@ -2156,6 +2156,7 @@ async function importVendorFindings(s: StoreShape, scan: InternalScan, prepared?
   for (const f of all) counts[f.severity] += 1;
   scan.severityCounts = counts;
   scan.hostsScanned = new Set(all.map((f) => f.asset)).size || scan.targets.length;
+  markDirty({ scans: [scan.id] });
 }
 
 // --- companies & folders ---------------------------------------------------
@@ -7187,10 +7188,11 @@ export async function importFromNessus(): Promise<
     for (const scan of s.scans.values()) {
       if (scan.connector === "nessus" && scan.vendor) {
         scan.vendor.nessusLastModified = null;
+        markDirty({ scans: [scan.id] });
       }
     }
     s.meta.nessusBackfillCorrected = true;
-    markDirty();
+    markDirty({});
   }
 
   let folders;
@@ -7291,7 +7293,7 @@ export async function importFromNessus(): Promise<
       skipped++;
       continue;
     }
-    if (existing && (routes === null || existing.vendor?.imported)) {
+    if (existing?.vendor?.imported) {
       // Older records (imported before this field existed, or created by the
       // live Start-Scan flow which doesn't set it) have no stamped
       // lastModified yet. Don't just trust Nessus's current value as "already
@@ -7306,6 +7308,7 @@ export async function importFromNessus(): Promise<
           : 0;
         if (!summary.lastModified || summary.lastModified <= recordedAt) {
           existing.vendor.nessusLastModified = summary.lastModified;
+          markDirty({ scans: [existing.id] });
           skipped += 1;
           continue;
         }
@@ -7339,10 +7342,11 @@ export async function importFromNessus(): Promise<
           ? new Date(summary.lastModified * 1000).toISOString()
           : nowIso
         : null;
-    if (prepared && existing?.vendor && !existing.vendor.imported) {
+    if (summary.status === "completed" && existing?.vendor && !existing.vendor.imported) {
       // A pending or previously failed run keeps its local identity when its
       // completed result has passed the current ownership checks.
       existing.completedAt = completedAt;
+      markDirty({ scans: [existing.id] });
       try {
         await importVendorFindings(s, existing, prepared);
         existing.status = "Completed";
@@ -7354,10 +7358,10 @@ export async function importFromNessus(): Promise<
       } catch (error) {
         errors.push(error instanceof Error ? error.message : "Nessus result could not be applied.");
       }
-      markDirty();
+      markDirty({ scans: [existing.id] });
       continue;
     }
-    const id = nextId(s, "SCAN");
+    const id = nextId(s, "SCAN", "scans");
     const scan: InternalScan = {
       id,
       name: summary.name,
@@ -7399,7 +7403,7 @@ export async function importFromNessus(): Promise<
       } finally {
         // Completion metadata and any findings changed after an awaited import
         // must remain dirty even if an earlier capture is already being saved.
-        markDirty();
+        markDirty({ scans: [scan.id] });
       }
     }
   }

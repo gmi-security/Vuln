@@ -120,10 +120,10 @@ Each stage must pass its checks before its change list is trusted. Use a task br
 
 **Files:** `lib/store.ts` (`importVendorFindings`, `importFromNessus`, `closeStaleFindings`, polling/completion and resync paths); extend `tests/finding-correlation.test.mjs`, `tests/connector-import-result.test.mjs` and the new scope tests.
 
-- [ ] Add tests for new, changed, duplicate and reopened findings; stale closure; unchanged scans; partial failure; new-scan creation; and mutations arriving while a provider request is awaited.
-- [ ] Replace full dirty markers only after the complete findings/assets/scans/folders/metadata mutation set is known. Preserve the recent correlation lookup optimization.
-- [ ] Keep imported timestamps and completion markers consistent with the rows they describe. A saved completion marker must never acknowledge omitted finding changes.
-- [ ] Compare committed results and restarted state with the original path; run the Nessus and persistence tests, then commit.
+- [x] Add tests for new, changed, duplicate and reopened findings; stale closure; unchanged scans; partial failure; new-scan creation; and mutations arriving while a provider request is awaited.
+- [x] Replace full dirty markers only after the complete findings/assets/scans/folders/metadata mutation set is known. Preserve the recent correlation lookup optimization.
+- [x] Keep imported timestamps and completion markers consistent with the rows they describe. A saved completion marker must never acknowledge omitted finding changes.
+- [x] Compare committed results and restarted state with the original path; run the Nessus and persistence tests, then commit.
 
 **Done when:** both new scans and existing scan updates save complete results through scoped writes, with no regression in progress polling or closure behavior.
 
@@ -203,6 +203,6 @@ Run `tests/platform-store-postgres.mjs` separately using its guarded private Uni
 - [x] Document the proposed approach, justification, risk checks and rollout order.
 - [ ] Implement and verify stages 1 through 6.
 
-Stage 1 is implemented and verified locally: 957 tests passed, seven optional database checks skipped, and TypeScript passed. Shared helpers now declare asset/finding IDs, alias metadata and closures; save diagnostics report candidate and comparison counts. Stage 2 passed 23 targeted checks and TypeScript: all four inventory providers, reviewed/legacy routing, cross-source scoring, full-save parity, repeat imports and restart. Recalculation covers the imported customers (not other customers); only changed risk projections become finding candidates. The next step is **stage 3: Nessus lifecycle**. Production remains unchanged; real PostgreSQL and release checks are still pending.
+Stage 1 is implemented and verified locally: 957 tests passed, seven optional database checks skipped, and TypeScript passed. Shared helpers now declare asset/finding IDs, alias metadata and closures; save diagnostics report candidate and comparison counts. Stage 2 passed 23 targeted checks and TypeScript: all four inventory providers, reviewed/legacy routing, cross-source scoring, full-save parity, repeat imports and restart. Recalculation covers the imported customers (not other customers); only changed risk projections become finding candidates. Stage 3 now tracks Nessus findings, scan completion, closure and backfill metadata. Completed but unimported scans remain retryable; repeated detected vulnerabilities preserve the existing new-occurrence semantics. Five new lifecycle fixtures and 32 related persistence/correlation checks passed; TypeScript passed. The next step is **stage 4: other shared-store connectors**. Production remains unchanged; real PostgreSQL and release checks are still pending.
 
 > For agentic workers: use `superpowers:executing-plans` for task-by-task implementation, or `superpowers:subagent-driven-development` if parallel agent execution is explicitly selected. Re-read the actual branch and this plan before implementing; preserve the existing single-writer and mutation-capture contracts.
