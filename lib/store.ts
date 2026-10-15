@@ -268,13 +268,31 @@ export function correlationKey(s: StoreShape, companyId: string, cve: string, as
   return `${companyId}::${cve.toUpperCase()}::${canonicalAssetKey(s, companyId, asset)}`;
 }
 
-// Built once per import run — O(store size) — instead of scanning every
-// finding per imported item, which would make a large import O(n*m).
-export function buildCorrelationIndex(s: StoreShape): Map<string, Finding> {
+// Build inventory lookups once. Calling lookupAsset for every finding made a
+// million-finding import scan the entire inventory a million times. Preserve
+// its exact identifier precedence, ambiguous-alias handling and customer scope.
+export function buildCorrelationIndex(s: StoreShape, companyId?: string): Map<string, Finding> {
+  const inventory = new Map<string, { exact: Map<string, string>; aliases: Map<string, string | null> }>();
+  for (const asset of s.assets.values()) {
+    if (companyId !== undefined && asset.companyId !== companyId) continue;
+    let customer = inventory.get(asset.companyId);
+    if (!customer) { customer = { exact: new Map(), aliases: new Map() }; inventory.set(asset.companyId, customer); }
+    const identifier = asset.identifier.toLowerCase();
+    // lookupAsset returns the first exact identifier, even if aliases collide.
+    if (!customer.exact.has(identifier)) customer.exact.set(identifier, asset.id);
+    for (const alias of [asset.hostname, ...asset.ipAddresses]) {
+      if (!alias) continue;
+      const key = alias.toLowerCase(), prior = customer.aliases.get(key);
+      customer.aliases.set(key, prior === undefined || prior === asset.id ? asset.id : null);
+    }
+  }
   const index = new Map<string, Finding>();
-  for (const f of s.findings.values()) {
-    if (f.status === "Resolved" || !CORRELATED_CONNECTORS.has(f.connector)) continue;
-    index.set(correlationKey(s, f.companyId, f.cve, f.asset), f);
+  for (const finding of s.findings.values()) {
+    if ((companyId !== undefined && finding.companyId !== companyId) || finding.status === "Resolved" || !CORRELATED_CONNECTORS.has(finding.connector)) continue;
+    const customer = inventory.get(finding.companyId), key = finding.asset.trim().toLowerCase();
+    const assetId = key ? customer?.exact.get(key) ?? customer?.aliases.get(key) : undefined;
+    const assetKey = assetId !== undefined && assetId !== null ? `asset:${assetId}` : `alias:${resolveIdentity(s, finding.companyId, finding.asset)}`;
+    index.set(`${finding.companyId}::${finding.cve.toUpperCase()}::${assetKey}`, finding);
   }
   return index;
 }
@@ -2062,7 +2080,7 @@ async function importVendorFindings(s: StoreShape, scan: InternalScan, prepared?
   // strings (10.x IPs, DESKTOP-XXXX), so one client's finding must never
   // swallow another's, but a CVE another connector already reported on the
   // same host in the same company is the same real vulnerability.
-  const index = buildCorrelationIndex(s);
+  const index = buildCorrelationIndex(s, scan.companyId);
   const touchedKeys = new Set<string>();
   for (const item of imported) {
     linkIdentities(s, scan.companyId, item.assetAliases);

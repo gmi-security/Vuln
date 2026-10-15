@@ -30,3 +30,13 @@ No schema migration, credential change, connector cadence change, tile-refresh c
 Merge the reviewed branch through a PR, verify the staged source matches the merged tree, and deploy the already-built artifacts. Preserve production operator scripts and environment. Stop the existing supervisor and all children before starting the new build. Verify both read and write readiness, a real new commit, and absence of new persistence failures before calling recovery complete.
 
 Full unscoped imports still compare the entire platform and require memory/CPU. This fix removes that work from idle SQL transactions; broader conversion of old import paths to explicit mutation scopes remains separate work. Genuine database outages and stale-writer violations still block writes deliberately.
+
+## Follow-up: import correlation CPU
+
+After the transaction fix deployed, startup recovered and a real metadata save committed. The scheduled Nessus sync then made the writer unresponsive while committed web reads remained available and persistence was not blocked. A ten-second CPU profile attributed 8,626 of 8,982 samples to the compiled `importVendorFindings` function. Its correlation index called `lookupAsset` for each finding, rescanning the entire inventory each time; each Nessus scan also indexed unrelated customers. Concurrent captures were invalidated while that import continued.
+
+The follow-up builds inventory maps once, preserving first exact-identifier matches, ambiguous-alias rejection, normalization, customer boundaries and the existing last-finding-wins behavior. Nessus requests only its customer's correlation index; the multi-customer Vulners importer retains its existing scope. No matching/classification rules change.
+
+Read-only comparison against 1,073,267 live finding identities and 15,049 assets: the original algorithm took 348 ms for a 1,000-finding sample; the indexed algorithm took 37 ms for the same sample, 1,683 ms for the full set and 199 ms for one customer's index. Sample keys and finding references matched; customer-scoped results matched the filtered full index. Peak observed RSS was 1,026 MiB. Production writes: zero. Independent review also compared 300 generated fixtures against the original lookup rules. Full suite: 943 passed, 7 optional DB tests skipped; Linux Next and both auxiliary worker builds passed.
+
+The interrupted scheduled run's persisted start timestamp must be made due once after stopping the old writer, using the existing fenced metadata writer and atomic reporting publication. Require the exact observed timestamp; keep the 24-hour setting and connector-specific daily gates unchanged. This retries the interrupted import rather than treating its start as a successful day's sync.

@@ -151,3 +151,28 @@ test("canonicalAssetKey prefers the asset inventory over the self-learned alias 
   assert.notEqual(stillViaInventory, "asset:AST-1");
   assert.equal(stillViaInventory, `alias:${store.resolveIdentity(s, "company-a", "203.0.113.50")}`);
 });
+
+
+test("correlation index matches individual lookup semantics with one inventory pass",()=>{
+ const s=fixtureStore();
+ const assets=[
+  {id:'first',companyId:'company-a',identifier:'EXACT',hostname:'shared',ipAddresses:['10.0.0.1']},
+  {id:'second',companyId:'company-a',identifier:'EXACT',hostname:'shared',ipAddresses:['10.0.0.2']},
+  {id:'third',companyId:'company-a',identifier:'shared',hostname:'unique',ipAddresses:['10.0.0.2']},
+  {id:'other',companyId:'company-b',identifier:'other',hostname:'unique',ipAddresses:['10.0.0.1']},
+  {id:'spaced',companyId:'company-a',identifier:' spaced ',hostname:' host ',ipAddresses:[' 10.0.0.3 ']},
+ ];
+ for(const a of assets)s.assets.set(a.id,a);
+ store.linkIdentities(s,'company-a',['unknown','alias']);
+ for(let i=0;i<100;i++){const f=baseFinding({id:`F-${i}`,companyId:i%3?'company-a':'company-b',cve:`CVE-2026-${i}`,asset:['EXACT','shared','unique','10.0.0.1','10.0.0.2','spaced','host','unknown',' alias '][i%9]});s.findings.set(f.id,f);}
+ const expected=new Map([...s.findings.values()].map(f=>[store.correlationKey(s,f.companyId,f.cve,f.asset),f]));
+ let passes=0;const values=s.assets.values.bind(s.assets);s.assets.values=()=>{passes++;return values();};
+ const actual=store.buildCorrelationIndex(s);
+ assert.deepEqual([...actual],[...expected]);assert.equal(passes,1,'inventory must not be rescanned for every finding');
+});
+
+test("customer import correlation includes only that customer with identical keys",()=>{
+ const s=fixtureStore();for(const companyId of ['company-a','company-b'])for(let i=0;i<10;i++){const f=baseFinding({id:companyId+i,companyId,asset:'shared',cve:`CVE-2026-${i}`});s.findings.set(f.id,f);}
+ const expected=[...store.buildCorrelationIndex(s)].filter(([,f])=>f.companyId==='company-a');
+ assert.deepEqual([...store.buildCorrelationIndex(s,'company-a')],expected);
+});
