@@ -32,10 +32,11 @@ test('scheduled connector ticks repeat after success and failure without overlap
     const declaration=source.statements.find(node=>ts.isFunctionDeclaration(node)&&node.name?.text===name);
     assert.ok(declaration,name);
     const state={},timers=[];let runs=0,finish,fail=false;
-    const context=createContext({process:{env:{}},console:{error(){}},persistGlobal:state,
+    const context=createContext({process:{env:{}},console:{error(){}},persistGlobal:state,persistenceBlocked:()=>state.blocked===true,
       setInterval:fn=>{timers.push(fn);return 1;},[tickName]:async()=>{runs++;await new Promise(resolve=>finish=resolve);if(fail)throw new Error('fixture failure');}});
     const code=ts.transpileModule(declaration.getText(source)+`; ${name}();`,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText;
     const mod=new SourceTextModule(code,{context});await mod.link(()=>{});await mod.evaluate();
+    state.blocked=true;timers[0]();assert.equal(runs,0,name+' pauses while storage is blocked');state.blocked=false;
     assert.equal(timers.length,1,name);timers[0]();timers[0]();assert.equal(runs,1,name+' blocks overlaps');
     finish();await state[guard];timers[0]();assert.equal(runs,2,name+' repeats');
     fail=true;finish();await state[guard];timers[0]();assert.equal(runs,3,name+' retries future tick after failure');finish();await state[guard];

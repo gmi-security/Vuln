@@ -1107,7 +1107,7 @@ function startScheduler(): void {
   persistGlobal.__vulnScheduler = setInterval(() => {
     // A bookkeeping mutation during a large publication invalidates its
     // capture and rolls back all completed batches. Try again next minute.
-    if (persistGlobal.__vulnSchedulerTick || persistGlobal.__vulnFlushing) return;
+    if (persistGlobal.__vulnSchedulerTick || persistGlobal.__vulnFlushing || persistenceBlocked()) return;
     const run = schedulerTick().catch((err) => {
       console.error("[scheduler] tick failed:", err);
     });
@@ -1128,7 +1128,7 @@ function startScheduler(): void {
 function startScannerElasticExportScheduler(): void {
   if (persistGlobal.__vulnScannerExportScheduler) return;
   persistGlobal.__vulnScannerExportScheduler = setInterval(() => {
-    if (persistGlobal.__vulnScannerExportTick || persistGlobal.__vulnFlushing) return;
+    if (persistGlobal.__vulnScannerExportTick || persistGlobal.__vulnFlushing || persistenceBlocked()) return;
     const run = scannerElasticExportTick().catch((err) => {
       console.error("[scanner-export] tick failed:", err);
     });
@@ -1189,7 +1189,7 @@ async function scannerElasticExportTick(): Promise<void> {
 function startVulnersBridgeScheduler(): void {
   if (persistGlobal.__vulnVulnersBridgeScheduler) return;
   persistGlobal.__vulnVulnersBridgeScheduler = setInterval(() => {
-    if (persistGlobal.__vulnVulnersBridgeTick || persistGlobal.__vulnFlushing) return;
+    if (persistGlobal.__vulnVulnersBridgeTick || persistGlobal.__vulnFlushing || persistenceBlocked()) return;
     const run = vulnersBridgeTick().catch((err) => {
       console.error("[vulners-bridge] tick failed:", err);
     });
@@ -2013,7 +2013,7 @@ async function refreshVendorScans(s: StoreShape): Promise<void> {
   if (!pending.length) return;
   let routes: ScannerRoute[] | null;
   try { routes = await loadReviewedScannerRoutes("nessus"); }
-  catch { for (const scan of pending) { scan.vendor!.lastPoll = now; scan.error = "Reviewed scanner routing is unavailable."; } markDirty(); return; }
+  catch { for (const scan of pending) { scan.vendor!.lastPoll = now; scan.error = "Reviewed scanner routing is unavailable."; } markDirty({scans: pending.map(scan => scan.id)}); return; }
   const rosters = new Map<number, Promise<Awaited<ReturnType<typeof nessusListScans>>>>();
   for (const scan of pending) {
     if (!scan.vendor) continue;
@@ -2031,7 +2031,7 @@ async function refreshVendorScans(s: StoreShape): Promise<void> {
       const remote = await nessusScanStatus(scan.vendor.nessusScanId, context?.config);
       scan.progressFrozenAt = remote.progress;
       scan.status = NESSUS_STATUS_MAP[remote.status] ?? scan.status;
-      markDirty();
+      markDirty({scans: [scan.id]});
       if (
         (scan.status === "Completed" || scan.status === "Stopped") &&
         !scan.completedAt
@@ -2041,12 +2041,16 @@ async function refreshVendorScans(s: StoreShape): Promise<void> {
       if (scan.status === "Completed" && !scan.vendor.imported) {
         // Mark imported only after the import succeeds, so a transient
         // Nessus failure leaves it false and the next poll retries.
-        await importVendorFindings(s, scan);
+        // Completion changes findings and aliases as well as scan progress.
+        // Promote even on a partial import failure; no findings may be omitted
+        // from the next capture just because no stale findings were closed.
+        try { await importVendorFindings(s, scan); }
+        finally { markDirty(); }
         scan.vendor.imported = true;
       }
     } catch (err) {
       scan.error = err instanceof Error ? err.message : "Nessus polling failed.";
-      markDirty();
+      markDirty({scans: [scan.id]});
     }
   }
 }
