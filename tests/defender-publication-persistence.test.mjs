@@ -18,7 +18,7 @@ const seed = () => ({ companies:[[company.id,company]], folders:[], scans:[], fi
 
 async function harness(disk = { value:seed() }, strict = false, scheduled = false, role = undefined, nessusFixture = undefined) {
   const intervals = [], logs = [], modules = new Map();
-  let failSave = false, saveCalls = 0, snapshotReads = 0, gate, lastChanges;
+  let failSave = false, saveCalls = 0, snapshotReads = 0, gate, frozenGate, lastChanges;
   const context = createContext({ Buffer, URL, URLSearchParams, TextEncoder, TextDecoder, AbortController, Response, Request, Headers, structuredClone,
     process:{ env:{VULN_DISABLE_SCHEDULER:scheduled?"false":"true", VULN_RUNTIME_ROLE:role},once(){} },
     console:{ log:(...args)=>logs.push(args.join(" ")), info:(...args)=>logs.push(args.join(" ")), error:(...args)=>logs.push(args.join(" ")),warn(){} },
@@ -35,8 +35,10 @@ async function harness(disk = { value:seed() }, strict = false, scheduled = fals
       for(const kind of ['companies','folders','scans','findings','assets']){buckets.set(kind+':00',data[kind]);delete data[kind];}
       return {metadata:data,buckets,changedKeys:[...buckets.keys(),'meta'],revision:disk.revision??1};
     },
-    saveSnapshot:async (value,options)=>{saveCalls++;if(gate)await gate;if(failSave)throw new Error("simulated database save failure");options?.guard?.();
-      lastChanges=options?.changes;const next=clone(value);
+    saveSnapshot:async (value,options)=>{saveCalls++;
+      let frozen;if(frozenGate && options?.changes===undefined){options?.captureGuard?.();frozen=clone(value);await frozenGate();}
+      if(gate)await gate;if(failSave)throw new Error("simulated database save failure");options?.guard?.();if(!frozen)options?.captureGuard?.();
+      lastChanges=options?.changes;const next=frozen??clone(value);
       if(options?.changes!==undefined)for(const kind of ['companies','folders','scans','findings','assets']){
         const entries=new Map(disk.value[kind]),incoming=new Map(next[kind]);
         for(const id of options.changes[kind]??[])if(incoming.has(id))entries.set(id,incoming.get(id));else entries.delete(id);
@@ -54,8 +56,8 @@ async function harness(disk = { value:seed() }, strict = false, scheduled = fals
     if(path === resolve("lib/defender-store.ts"))return defender;
     if(nessusFixture && path === resolve("lib/nessus.ts")){
       if(!modules.has(path))modules.set(path,synthetic(Object.fromEntries(['nessusConfig','nessusLaunchScan','nessusServerStatus','nessusListFolders','nessusListScans','nessusScanStatus','nessusScanSchedule','nessusScanControl','nessusImportFindings'].map(key=>[key,
-        key==='nessusScanStatus'?async()=>({status:nessusFixture.status,progress:nessusFixture.status==='completed'?100:50}):
-        key==='nessusImportFindings'?async()=>clone(nessusFixture.result):()=>{throw Error('Unexpected Nessus fixture call '+key);}]))));
+        nessusFixture.overrides?.[key]??(key==='nessusScanStatus'?async()=>({status:nessusFixture.status,progress:nessusFixture.status==='completed'?100:50}):
+        key==='nessusImportFindings'?async()=>clone(nessusFixture.result):()=>{throw Error('Unexpected Nessus fixture call '+key);})]))));
       return modules.get(path);
     }
     if(!modules.has(path))modules.set(path,(async()=>new SourceTextModule(ts.transpileModule((await readFile(path,"utf8"))+(path===resolve("lib/store.ts")?'\nexport { refreshVendorScans };':''),{
@@ -72,7 +74,7 @@ async function harness(disk = { value:seed() }, strict = false, scheduled = fals
   const store=(await moduleAt("lib/store.ts")).namespace;
   await store.ensureHydrated();await context.__vulnFlushing;
   return { requestContext,context,store,platform:mod.namespace,disk,logs,intervals,
-    fail:()=>{failSave=true;},recover:()=>{failSave=false;},block:value=>{gate=value;},
+    fail:()=>{failSave=true;},recover:()=>{failSave=false;},block:value=>{gate=value;},freezeBlock:value=>{frozenGate=value;},
     saves:()=>saveCalls,reads:()=>snapshotReads,changes:()=>lastChanges };
 }
 
@@ -180,6 +182,24 @@ test("SQL capture retries when another mutation arrives during save",async()=>{
  assert.ok(h.disk.value.companies.some(([,c])=>c.name==="Second customer"));assert.equal(h.store.persistenceBlocked(),false);
 });
 
+test("later mutations stay queued after a frozen commit and survive their own save and restart",async()=>{
+ const h=await harness(undefined,true);let firstRelease,secondRelease,captured=0;
+ const firstGate=new Promise(r=>{firstRelease=r}),secondGate=new Promise(r=>{secondRelease=r});
+ h.freezeBlock(()=>++captured===1?firstGate:secondGate);
+ h.store.updateCompany(company.id,{name:'First captured name'});
+ const first=h.store.commitPlatformMutation();await new Promise(r=>setImmediate(r));
+ h.store.updateCompany(company.id,{name:'Later queued name'});let secondDone=false;
+ const second=h.store.commitPlatformMutation().then(()=>{secondDone=true});
+ firstRelease();await first;await new Promise(r=>setImmediate(r));
+ assert.equal(h.disk.value.companies[0][1].name,'First captured name');
+ assert.equal(secondDone,false,'later mutation cannot be acknowledged by the earlier commit');
+ assert.equal(captured,2,'dirty scope must survive the earlier generation');
+ secondRelease();await second;
+ assert.equal(h.disk.value.companies[0][1].name,'Later queued name');
+ const restarted=await harness(h.disk,true);
+ assert.equal(restarted.store.getCompanyIdentity(company.id).name,'Later queued name');
+});
+
 test("SQL analyst edits declare only their finding and preserve unrelated data and metadata",async()=>{
  const data=seed();data.futureMetadata={keep:'yes'};data.findings=[['F-one',{id:'F-one',companyId:company.id,status:'Open',assignee:null}],['F-two',{id:'F-two',companyId:company.id,status:'Open'}]];
  const h=await harness({value:data},true);h.store.updateFinding('F-one',{status:'In Remediation',assignee:'Team'});await h.store.commitPlatformMutation();
@@ -278,4 +298,21 @@ for(const status of ['running','completed'])test(`Nessus ${status} poll saves th
   assert.equal(h.disk.value.scans[0][1].vendor.imported,true);
   const restarted=await harness(h.disk,true);assert.equal(restarted.store.computeMetrics({companyId:company.id}).totalOpen,1);
  }
+});
+
+test('new Nessus scan completion remains dirty after a capture made during its API request',async()=>{
+ let h,release,captured;const gate=new Promise(r=>{release=r}),seen=new Promise(r=>{captured=r});let captures=0;
+ const result={findings:[{cve:'CVE-2026-1234',title:'Patch fixture',asset:'host-1',assetAliases:[],severity:'High',cvss:8,exploitAvailable:false,remediation:'Install update'}],scannedHosts:[]};
+ h=await harness({value:seed()},true,false,undefined,{overrides:{
+  nessusConfig:()=>({baseUrl:'https://nessus.invalid',accessKey:'fixture',secretKey:'fixture'}),
+  nessusListFolders:async()=>[{id:7,name:company.name,type:'custom'}],
+  nessusListScans:async()=>[{id:9,folderId:7,name:'Fixture scan',status:'completed',lastModified:1790000000}],
+  nessusImportFindings:async()=>{h.intervals.find(t=>t.ms===6000).fn();await new Promise(r=>setImmediate(r));return clone(result);},
+ }});
+ h.freezeBlock(()=>{captures++;captured();return gate});
+ const importing=h.store.importFromNessus();await seen;await new Promise(r=>setImmediate(r));release();
+ const imported=await importing;assert.equal(imported.scansImported,1);assert.equal(imported.findingsImported,1);
+ assert.ok(captures>=2,'completion must cause another save after the initial scan capture');
+ assert.equal(h.disk.value.scans[0][1].vendor.imported,true);assert.equal(h.disk.value.findings.length,1);
+ const restarted=await harness(h.disk,true);assert.equal(restarted.store.computeMetrics({companyId:company.id}).totalOpen,1);
 });
