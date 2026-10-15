@@ -16,7 +16,7 @@ const seed = () => ({ companies:[[company.id,company]], folders:[], scans:[], fi
   settings:{autoScanNewAssets:false,schedule:{autoSyncEnabled:false,alertsEnabled:false,monthlyReportsEnabled:false},sla:{Critical:7,High:30,Medium:60,Low:90}},
   meta:{autoSyncDefaultMigrated:true,defenderGenerations:{}} });
 
-async function harness(disk = { value:seed() }, strict = false, scheduled = false, role = undefined) {
+async function harness(disk = { value:seed() }, strict = false, scheduled = false, role = undefined, nessusFixture = undefined) {
   const intervals = [], logs = [], modules = new Map();
   let failSave = false, saveCalls = 0, snapshotReads = 0, gate, lastChanges;
   const context = createContext({ Buffer, URL, URLSearchParams, TextEncoder, TextDecoder, AbortController, Response, Request, Headers, structuredClone,
@@ -52,7 +52,13 @@ async function harness(disk = { value:seed() }, strict = false, scheduled = fals
     path=resolve(path);
     if(path === resolve("lib/persist.ts"))return persist;
     if(path === resolve("lib/defender-store.ts"))return defender;
-    if(!modules.has(path))modules.set(path,(async()=>new SourceTextModule(ts.transpileModule(await readFile(path,"utf8"),{
+    if(nessusFixture && path === resolve("lib/nessus.ts")){
+      if(!modules.has(path))modules.set(path,synthetic(Object.fromEntries(['nessusConfig','nessusLaunchScan','nessusServerStatus','nessusListFolders','nessusListScans','nessusScanStatus','nessusScanSchedule','nessusScanControl','nessusImportFindings'].map(key=>[key,
+        key==='nessusScanStatus'?async()=>({status:nessusFixture.status,progress:nessusFixture.status==='completed'?100:50}):
+        key==='nessusImportFindings'?async()=>clone(nessusFixture.result):()=>{throw Error('Unexpected Nessus fixture call '+key);}]))));
+      return modules.get(path);
+    }
+    if(!modules.has(path))modules.set(path,(async()=>new SourceTextModule(ts.transpileModule((await readFile(path,"utf8"))+(path===resolve("lib/store.ts")?'\nexport { refreshVendorScans };':''),{
       compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText,{identifier:path,context}))());
     return modules.get(path);
   }
@@ -243,4 +249,33 @@ test("requests pin one committed generation across refresh and later requests se
   });
   await h.requestContext.run({},async()=>{await h.store.ensureHydrated();assert.equal(h.store.getCompanyIdentity(company.id).name,"Changed");});
   assert.equal(h.saves(),0);h.context.__vulnCommittedReader.stop();
+});
+
+
+test("failed SQL storage suspends all new scheduler ticks without changing the schedule",async()=>{
+ const h=await harness(undefined,true,true);h.store.publishDefenderSnapshot(snapshot);h.fail();
+ await assert.rejects(h.store.commitPlatformMutation(),/simulated database save failure/);
+ const before=h.context.__vulnMutationVersion;
+ for(const timer of h.intervals.filter(t=>t.ms===60000))timer.fn();
+ assert.equal(h.context.__vulnSchedulerTick,undefined);
+ assert.equal(h.context.__vulnScannerExportTick,undefined);
+ assert.equal(h.context.__vulnVulnersBridgeTick,undefined);
+ assert.equal(h.context.__vulnMutationVersion,before);
+ assert.equal(h.disk.value.settings.schedule.autoSyncEnabled,false,'do not rewrite the saved schedule to suppress failed storage');
+});
+
+
+for(const status of ['running','completed'])test(`Nessus ${status} poll saves the correct scope including imported findings with no closures`,async()=>{
+ const data=seed();data.scans=[['S-1',{id:'S-1',companyId:company.id,companyName:company.name,connector:'nessus',status:'Running',targets:['host-1'],vendor:{nessusScanId:1,lastPoll:0,imported:false}}]];
+ const h=await harness({value:data},true,false,undefined,{status,result:{findings:[{cve:'CVE-2026-1234',title:'Patch fixture',asset:'host-1',assetAliases:[],severity:'High',cvss:8,exploitAvailable:false,remediation:'Install update'}],scannedHosts:[]}});
+ await h.store.refreshVendorScans(h.context.__vulnStore);
+ await h.store.commitPlatformMutation();
+ if(status==='running'){
+  assert.deepEqual(clone(h.changes()),{scans:['S-1']});assert.equal(h.disk.value.findings.length,0);
+ }else{
+  assert.equal(h.changes(),undefined,'a completed import must include all changed findings');
+  assert.equal(h.disk.value.findings.length,1);assert.equal(h.disk.value.findings[0][1].cve,'CVE-2026-1234');
+  assert.equal(h.disk.value.scans[0][1].vendor.imported,true);
+  const restarted=await harness(h.disk,true);assert.equal(restarted.store.computeMetrics({companyId:company.id}).totalOpen,1);
+ }
 });

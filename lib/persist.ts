@@ -1,8 +1,8 @@
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 import { createHash } from "node:crypto";
 import { createReportingInputDigests, publishReportingInputRevisions, publishSqlReportingChanges, reportingSnapshotManifest } from "./db/customer-reporting-revisions.mjs";
 import { readPlatformAuthority, bindPlatformWriter } from "./db/platform-authority.mjs";
-import { loadPlatformStore, savePlatformStore, savePlatformDelta, platformSaveTimeoutMs } from "./db/platform-store.mjs";
+import { loadPlatformStore, preparePlatformStore, commitPreparedPlatformStore, savePlatformDelta, platformSaveTimeoutMs } from "./db/platform-store.mjs";
 import { loadCommittedPlatform } from "./db/platform-reader.mjs";
 
 // Snapshot persistence. The in-memory store (companies, folders, scans,
@@ -445,39 +445,54 @@ export async function saveSnapshot(data: unknown, options?: { guard?: () => void
 
   if (strictPlatformPersistence()) {
     if (!persistence.platformState || persistence.platformAuthority?.mode !== "sql") throw new Error("A committed SQL generation must be loaded before writing.");
-    const client = await p.connect();
-    // SQL authority always publishes reporting revisions in the same commit.
+    // Full comparisons/report hashing can exceed PostgreSQL's idle transaction
+    // limit. Prepare BEFORE borrowing a connection or locking the authority row.
     const reporting = createReportingInputDigests(reportingDigestCache);
-    const startedAt = Date.now(), timeoutMs = platformSaveTimeoutMs(options?.changes);
-    const deadline = startedAt + timeoutMs;
-    if (timeoutMs > 300000) console.info(`[persist] Large SQL publication started: ${options?.changes?.findings?.length} findings; ${timeoutMs / 1000}s limit.`);
+    const startedAt = Date.now();
+    let deadline = startedAt + 300000, cancelled = false, phase = "prepare";
+    let client: PoolClient | undefined;
     const guard = () => {
-      if (Date.now() >= deadline) throw new Error(`SQL platform save exceeded its ${timeoutMs / 1000}s deadline.`);
+      if (cancelled || Date.now() >= deadline) throw new Error(`SQL platform ${phase} deadline exceeded.`);
       options?.guard?.();
     };
     try {
-      const next = await withTimeout((async () => {
-      await client.query("BEGIN; SET LOCAL statement_timeout='60s'; SET LOCAL lock_timeout='10s'; SET LOCAL idle_in_transaction_session_timeout='90s'");
-      const next = options?.changes !== undefined
-        ? await savePlatformDelta(client, obj, persistence.platformState, options.changes, { guard })
-        : await savePlatformStore(client, obj, persistence.platformState, { reporting, guard });
-      if ("changedKeys" in next) {
-        await publishSqlReportingChanges(client, next.changedKeys);
-        // Complete-snapshot cache is no longer current after a delta commit.
-        reportingDigestCache.clear();
-      } else await publishReportingInputRevisions(client, reporting.finish());
+      const prepared = options?.changes === undefined
+        ? await preparePlatformStore(obj, persistence.platformState, { reporting, guard }) : undefined;
+      const digests = prepared ? reporting.finish() : undefined;
       guard();
-      await client.query("COMMIT");
-      return next;
+      const preparedMs = Date.now() - startedAt;
+      const timeoutMs = platformSaveTimeoutMs(options?.changes, prepared?.findingChanges);
+      phase = "connect";
+      client = await p.connect();
+      guard();
+      const activeClient = client;
+      deadline = Date.now() + timeoutMs;
+      if (timeoutMs > 300000) console.info(`[persist] Large SQL publication started: ${options?.changes?.findings?.length ?? prepared?.findingChanges} findings; ${timeoutMs / 1000}s limit.`);
+      const next = await withTimeout((async () => {
+        phase = "write";
+        await activeClient.query("BEGIN; SET LOCAL statement_timeout='60s'; SET LOCAL lock_timeout='10s'; SET LOCAL idle_in_transaction_session_timeout='90s'");
+        const next = prepared
+          ? await commitPreparedPlatformStore(activeClient, prepared, { guard })
+          : await savePlatformDelta(activeClient, obj, persistence.platformState, options!.changes!, { guard });
+        phase = "reporting";
+        if ("changedKeys" in next) await publishSqlReportingChanges(activeClient, next.changedKeys);
+        else await publishReportingInputRevisions(activeClient, digests!);
+        guard();
+        phase = "commit";
+        await activeClient.query("COMMIT");
+        return next;
       })(), timeoutMs, "SQL platform save");
       persistence.platformState = next; persistence.platformAuthority = next.authority;
-      if (!("changedKeys" in next)) reporting.committed();
-      if (timeoutMs > 300000) console.info(`[persist] Large SQL publication committed in ${Date.now() - startedAt}ms.`);
+      if ("changedKeys" in next) reportingDigestCache.clear();
+      else reporting.committed();
+      console.info(`[persist] SQL save committed: scope=${prepared ? "full" : "delta"} prepareMs=${preparedMs} totalMs=${Date.now() - startedAt} inserted=${next.counts.inserted} updated=${next.counts.updated} deleted=${next.counts.deleted} metadata=${next.counts.metadata}.`);
     } catch (error) {
-      client.release(error instanceof Error ? error : new Error(String(error)));
+      cancelled = true;
+      console.error(`[persist] SQL save stopped: phase=${phase} scope=${options?.changes === undefined ? "full" : "delta"} elapsedMs=${Date.now() - startedAt} code=${(error as {code?: string})?.code ?? "none"}.`);
+      client?.release(error instanceof Error ? error : new Error(String(error)));
       throw error;
     }
-    client.release();
+    client?.release();
     return;
   }
 

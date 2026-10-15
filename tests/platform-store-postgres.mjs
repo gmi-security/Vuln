@@ -121,11 +121,21 @@ try{
  const reporting=revisionModule.createReportingInputDigests();
  await tx(db,async()=>{await transitionPlatformStore(db,'sql',reversed.authority,{actor:'integration',reporting});await revisionModule.publishReportingInputRevisions(db,reporting.finish());});
  const nativePool=new pg.Pool({...config,database:name,max:2});
+ let loans=0,preparedOutside=0,recordWritten=false;
+ const observedPool={on:(...a)=>nativePool.on(...a),end:()=>nativePool.end(),query:(...a)=>nativePool.query(...a),async connect(){
+  const c=await nativePool.connect();loans++;
+  return {release(e){loans--;c.release(e);},async query(sql,params){const result=await c.query(sql,params);if(sql.startsWith('INSERT INTO app_findings'))recordWritten=true;return result;}};
+ }};
+ const observedStore={...storeModule,async preparePlatformStore(...args){
+  assert.equal(loans,0,'expensive comparison must not borrow a DB connection');
+  const plan=await storeModule.preparePlatformStore(...args);
+  assert.equal(loans,0,'reporting hashes must also finish before a transaction');preparedOutside++;return plan;
+ }};
  const oldUrl=process.env.DATABASE_URL,oldMode=process.env.VULN_PLATFORM_STORE;process.env.DATABASE_URL='postgresql://localhost/test';process.env.VULN_PLATFORM_STORE='sql';
  try{
   const code=ts.transpileModule(await readFile('lib/persist.ts','utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText;
   async function instance(sameProcess=false){if(!sameProcess)delete globalThis.__vulnDatabasePersistenceV1;const m=new SourceTextModule(code);await m.link(name=>{
-   const values=name==='pg'?{Pool:class{constructor(){return nativePool;}}}:name.endsWith('customer-reporting-revisions.mjs')?revisionModule:name.endsWith('platform-authority.mjs')?authorityModule:name.endsWith('platform-store.mjs')?storeModule:name.endsWith('platform-reader.mjs')?readerModule:crypto;
+   const values=name==='pg'?{Pool:class{constructor(){return observedPool;}}}:name.endsWith('customer-reporting-revisions.mjs')?revisionModule:name.endsWith('platform-authority.mjs')?authorityModule:name.endsWith('platform-store.mjs')?observedStore:name.endsWith('platform-reader.mjs')?readerModule:crypto;
    return new SyntheticModule(Object.keys(values),function(){for(const k of Object.keys(values))this.setExport(k,values[k]);});});await m.evaluate();return m.namespace;}
   const runtime=await instance(),data=await runtime.loadSnapshot();
   const otherRoute=await instance(true);
@@ -138,6 +148,20 @@ try{
   await complete.bucket('meta',JSON.stringify(Object.fromEntries(Object.entries(data).filter(([k])=>!platformCollections[k]))));
   assert.equal(complete.finish()[0].hash,after.hash,'Incremental reporting pieces must equal the independent full-generation digest');
   ok('bounded row edit publishes exactly the same reporting revision content as full comparison');
+  data.findings[0][1].title='Prepared update';recordWritten=false;
+  const beforePrepared=await readPlatformAuthority(db),beforeReport=await revisionModule.readReportingInputRevision(db,'CO-1');
+  await assert.rejects(runtime.saveSnapshot(data,{guard(){if(recordWritten)throw Error('abort prepared write after SQL insert');}}),/abort prepared write/);
+  assert.deepEqual(await readPlatformAuthority(db),beforePrepared);
+  assert.deepEqual(await revisionModule.readReportingInputRevision(db,'CO-1'),beforeReport);
+  assert.notEqual((await db.query('SELECT payload FROM app_findings WHERE id=$1',[data.findings[0][0]])).rows[0].payload.title,'Prepared update');
+  await runtime.saveSnapshot(data);
+  assert.equal(preparedOutside,2);assert.equal(loans,0);
+  assert.equal((await db.query('SELECT payload FROM app_findings WHERE id=$1',[data.findings[0][0]])).rows[0].payload.title,'Prepared update');
+  const preparedDigest=revisionModule.createReportingInputDigests();
+  for(const [kind,c]of Object.entries(platformCollections))for(let b=0;b<c.buckets;b++)await preparedDigest.bucket(`${kind}:${String(b).padStart(2,'0')}`,JSON.stringify(data[kind].filter(([id])=>platformBucket(id,c.buckets)===b)));
+  await preparedDigest.bucket('meta',JSON.stringify(Object.fromEntries(Object.entries(data).filter(([k])=>!platformCollections[k]))));
+  assert.equal(preparedDigest.finish()[0].hash,(await revisionModule.readReportingInputRevision(db,'CO-1')).hash);
+  ok('full preparation holds no SQL connection; fault after row write rolls back authority, data and reporting, then retry commits matching hashes');
   const bulkCount=Number(process.env.VULN_TEST_BULK_ROWS??1501);
   assert.ok(Number.isInteger(bulkCount)&&bulkCount>=1501&&bulkCount<=800000);
   const bulk=Array.from({length:bulkCount},(_,i)=>[`B-${i}`,{id:`B-${i}`,companyId:'CO-1',connector:'defender',
