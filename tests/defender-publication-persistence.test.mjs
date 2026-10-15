@@ -37,7 +37,7 @@ async function harness(disk = { value:seed() }, strict = false, scheduled = fals
     },
     saveSnapshot:async (value,options)=>{saveCalls++;
       let frozen;if(frozenGate && options?.changes===undefined){options?.captureGuard?.();frozen=clone(value);await frozenGate();}
-      if(gate)await (typeof gate === "function" ? gate() : gate);if(failSave)throw new Error("simulated database save failure");options?.guard?.();if(!frozen)options?.captureGuard?.();
+      if(gate)await gate;if(failSave)throw new Error("simulated database save failure");options?.guard?.();if(!frozen)options?.captureGuard?.();
       lastChanges=options?.changes;const next=frozen??clone(value);
       if(options?.changes!==undefined)for(const kind of ['companies','folders','scans','findings','assets']){
         const entries=new Map(disk.value[kind]),incoming=new Map(next[kind]);
@@ -293,7 +293,7 @@ for(const status of ['running','completed'])test(`Nessus ${status} poll saves th
  if(status==='running'){
   assert.deepEqual(clone(h.changes()),{scans:['S-1']});assert.equal(h.disk.value.findings.length,0);
  }else{
-  assert.deepEqual(clone(h.changes()),{scans:['S-1'],findings:[h.disk.value.findings[0][0]]});
+  assert.equal(h.changes(),undefined,'a completed import must include all changed findings');
   assert.equal(h.disk.value.findings.length,1);assert.equal(h.disk.value.findings[0][1].cve,'CVE-2026-1234');
   assert.equal(h.disk.value.scans[0][1].vendor.imported,true);
   const restarted=await harness(h.disk,true);assert.equal(restarted.store.computeMetrics({companyId:company.id}).totalOpen,1);
@@ -309,7 +309,7 @@ test('new Nessus scan completion remains dirty after a capture made during its A
   nessusListScans:async()=>[{id:9,folderId:7,name:'Fixture scan',status:'completed',lastModified:1790000000}],
   nessusImportFindings:async()=>{h.intervals.find(t=>t.ms===6000).fn();await new Promise(r=>setImmediate(r));return clone(result);},
  }});
- h.block(()=>{captures++;captured();return gate});
+ h.freezeBlock(()=>{captures++;captured();return gate});
  const importing=h.store.importFromNessus();await seen;await new Promise(r=>setImmediate(r));release();
  const imported=await importing;assert.equal(imported.scansImported,1);assert.equal(imported.findingsImported,1);
  assert.ok(captures>=2,'completion must cause another save after the initial scan capture');

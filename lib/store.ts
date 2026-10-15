@@ -256,7 +256,6 @@ export function resolveIdentity(s: StoreShape, companyId: string, id: string): s
 // Safe to call every import — already-linked identifiers are a no-op.
 export function linkIdentities(s: StoreShape, companyId: string, ids: (string | undefined | null)[]): void {
   linkIdentitiesAliases(s.identityAliases, companyId, ids);
-  markDirty({});
 }
 
 export function canonicalAssetKey(s: StoreShape, companyId: string, asset: string): string {
@@ -398,13 +397,13 @@ async function closeStaleFindings(
       ) {
         f.status = "Resolved";
         f.resolvedAt = observedAtIso;
-        markDirty({ findings: [f.id] });
         closed += 1;
       }
     }
     i += 1;
     if (i % 500 === 0) await new Promise((resolve) => setImmediate(resolve));
   }
+  if (closed > 0) markDirty();
   return closed;
 }
 
@@ -2028,7 +2027,7 @@ async function refreshVendorScans(s: StoreShape): Promise<void> {
   if (readerRole()) return;
   const now = Date.now();
   const pending = [...s.scans.values()].filter(scan => scan.vendor &&
-    (["Running", "Paused", "Queued"].includes(scan.status) || scan.status === "Completed" && !scan.vendor.imported) && now - scan.vendor.lastPoll >= 4000);
+    ["Running", "Paused", "Queued"].includes(scan.status) && now - scan.vendor.lastPoll >= 4000);
   if (!pending.length) return;
   let routes: ScannerRoute[] | null;
   try { routes = await loadReviewedScannerRoutes("nessus"); }
@@ -2037,11 +2036,9 @@ async function refreshVendorScans(s: StoreShape): Promise<void> {
   for (const scan of pending) {
     if (!scan.vendor) continue;
     const active =
-      scan.status === "Running" || scan.status === "Paused" || scan.status === "Queued" ||
-      scan.status === "Completed" && !scan.vendor.imported;
+      scan.status === "Running" || scan.status === "Paused" || scan.status === "Queued";
     if (!active || now - scan.vendor.lastPoll < 4000) continue;
     scan.vendor.lastPoll = now;
-    markDirty({ scans: [scan.id] });
     try {
       const context = nessusContextFromRoutes(routes, scan.companyId);
       if (context) {
@@ -2062,10 +2059,12 @@ async function refreshVendorScans(s: StoreShape): Promise<void> {
       if (scan.status === "Completed" && !scan.vendor.imported) {
         // Mark imported only after the import succeeds, so a transient
         // Nessus failure leaves it false and the next poll retries.
-        await importVendorFindings(s, scan);
+        // Completion changes findings and aliases as well as scan progress.
+        // Promote even on a partial import failure; no findings may be omitted
+        // from the next capture just because no stale findings were closed.
+        try { await importVendorFindings(s, scan); }
+        finally { markDirty(); }
         scan.vendor.imported = true;
-        scan.error = undefined;
-        markDirty({ scans: [scan.id] });
       }
     } catch (err) {
       scan.error = err instanceof Error ? err.message : "Nessus polling failed.";
@@ -2096,7 +2095,7 @@ async function importVendorFindings(s: StoreShape, scan: InternalScan, prepared?
       continue;
     }
     const created: Finding = {
-      id: nextId(s, "VLN", "findings"),
+      id: `VLN-${(s.counter += 1)}`,
       scanId: scan.id,
       companyId: scan.companyId,
       companyName: scan.companyName,
@@ -2149,7 +2148,6 @@ async function importVendorFindings(s: StoreShape, scan: InternalScan, prepared?
   // covers hosts with at least one finding, missing every host Nessus
   // scanned clean.
   scan.scannedHostAliases = Array.from(coveredAliases);
-  markDirty({ scans: [scan.id] });
   await closeStaleFindings(s, scan.companyId, scan.connector, coveredAssetKeys, touchedKeys, completedAt);
   const all = Array.from(s.findings.values()).filter((f) => f.scanId === scan.id);
   scan.findingsCount = all.length;
@@ -2157,7 +2155,6 @@ async function importVendorFindings(s: StoreShape, scan: InternalScan, prepared?
   for (const f of all) counts[f.severity] += 1;
   scan.severityCounts = counts;
   scan.hostsScanned = new Set(all.map((f) => f.asset)).size || scan.targets.length;
-  markDirty({ scans: [scan.id] });
 }
 
 // --- companies & folders ---------------------------------------------------
@@ -3576,7 +3573,6 @@ export async function enrichThreatIntel(): Promise<{
 }> {
   const s = store();
   const kevAdded = await refreshKevFromCisa();
-  markDirty({}); // The refreshed KEV catalog is persisted even with no findings.
 
   const cveRe = /^CVE-\d{4}-\d{4,}$/i;
   // Every CVE a finding covers (a scanner plugin often maps to several).
@@ -4729,22 +4725,19 @@ export function computeAttackPaths(filter?: {
 
 // Recompute a finding's environmental context + real risk against the current
 // inventory. Used after an inventory sync so existing findings reprice.
-export function rescoreFinding(s: StoreShape, f: Finding, riskOnly = false): void {
-  const next = riskFields(s, {
-    cve: f.cve, cvss: f.cvss, epss: f.epss, exploitAvailable: f.exploitAvailable,
-    asset: f.asset, companyId: f.companyId,
-  });
-  // Inventory-only recalculation has not changed the assessment itself. Compare
-  // just the small risk projection; no full finding serialization is required.
-  const changed = !riskOnly || Object.entries(next).some(([key, value]) =>
-    key === "compensatingControl"
-      ? JSON.stringify(f.compensatingControl) !== JSON.stringify(value)
-      : f[key as keyof Finding] !== value);
-  if (changed) {
-    Object.assign(f, next);
-    // Other callers may already have changed evidence, scores or lastSeen.
-    markDirty({ findings: [f.id] });
-  }
+export function rescoreFinding(s: StoreShape, f: Finding): void {
+  markDirty();
+  Object.assign(
+    f,
+    riskFields(s, {
+      cve: f.cve,
+      cvss: f.cvss,
+      epss: f.epss,
+      exploitAvailable: f.exploitAvailable,
+      asset: f.asset,
+      companyId: f.companyId,
+    }),
+  );
 }
 
 // Rescore every finding in the store. This is O(total findings) — tens of
@@ -4767,7 +4760,7 @@ async function rescoreAllFindings(
   for (const f of s.findings.values()) {
     const before = f.realRisk;
     if (companyIds && !companyIds.has(f.companyId)) continue;
-    rescoreFinding(s, f, true);
+    rescoreFinding(s, f);
     if (f.realRisk !== before || matchesSource(f)) rescored += 1;
     i += 1;
     if (i % 500 === 0) await new Promise((resolve) => setImmediate(resolve));
@@ -4800,7 +4793,7 @@ function upsertAsset(
         criticality: input.criticality,
         lastSynced: nowIso,
       };
-      markDirty({ assets: [automate.id] });
+      markDirty();
       return automate;
     }
   }
@@ -4820,13 +4813,12 @@ function upsertAsset(
   );
   if (existing) {
     Object.assign(existing, input, { lastSynced: nowIso });
-    markDirty({ assets: [existing.id] });
+    markDirty();
     return existing;
   }
-  const id = input.id ?? nextId(s, "AST", "assets");
+  const id = input.id ?? nextId(s, "AST");
   const asset: InternalAsset = { ...input, id, lastSynced: nowIso };
   s.assets.set(id, asset);
-  markDirty({ assets: [id] });
   return asset;
 }
 
@@ -5015,7 +5007,7 @@ export async function importFromSpiderfoot(): Promise<
     const company = s.companies.get(companyId)!;
     const folder = ensureFolder(s, companyId, "SpiderFoot");
     const nowIso = new Date().toISOString();
-    const scanId = nextId(s, "SCAN", "scans");
+    const scanId = nextId(s, "SCAN");
     const scan: InternalScan = {
       id: scanId,
       name: sf.name || `SpiderFoot ${sf.id}`,
@@ -5053,12 +5045,10 @@ export async function importFromSpiderfoot(): Promise<
       );
       if (existing) {
         existing.lastSeen = nowIso;
-        markDirty({ findings: [existing.id] });
         continue;
       }
-      const findingId = nextId(s, "VLN", "findings");
-      s.findings.set(findingId, {
-        id: findingId,
+      s.findings.set(`VLN-${(s.counter += 1)}`, {
+        id: `VLN-${s.counter}`,
         scanId: scan.id,
         companyId: scan.companyId,
         companyName: scan.companyName,
@@ -5100,7 +5090,6 @@ export async function importFromSpiderfoot(): Promise<
     for (const f of all) counts[f.severity] += 1;
     scan.severityCounts = counts;
     scan.hostsScanned = new Set(all.map((f) => f.asset)).size || scan.targets.length;
-    markDirty({ scans: [scan.id] });
     findingsImported += all.length;
   }
 
@@ -5125,6 +5114,7 @@ export type BurpImportResult = {
 // under a per-company "Burp" scan. Unmatched hosts are skipped (counted).
 export function importBurpFindings(items: BurpFinding[]): BurpImportResult {
   const s = store();
+  markDirty(); // callers (XML upload) may not flush explicitly
   const nowIso = new Date().toISOString();
   const matched = new Set<string>();
   let findingsImported = 0;
@@ -5141,7 +5131,7 @@ export function importBurpFindings(items: BurpFinding[]): BurpImportResult {
     if (!scan) {
       const company = s.companies.get(companyId)!;
       const folder = ensureFolder(s, companyId, "Burp");
-      const scanId = nextId(s, "SCAN", "scans");
+      const scanId = nextId(s, "SCAN");
       scan = {
         id: scanId,
         name: `Burp Pentest — ${company.name}`,
@@ -5182,12 +5172,10 @@ export function importBurpFindings(items: BurpFinding[]): BurpImportResult {
     );
     if (existing) {
       existing.lastSeen = nowIso;
-      markDirty({ findings: [existing.id] });
       continue;
     }
-    const findingId = nextId(s, "VLN", "findings");
-    s.findings.set(findingId, {
-      id: findingId,
+    s.findings.set(`VLN-${(s.counter += 1)}`, {
+      id: `VLN-${s.counter}`,
       scanId: scan.id,
       companyId: scan.companyId,
       companyName: scan.companyName,
@@ -5230,7 +5218,6 @@ export function importBurpFindings(items: BurpFinding[]): BurpImportResult {
     for (const f of all) counts[f.severity] += 1;
     scan.severityCounts = counts;
     scan.hostsScanned = new Set(all.map((f) => f.asset)).size;
-    markDirty({ scans: [scan.id] });
   }
 
   return { findingsImported, companiesMatched: matched.size, skipped };
@@ -5272,6 +5259,7 @@ export type NmapImportResult = {
 // model; findings are limited to genuinely risky reachable services.
 export function importNmapScan(hosts: NmapHost[]): NmapImportResult {
   const s = store();
+  markDirty(); // callers (XML upload) may not flush explicitly
   const nowIso = new Date().toISOString();
   const matched = new Set<string>();
   let hostsProcessed = 0;
@@ -5336,7 +5324,7 @@ export function importNmapScan(hosts: NmapHost[]): NmapImportResult {
     let scan = scanByCompany.get(companyId);
     if (!scan) {
       const folder = ensureFolder(s, companyId, "Nmap");
-      const scanId = nextId(s, "SCAN", "scans");
+      const scanId = nextId(s, "SCAN");
       scan = {
         id: scanId,
         name: `Nmap Discovery — ${company.name}`,
@@ -5374,12 +5362,10 @@ export function importNmapScan(hosts: NmapHost[]): NmapImportResult {
       );
       if (existing) {
         existing.lastSeen = nowIso;
-        markDirty({ findings: [existing.id] });
         continue;
       }
-      const findingId = nextId(s, "VLN", "findings");
-      s.findings.set(findingId, {
-        id: findingId,
+      s.findings.set(`VLN-${(s.counter += 1)}`, {
+        id: `VLN-${s.counter}`,
         scanId: scan.id,
         companyId: scan.companyId,
         companyName: scan.companyName,
@@ -5423,7 +5409,6 @@ export function importNmapScan(hosts: NmapHost[]): NmapImportResult {
     for (const f of all) counts[f.severity] += 1;
     scan.severityCounts = counts;
     scan.hostsScanned = new Set(all.map((f) => f.asset)).size;
-    markDirty({ scans: [scan.id] });
   }
 
   return { hostsProcessed, assetsUpdated, findingsImported, companiesMatched: matched.size, skipped };
@@ -5508,7 +5493,7 @@ export async function importFromVulners(): Promise<VulnersImportResult | { error
 
     if (!best) continue;
     f.enrichments = recordVulnersEnrichment(f.enrichments, enrichmentObservedAt);
-    markDirty({ findings: [f.id] });
+    markDirty();
 
     let changed = false;
     if (best.epss > 0 && (!f.epss || best.epss > f.epss)) {
@@ -5635,7 +5620,7 @@ export async function importFromVulnersBridge(): Promise<
     let scan = scanByCompany.get(companyId);
     if (!scan) {
       const folder = ensureFolder(s, companyId, "Vulners Bridge");
-      const scanId = nextId(s, "SCAN", "scans");
+      const scanId = nextId(s, "SCAN");
       scan = {
         id: scanId,
         name: `Vulners Bridge — ${companyName}`,
@@ -5682,7 +5667,7 @@ export async function importFromVulnersBridge(): Promise<
         });
         continue;
       }
-      const fid = nextId(s, "FIND", "findings");
+      const fid = nextId(s, "FIND");
       const f: Finding = {
         id: fid,
         scanId: scan.id,
@@ -5722,7 +5707,6 @@ export async function importFromVulnersBridge(): Promise<
       scan.findingsCount += 1;
       scan.severityCounts[f.severity] = (scan.severityCounts[f.severity] ?? 0) + 1;
       scan.hostsScanned += 1;
-      markDirty({ scans: [scan.id] });
       findingsImported += 1;
     }
   }
@@ -6117,7 +6101,7 @@ export async function importFromArtemis(): Promise<
 
     let scan = existingScans[0];
     if (!scan) {
-      const scanId = nextId(s, "SCAN", "scans");
+      const scanId = nextId(s, "SCAN");
       scan = {
         id: scanId,
         name: `Artemis — ${tag}`,
@@ -6145,7 +6129,6 @@ export async function importFromArtemis(): Promise<
       s.scans.set(scanId, scan);
     } else {
       scan.completedAt = nowIso;
-      markDirty({ scans: [scan.id] });
     }
     tagsProcessed += 1;
     matchedCompanies.add(companyId);
@@ -6159,12 +6142,10 @@ export async function importFromArtemis(): Promise<
       );
       if (existing) {
         existing.lastSeen = nowIso;
-        markDirty({ findings: [existing.id] });
         continue;
       }
-      const findingId = nextId(s, "VLN", "findings");
-      s.findings.set(findingId, {
-        id: findingId,
+      s.findings.set(`VLN-${(s.counter += 1)}`, {
+        id: `VLN-${s.counter}`,
         scanId: scan.id,
         companyId: scan.companyId,
         companyName: scan.companyName,
@@ -6206,7 +6187,6 @@ export async function importFromArtemis(): Promise<
     for (const f of all) counts[f.severity] += 1;
     scan.severityCounts = counts;
     scan.hostsScanned = new Set(all.map((f) => f.asset)).size || 0;
-    markDirty({ scans: [scan.id] });
     findingsImported += all.length;
   }
 
@@ -6286,13 +6266,13 @@ async function applyTidalInventory(
     importedCompanies.add(company.id);
   }
 
-  const findingsRescored = await rescoreAllFindings(s, (f) => f.assetSource === "tidal", importedCompanies);
+  const findingsRescored = await rescoreAllFindings(s, (f) => f.assetSource === "tidal", routes ? importedCompanies : undefined);
 
   // If auto-scan is enabled, scan any newly-known assets that have no
   // coverage yet.
   let autoScan: AutoScanResult | undefined;
   if (s.settings.autoScanNewAssets) {
-    autoScan = await autoScanGaps(importedCompanies);
+    autoScan = await autoScanGaps(routes ? importedCompanies : undefined);
   }
 
   await flushNow();
@@ -6455,11 +6435,11 @@ export async function importFromAutomate(): Promise<AutomateImportResult | { err
     }
   }
 
-  const findingsRescored = await rescoreAllFindings(s, (f) => f.assetSource === "automate", importedCompanies);
+  const findingsRescored = await rescoreAllFindings(s, (f) => f.assetSource === "automate", routes ? importedCompanies : undefined);
 
   let autoScan: AutoScanResult | undefined;
   if (s.settings.autoScanNewAssets) {
-    autoScan = await autoScanGaps(importedCompanies);
+    autoScan = await autoScanGaps(routes ? importedCompanies : undefined);
   }
 
   await flushNow();
@@ -6911,7 +6891,7 @@ async function importEndpoints(
     assetsUpserted += 1;
   }
 
-  const companyIds = new Set([internal.id]);
+  const companyIds = reviewedCompanyId ? new Set([reviewedCompanyId]) : undefined;
   const findingsRescored = await rescoreAllFindings(s, (f) => f.assetSource === source, companyIds);
 
   let autoScan: AutoScanResult | undefined;
@@ -7202,11 +7182,10 @@ export async function importFromNessus(): Promise<
     for (const scan of s.scans.values()) {
       if (scan.connector === "nessus" && scan.vendor) {
         scan.vendor.nessusLastModified = null;
-        markDirty({ scans: [scan.id] });
       }
     }
     s.meta.nessusBackfillCorrected = true;
-    markDirty({});
+    markDirty();
   }
 
   let folders;
@@ -7302,12 +7281,12 @@ export async function importFromNessus(): Promise<
     // newer completed run on every sync.
     const existing = routes === null ? existingScans[0] : existingScans.sort((a, b) =>
       (b.vendor?.nessusLastModified ?? 0) - (a.vendor?.nessusLastModified ?? 0))[0];
-    if (existing?.vendor && !existing.vendor.imported && summary.status !== "completed") {
+    if (routes !== null && existing?.vendor && !existing.vendor.imported && summary.status !== "completed") {
       // The existing pending record is handled by polling; do not duplicate it.
       skipped++;
       continue;
     }
-    if (existing?.vendor?.imported) {
+    if (existing && (routes === null || existing.vendor?.imported)) {
       // Older records (imported before this field existed, or created by the
       // live Start-Scan flow which doesn't set it) have no stamped
       // lastModified yet. Don't just trust Nessus's current value as "already
@@ -7322,7 +7301,6 @@ export async function importFromNessus(): Promise<
           : 0;
         if (!summary.lastModified || summary.lastModified <= recordedAt) {
           existing.vendor.nessusLastModified = summary.lastModified;
-          markDirty({ scans: [existing.id] });
           skipped += 1;
           continue;
         }
@@ -7356,11 +7334,10 @@ export async function importFromNessus(): Promise<
           ? new Date(summary.lastModified * 1000).toISOString()
           : nowIso
         : null;
-    if (summary.status === "completed" && existing?.vendor && !existing.vendor.imported) {
+    if (prepared && existing?.vendor && !existing.vendor.imported) {
       // A pending or previously failed run keeps its local identity when its
       // completed result has passed the current ownership checks.
       existing.completedAt = completedAt;
-      markDirty({ scans: [existing.id] });
       try {
         await importVendorFindings(s, existing, prepared);
         existing.status = "Completed";
@@ -7372,10 +7349,10 @@ export async function importFromNessus(): Promise<
       } catch (error) {
         errors.push(error instanceof Error ? error.message : "Nessus result could not be applied.");
       }
-      markDirty({ scans: [existing.id] });
+      markDirty();
       continue;
     }
-    const id = nextId(s, "SCAN", "scans");
+    const id = nextId(s, "SCAN");
     const scan: InternalScan = {
       id,
       name: summary.name,
@@ -7417,7 +7394,7 @@ export async function importFromNessus(): Promise<
       } finally {
         // Completion metadata and any findings changed after an awaited import
         // must remain dirty even if an earlier capture is already being saved.
-        markDirty({ scans: [scan.id] });
+        markDirty();
       }
     }
   }
@@ -7610,12 +7587,11 @@ async function runVulnersBridgeScanAsync(
             rescoreFinding(s, existing);
           }
           existing.lastSeen = nowIso;
-          markDirty({ findings: [existing.id] });
           continue;
         }
         const severity: Finding["severity"] =
           v.cvss >= 9 ? "Critical" : v.cvss >= 7 ? "High" : v.cvss >= 4 ? "Medium" : v.cvss > 0 ? "Low" : "Info";
-        const fid = nextId(s, "FIND", "findings");
+        const fid = nextId(s, "FIND");
         const f: Finding = {
           id: fid,
           scanId,
@@ -7656,6 +7632,7 @@ async function runVulnersBridgeScanAsync(
       // check of it — any other open Vulners finding on this same target not
       // among this round's results is stale (the CVE it flagged is gone).
       const currentCves = new Set(results.map((v) => v.cve));
+      let closedHere = 0;
       // Reviewed bridge completeness is not yet attested by the deployed API.
       // Preserve prior findings until that source contract is verified.
       for (const f of context ? [] : s.findings.values()) {
@@ -7668,9 +7645,10 @@ async function runVulnersBridgeScanAsync(
         ) {
           f.status = "Resolved";
           f.resolvedAt = nowIso;
-          markDirty({ findings: [f.id] });
+          closedHere += 1;
         }
       }
+      if (closedHere > 0) markDirty();
     }
   } catch (err) {
     const current = s.scans.get(scanId);
@@ -7679,7 +7657,6 @@ async function runVulnersBridgeScanAsync(
       current.error = err instanceof Error ? err.message : "Bridge scan failed.";
       current.completedAt = new Date().toISOString();
       current.progressFrozenAt = 0;
-      markDirty({ scans: [scanId] });
       if (current.bridgeScan) current.bridgeScan.done = true;
     }
     void flushNow().catch(error => console.error("[platform] background save failed:", error));
@@ -7699,7 +7676,6 @@ async function runVulnersBridgeScanAsync(
   current.completedAt = new Date().toISOString();
   current.progressFrozenAt = failedTargets ? Math.round(completedTargets / targets.length * 100) : 100;
   current.bridgeScan.done = true;
-  markDirty({ scans: [scanId] });
   void flushNow().catch(error => console.error("[platform] background save failed:", error));
 }
 
@@ -7741,16 +7717,13 @@ async function runZapScanAsync(
         await recheckActiveScanner(context);
         current.zapScan.phase = "spidering";
         current.progressFrozenAt = 5;
-        markDirty({ scans: [scanId] });
         const spiderScanId = await zapStartSpider(target, scope);
         current.zapScan.spiderScanId = spiderScanId;
-        markDirty({ scans: [scanId] });
         let crawled = false;
         for (let i = 0; i < 60; i++) {
           await recheckActiveScanner(context);
           const progress = await zapSpiderStatus(spiderScanId, scope?.config);
           current.progressFrozenAt = 5 + Math.round((progress / 100) * 35);
-          markDirty({ scans: [scanId] });
           if (progress === 100) { crawled = true; break; }
           await new Promise((r) => setTimeout(r, 5000));
         }
@@ -7758,22 +7731,18 @@ async function runZapScanAsync(
         await recheckActiveScanner(context);
         current.zapScan.phase = "scanning";
         current.progressFrozenAt = 40;
-        markDirty({ scans: [scanId] });
         const activeScanId = await zapStartActiveScan(target, scope);
         current.zapScan.activeScanId = activeScanId;
-        markDirty({ scans: [scanId] });
         let scanned = false;
         for (let i = 0; i < 120; i++) {
           await recheckActiveScanner(context);
           const progress = await zapActiveScanStatus(activeScanId, scope?.config);
           current.progressFrozenAt = 40 + Math.round((progress / 100) * 55);
-          markDirty({ scans: [scanId] });
           if (progress === 100) { scanned = true; break; }
           await new Promise((r) => setTimeout(r, 5000));
         }
         if (!scanned) throw new Error("ZAP active scan timed out; remote scan may still be running.");
         current.progressFrozenAt = 95;
-        markDirty({ scans: [scanId] });
         const report = await zapFetchReport(scope);
         const siteFindings = report.filter(v => scannerWebOrigin(v.asset) === scannerWebOrigin(target));
         await recheckActiveScanner(context);
@@ -7792,10 +7761,9 @@ async function runZapScanAsync(
           );
           if (existing) {
             existing.lastSeen = nowIso;
-            markDirty({ findings: [existing.id] });
             continue;
           }
-          const fid = nextId(s, "FIND", "findings");
+          const fid = nextId(s, "FIND");
           const f: Finding = {
             id: fid,
             scanId,
@@ -7845,7 +7813,6 @@ async function runZapScanAsync(
       current.error = err instanceof Error ? err.message : "ZAP scan failed.";
       current.completedAt = new Date().toISOString();
       current.progressFrozenAt = 0;
-      markDirty({ scans: [scanId] });
       if (current.zapScan) current.zapScan.phase = "done";
     }
     void flushNow().catch(error => console.error("[platform] background save failed:", error));
@@ -7865,7 +7832,6 @@ async function runZapScanAsync(
   current.completedAt = new Date().toISOString();
   current.progressFrozenAt = failedTargets ? Math.round(completedTargets / targets.length * 100) : 100;
   current.zapScan.phase = "done";
-  markDirty({ scans: [scanId] });
   void flushNow().catch(error => console.error("[platform] background save failed:", error));
 }
 
@@ -7921,7 +7887,7 @@ export async function startScan(input: {
   }
 
   const demo = getDemoProfile(input.connector);
-  const id = nextId(s, "SCAN", "scans");
+  const id = nextId(s, "SCAN");
   const nowIso = new Date().toISOString();
   const seedVal = hashSeed(id + input.connector + input.targets.join(","));
   const rand = mulberry32(seedVal);
