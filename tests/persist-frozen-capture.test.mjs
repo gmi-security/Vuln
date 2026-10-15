@@ -57,11 +57,11 @@ test('a frozen capture commits despite later RAM changes and the next save retai
  assert.equal(h.state.platformAuthority.revision,'7');
 });
 
-test('scoped writes keep the capture check until the transaction finishes',async()=>{
- const h=await harness();let changed=false;h.onWrite(()=>{changed=true});
- await assert.rejects(h.persist.saveSnapshot(h.data,{changes:{scans:['S-1']},captureGuard(){if(changed)throw Error('capture changed')}}),/capture changed/);
- assert.ok(!h.queries.includes('COMMIT'));
- assert.equal(h.state.platformAuthority.revision,'5');
+test('scoped frozen writes commit one capture and preserve a later mutation for the next save',async()=>{
+ const h=await harness();let changed=false;h.onWrite(()=>{changed=true;h.data.scans[0][1].progress=90});
+ await h.persist.saveSnapshot(h.data,{changes:{scans:['S-1']},captureGuard(){if(changed)throw Error('capture changed')}});
+ assert.equal(h.written[0].payload.progress,50);assert.equal(h.state.platformAuthority.revision,'6');
+ await h.persist.saveSnapshot(h.data,{changes:{scans:['S-1']}});assert.equal(h.written[1].payload.progress,90);
 });
 
 test('general cancellation still aborts frozen writes after an INSERT',async()=>{

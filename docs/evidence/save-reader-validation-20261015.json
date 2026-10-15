@@ -1,0 +1,36 @@
+{
+  "date": "2026-10-15",
+  "base": "90da990b7230cba74449790e4bb113ac10e06687",
+  "suite": {
+    "passed": 1003,
+    "failed": 0,
+    "optionalSkipped": 7
+  },
+  "optionalPostgres": {
+    "passed": 51,
+    "failed": 0,
+    "skipped": 0
+  },
+  "platformPostgres": {
+    "checks": 22,
+    "syntheticBulkRows": 30001,
+    "bulkSaveMs": 6316
+  },
+  "pooledConnectionRetention": {
+    "generations": 3,
+    "previousHandlerRetained": 3,
+    "candidateRetainedAfterResponse": 0,
+    "candidateRetainedAfterPoolReuse": 0
+  },
+  "builds": [
+    "typescript-noEmit",
+    "next-production-linux",
+    "summary-worker",
+    "reporting-worker"
+  ],
+  "review": "No blocking findings",
+  "limits": [
+    "Synthetic bulk timing is not a production performance guarantee.",
+    "Full-bucket reader remains unchanged; live repeated refresh memory validation follows deployment."
+  ]
+}

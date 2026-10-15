@@ -73,7 +73,18 @@ export function createRuntimeRequestHandler({ role, socketPath, token, handleReq
         else { res.writeHead(500, { "content-type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
       });
     };
-    if (role === "web") globalThis[contextKey].run({}, run);
+    if (role === "web") {
+      const context = {};
+      const release = () => {
+        // Pooled sockets and other async resources can outlive the request and
+        // retain its ALS context. Release the large view, including on abort.
+        // Late callbacks may read current data but must never pin it here again.
+        Object.defineProperty(context, "platform", { configurable: true, get: () => undefined, set: () => {} });
+        res.off("finish", release); res.off("close", release); req.off("aborted", release);
+      };
+      res.once("finish", release); res.once("close", release); req.once("aborted", release);
+      globalThis[contextKey].run(context, run);
+    }
     else run();
   };
 }

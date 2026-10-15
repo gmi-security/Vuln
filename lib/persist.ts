@@ -2,7 +2,7 @@ import { Pool, type PoolClient } from "pg";
 import { createHash } from "node:crypto";
 import { createReportingInputDigests, publishReportingInputRevisions, publishSqlReportingChanges, reportingSnapshotManifest } from "./db/customer-reporting-revisions.mjs";
 import { readPlatformAuthority, bindPlatformWriter } from "./db/platform-authority.mjs";
-import { loadPlatformStore, preparePlatformStore, commitPreparedPlatformStore, savePlatformDelta, platformSaveTimeoutMs } from "./db/platform-store.mjs";
+import { loadPlatformStore, preparePlatformStore, commitPreparedPlatformStore, preparePlatformDelta, platformSaveTimeoutMs } from "./db/platform-store.mjs";
 import { loadCommittedPlatform } from "./db/platform-reader.mjs";
 
 // Snapshot persistence. The in-memory store (companies, folders, scans,
@@ -449,6 +449,9 @@ export async function saveSnapshot(data: unknown, options?: { guard?: () => void
     // limit. Prepare BEFORE borrowing a connection or locking the authority row.
     const reporting = createReportingInputDigests(reportingDigestCache);
     const startedAt = Date.now();
+    const candidateRecords = options?.changes === undefined
+      ? ["companies", "folders", "scans", "findings", "assets"].reduce((n, kind) => n + (Array.isArray(obj[kind]) ? obj[kind].length : 0), 0)
+      : Object.values(options.changes).reduce((n, ids) => n + ids.length, 0);
     let deadline = startedAt + 300000, cancelled = false, captureFrozen = false, phase = "prepare";
     let client: PoolClient | undefined;
     const guard = () => {
@@ -458,14 +461,15 @@ export async function saveSnapshot(data: unknown, options?: { guard?: () => void
     };
     try {
       const prepared = options?.changes === undefined
-        ? await preparePlatformStore(obj, persistence.platformState, { reporting, guard }) : undefined;
-      const digests = prepared ? reporting.finish() : undefined;
+        ? await preparePlatformStore(obj, persistence.platformState, { reporting, guard })
+        : await preparePlatformDelta(obj, persistence.platformState, options.changes, { guard });
+      const digests = options?.changes === undefined ? reporting.finish() : undefined;
       guard();
       // Prepared rows, metadata and report digests are detached and consistent.
       // Later RAM edits remain dirty in store.ts for the next serialized save;
-      // they must not repeatedly cancel this already-frozen generation. Delta
-      // writes still reference live values and retain the capture guard.
-      captureFrozen = Boolean(prepared);
+      // they must not repeatedly cancel this already-frozen generation. Both
+      // full and scoped writes now use detached rows and metadata.
+      captureFrozen = true;
       const preparedMs = Date.now() - startedAt;
       const timeoutMs = platformSaveTimeoutMs(options?.changes, prepared?.findingChanges);
       phase = "connect";
@@ -477,11 +481,9 @@ export async function saveSnapshot(data: unknown, options?: { guard?: () => void
       const next = await withTimeout((async () => {
         phase = "write";
         await activeClient.query("BEGIN; SET LOCAL statement_timeout='60s'; SET LOCAL lock_timeout='10s'; SET LOCAL idle_in_transaction_session_timeout='90s'");
-        const next = prepared
-          ? await commitPreparedPlatformStore(activeClient, prepared, { guard })
-          : await savePlatformDelta(activeClient, obj, persistence.platformState, options!.changes!, { guard });
+        const next = await commitPreparedPlatformStore(activeClient, prepared, { guard });
         phase = "reporting";
-        if ("changedKeys" in next) await publishSqlReportingChanges(activeClient, next.changedKeys);
+        if ("changedKeys" in next) await publishSqlReportingChanges(activeClient, next.changedKeys, next.reportingTargets);
         else await publishReportingInputRevisions(activeClient, digests!);
         guard();
         phase = "commit";
@@ -491,7 +493,7 @@ export async function saveSnapshot(data: unknown, options?: { guard?: () => void
       persistence.platformState = next; persistence.platformAuthority = next.authority;
       if ("changedKeys" in next) reportingDigestCache.clear();
       else reporting.committed();
-      console.info(`[persist] SQL save committed: scope=${prepared ? "full" : "delta"} prepareMs=${preparedMs} totalMs=${Date.now() - startedAt} inserted=${next.counts.inserted} updated=${next.counts.updated} deleted=${next.counts.deleted} metadata=${next.counts.metadata}.`);
+      console.info(`[persist] SQL save committed: scope=${options?.changes === undefined ? "full" : "delta"} reason=${options?.changes === undefined ? "scope-not-declared" : "declared-records"} candidates=${candidateRecords} compared=${next.comparedRecords} prepareMs=${preparedMs} totalMs=${Date.now() - startedAt} inserted=${next.counts.inserted} updated=${next.counts.updated} deleted=${next.counts.deleted} metadata=${next.counts.metadata}.`);
     } catch (error) {
       cancelled = true;
       console.error(`[persist] SQL save stopped: phase=${phase} scope=${options?.changes === undefined ? "full" : "delta"} elapsedMs=${Date.now() - startedAt} code=${(error as {code?: string})?.code ?? "none"}.`);
