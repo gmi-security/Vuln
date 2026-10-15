@@ -121,10 +121,10 @@ try{
  const reporting=revisionModule.createReportingInputDigests();
  await tx(db,async()=>{await transitionPlatformStore(db,'sql',reversed.authority,{actor:'integration',reporting});await revisionModule.publishReportingInputRevisions(db,reporting.finish());});
  const nativePool=new pg.Pool({...config,database:name,max:2});
- let loans=0,preparedOutside=0,recordWritten=false;
+ let loans=0,preparedOutside=0,recordWritten=false,afterRecord;
  const observedPool={on:(...a)=>nativePool.on(...a),end:()=>nativePool.end(),query:(...a)=>nativePool.query(...a),async connect(){
   const c=await nativePool.connect();loans++;
-  return {release(e){loans--;c.release(e);},async query(sql,params){const result=await c.query(sql,params);if(sql.startsWith('INSERT INTO app_findings'))recordWritten=true;return result;}};
+  return {release(e){loans--;c.release(e);},async query(sql,params){const result=await c.query(sql,params);if(sql.startsWith('INSERT INTO app_findings')){recordWritten=true;const hook=afterRecord;afterRecord=undefined;hook?.();}return result;}};
  }};
  const observedStore={...storeModule,async preparePlatformStore(...args){
   assert.equal(loans,0,'expensive comparison must not borrow a DB connection');
@@ -162,6 +162,18 @@ try{
   await preparedDigest.bucket('meta',JSON.stringify(Object.fromEntries(Object.entries(data).filter(([k])=>!platformCollections[k]))));
   assert.equal(preparedDigest.finish()[0].hash,(await revisionModule.readReportingInputRevision(db,'CO-1')).hash);
   ok('full preparation holds no SQL connection; fault after row write rolls back authority, data and reporting, then retry commits matching hashes');
+  data.findings[0][1].title='Frozen generation';let captureChanged=false;
+  const frozenData=structuredClone(data);
+  afterRecord=()=>{data.findings[0][1].title='Later generation';captureChanged=true;};
+  await runtime.saveSnapshot(data,{captureGuard(){if(captureChanged)throw Error('RAM capture changed');}});
+  assert.equal((await db.query('SELECT payload FROM app_findings WHERE id=$1',[data.findings[0][0]])).rows[0].payload.title,'Frozen generation');
+  const frozenDigest=revisionModule.createReportingInputDigests();
+  for(const [kind,c]of Object.entries(platformCollections))for(let b=0;b<c.buckets;b++)await frozenDigest.bucket(`${kind}:${String(b).padStart(2,'0')}`,JSON.stringify(frozenData[kind].filter(([id])=>platformBucket(id,c.buckets)===b)));
+  await frozenDigest.bucket('meta',JSON.stringify(Object.fromEntries(Object.entries(frozenData).filter(([k])=>!platformCollections[k]))));
+  assert.equal(frozenDigest.finish()[0].hash,(await revisionModule.readReportingInputRevision(db,'CO-1')).hash);
+  await runtime.saveSnapshot(data);
+  assert.equal((await db.query('SELECT payload FROM app_findings WHERE id=$1',[data.findings[0][0]])).rows[0].payload.title,'Later generation');
+  ok('frozen full save commits consistent rows and reporting across later RAM mutations, then saves the newer generation');
   const bulkCount=Number(process.env.VULN_TEST_BULK_ROWS??1501);
   assert.ok(Number.isInteger(bulkCount)&&bulkCount>=1501&&bulkCount<=800000);
   const bulk=Array.from({length:bulkCount},(_,i)=>[`B-${i}`,{id:`B-${i}`,companyId:'CO-1',connector:'defender',

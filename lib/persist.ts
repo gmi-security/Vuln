@@ -430,7 +430,7 @@ const UPSERT_SQL = `INSERT INTO vuln_store (key, data, updated_at)
 // snapshot; the hash cache is only updated after COMMIT so a failed write is
 // fully retried on the next flush. Callers (store.ts) already serialize
 // saves through a single promise chain, so saves never overlap.
-export async function saveSnapshot(data: unknown, options?: { guard?: () => void; changes?: Record<string, string[]> }): Promise<void> {
+export async function saveSnapshot(data: unknown, options?: { guard?: () => void; captureGuard?: () => void; changes?: Record<string, string[]> }): Promise<void> {
   if (process.env.VULN_RUNTIME_ROLE === "web") throw new Error("The web reader cannot save platform data.");
   const p = getPool();
   if (!p) return;
@@ -449,17 +449,23 @@ export async function saveSnapshot(data: unknown, options?: { guard?: () => void
     // limit. Prepare BEFORE borrowing a connection or locking the authority row.
     const reporting = createReportingInputDigests(reportingDigestCache);
     const startedAt = Date.now();
-    let deadline = startedAt + 300000, cancelled = false, phase = "prepare";
+    let deadline = startedAt + 300000, cancelled = false, captureFrozen = false, phase = "prepare";
     let client: PoolClient | undefined;
     const guard = () => {
       if (cancelled || Date.now() >= deadline) throw new Error(`SQL platform ${phase} deadline exceeded.`);
       options?.guard?.();
+      if (!captureFrozen) options?.captureGuard?.();
     };
     try {
       const prepared = options?.changes === undefined
         ? await preparePlatformStore(obj, persistence.platformState, { reporting, guard }) : undefined;
       const digests = prepared ? reporting.finish() : undefined;
       guard();
+      // Prepared rows, metadata and report digests are detached and consistent.
+      // Later RAM edits remain dirty in store.ts for the next serialized save;
+      // they must not repeatedly cancel this already-frozen generation. Delta
+      // writes still reference live values and retain the capture guard.
+      captureFrozen = Boolean(prepared);
       const preparedMs = Date.now() - startedAt;
       const timeoutMs = platformSaveTimeoutMs(options?.changes, prepared?.findingChanges);
       phase = "connect";

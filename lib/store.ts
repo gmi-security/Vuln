@@ -930,7 +930,7 @@ function persistSnapshot(throwOnError = false): Promise<void> {
         try {
           await saveSnapshot(serializeStore(globalStore.__vulnStore, changes), {
             changes,
-            guard: () => {
+            captureGuard: () => {
               if (strictPlatformPersistence() && version !== (persistGlobal.__vulnMutationVersion ?? 0))
                 throw Object.assign(new Error("Platform changed during save; capture will be retried."), { code: "platform-capture-changed" });
             },
@@ -7391,6 +7391,10 @@ export async function importFromNessus(): Promise<
       } catch (error) {
         if (routes !== null) errors.push(error instanceof Error ? error.message : "Nessus result could not be applied.");
         // leave imported=false so a later poll retries the findings import
+      } finally {
+        // Completion metadata and any findings changed after an awaited import
+        // must remain dirty even if an earlier capture is already being saved.
+        markDirty();
       }
     }
   }
