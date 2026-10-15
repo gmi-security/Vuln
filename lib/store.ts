@@ -2064,6 +2064,7 @@ async function refreshVendorScans(s: StoreShape): Promise<void> {
         // Nessus failure leaves it false and the next poll retries.
         await importVendorFindings(s, scan);
         scan.vendor.imported = true;
+        scan.error = undefined;
         markDirty({ scans: [scan.id] });
       }
     } catch (err) {
@@ -7301,7 +7302,7 @@ export async function importFromNessus(): Promise<
     // newer completed run on every sync.
     const existing = routes === null ? existingScans[0] : existingScans.sort((a, b) =>
       (b.vendor?.nessusLastModified ?? 0) - (a.vendor?.nessusLastModified ?? 0))[0];
-    if (routes !== null && existing?.vendor && !existing.vendor.imported && summary.status !== "completed") {
+    if (existing?.vendor && !existing.vendor.imported && summary.status !== "completed") {
       // The existing pending record is handled by polling; do not duplicate it.
       skipped++;
       continue;

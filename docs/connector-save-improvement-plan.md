@@ -1,6 +1,6 @@
 # Connector save improvement plan
 
-**Status:** Approved for implementation on October 15, 2026. Work is on `perf/connector-scoped-saves`; production remains unchanged pending validation and release.
+**Status:** Implementation and independent review complete on October 15, 2026, on `perf/connector-scoped-saves`. Ready for PR review. Production is unchanged; deployment, live response measurements and the next scheduled import cycle remain unverified.
 
 **Date:** October 15, 2026
 
@@ -142,7 +142,7 @@ Each stage must pass its checks before its change list is trusted. Use a task br
 
 **Files:** `lib/db/platform-store.mjs`, `lib/persist.ts`, `lib/db/customer-reporting-revisions.mjs`; tests in `tests/platform-bulk-save.test.mjs`, `tests/platform-store-postgres.mjs`, `tests/defender-publication-persistence.test.mjs`, `tests/spotlight-resumable-import.test.mjs` and `tests/reporting-inputs.test.mjs`.
 
-- [x] Test small edits and large customer publications with many unrelated platform records. Measure candidate serialization, map/index copying, reporting work, transaction duration and peak memory separately.
+- [x] Test small edits and large customer publications with many unrelated platform records. Measure candidate preparation, map/index copying and process memory; record real SQL/reporting/commit time as a combined remainder. Reporting time and SQL time are not independently isolated by this measurement.
 - [x] Preserve the existing direct SQL generation/cache/ticket writers. Test Defender publication, Spotlight resume/promotion, tile results and ticket references through restart; use mocked provider transport for external actions.
 - [x] Verify that only affected reporting inputs change. Follow the existing reporting bucket/revision contract; do not force all customer summaries to rebuild.
 - [x] If the large scoped path still spends substantial preparation time inside a transaction, extend the existing prepared-save mechanism to scoped captures before releasing that path. Freeze rows and metadata before SQL, recheck authority, and retain later mutations for the next save. Do not remove capture guards from live values.
@@ -154,11 +154,17 @@ The current delta writer still copies collection maps and examines index entries
 
 ### Task 6: Compare performance and prepare the release
 
-- [ ] Run old and new implementations against the same representative data: one asset edit, one scan-progress edit, a small inventory change, a full customer Nessus import, a large Defender publication and overlapping mutations.
-- [ ] Record provider time separately from application preparation and SQL time. Record rows considered/compared/written, retries, memory, event-loop delay and page/API response times during the workload.
-- [ ] Run the complete test suite, real PostgreSQL checks, TypeScript validation, both worker builds and a Linux production build. Record optional/skipped checks separately from passes.
-- [ ] Open the reviewed PR with the connector coverage matrix and before/after measurements. Build the merged version before stopping the running service.
+- [x] Compare full and scoped preparation on the same synthetic data: one asset edit, one scan-progress edit, a small inventory change and large Nessus-/Defender-shaped customer sets. Verify overlapping mutations separately with behavioral and real SQL tests. These are save-path comparisons, not end-to-end historical importer benchmarks.
+- [x] Record candidates, compared/written rows, preparation time, index copy time, CPU, memory and event-loop delay; record the combined SQL/reporting/commit remainder separately. No live provider timing or production HTTP latency was measured.
+- [x] Run the complete test suite, real PostgreSQL checks, TypeScript validation, both worker builds and a Linux production build. Record skipped checks separately from passes.
+- [x] Complete independent review, reproduce findings and verify fixes. Review found and fixed duplicate unfinished Nessus scans and stale errors after successful retries; no findings remain outstanding.
+- [ ] Open the reviewed PR with connector coverage and before/after measurements.
+
+**Release checks still required after PR review:**
+
+- [ ] Build the merged version before stopping the running service.
 - [ ] At the authorized deployment, drain or safely stop active imports and preserve durable resume state. Restart with existing configuration, then verify health, a real successful scoped commit, customer totals, reporting and ticket references.
+- [ ] Measure provider time and page/API response times during actual imports. Preparation benchmarks alone do not prove production responsiveness.
 - [ ] Observe the next scheduled 24-hour cycle before declaring scheduled-import behavior verified. A manual test alone does not prove that cycle.
 
 **Rollback:** use the prior application build and its existing full-save fallback after safely stopping the new writer. Keep the database and committed records in place; this plan requires no schema or data-format migration. Rollback must not start a second writer or discard pending durable import state.
@@ -184,7 +190,7 @@ Release acceptance is behavioral, not just a faster timing:
 
 ## Verification commands for implementation
 
-Run the focused tests as each stage is built, followed by the broad checks below. These commands are instructions for implementation; they were not run to claim this proposal is complete.
+Run the focused tests as each stage is built, followed by the broad checks below. Completed checks and their limitations are recorded in the next section.
 
 ```bash
 node --experimental-vm-modules --test tests/connector-mutation-scope.test.mjs tests/platform-prepared-save.test.mjs tests/persist-frozen-capture.test.mjs tests/platform-bulk-save.test.mjs
@@ -199,15 +205,53 @@ Run `tests/platform-store-postgres.mjs` separately using its guarded private Uni
 
 ## Current position and next step
 
-- [x] Trace connector save paths and identify shared full-comparison callers.
-- [x] Document the proposed approach, justification, risk checks and rollout order.
-- [ ] Implement and verify stages 1 through 6.
+- [x] Trace connector save paths and document the design and risks.
+- [x] Implement and verify stages 1 through 5 and the pre-release portion of stage 6.
+- [x] Independently review the complete branch and fix both findings.
+- [ ] Review and merge the PR, then perform the release checks above.
 
-Stage 1 is implemented and verified locally: 957 tests passed, seven optional database checks skipped, and TypeScript passed. Shared helpers now declare asset/finding IDs, alias metadata and closures; save diagnostics report candidate and comparison counts. Stage 2 passed 23 targeted checks and TypeScript: all four inventory providers, reviewed/legacy routing, cross-source scoring, full-save parity, repeat imports and restart. Recalculation covers the imported customers (not other customers); only changed risk projections become finding candidates. Stage 3 now tracks Nessus findings, scan completion, closure and backfill metadata. Completed but unimported scans remain retryable; repeated detected vulnerabilities preserve the existing new-occurrence semantics. Five new lifecycle fixtures and 32 related persistence/correlation checks passed; TypeScript passed. Stage 4 covers SpiderFoot, Artemis, Burp, Nmap, Vulners enrichment/Bridge and ZAP, including asynchronous progress/completion, failed targets, repeated imports and partial uploads. Shared threat enrichment still updates all affected customers and now saves KEV metadata even with no findings. The 19 new scanner/enrichment fixtures, 46 related ownership/source checks and TypeScript passed. Disabled providers remain disabled. Stage 5 passed 21 real PostgreSQL checks using an isolated, fresh test cluster and synthetic records, including a 30,001-row publication, reporting parity, rollback, stale writers and restart. Both full and scoped captures are now frozen before borrowing a connection. The full suite passed 992 checks with seven optional database checks skipped; TypeScript and both worker builds passed. The Linux production build passed. The next step is **stage 6: final review and PR preparation**. Production remains unchanged; real PostgreSQL and release checks are still pending.
+The next step is PR review. No production application, database, PM2 process, connector credentials, schedules or ticket settings were changed during this implementation.
+
+### Verification evidence
+
+| Check | Result | Scope and limitation |
+| --- | --- | --- |
+| Final local suite | 995 passed, 7 optional DB tests skipped, 0 failed (1,002 total) | Includes customer isolation, mutation scopes, partial imports, overlap, frozen captures, fallback, reporting, scanner behavior and mocked-provider regressions |
+| Optional database suite | 51 passed, 0 skipped, 0 failed | The five test files containing all seven local DB skips were run with a fresh private PostgreSQL cluster: Defender, Defender risk, Elastic cache, ticket lifecycle and legacy snapshot persistence. 51 includes non-DB cases in those files; it is not 51 additional unique tests |
+| Platform PostgreSQL checks | 21 passed | Synthetic source records, 30,001-row publication, exact reporting parity, actual transaction rollback, stale writers and restart |
+| TypeScript and both workers | Passed | Final application type check plus summary and reporting worker builds |
+| Linux production build | Passed | Final application code in an isolated build directory, without production configuration or provider jobs |
+| Independent review | No outstanding critical, important or minor findings | Reviewer ran 60 focused checks initially and 36 after fixes; broader results are implementer evidence |
+| Live provider and production performance | Not run | Existing credentials/schedules remain unchanged; require release observation |
+
+The full-save oracle in connector fixtures runs the **current importer** with full comparison forced on. It verifies that scoped persistence omits no changes in those scenarios; it does not independently prove every behavior matches an older importer. Separate correlation/routing fixtures preserve existing behavior, including a new occurrence when a previously resolved CVE is detected again.
+
+### Connector coverage
+
+| Path | Implemented and checked | Evidence |
+| --- | --- | --- |
+| Tidal, Automate, CrowdStrike inventory, Intune | Actual asset IDs, customer-limited cross-source risk recalculation, alias metadata, repeats and restart | `connector-inventory-saves`, `connector-mutation-scope`, existing ownership/routing tests |
+| Nessus | Findings, closure, scans, backfill, provider failure, partial application, completed-import retry, pending-scan reuse and restart | `connector-nessus-saves`, finding correlation, import-result and scanner routing tests |
+| SpiderFoot, Artemis, Burp, Nmap | Scoped success/repeat/partial failure; assets, findings, scan totals and completion | `connector-scanner-saves`, existing ownership/source semantics tests |
+| ZAP, Vulners Bridge | Scan creation, asynchronous progress/completion, failed targets and findings | `connector-scanner-saves`, existing bridge tests |
+| Shared Vulners/threat enrichment | Finding provenance and scores; affected customers and KEV metadata, including empty findings | `connector-scanner-saves`, inventory/mutation scope tests |
+| Defender | Existing SQL generation and explicit platform IDs retained; large publication, failure and restart | `defender-publication-persistence`, optional Defender DB suites, real platform PostgreSQL checks |
+| CrowdStrike Spotlight | Direct SQL resume/promotion preserved | Existing resumable-import, source and reporting tests; provider transport mocked |
+| Saved ES/CS tiles, SQL risk cache, ConnectWise | Existing dedicated writers preserved | Existing cache/risk/ticket tests plus real optional DB lifecycle checks; no external tickets sent |
+| AppSec and disabled optional providers | Read/routing behavior preserved; disabled providers stay disabled | Existing routing/source checks; optional connectors exercised only with fixtures |
+| Broad administration or unknown scope | Full comparison retained | Mutation fallback, full prepared-save and frozen-capture tests |
+
+### Review decisions
+
+- Keep full comparison when the changed-record list cannot be trusted. This preserves correctness but retains its CPU cost for those operations.
+- Recalculate inventory-dependent risks across the imported customer's findings, including other finding sources. Shared threat refresh still owns changes that apply across customers.
+- Retry completed but unimported Nessus results under the existing scan ID. Repeated unfinished scans stay on their existing polling path; successful retries clear obsolete errors.
+- Freeze both full and scoped records before opening the database transaction. Mutations arriving afterward remain pending for the next save.
+- No review findings were deferred. Production performance and the scheduled cycle are unverified release checks, not completed implementation tests.
 
 > For agentic workers: use `superpowers:executing-plans` for task-by-task implementation, or `superpowers:subagent-driven-development` if parallel agent execution is explicitly selected. Re-read the actual branch and this plan before implementing; preserve the existing single-writer and mutation-capture contracts.
 
-## Measured results and remaining limits ? October 15, 2026
+## Measured results and remaining limits - October 15, 2026
 
 The reproducible [benchmark](../tests/connector-save-benchmark.mjs) used 100,000 synthetic findings plus 1,005 company, asset and scan rows, on Windows x64 / Node 24.18.0. Each case ran in a separate process. Both paths produced identical changed-row counts. These timings cover preparation only: full preparation includes reporting digests; scoped reporting is calculated from committed SQL buckets inside the transaction. They do not measure provider downloads or production page responsiveness.
 

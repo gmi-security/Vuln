@@ -37,3 +37,21 @@ test('legacy Nessus backfill markers and counter survive a scoped save',async()=
  const d=initial();d.meta.nessusBackfillCorrected=false;d.scans[0][1].completedAt=now;d.scans[0][1].status='Completed';d.scans[0][1].vendor={nessusScanId:9,lastPoll:0,imported:true,nessusLastModified:1};
  const h=await mutationHarness({disk:{value:d},providers:providers(),now});await h.store.importFromNessus();h.assertPersisted();assert.notEqual(h.lastScope(),undefined);assert.equal(h.disk.value.meta.nessusBackfillCorrected,true);assert.equal(h.disk.value.scans[0][1].vendor.nessusLastModified,lastModified);
 });
+
+for(const status of ['running','paused'])test(`repeated legacy Nessus ${status} imports reuse the pending scan`,async()=>{
+ const d=initial();d.scans[0][1].status=status==='running'?'Running':'Paused';d.scans[0][1].vendor.nessusLastModified=lastModified;
+ const p=providers();p['lib/nessus.ts'].nessusListScans=async()=>[{id:9,folderId:7,name:'Scan',status,lastModified}];
+ const h=await mutationHarness({disk:{value:d},providers:p,now});
+ for(let repeat=0;repeat<2;repeat++){
+  const imported=await h.store.importFromNessus();assert.equal(imported.scansImported,0);assert.equal(imported.skipped,1);h.assertPersisted();
+  assert.deepEqual(h.disk.value.scans.map(([id])=>id),['S-1']);
+ }
+});
+
+test('automatic Nessus retry clears an old error only after findings import succeeds',async()=>{
+ const d=initial();d.scans[0][1].status='Completed';d.scans[0][1].completedAt=now;d.scans[0][1].error='Provider failed before complete result';
+ const h=await mutationHarness({disk:{value:d},providers:providers(),now});
+ await h.store.refreshVendorScans(h.memory());await h.flush();h.assertPersisted();
+ const recovered=h.disk.value.scans[0][1];assert.equal(recovered.vendor.imported,true);assert.equal(recovered.error,undefined);assert.equal(recovered.status,'Completed');
+ const restarted=await mutationHarness({disk:h.disk,providers:providers(),now});assert.equal(restarted.memory().scans.get('S-1').error,undefined);
+});
