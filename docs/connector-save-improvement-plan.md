@@ -1,6 +1,6 @@
 # Connector save improvement plan
 
-**Status:** Implementation and independent review complete on October 15, 2026, on `perf/connector-scoped-saves`. Ready for PR review. Production is unchanged; deployment, live response measurements and the next scheduled import cycle remain unverified.
+**Status:** Implementation and independent review complete on October 15, 2026, on `perf/connector-scoped-saves`. [PR #61](https://github.com/gmi-security/Vuln/pull/61) is open for review. Production is unchanged; deployment, live response measurements and the next scheduled import cycle remain unverified.
 
 **Date:** October 15, 2026
 
@@ -158,7 +158,7 @@ The current delta writer still copies collection maps and examines index entries
 - [x] Record candidates, compared/written rows, preparation time, index copy time, CPU, memory and event-loop delay; record the combined SQL/reporting/commit remainder separately. No live provider timing or production HTTP latency was measured.
 - [x] Run the complete test suite, real PostgreSQL checks, TypeScript validation, both worker builds and a Linux production build. Record skipped checks separately from passes.
 - [x] Complete independent review, reproduce findings and verify fixes. Review found and fixed duplicate unfinished Nessus scans and stale errors after successful retries; no findings remain outstanding.
-- [ ] Open the reviewed PR with connector coverage and before/after measurements.
+- [x] Open [PR #61](https://github.com/gmi-security/Vuln/pull/61) with connector coverage and before/after measurements.
 
 **Release checks still required after PR review:**
 
@@ -210,7 +210,7 @@ Run `tests/platform-store-postgres.mjs` separately using its guarded private Uni
 - [x] Independently review the complete branch and fix both findings.
 - [ ] Review and merge the PR, then perform the release checks above.
 
-The next step is PR review. No production application, database, PM2 process, connector credentials, schedules or ticket settings were changed during this implementation.
+The next step is review of [PR #61](https://github.com/gmi-security/Vuln/pull/61). No production application, database, PM2 process, connector credentials, schedules or ticket settings were changed during this implementation.
 
 ### Verification evidence
 
