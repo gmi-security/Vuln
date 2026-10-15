@@ -1,0 +1,209 @@
+{
+  "recordCount": 100000,
+  "environment": {
+    "node": "v24.18.0",
+    "platform": "win32",
+    "arch": "x64"
+  },
+  "limits": "Synthetic preparation only. Full includes report digest preparation; scoped reporting occurs in SQL and is measured separately. Peak RSS includes fixture setup. Provider time and production HTTP latency are not measured.",
+  "results": [
+    {
+      "scenario": "asset",
+      "full": {
+        "elapsedMs": 3564,
+        "cpuMs": 4188,
+        "comparedRecords": 101005,
+        "writes": {
+          "inserted": 0,
+          "updated": 1,
+          "deleted": 0,
+          "metadata": 0
+        },
+        "heapGrowthMiB": 210,
+        "peakRssMiB": 531,
+        "eventLoopMaxMs": 116
+      },
+      "scoped": {
+        "elapsedMs": 1,
+        "cpuMs": 0,
+        "comparedRecords": 1,
+        "writes": {
+          "inserted": 0,
+          "updated": 1,
+          "deleted": 0,
+          "metadata": 0
+        },
+        "indexCopyMs": 0,
+        "recordPreparationMs": 0,
+        "heapGrowthMiB": 0,
+        "peakRssMiB": 399,
+        "eventLoopMaxMs": 0
+      }
+    },
+    {
+      "scenario": "scan",
+      "full": {
+        "elapsedMs": 3782,
+        "cpuMs": 4562,
+        "comparedRecords": 101005,
+        "writes": {
+          "inserted": 0,
+          "updated": 1,
+          "deleted": 0,
+          "metadata": 0
+        },
+        "heapGrowthMiB": 197,
+        "peakRssMiB": 537,
+        "eventLoopMaxMs": 103
+      },
+      "scoped": {
+        "elapsedMs": 1,
+        "cpuMs": 0,
+        "comparedRecords": 1,
+        "writes": {
+          "inserted": 0,
+          "updated": 1,
+          "deleted": 0,
+          "metadata": 0
+        },
+        "indexCopyMs": 0,
+        "recordPreparationMs": 0,
+        "heapGrowthMiB": 0,
+        "peakRssMiB": 396,
+        "eventLoopMaxMs": 0
+      }
+    },
+    {
+      "scenario": "inventory",
+      "full": {
+        "elapsedMs": 3372,
+        "cpuMs": 4141,
+        "comparedRecords": 101005,
+        "writes": {
+          "inserted": 0,
+          "updated": 110,
+          "deleted": 0,
+          "metadata": 0
+        },
+        "heapGrowthMiB": 47,
+        "peakRssMiB": 534,
+        "eventLoopMaxMs": 98
+      },
+      "scoped": {
+        "elapsedMs": 26,
+        "cpuMs": 15,
+        "comparedRecords": 110,
+        "writes": {
+          "inserted": 0,
+          "updated": 110,
+          "deleted": 0,
+          "metadata": 0
+        },
+        "indexCopyMs": 22,
+        "recordPreparationMs": 3,
+        "heapGrowthMiB": 31,
+        "peakRssMiB": 399,
+        "eventLoopMaxMs": 10
+      }
+    },
+    {
+      "scenario": "nessus-customer",
+      "full": {
+        "elapsedMs": 3461,
+        "cpuMs": 3937,
+        "comparedRecords": 101005,
+        "writes": {
+          "inserted": 0,
+          "updated": 25000,
+          "deleted": 0,
+          "metadata": 0
+        },
+        "heapGrowthMiB": 189,
+        "peakRssMiB": 549,
+        "eventLoopMaxMs": 172
+      },
+      "scoped": {
+        "elapsedMs": 512,
+        "cpuMs": 579,
+        "comparedRecords": 25000,
+        "writes": {
+          "inserted": 0,
+          "updated": 25000,
+          "deleted": 0,
+          "metadata": 0
+        },
+        "indexCopyMs": 27,
+        "recordPreparationMs": 474,
+        "heapGrowthMiB": 47,
+        "peakRssMiB": 403,
+        "eventLoopMaxMs": 49
+      }
+    },
+    {
+      "scenario": "defender-customer",
+      "full": {
+        "elapsedMs": 4256,
+        "cpuMs": 4827,
+        "comparedRecords": 101005,
+        "writes": {
+          "inserted": 0,
+          "updated": 25000,
+          "deleted": 0,
+          "metadata": 0
+        },
+        "heapGrowthMiB": 189,
+        "peakRssMiB": 547,
+        "eventLoopMaxMs": 137
+      },
+      "scoped": {
+        "elapsedMs": 645,
+        "cpuMs": 766,
+        "comparedRecords": 25000,
+        "writes": {
+          "inserted": 0,
+          "updated": 25000,
+          "deleted": 0,
+          "metadata": 0
+        },
+        "indexCopyMs": 46,
+        "recordPreparationMs": 577,
+        "heapGrowthMiB": 47,
+        "peakRssMiB": 403,
+        "eventLoopMaxMs": 68
+      }
+    },
+    {
+      "scenario": "unchanged-customer",
+      "full": {
+        "elapsedMs": 4009,
+        "cpuMs": 4797,
+        "comparedRecords": 101005,
+        "writes": {
+          "inserted": 0,
+          "updated": 0,
+          "deleted": 0,
+          "metadata": 0
+        },
+        "heapGrowthMiB": 70,
+        "peakRssMiB": 523,
+        "eventLoopMaxMs": 106
+      },
+      "scoped": {
+        "elapsedMs": 661,
+        "cpuMs": 718,
+        "comparedRecords": 25000,
+        "writes": {
+          "inserted": 0,
+          "updated": 0,
+          "deleted": 0,
+          "metadata": 0
+        },
+        "indexCopyMs": 38,
+        "recordPreparationMs": 602,
+        "heapGrowthMiB": 37,
+        "peakRssMiB": 403,
+        "eventLoopMaxMs": 63
+      }
+    }
+  ]
+}
