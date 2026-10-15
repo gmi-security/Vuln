@@ -108,11 +108,11 @@ Each stage must pass its checks before its change list is trusted. Use a task br
 
 **Interface rule:** reuse existing importer return types. Pass customer sets through existing scope arguments. Any additional changed-asset input stays internal to the store helpers.
 
-- [ ] Add tests with two customers and overlapping host/vendor IDs. Assert that an inventory import preserves ownership, source observations, aliases and affected finding scores while leaving the other customer unchanged.
-- [ ] Track asset candidates throughout each inventory path. Restrict risk recalculation to affected assets when the dependency is known; use the affected customer's complete finding set when an alias or customer-wide dependency makes a narrower set unsafe.
-- [ ] Avoid marking findings whose persisted score fields did not change. Preserve real observation timestamps and all existing risk calculations.
-- [ ] Verify both reviewed routing and supported legacy routing paths. Missing scope must not silently skip required work.
-- [ ] Compare old and new resulting records, run the relevant tests, then commit.
+- [x] Add tests with two customers and overlapping host/vendor IDs. Assert that an inventory import preserves ownership, source observations, aliases and affected finding scores while leaving the other customer unchanged.
+- [x] Track asset candidates throughout each inventory path. Restrict risk recalculation to affected assets when the dependency is known; use the affected customer's complete finding set when an alias or customer-wide dependency makes a narrower set unsafe.
+- [x] Avoid marking findings whose persisted score fields did not change. Preserve real observation timestamps and all existing risk calculations.
+- [x] Verify both reviewed routing and supported legacy routing paths. Missing scope must not silently skip required work.
+- [x] Compare old and new resulting records, run the relevant tests, then commit.
 
 **Done when:** inventory saves no longer trigger full comparison through these paths, and scores match the original behavior for every affected finding.
 
@@ -203,6 +203,6 @@ Run `tests/platform-store-postgres.mjs` separately using its guarded private Uni
 - [x] Document the proposed approach, justification, risk checks and rollout order.
 - [ ] Implement and verify stages 1 through 6.
 
-Stage 1 is implemented and verified locally: 957 tests passed, seven optional database checks skipped, and TypeScript passed. Shared helpers now declare asset/finding IDs, alias metadata and closures; save diagnostics report candidate and comparison counts. The next step is **stage 2: inventory imports and narrow rescoring**. Production remains unchanged; real PostgreSQL and release checks are still pending.
+Stage 1 is implemented and verified locally: 957 tests passed, seven optional database checks skipped, and TypeScript passed. Shared helpers now declare asset/finding IDs, alias metadata and closures; save diagnostics report candidate and comparison counts. Stage 2 passed 23 targeted checks and TypeScript: all four inventory providers, reviewed/legacy routing, cross-source scoring, full-save parity, repeat imports and restart. Recalculation covers the imported customers (not other customers); only changed risk projections become finding candidates. The next step is **stage 3: Nessus lifecycle**. Production remains unchanged; real PostgreSQL and release checks are still pending.
 
 > For agentic workers: use `superpowers:executing-plans` for task-by-task implementation, or `superpowers:subagent-driven-development` if parallel agent execution is explicitly selected. Re-read the actual branch and this plan before implementing; preserve the existing single-writer and mutation-capture contracts.

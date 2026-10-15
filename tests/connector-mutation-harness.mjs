@@ -1,4 +1,5 @@
 // Real store/import logic; only persistence and explicitly supplied providers are fixtures.
+import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {resolve,dirname} from 'node:path';
 import {createContext,SourceTextModule,SyntheticModule} from 'node:vm';
@@ -12,9 +13,10 @@ export const seed=()=>({companies:[['CO-A',company()],['CO-B',company('CO-B','Be
 const compiled=new Map();
 const exposed='\nexport {markDirty,nextId,upsertAsset,rescoreAllFindings,closeStaleFindings,importVendorFindings,refreshVendorScans,serializeStore,importEndpoints,applyTidalInventory,runZapScanAsync,runVulnersBridgeScanAsync};';
 
-export async function mutationHarness({disk={value:seed()},providers={},baseline=false}={}){
+export async function mutationHarness({disk={value:seed()},providers={},baseline=false,now}={}){
  const modules=new Map(),saves=[],timers=[];let fail=false,gate;
- const context=createContext({Buffer,URL,URLSearchParams,TextEncoder,TextDecoder,AbortController,Response,Request,Headers,structuredClone,
+ const Clock=now ? class extends Date {constructor(...args){super(...(args.length?args:[now]));}static now(){return new Date(now).getTime();}} : Date;
+ const context=createContext({Date:Clock,Buffer,URL,URLSearchParams,TextEncoder,TextDecoder,AbortController,Response,Request,Headers,structuredClone,
   fetch:()=>{throw Error('Unexpected provider request in mutation fixture');},
   process:{env:{VULN_DISABLE_SCHEDULER:'true'},once(){}},console:{log(){},info(){},error(){},warn(){}},
   setTimeout,clearTimeout,setImmediate,clearImmediate,setInterval:(fn,ms)=>{timers.push({fn,ms});return {unref(){}};},clearInterval(){}});
@@ -55,5 +57,6 @@ export async function mutationHarness({disk={value:seed()},providers={},baseline
  await store.ensureHydrated();await context.__vulnFlushing;saves.length=0;
  return {store,context,disk,saves,timers,memory:()=>context.__vulnStore,
   fail:()=>{fail=true;},recover:()=>{fail=false;context.__vulnPersistBlocked=false;},block:fn=>{gate=fn;},
+  assertPersisted:()=>{const current=clone(store.serializeStore(context.__vulnStore));for(const key of ['companies','folders','scans','findings','assets','identityAliases','counter','settings','meta'])assert.deepEqual(disk.value[key],current[key],`Unsaved ${key}`);},
   flush:()=>store.flushNow({throwOnError:true}),lastScope:()=>saves.at(-1)?.changes};
 }

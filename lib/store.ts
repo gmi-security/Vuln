@@ -4726,20 +4726,22 @@ export function computeAttackPaths(filter?: {
 
 // Recompute a finding's environmental context + real risk against the current
 // inventory. Used after an inventory sync so existing findings reprice.
-export function rescoreFinding(s: StoreShape, f: Finding): void {
-  // Callers can have changed assessment/evidence fields before rescoring.
-  markDirty({ findings: [f.id] });
-  Object.assign(
-    f,
-    riskFields(s, {
-      cve: f.cve,
-      cvss: f.cvss,
-      epss: f.epss,
-      exploitAvailable: f.exploitAvailable,
-      asset: f.asset,
-      companyId: f.companyId,
-    }),
-  );
+export function rescoreFinding(s: StoreShape, f: Finding, riskOnly = false): void {
+  const next = riskFields(s, {
+    cve: f.cve, cvss: f.cvss, epss: f.epss, exploitAvailable: f.exploitAvailable,
+    asset: f.asset, companyId: f.companyId,
+  });
+  // Inventory-only recalculation has not changed the assessment itself. Compare
+  // just the small risk projection; no full finding serialization is required.
+  const changed = !riskOnly || Object.entries(next).some(([key, value]) =>
+    key === "compensatingControl"
+      ? JSON.stringify(f.compensatingControl) !== JSON.stringify(value)
+      : f[key as keyof Finding] !== value);
+  if (changed) {
+    Object.assign(f, next);
+    // Other callers may already have changed evidence, scores or lastSeen.
+    markDirty({ findings: [f.id] });
+  }
 }
 
 // Rescore every finding in the store. This is O(total findings) — tens of
@@ -4762,7 +4764,7 @@ async function rescoreAllFindings(
   for (const f of s.findings.values()) {
     const before = f.realRisk;
     if (companyIds && !companyIds.has(f.companyId)) continue;
-    rescoreFinding(s, f);
+    rescoreFinding(s, f, true);
     if (f.realRisk !== before || matchesSource(f)) rescored += 1;
     i += 1;
     if (i % 500 === 0) await new Promise((resolve) => setImmediate(resolve));
@@ -6269,13 +6271,13 @@ async function applyTidalInventory(
     importedCompanies.add(company.id);
   }
 
-  const findingsRescored = await rescoreAllFindings(s, (f) => f.assetSource === "tidal", routes ? importedCompanies : undefined);
+  const findingsRescored = await rescoreAllFindings(s, (f) => f.assetSource === "tidal", importedCompanies);
 
   // If auto-scan is enabled, scan any newly-known assets that have no
   // coverage yet.
   let autoScan: AutoScanResult | undefined;
   if (s.settings.autoScanNewAssets) {
-    autoScan = await autoScanGaps(routes ? importedCompanies : undefined);
+    autoScan = await autoScanGaps(importedCompanies);
   }
 
   await flushNow();
@@ -6438,11 +6440,11 @@ export async function importFromAutomate(): Promise<AutomateImportResult | { err
     }
   }
 
-  const findingsRescored = await rescoreAllFindings(s, (f) => f.assetSource === "automate", routes ? importedCompanies : undefined);
+  const findingsRescored = await rescoreAllFindings(s, (f) => f.assetSource === "automate", importedCompanies);
 
   let autoScan: AutoScanResult | undefined;
   if (s.settings.autoScanNewAssets) {
-    autoScan = await autoScanGaps(routes ? importedCompanies : undefined);
+    autoScan = await autoScanGaps(importedCompanies);
   }
 
   await flushNow();
@@ -6894,7 +6896,7 @@ async function importEndpoints(
     assetsUpserted += 1;
   }
 
-  const companyIds = reviewedCompanyId ? new Set([reviewedCompanyId]) : undefined;
+  const companyIds = new Set([internal.id]);
   const findingsRescored = await rescoreAllFindings(s, (f) => f.assetSource === source, companyIds);
 
   let autoScan: AutoScanResult | undefined;
