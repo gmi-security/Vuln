@@ -23,6 +23,9 @@ function database(){
    state.reads.push('meta');return {rows:[{data:structuredClone(state.metadata),payload:structuredClone(state.metadata),record_hash:state.metadataHash??platformHash(platformJson(state.metadata))}]};
   }
   const collection=Object.entries(platformCollections).find(([,config])=>sql.includes(`FROM ${config.table}`));
+  if(sql.startsWith('SELECT id,company_id,store_bucket')&&collection){
+   return {rows:state.records.get(collection[0]).filter(r=>params[0].includes(r.id)).map(({id,company_id,store_bucket})=>({id,company_id,store_bucket}))};
+  }
   if(sql.startsWith('SELECT id,payload,record_hash,store_order')&&collection){
    const [kind]=collection,[bucket,after,afterId]=params;state.reads.push(`${kind}:${String(bucket).padStart(2,'0')}`);
    return {rows:structuredClone(state.records.get(kind).filter(r=>r.store_bucket===bucket&&(r.store_order>after||(r.store_order===after&&r.id>afterId)))

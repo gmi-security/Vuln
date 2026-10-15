@@ -140,3 +140,24 @@ test("parallel web requests get independent committed-read contexts and cannot i
   assert.deepEqual((await Promise.all([one, two])).map(response => response.body), ["first", "second"]);
   assert.equal(contexts.size, 2);
 });
+
+for (const ending of ['finish', 'abort', 'throw']) test(`web ${ending} releases the pinned view retained by background async resources`, {timeout:5000}, async context => {
+  const started=deferred(), release=deferred(), ended=deferred(); let local;
+  const view={findings:new Map([['f',{id:'f'}]])};
+  const address=await listen(context,runtime.createRuntimeRequestHandler({role:'web',socketPath:await socket(context),token,
+    async handleRequest(_req,res){
+      local=globalThis[Symbol.for('vuln.readContext')].getStore(); local.platform=view;
+      res.once('close',()=>ended.resolve()); started.resolve();
+      if(ending==='throw')throw Error('test handler failure');
+      res.write('stream'); await release.promise;
+      if(ending==='finish'){assert.equal(local.platform,view,'active streaming request keeps its pinned generation');res.end('end');}
+    }}));
+  const req=http.request({...address,path:'/api/companies'});req.on('error',()=>{});req.end();
+  const [res]=await once(req,'response'); res.resume(); await started.promise;
+  if(ending==='abort')res.destroy(); else release.resolve();
+  await ended.promise;
+  assert.equal(local.platform,undefined,'completed requests must not retain the full platform dataset');
+  local.platform=view;
+  assert.equal(local.platform,undefined,'late async work must not repin a completed request');
+  release.resolve();
+});

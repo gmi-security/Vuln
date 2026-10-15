@@ -80,3 +80,34 @@ test('actual full-import changes receive the same bounded budget as explicit imp
  assert.equal(store.platformSaveTimeoutMs(undefined,1),300000);
  assert.equal(store.platformSaveTimeoutMs(undefined,100000),900000);
 });
+
+test('comparison counts distinguish a scoped save from hashing the whole collection',async()=>{
+ const f=fixture();f.data.scans[0][1].progress=50;
+ const full=await store.preparePlatformStore(f.data,f.state);
+ assert.equal(full.comparedRecords,1002);
+ f.data.findings[0][1].toJSON=()=>{throw Error('Unrelated finding was serialized');};
+ const delta=await store.savePlatformDelta(f.client,f.data,f.state,{scans:['S-1']});
+ assert.equal(delta.comparedRecords,1);
+ assert.equal(delta.counts.updated,1);
+});
+
+test('scoped preparation freezes only declared payloads before SQL and retains deletes, orders and metadata',async()=>{
+ const f=fixture();f.data.counter=2;f.data.findings=f.data.findings.filter(([id])=>id!=='F-1');f.data.findings[0][1].status='Resolved';
+ f.data.findings.push(['F-new',{id:'F-new',companyId:'CO-1',status:'Open'}]);
+ f.data.findings.find(([id])=>id==='F-2')[1].toJSON=()=>{throw Error('Unrelated payload serialized');};
+ assert.equal(typeof store.preparePlatformDelta,'function');
+ const plan=await store.preparePlatformDelta(f.data,f.state,{findings:['F-0','F-1','F-new']});
+ assert.equal(f.queries.length,0);assert.equal(plan.comparedRecords,2);assert.equal(plan.findingChanges,3);
+ f.data.findings[0][1].status='Later edit';f.data.counter=3;
+ const result=await store.commitPreparedPlatformStore(f.client,plan);
+ assert.equal(f.written.find(r=>r.id==='F-0').payload.status,'Resolved');assert.deepEqual(result.counts,{inserted:1,updated:1,deleted:1,metadata:1});
+ assert.ok(result.changedKeys.includes('meta'));assert.equal(result.index.get('findings').get('F-0').order,f.state.index.get('findings').get('F-0').order);
+ assert.ok(f.state.index.get('findings').has('F-1'));assert.ok(!result.index.get('findings').has('F-1'));
+});
+
+test('scoped preparation rejects invalid scope or a changed capture before SQL',async()=>{
+ const f=fixture();assert.equal(typeof store.preparePlatformDelta,'function');
+ for(const changes of [{findings:['F-0','F-0']},{unknown:['F-0']},{findings:[null]}])await assert.rejects(store.preparePlatformDelta(f.data,f.state,changes),/scope/);
+ await assert.rejects(store.preparePlatformDelta(f.data,f.state,{findings:['F-0']},{guard(){throw Error('capture changed');}}),/capture changed/);
+ assert.equal(f.queries.length,0);
+});
