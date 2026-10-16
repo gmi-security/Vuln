@@ -34,7 +34,11 @@ try {
   }
   const first=await install('CO-A',[sample('1'),sample('2'),sample('3','CVE-2026-2000','other')]);
   assert.equal((await store.read(request)).state,'summary-pending');
-  assert.equal((await store.build('CO-A','tester')).state,'built');
+  const streaming=create({connect:async()=>{const client=await db.connect();return {release:(v)=>client.release(v),query:(sql,args)=>{
+    assert.ok(!(sql.includes('spotlight_import_records') && /COUNT\s*\(/i.test(sql)), 'large imports must validate counts during the bounded scan, not an upfront full-source count');
+    return client.query(sql,args);
+  }};}});
+  assert.equal((await streaming.build('CO-A','tester')).state,'built');
   assert.equal((await store.build('CO-A','tester')).state,'reused');
   const result=await store.read({...request,limit:1});assert.equal(result.state,'available');assert.equal(result.projection.state,'ready');
   const savedFixes=(await db.query("SELECT summary->'topFixes' AS fixes FROM spotlight_summary_generations WHERE run_id=$1",[first])).rows[0].fixes;
@@ -85,7 +89,7 @@ try {
   const third=await install('CO-A',[sample('5','CVE-2026-4000')]);let newer;
   const supersede=create({connect:async()=>{const client=await db.connect();return {release:(v)=>client.release(v),query:async(sql,args)=>{
     const response=await client.query(sql,args);
-    if(sql.includes('ORDER BY r.source_id')&&!newer)newer=await install('CO-A',[]);
+    if(sql.includes('CROSS JOIN LATERAL jsonb_to_record(r.raw)')&&!newer)newer=await install('CO-A',[]);
     return response;
   }};}});
   assert.equal((await supersede.build('CO-A','tester')).state,'superseded');assert.equal((await store.read(request)).generation.id,second);
@@ -101,6 +105,36 @@ try {
   await db.query('DELETE FROM spotlight_import_records WHERE run_id=$1',[second]);await db.query('DELETE FROM spotlight_import_runs WHERE id=$1',[second]);
   assert.equal((await store.read(request)).generation.id,newer);
   ok('invalid source evidence never replaces a good summary; summaries are independent of source pruning');
+  const multi=await install('CO-BATCH',Array.from({length:4001},(_,i)=>sample(String(i).padStart(5,'0'))));
+  const progress=[];
+  assert.equal((await streaming.build('CO-BATCH','tester',{checkpoint:async n=>{progress.push(n);}})).state,'built');
+  assert.ok(progress.includes(2000)&&progress.includes(4000));
+  assert.equal((await store.read({...request,companyId:'CO-BATCH'})).summary.sourceInstances,4001);
+  const realNow=Date.now;
+  async function timedBuild(elapsed){
+    let offset=0;Date.now=()=>realNow()+offset;
+    try{return await streaming.build('CO-BUDGET','tester',{checkpoint:async()=>{offset=elapsed;}});}
+    finally{Date.now=realNow;}
+  }
+  const budget=await install('CO-BUDGET',[sample('budget-1')]);
+  assert.equal((await timedBuild(360000)).state,'built','large batch scans can exceed five minutes without enlarging individual query timeouts');
+  await install('CO-BUDGET',[sample('budget-2')]);
+  await assert.rejects(()=>timedBuild(900001),/fifteen minutes/);
+  assert.equal((await store.read({...request,companyId:'CO-BUDGET'})).generation.id,budget);
+  ok('large scans retain a fifteen-minute overall deadline and preserve the prior summary when it expires');
+  const broken=await install('CO-BATCH',[sample('same')]);
+  for(const counts of [[0,0],[2,2],[1,2],[null,1]]){
+    await db.query('UPDATE spotlight_import_runs SET expected_count=$2,hydrated_count=$3 WHERE id=$1',[broken,...counts]);
+    await assert.rejects(()=>streaming.build('CO-BATCH','tester'),/count|cover/);
+    assert.equal((await store.read({...request,companyId:'CO-BATCH'})).generation.id,multi);
+  }
+  await db.query('UPDATE spotlight_import_runs SET expected_count=2,hydrated_count=2 WHERE id=$1',[broken]);
+  await db.query("INSERT INTO spotlight_import_records SELECT run_id,'ZZ-OTHER',company_id,source_id,cve,status,raw FROM spotlight_import_records WHERE run_id=$1",[broken]);
+  await assert.rejects(()=>streaming.build('CO-BATCH','tester'),/ownership/);
+  assert.equal((await db.query('SELECT count(*)::int n FROM spotlight_summary_generations WHERE run_id=$1',[broken])).rows[0].n,0);
+  await db.query("UPDATE spotlight_import_records SET tenant_key='AA-OTHER' WHERE run_id=$1 AND tenant_key='ZZ-OTHER'",[broken]);
+  await assert.rejects(()=>streaming.build('CO-BATCH','tester'),/ownership/);
+  ok('multi-batch count reconciliation rejects missing/extra records and misplaced tenants sharing source IDs on either side of the valid scope');
   await db.query("UPDATE spotlight_summary_generations SET summary=jsonb_set(summary,'{uniqueCves}','1') WHERE run_id=$1",[newer]);
   assert.equal((await store.read(request)).state,'inconsistent');
   ok('corrupt saved totals fail closed instead of presenting a healthy zero');

@@ -44,6 +44,8 @@ The full retained recovery-copy build matched all 2,119,658 rows and all 11,710 
 
 ## Job lifecycle
 
+The builder checks row ownership and reconciles the imported record count during its existing 2,000-row scan. It traverses the entire run in `(tenant_key, source_id)` primary-key order, so a misplaced tenant cannot be hidden by a customer filter. There is no separate full-source count. Individual SQL statements retain a 15-second timeout; the dedicated build has a 15-minute overall deadline to cover larger retained imports. A count mismatch, ownership failure or exceeded limit leaves the previous summary unchanged.
+
 Discovery polls only allowlisted customers with a completed owned import and completion timestamp. It creates one job per customer/import/model version; repeating discovery does not add duplicates. A newer source pointer supersedes queued work for the old generation. A claimed job cannot silently build a different generation.
 
 Jobs progress through `queued` → `running` → `succeeded`. A failed build or expired lease enters `retry`, with one minute before the second attempt and five minutes before the third. Three consumed attempts end in `failed`; ordinary polling does not reset failed jobs. A busy builder lock defers work for one minute without spending an attempt. There is no operator retry UI yet.
