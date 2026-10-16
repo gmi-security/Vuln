@@ -8,7 +8,7 @@ import styles from "./QueryDashboard.module.css";
 
 const format = (value: number) => value.toLocaleString();
 
-export default function TopFixes({ companyId, refreshToken, reviewHref = "#consolidation-review" }: { companyId: string; refreshToken?: number; reviewHref?: string }) {
+export default function TopFixes({ companyId, canManage=false, refreshToken, reviewHref = "#consolidation-review" }: { companyId: string; canManage?:boolean; refreshToken?: number; reviewHref?: string }) {
   const [result, setResult] = useState<TopFixesResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -78,6 +78,6 @@ export default function TopFixes({ companyId, refreshToken, reviewHref = "#conso
     </>}
     <a href={reviewHref} className="mt-5 inline-block text-sm text-sky-300 underline underline-offset-2">View ticket queue</a>
   </section>
-  <RemediationWorklist data={data?.remediationWorklist} loading={loading}/>
+  <RemediationWorklist key={companyId} companyId={companyId} canManage={canManage} data={data?.remediationWorklist} loading={loading}/>
   </>;
 }

@@ -22,7 +22,7 @@ export const loadDefenderSourceReader = () => loadReader('defender-source-read-m
 export const loadSpotlightSourceReader = () => loadReader('spotlight-source-read-model', 'createSpotlightSourceReader');
 
 export async function loadSpotlightSummaryModules() {
-  const allowed = new Set(['customer-source-read-model','spotlight-summary-model','spotlight-summary-store','spotlight-top-fixes','patch-recommendations','crowdstrike-dashboard','elastic-dashboard','remediation-worklist']);
+  const allowed = new Set(['customer-source-read-model','spotlight-summary-model','spotlight-summary-store','spotlight-top-fixes','patch-recommendations','crowdstrike-dashboard','elastic-dashboard','remediation-worklist','remediation-ticket-model','remediation-ticket-packet','patch-coverage','vuln-sla','dashboard-csv']);
   const cache = new Map();
   function load(name) {
     if (!allowed.has(name)) throw new Error('Unexpected summary dependency.');
@@ -33,8 +33,10 @@ export async function loadSpotlightSummaryModules() {
     return module;
   }
   const store = load('spotlight-summary-store');
-  await store.link(spec => spec === 'node:crypto'
+  const linker = spec => spec === 'node:crypto'
     ? new SyntheticModule(['createHash'], function(){this.setExport('createHash',createHash);})
-    : load(spec.replace(/^\.\//,''))); await store.evaluate();
-  return {...store.namespace,...cache.get('spotlight-summary-model').namespace};
+    : load(spec.replace(/^\.\//,''));
+  await store.link(linker); await store.evaluate();
+  const packet=load('remediation-ticket-packet');await packet.link(linker);await packet.evaluate();
+  return {...store.namespace,...cache.get('spotlight-summary-model').namespace,...cache.get('remediation-ticket-model').namespace,...packet.namespace};
 }

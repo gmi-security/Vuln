@@ -1,3 +1,4 @@
+import { ticketedAction, ticketedFinding } from "./patch-coverage";
 import { DashboardError, type QueryResult } from "./elastic-dashboard";
 import { normalizePatchFinding, normalizeRemediation, recommendedRemediationIds, patchRecommendationIds, remediationVariantId, type PatchFinding, type Remediation, type PatchApp } from "./patch-recommendations";
 export { normalizePatchFinding, normalizeRemediation, recommendedRemediationIds, patchRecommendationIds } from "./patch-recommendations";
@@ -72,6 +73,7 @@ export type PatchGroup = {
   vendorUrl: string; link: string; published: string;
   cves: string[]; deviceCount: number; findingCount: number; hostScope: string[]; csv: string;
   deviceCves: { cid: string; hostId: string; cve: string }[];
+  deviceCveCoverage?: import("./patch-coverage").PatchCoverage;
   reviewRows?: { asset: string; cve: string; severity?: string; risk?: number; connectors?: string[]; findingId?: string; hostname?: string; ip?: string; os?: string; criticality?: string; exposure?: string }[];
   worstSeverity: string | null;
   // Highest real-risk score (0-100) among this group's rows -- the same
@@ -98,7 +100,7 @@ export function buildPatchRequest(cve: string, records: PatchFinding[], region: 
   // through two different paths.
   let alreadyTicketedFindings = 0;
   const scoped = records.filter((row) => {
-    if (!alreadyTicketed.has(JSON.stringify([row.cid, row.hostId, cve]))) return true;
+    if (!ticketedFinding(alreadyTicketed,row)) return true;
     alreadyTicketedFindings++; return false;
   });
   if (!scoped.length) throw new DashboardError("Every open/reopened finding for this CVE already has an active ticket in progress. No patch request was prepared.");
@@ -116,7 +118,7 @@ export function buildPatchRequest(cve: string, records: PatchFinding[], region: 
     const localRemedies = new Map(row.remediations.map((r) => [r.id, r]));
     for (const id of patchRecommendationIds(row)) {
       const remediation = localRemedies.get(id);
-      if (!remediation) continue;
+      if (!remediation || ticketedAction(alreadyTicketed,row,remediation)) continue;
       const key = JSON.stringify([row.cid, remediationVariantId(remediation)]);
       remedies.set(key, remediation);
     }
@@ -129,6 +131,7 @@ export function buildPatchRequest(cve: string, records: PatchFinding[], region: 
       const ids = recommendations.length ? recommendations : [""];
       for (const id of ids) {
         const remediation = localRemedies.get(id);
+        if(remediation && ticketedAction(alreadyTicketed,row,remediation))continue;
         if (!id || !remediation?.action) warnings.add("CrowdStrike did not supply an actionable recommended remediation for some application entries. These are marked in the CSV; review them in Falcon before patching.");
         const mapping = !id ? "No recommended remediation supplied" : row.apps.length ? "Recommended application remediation" : "Recommended finding-level remediation (application not supplied)";
         csvRows.push([row.cve, row.cid, row.hostId, row.hostname || null, row.ip || null, row.os || null, row.hostCriticality || null, row.exposure || null, row.id, row.status, row.suppressed,
@@ -197,7 +200,7 @@ export function buildPatchConsolidation(cves: string[], records: PatchFinding[],
       if (!remediation?.action) continue;
       mappedCves.add(row.cve);
       const rowKey = JSON.stringify([row.cid, row.hostId, row.cve]);
-      if (alreadyTicketed.has(rowKey)) { alreadyTicketedFindings++; continue; }
+      if (ticketedAction(alreadyTicketed,row,remediation)) { alreadyTicketedFindings++; continue; }
       const key = JSON.stringify([row.cid, remediationVariantId(remediation)]);
       const existing = groups.get(key);
       if (existing) {

@@ -114,6 +114,7 @@ try{
       return failSource?json({error:'Fixture saved read failed'},400):json(result);
     }
     if(p==='customer-tiles')return json({canManage:true,storageReady:true,connected:true,crowdstrike:{connected:true},availableSources:{elastic:true,crowdstrike:true},queries:['table','bar'].map(display=>({id:display,title:`Fixture ${display}`,companyId,source:'crowdstrike',query:'fixture',display,chart:{category:'cve',value:'devices'},enabled:false,refreshMinutes:1440,refreshedAt:when,attemptedAt:when,error:null,result:{columns:[{name:'cve',type:'keyword'},{name:'devices',type:'long'}],rows:[[cve,2]],truncated:false}}))});
+    if(p==='remediation-ticket' && req.method()==='POST'){assert.equal(body.id,'shared-action');return json({companyId:body.companyId,groups:[{id:'prepared-remediation-fixture'}],reviewUrl:`/remediation?companyId=${body.companyId}&view=tickets`});}
     if(p==='top-fixes')return failFixes ? json({error:'Top fixes temporarily unavailable.'},503) : json({companyId,calculatedAt:when,totalFixes:1,affectedDevices:18,findingCount:20,uniqueCves:1,missingRemediation:0,missingDevice:0,limit:50,
       rows:[{id:'fixture-fix',cve,remediation:'Install the open vulnerability update',deviceCount:18,findingCount:20,maxRisk:72,severity:'High'}],
       remediationWorklist:{totalGroups:1,limit:50,rows:[{id:'shared-action',cves:[cve,...Array.from({length:60},(_,i)=>`CVE-2026-${5678+i}`)],remediation:'One recommended patch across CVEs',deviceCount:9,findingCount:70,maxRisk:90,severity:'Critical',source:'crowdstrike',grouping:'vendor-remediation'}]}});
@@ -242,6 +243,13 @@ try{
   assert.match(await worklist.innerText(),/CVE-2026-5678/);
   await page.screenshot({path:join(artifacts,'remediation-worklist-fixture.png')});
   pass('separate scrollable remediation table preserves Top fixes and opens shared customer CVE workflow');
+  const beforePrepare=calls.filter(c=>c.method==='POST').length;
+  await worklist.getByRole('button',{name:'Prepare ticket draft',exact:true}).click();
+  await worklist.getByRole('link',{name:'Review on Tickets page',exact:true}).waitFor();
+  assert.match(await worklist.innerText(),/1 draft ready for review/);
+  assert.equal(calls.filter(c=>c.method==='POST').length,beforePrepare+1);
+  assert.equal(calls.filter(c=>c.path==='remediation-ticket'&&c.method==='POST').at(-1).body.companyId,companies[0].id);
+  pass('remediation row prepares one customer-scoped draft with a Tickets review link and no ticket-send request');
   const intel=page.getByRole('region',{name:'Threat Intelligence'});await intel.getByRole('button',{name:`View ${cve} details`}).click();await panel.getByText(`${companies[0].id}-device`,{exact:true}).waitFor();await page.keyboard.press('Escape');
   failIntel=true;await intel.getByRole('button',{name:'Refresh saved evidence'}).click();await intel.getByRole('alert').waitFor({timeout:15000});assert.match(await intel.innerText(),/Synthetic retained signal/);
   await page.getByRole('link',{name:'View ticket queue',exact:true}).click();

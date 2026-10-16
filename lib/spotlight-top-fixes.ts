@@ -1,3 +1,4 @@
+import { createRemediationEvidence } from "./remediation-ticket-model";
 import { normalizePatchFinding, patchRecommendationIds, recommendedRemediationIds, remediationActionKey, remediationVariantId } from "./patch-recommendations";
 import type { TopFixesResult, TopFix } from "./reporting-top-fixes";
 import { compareRemediationFixes, type RemediationFix } from "./remediation-worklist";
@@ -5,6 +6,7 @@ import { compareRemediationFixes, type RemediationFix } from "./remediation-work
 // Runs only in the isolated summary worker, during its existing full-generation
 // traversal. Device ordinals come from the scope-checked source accumulator.
 export function createSpotlightTopFixes(companyId: string) {
+  const evidence = createRemediationEvidence();
   const groups = new Map<string, TopFix & { devices: Set<number> }>();
   const actions = new Map<string, Omit<RemediationFix,"cves"> & { devices: Set<number>; cves: Set<string> }>();
   const devices = new Set<number>(), cves = new Set<string>();
@@ -13,6 +15,7 @@ export function createSpotlightTopFixes(companyId: string) {
   function add(raw: Record<string,unknown> | undefined, cve: string, device: number) {
     if (!raw || !/^CVE-\d{4}-\d{4,19}$/.test(cve)) { missingRemediation++; return; }
     const row=normalizePatchFinding(raw,cve), ids=patchRecommendationIds(row);
+    row.cid=row.cid.toLowerCase();
     // As with patch preparation, incomplete app recommendations require source
     // refresh/investigation. Never guess that the minimum patch is recommended.
     if (!ids.length || row.apps.some(app=>!recommendedRemediationIds(app,row.remediations).length) ||
@@ -49,6 +52,7 @@ export function createSpotlightTopFixes(companyId: string) {
         if(++actionCves>5_000_000)throw new Error("Remediation worklist CVE/action limit exceeded.");
         action.cves.add(cve);
       }
+      evidence.add(action.id,remedy,row);
       action.findingCount++;action.maxRisk=Math.max(action.maxRisk,row.risk);
       if(rank[severity]>rank[action.severity])action.severity=severity;
     }
@@ -62,5 +66,5 @@ export function createSpotlightTopFixes(companyId: string) {
         .sort(compareRemediationFixes)
         .slice(0,50).map(({devices:_,cves,...action})=>({...action,cves:[...cves].sort()}))}};
   }
-  return {add,finish};
+  return {add,finish,patchActions:()=>evidence.finish(finish().remediationWorklist!.rows.map(row=>row.id)),get patchEvidenceError(){return evidence.unavailableReason;}};
 }
