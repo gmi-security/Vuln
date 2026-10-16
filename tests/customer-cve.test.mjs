@@ -94,6 +94,17 @@ test('saved completed generation wins over stale normalized CrowdStrike data',as
   assert.deepEqual(q.params,[company.id,cve,10001,'run-A']);assert.match(q.sql,/r.company_id=\$1/);assert.match(q.sql,/r.tenant_key=\$1/);
   assert.ok(calls.some(row=>row.sql==='ROLLBACK'));assert.equal(released(),1);
 });
+
+test('variant actions on the same device keep their own finding evidence and scores',()=>{
+  const first=cs({id:'first',risk:90}),second=cs({id:'second',risk:15,severity:'Low'});
+  second.remediations[0].action='Install another target version';second.remediations[0].reference='KB2';
+  const groups=model.buildCustomerCveGroups(company,cve,[],[first,second],new Set(),when);
+  assert.equal(groups.length,2);
+  const high=groups.find(g=>g.action===first.remediations[0].action),low=groups.find(g=>g.action===second.remediations[0].action);
+  assert.equal(high.maxRisk,90);assert.equal(low.maxRisk,15);
+  assert.match(high.csv,/first/);assert.doesNotMatch(high.csv,/second/);
+  assert.match(low.csv,/second/);assert.doesNotMatch(low.csv,/first/);
+});
 test('a timed-out CVE read reports a timeout and rolls back without preparing a partial draft',async()=>{
   for(const action of ['readCustomerCve','prepareCustomerCve']){
     const {api,calls,released}=await service({generation:{run_id:'run-A',promoted_at:when},
@@ -172,12 +183,15 @@ test('threat intelligence reads only customer CVEs and scoped risk evidence; no 
   assert.ok(calls.every(row=>!/(INSERT|UPDATE|DELETE)/.test(row.sql)));
 });
 
-test('manual draft cannot be automatically sent; equivalent legacy ticket is checked before a manual send',async()=>{
-  for(const actor of ['auto-create','member']){
+test('manual drafts require approval and both legacy/variant send paths check equivalent action metadata',async()=>{
+  for(const [actor,variant] of [['auto-create',false],['member',false],['member',true]]){
+    const packet={manualOnly:true,source:'stored-findings',title:'Update',action:'Install version 3',reference:'3',link:'',vendorUrl:'',published:'',
+      ...(variant?{vendorRemediationId:'r1'}:{})};
+    const remediationId=variant?'manual:r1:variant':'manual:r1';
     const calls=[];
     const query=async(sql,params)=>{
       calls.push({sql,params});
-      if(sql.includes('SELECT * FROM patch_group_ticket_requests'))return{rows:[{state:'prepared',review_state:'approved',remediation_id:'manual:r1',tenant_id:'cid-A',scope_hash:'scope',packet:{manualOnly:true,source:'stored-findings'}}]};
+      if(sql.includes('SELECT * FROM patch_group_ticket_requests'))return{rows:[{state:'prepared',review_state:'approved',remediation_id:remediationId,tenant_id:'cid-A',scope_hash:'scope',packet}]};
       if(sql.includes('SELECT revision FROM patch_connectwise_connection'))return{rows:[{revision:1}]};
       if(sql.includes('SELECT id,ticket_id FROM patch_group_ticket_requests'))return{rows:[{id:'legacy',ticket_id:123}]};
       return{rows:[]};
@@ -192,7 +206,14 @@ test('manual draft cannot be automatically sent; equivalent legacy ticket is che
       routing:{companyId:1,boardId:1},title:'Test',body:'Review',connectionRevision:1},actor),actor==='auto-create'?/explicit manual sending/:/ticket #123/);
     assert.ok(calls.some(row=>row.sql==='ROLLBACK'));
     assert.ok(calls.every(row=>!sqlWrite(row.sql)));
-    if(actor==='member')assert.deepEqual(calls.find(row=>row.sql.includes('SELECT id,ticket_id')).params[1],['r1','manual:r1']);
+    if(actor==='member'){
+      const lookup=calls.find(row=>row.sql.includes('SELECT id,ticket_id'));
+      assert.deepEqual(lookup.params[1],variant?['r1:variant','manual:r1:variant']:['r1','manual:r1']);
+      assert.deepEqual(lookup.params[6],variant?['r1','manual:r1']:[]);
+      assert.equal(lookup.params[7],variant?null:'r1');
+      assert.equal(JSON.parse(lookup.params[8]).action,'Install version 3');
+      assert.match(lookup.sql,/packet @> \$9::jsonb/);
+    }
   }
   function sqlWrite(sql){return /^(INSERT|UPDATE|DELETE)/.test(sql);}
 });

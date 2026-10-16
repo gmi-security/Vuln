@@ -1,5 +1,5 @@
 import { DashboardError, type QueryResult } from "./elastic-dashboard";
-import { normalizePatchFinding, normalizeRemediation, recommendedRemediationIds, patchRecommendationIds, type PatchFinding, type Remediation, type PatchApp } from "./patch-recommendations";
+import { normalizePatchFinding, normalizeRemediation, recommendedRemediationIds, patchRecommendationIds, remediationVariantId, type PatchFinding, type Remediation, type PatchApp } from "./patch-recommendations";
 export { normalizePatchFinding, normalizeRemediation, recommendedRemediationIds, patchRecommendationIds } from "./patch-recommendations";
 export type { PatchFinding, Remediation } from "./patch-recommendations";
 import { dashboardCsv } from "./dashboard-csv";
@@ -68,7 +68,7 @@ export type PatchGroup = {
   manualOnly?: boolean;
   source?: "stored-findings";
   appCompanyId?: string; companyName?: string; connectors?: string[];
-  remediationId: string; tenantId: string; title: string; action: string; reference: string;
+  remediationId: string; vendorRemediationId?: string; tenantId: string; title: string; action: string; reference: string;
   vendorUrl: string; link: string; published: string;
   cves: string[]; deviceCount: number; findingCount: number; hostScope: string[]; csv: string;
   deviceCves: { cid: string; hostId: string; cve: string }[];
@@ -117,9 +117,7 @@ export function buildPatchRequest(cve: string, records: PatchFinding[], region: 
     for (const id of patchRecommendationIds(row)) {
       const remediation = localRemedies.get(id);
       if (!remediation) continue;
-      const key = JSON.stringify([row.cid, remediation.id]);
-      const old = remedies.get(key);
-      if (old && JSON.stringify(old) !== JSON.stringify(remediation)) throw new DashboardError("Remediation details changed during collection. Retry to prepare a consistent request.");
+      const key = JSON.stringify([row.cid, remediationVariantId(remediation)]);
       remedies.set(key, remediation);
     }
     if (!row.hostname) warnings.add("Some hostnames were not supplied. Use the tenant and host IDs in the CSV to identify those devices.");
@@ -200,10 +198,9 @@ export function buildPatchConsolidation(cves: string[], records: PatchFinding[],
       mappedCves.add(row.cve);
       const rowKey = JSON.stringify([row.cid, row.hostId, row.cve]);
       if (alreadyTicketed.has(rowKey)) { alreadyTicketedFindings++; continue; }
-      const key = JSON.stringify([row.cid, remediation.id]);
+      const key = JSON.stringify([row.cid, remediationVariantId(remediation)]);
       const existing = groups.get(key);
       if (existing) {
-        if (JSON.stringify(existing.remediation) !== JSON.stringify(remediation)) throw new DashboardError("Remediation details changed during collection. Retry to prepare a consistent consolidation.");
         existing.cves.add(row.cve); existing.devices.add(deviceKey); existing.findings.add(JSON.stringify([row.cid, row.id]));
         existing.rows.set(rowKey, { cid: row.cid, hostId: row.hostId, hostname: row.hostname, ip: row.ip, os: row.os, hostCriticality: row.hostCriticality, exposure: row.exposure, cve: row.cve, severity: row.severity, risk: row.risk, findingId: row.id });
       } else {
@@ -227,12 +224,12 @@ export function buildPatchConsolidation(cves: string[], records: PatchFinding[],
       "", "RECOMMENDED REMEDIATION", shown(g.remediation.title), `Action: ${shown(g.remediation.action)}`,
       `Type: Recommended; reference: ${shown(g.remediation.reference)}`, `Source: ${shown(g.remediation.link)}; vendor: ${shown(g.remediation.vendorUrl)}`, `Patch published: ${shown(g.remediation.published)}`,
       "", "PATCH TEAM ACTIONS", "1. Review each device in the attached CSV and confirm ownership and the maintenance window.",
-      "2. Apply the recommended remediation above. It resolves every CVE listed above on the same device.",
+      "2. Apply the recommended remediation to the affected device/CVE pairs listed in the CSV.",
       "3. After patching and any required restart, verify the findings are closed in Falcon and record the outcome in this ticket.",
       "", "AFFECTED ASSETS", `See the attached ${label}-patch-request.csv for the complete device list (one row per device/CVE pair).`,
       "", "COLLECTION NOTES", "All matching pages were collected per CVE. This is a paginated observation, not an atomic CrowdStrike snapshot.",
       `Attach ${label}-patch-request.csv. No ticket has been sent to ConnectWise.`].join("\n");
-    return { remediationId: g.remediation.id, tenantId: g.tenantId, title: g.remediation.title, action: g.remediation.action,
+    return { remediationId: remediationVariantId(g.remediation), vendorRemediationId: g.remediation.id, tenantId: g.tenantId, title: g.remediation.title, action: g.remediation.action,
       reference: g.remediation.reference, vendorUrl: g.remediation.vendorUrl, link: g.remediation.link, published: g.remediation.published,
       cves: sortedCves, deviceCount, findingCount, hostScope: [...g.devices].sort(),
       deviceCves: groupRows.map((r) => ({ cid: r.cid, hostId: r.hostId, cve: r.cve })),

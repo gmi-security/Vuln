@@ -115,7 +115,8 @@ try{
     }
     if(p==='customer-tiles')return json({canManage:true,storageReady:true,connected:true,crowdstrike:{connected:true},availableSources:{elastic:true,crowdstrike:true},queries:['table','bar'].map(display=>({id:display,title:`Fixture ${display}`,companyId,source:'crowdstrike',query:'fixture',display,chart:{category:'cve',value:'devices'},enabled:false,refreshMinutes:1440,refreshedAt:when,attemptedAt:when,error:null,result:{columns:[{name:'cve',type:'keyword'},{name:'devices',type:'long'}],rows:[[cve,2]],truncated:false}}))});
     if(p==='top-fixes')return failFixes ? json({error:'Top fixes temporarily unavailable.'},503) : json({companyId,calculatedAt:when,totalFixes:1,affectedDevices:18,findingCount:20,uniqueCves:1,missingRemediation:0,missingDevice:0,limit:50,
-      rows:[{id:'fixture-fix',cve,remediation:'Install the open vulnerability update',deviceCount:18,findingCount:20,maxRisk:72,severity:'High'}]});
+      rows:[{id:'fixture-fix',cve,remediation:'Install the open vulnerability update',deviceCount:18,findingCount:20,maxRisk:72,severity:'High'}],
+      remediationWorklist:{totalGroups:1,limit:50,rows:[{id:'shared-action',cves:[cve,...Array.from({length:60},(_,i)=>`CVE-2026-${5678+i}`)],remediation:'One recommended patch across CVEs',deviceCount:9,findingCount:70,maxRisk:90,severity:'Critical',source:'crowdstrike',grouping:'vendor-remediation'}]}});
     if(p==='patch-group-tickets')return json({requests:emptyQueue?[]:[summary(companyId)],more:false,total:emptyQueue?0:1});
     if(p==='risk/summary')return json({totalOpenRisk:1,criticalRiskCount:0,swath1Open:0,swath2Open:1,kevOpen:1,internetFacingCriticalRisk:0,verifiedRemediations:0,awaitingVerification:0});
     if(p==='risk/top')return json({rows:[{id:'risk-1',cve,companyId,hostname:'fixture-host',severity:'High',riskScore:720,effectiveSwath:2,calculatedSwath:2,reasons:[],cisaKev:true,epssProbability:0.9,verificationStatus:'detected',lastSeen:when}],total:1});
@@ -227,6 +228,20 @@ try{
   assert.doesNotMatch(await fixes.innerText(),/nothing to patch|No open CVE findings/);
   failFixes=false;emptyQueue=false;
   pass('Top Fixes ranks open vulnerability data with an empty ticket queue; CVEs open the shared panel and failed refresh retains results');
+  const worklist=page.getByRole('region',{name:'Recommended remediation worklist'});
+  assert.match(await worklist.innerText(),/One recommended patch across CVEs/);
+  assert.equal(await fixes.isVisible(),true,'existing Top fixes remains visible');
+  assert.equal(await worklist.getByRole('button',{name:/details$/}).count(),0,'collapsed CVE list must not mount hidden buttons');
+  await worklist.getByRole('button',{name:'View 61 CVEs',exact:true}).click();
+  assert.equal(await worklist.getByRole('button',{name:/details$/}).count(),50);
+  await worklist.getByRole('button',{name:'Next CVEs'}).click();
+  assert.equal(await worklist.getByRole('button',{name:/details$/}).count(),11);
+  await worklist.getByRole('button',{name:'Previous CVEs'}).click();
+  await worklist.getByRole('button',{name:`View ${cve} details`}).click();
+  await panel.getByText(`${companies[0].id}-device`,{exact:true}).waitFor();await page.keyboard.press('Escape');
+  assert.match(await worklist.innerText(),/CVE-2026-5678/);
+  await page.screenshot({path:join(artifacts,'remediation-worklist-fixture.png')});
+  pass('separate scrollable remediation table preserves Top fixes and opens shared customer CVE workflow');
   const intel=page.getByRole('region',{name:'Threat Intelligence'});await intel.getByRole('button',{name:`View ${cve} details`}).click();await panel.getByText(`${companies[0].id}-device`,{exact:true}).waitFor();await page.keyboard.press('Escape');
   failIntel=true;await intel.getByRole('button',{name:'Refresh saved evidence'}).click();await intel.getByRole('alert').waitFor({timeout:15000});assert.match(await intel.innerText(),/Synthetic retained signal/);
   await page.getByRole('link',{name:'View ticket queue',exact:true}).click();

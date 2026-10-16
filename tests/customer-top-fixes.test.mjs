@@ -43,6 +43,25 @@ test('completed Spotlight summary replaces stale normalized CrowdStrike while re
   assert.equal(r.rows[1].findingCount,1);assert.equal(r.rows[1].source,'platform');
   assert.ok(h.calls.filter(c=>c.args).every(c=>c.args[0]===companyId));
 });
+
+test('new remediation table merges customer-scoped summaries by severity without replacing existing rows',async()=>{
+  const {cve,...rest}=fix.rows[0];
+  const fixes={...fix,remediationWorklist:{totalGroups:1,limit:50,rows:[{...rest,severity:'Critical',cves:[cve],grouping:'vendor-remediation'}]}};
+  const h=await harness({fixes}),r=await h.read(companyId);
+  assert.equal(r.rows.length,2);
+  assert.deepEqual(r.remediationWorklist.rows.map(row=>row.source),['crowdstrike','platform']);
+  assert.equal(r.remediationWorklist.totalGroups,2);
+  assert.deepEqual(r.remediationWorklist.rows[0].cves,[cve]);
+  assert.ok(h.calls.some(c=>c.sql.includes('model_version IN (4,$3)')));
+});
+
+test('v4 summary preserves old table while additional worklist is pending; malformed v5 data is refused',async()=>{
+  const old=await (await harness()).read(companyId);
+  assert.equal(old.rows[0].source,'crowdstrike');assert.equal(old.remediationWorklist.rows.length,1);
+  assert.match(old.remediationWorklist.notices[0],/waiting/);
+  const h=await harness({fixes:{...fix,remediationWorklist:{totalGroups:1,limit:50,rows:[]}}});
+  await assert.rejects(h.read(companyId),/inconsistent/);
+});
 test('missing source summary is explicitly pending and never falls back to stale CrowdStrike findings',async()=>{
   const h=await harness({pending:true}),r=await h.read(companyId);
   assert.equal(r.findingCount,1);assert.equal(r.rows[0].findingCount,1);assert.equal(r.notices.length,1);

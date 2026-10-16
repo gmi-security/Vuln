@@ -34,6 +34,17 @@ test('ranks open fixes without tickets; counts devices once per fix and excludes
   assert.equal(result.findingCount,4);
   assert.equal(result.uniqueCves,2);
   assert.deepEqual(result.rows.map(r=>[r.cve,r.deviceCount,r.findingCount,r.maxRisk]),[['CVE-2026-1234',2,3,72],['CVE-2026-4567',1,1,100]]);
+  assert.deepEqual(result.remediationWorklist.rows.map(r=>r.cves),[['CVE-2026-4567'],['CVE-2026-1234']]);
+  assert.ok(result.remediationWorklist.rows.every(r=>r.grouping==='single-cve'),'generic prose must not imply cross-CVE patch coverage');
+});
+
+test('severity worklist selects from all platform groups, not the old device-ranked top 50',async()=>{
+  const rows=Array.from({length:55},(_,i)=>finding(String(i),{remediation:'Patch '+i,realRisk:i}));
+  rows.push(finding('critical',{asset:'',severity:'Critical',remediation:'Critical patch'}));
+  const result=await buildTopFixes(companyId,rows);
+  assert.equal(result.rows[0].severity,'High');
+  assert.equal(result.remediationWorklist.rows[0].remediation,'Critical patch');
+  assert.equal(result.remediationWorklist.totalGroups,56);
 });
 
 test('normalizes action whitespace and case but never merges unrelated CVEs or different fixes',async()=>{

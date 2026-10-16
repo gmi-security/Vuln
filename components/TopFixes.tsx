@@ -1,5 +1,6 @@
 "use client";
 import CveText from "./CveText";
+import RemediationWorklist from "./RemediationWorklist";
 import { useEffect, useState } from "react";
 import { readDashboardResponse } from "@/lib/dashboard-browser-client";
 import type { TopFixesResult } from "@/lib/reporting-top-fixes";
@@ -33,7 +34,7 @@ export default function TopFixes({ companyId, refreshToken, reviewHref = "#conso
   }, [companyId, refreshToken, version]);
   const maxDevices = Math.max(1, ...(data?.rows.map(row => row.deviceCount) ?? []));
 
-  return <section className="rounded-2xl border border-[rgba(179,14,20,0.3)] bg-[#050505] p-5 sm:p-7" aria-label="Patching posture — top fixes" aria-busy={loading}>
+  return <><section className="rounded-2xl border border-[rgba(179,14,20,0.3)] bg-[#050505] p-5 sm:p-7" aria-label="Patching posture — top fixes" aria-busy={loading}>
     <p className="text-xs uppercase tracking-[0.25em] text-red-500">Patching posture</p>
     <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
       <h2 className="text-2xl font-semibold text-white">Top fixes</h2>
@@ -76,5 +77,7 @@ export default function TopFixes({ companyId, refreshToken, reviewHref = "#conso
       </>}
     </>}
     <a href={reviewHref} className="mt-5 inline-block text-sm text-sky-300 underline underline-offset-2">View ticket queue</a>
-  </section>;
+  </section>
+  <RemediationWorklist data={data?.remediationWorklist} loading={loading}/>
+  </>;
 }

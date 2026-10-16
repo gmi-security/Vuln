@@ -103,3 +103,28 @@ test("buildPatchConsolidation's maxRisk is the highest GMI risk score among a gr
   assert.ok(consolidation.groups.length > 0);
   for (const group of consolidation.groups) assert.equal(group.maxRisk, 88);
 });
+
+test("one vendor remediation ID with different target versions stays in separate stable action groups", () => {
+  const first=finding(), second=finding({id:"f2",hostId:"host-2"});
+  first.remediations[0].action="Update .NET to 4.8.9344.0 or newer";
+  first.remediations[0].reference="4.8.9344.0";
+  second.remediations[0].action="Update .NET to 4.8.10008.0 or newer";
+  second.remediations[0].reference="4.8.10008.0";
+  const build=rows=>patchRequest.buildPatchConsolidation(["CVE-2026-1000"],rows,"us-1","start","end");
+  const result=build([first,second]);
+  assert.equal(result.groups.length,2);
+  assert.notEqual(result.groups[0].remediationId,result.groups[1].remediationId);
+  for(const row of [first,second]) {
+    const group=result.groups.find(g=>g.action===row.remediations[0].action);
+    assert.equal(group.deviceCount,1); assert.equal(group.vendorRemediationId,"r1");
+    assert.equal(group.remediationId,build([row]).groups[0].remediationId);
+    assert.deepEqual(group.deviceCves.map(d=>d.hostId),[row.hostId]);
+  }
+});
+
+test("same recommended action spans CVEs and counts a device once; metadata role is not a different action",()=>{
+  const first=finding({apps:[{recommended:"r1"}]}), second=finding({id:"f2",cve:"CVE-2026-1001",apps:[{recommended:"r1"}]});
+  second.remediations[0].recommendationType="minimum";
+  const result=patchRequest.buildPatchConsolidation(["CVE-2026-1000","CVE-2026-1001"],[first,second],"us-1","start","end");
+  assert.equal(result.groups.length,1);assert.equal(result.groups[0].deviceCount,1);assert.equal(result.groups[0].cves.length,2);
+});

@@ -155,7 +155,7 @@ export function createSpotlightSummaryStore(db: Database) {
         else {
           const saved = (await client.query(`SELECT g.* FROM public.spotlight_summary_current p JOIN public.spotlight_summary_generations g
             ON g.company_id=p.company_id AND g.run_id=p.run_id AND g.model_version=p.model_version
-            WHERE p.company_id=$1 AND p.model_version IN (3,$2)`, [companyId, VERSION])).rows[0];
+            WHERE p.company_id=$1 AND p.model_version IN (3,4,$2)`, [companyId, VERSION])).rows[0];
           base.projection = { state: saved?.run_id === current.run_id && saved.model_version === VERSION ? "ready" : "pending", currentImportId: current.run_id,
             builtAt: saved ? iso(saved.built_at) : null, modelVersion: VERSION };
           if (!saved) result = unavailable("summary-pending");
