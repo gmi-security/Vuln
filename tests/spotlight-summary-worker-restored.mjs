@@ -15,7 +15,7 @@ let summaryInstalled=false,jobsInstalled=false,child;
 const tables=['spotlight_summary_jobs','spotlight_summary_current','spotlight_summary_cves','spotlight_summary_generations'];
 async function once(companyId){
   const url=`postgresql://codex@/recovery_application?host=${encodeURIComponent(socket)}&port=55483`;
-  child=spawn(process.execPath,['--max-old-space-size=512','scripts/spotlight-summary-worker.mjs','--once'],{env:{...process.env,DATABASE_URL:url,VULN_SPOTLIGHT_SUMMARY_WORKER_ENABLED:'true',VULN_SPOTLIGHT_SUMMARY_CUSTOMERS:companyId},stdio:['ignore','pipe','pipe']});
+  child=spawn(process.execPath,['--max-old-space-size=1024','scripts/spotlight-summary-worker.mjs','--once'],{env:{...process.env,DATABASE_URL:url,VULN_SPOTLIGHT_SUMMARY_WORKER_ENABLED:'true',VULN_SPOTLIGHT_SUMMARY_CUSTOMERS:companyId},stdio:['ignore','pipe','pipe']});
   let output='';child.stdout.on('data',v=>output+=v);child.stderr.on('data',v=>output+=v);
   const done=new Promise((resolve,reject)=>{child.once('error',reject);child.once('close',code=>resolve(code));});
   const code=await done;child=undefined;assert.equal(code,0,output);return output;

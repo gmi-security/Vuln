@@ -10,7 +10,7 @@ The web app never starts this worker. Its dedicated CLI is `scripts/spotlight-su
 
 ## Process and configuration
 
-`npm run build:summary-worker` compiles the worker's isolated TypeScript dependency tree to `.worker-build/spotlight-summary`. `npm run worker:summary` starts the CLI with a 512 MiB JavaScript heap ceiling. This is not a total process or database memory limit. The regular Next build does not create the worker artifact; the artifact is ignored by Git and must be built for a separately approved deployment.
+`npm run build:summary-worker` compiles the worker's isolated TypeScript dependency tree to `.worker-build/spotlight-summary`. `npm run worker:summary` and the split runtime start this worker with a 1 GiB JavaScript heap ceiling. Reporting remains at 512 MiB; web and importer settings are unchanged. This is not a total process or database memory limit. The regular Next build does not create the worker artifact; the artifact is ignored by Git and must be built for a separately approved deployment.
 
 The CLI reads only its process environment; it does not load `.env.local`, the application singleton, or legacy schedulers.
 
@@ -45,6 +45,8 @@ The full retained recovery-copy build matched all 2,119,658 rows and all 11,710 
 ## Job lifecycle
 
 The builder checks row ownership and reconciles the imported record count during its existing 2,000-row scan. It traverses the entire run in `(tenant_key, source_id)` primary-key order, so a misplaced tenant cannot be hidden by a customer filter. There is no separate full-source count. Individual SQL statements retain a 15-second timeout; the dedicated build has a 15-minute overall deadline to cover larger retained imports. A count mismatch, ownership failure or exceeded limit leaves the previous summary unchanged.
+
+Source records, distinct device/CVE pairs and distinct device/remediation pairs each have a five-million limit. The device, CVE and remediation-group limits remain 100,000. A retained import exceeded the previous three-million remediation-pair cap; capacity increases are confined to the dedicated summary process and retain explicit rejection instead of truncating results.
 
 Discovery polls only allowlisted customers with a completed owned import and completion timestamp. It creates one job per customer/import/model version; repeating discovery does not add duplicates. A newer source pointer supersedes queued work for the old generation. A claimed job cannot silently build a different generation.
 

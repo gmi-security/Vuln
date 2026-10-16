@@ -26,7 +26,7 @@ export function createSpotlightTopFixes(companyId: string) {
         groups.set(key,group);
       }
       if (!group.devices.has(device)) {
-        if (++pairs>3_000_000) throw new Error("Top fixes device/action limit exceeded.");
+        if (++pairs>5_000_000) throw new Error("Top fixes device/action limit exceeded.");
         group.devices.add(device); group.deviceCount++;
       }
       group.findingCount++;group.maxRisk=Math.max(group.maxRisk,row.risk);

@@ -58,10 +58,10 @@ test("per-role heap overrides accept bounded integer MiB values without replacin
   assert.equal(inherited.webHeapMb, undefined); assert.equal(inherited.workerHeapMb, undefined);
 });
 
-test("real child launches apply each role heap override while keeping auxiliary workers at 512 MiB", { timeout: 5000 }, async () => {
+test("real child launches keep web/writer overrides and give only the summary worker a 1 GiB heap", { timeout: 5000 }, async () => {
   const config = configuration({ VULN_WEB_HEAP_MB: "128", VULN_WORKER_HEAP_MB: "256", NODE_OPTIONS: "--max-old-space-size=1024",
     PRIVATE_TEST_VALUE: "private-heap-test-value" });
-  config.auxiliaryWorkers = [{ role: "summary", script: fileURLToPath(new URL("./fixtures/runtime-auxiliary.mjs", import.meta.url)), args: [] }];
+  config.auxiliaryWorkers = ["summary", "reporting"].map(role => ({ role, script: fileURLToPath(new URL("./fixtures/runtime-auxiliary.mjs", import.meta.url)), args: [] }));
   const controller = new AbortController(), args = new Map(), events = [];
   const status = await launcher.superviseRuntime(config, { serverScript, signal: controller.signal, shutdownMs: 500,
     onEvent(event, child) {
@@ -72,7 +72,8 @@ test("real child launches apply each role heap override while keeping auxiliary 
   assert.equal(status, 0);
   assert.ok(args.get("web").includes("--max-old-space-size=128"));
   assert.ok(args.get("worker").includes("--max-old-space-size=256"));
-  assert.ok(args.get("summary").includes("--max-old-space-size=512"));
+  assert.ok(args.get("summary").includes("--max-old-space-size=1024"));
+  assert.ok(args.get("reporting").includes("--max-old-space-size=512"));
   assert.equal(JSON.stringify(events).includes("private-heap-test-value"), false);
 });
 

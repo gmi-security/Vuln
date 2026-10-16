@@ -15,7 +15,7 @@
 - No source-data deletion, new CrowdStrike import, ticket action, schema change or customer reassignment.
 - Every row in the run must be checked, including misplaced tenants, duplicate source IDs across tenants and records excluded from displayed counts.
 - Missing/extra records, incorrect ownership and changing import pointers must not publish partial summaries.
-- Keep query and memory bounds; allow a bounded 15-minute total build and measure the retained large generation before release.
+- Keep query bounds; allow a bounded 15-minute total build, five million pairs and 1 GiB heap in the dedicated summary process, and measure the retained large generation before release.
 - Existing failed jobs must not silently reset; authorize one targeted retry only after the fix is deployed.
 
 ## Task 1: Stream integrity validation
@@ -42,3 +42,5 @@ Initial diagnosis: current import recorded 3,370,395 rows; summary model 4 job f
 The first read-only batch scan processes roughly 7,000 records/second, making the previous five-minute build deadline insufficient for the new import. Increase only the total deadline to 15 minutes, retaining 15-second query timeouts, memory/record limits, lease heartbeats and cancellation. The added clock-controlled database test failed against the old deadline before changing it.
 
 Validation before release: 16 real PostgreSQL summary checks, nine worker lifecycle checks, 20 focused unit tests, TypeScript and production/worker builds passed. Full suite: 1,003 passed, seven optional database tests skipped, zero failed. Independent review found no blockers; completion of the retained-generation read-only scan remains the release check. The old five-minute budget was also reproduced on real retained data (300,340 ms); each batch query stayed under 1.4 seconds.
+
+The larger read-only scan then hit the old three-million device/remediation-pair limit after 434.8 seconds. Increase both pair limits to five million (matching the source-row ceiling) and the dedicated summary heap to 1 GiB. Web, importer and reporting-worker heaps stay unchanged. The real child-process test failed against the old summary heap before changing it. Repeat the full retained-data run and validation after this capacity correction.
