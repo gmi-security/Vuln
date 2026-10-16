@@ -68,13 +68,13 @@ test('source mismatch and over-limit input are rejected',()=>{
   assert.throws(()=>model.scopedSpotlightRows(company.id,cve,Array(10001).fill({})),/No partial/);
 });
 
-async function service({records=[],generation=null,findings=[finding()],tickets=[],prior=null}={}){
+async function service({records=[],generation=null,findings=[finding()],tickets=[],prior=null,sourceError=null}={}){
   const calls=[];let released=0;
   const query=async(sql,params=[])=>{
     calls.push({sql,params});
     if(sql.includes('to_regclass'))return{rows:[{spotlight:true,enrichment:false}]};
     if(sql.includes('FROM spotlight_import_current'))return{rows:generation?[generation]:[]};
-    if(sql.includes('FROM spotlight_import_records'))return{rows:records};
+    if(sql.includes('FROM spotlight_import_records')){if(sourceError)throw sourceError;return{rows:records};}
     if(sql.includes('SELECT id,state,review_state'))return{rows:tickets};
     if(sql.includes("AND state='prepared'"))return{rows:prior?[{id:prior}]:[]};
     if(sql.includes("SELECT id FROM patch_group_ticket_requests WHERE id="))return{rows:[],rowCount:0};
@@ -93,6 +93,22 @@ test('saved completed generation wins over stale normalized CrowdStrike data',as
   const q=calls.find(row=>row.sql.includes('FROM spotlight_import_records'));
   assert.deepEqual(q.params,[company.id,cve,10001,'run-A']);assert.match(q.sql,/r.company_id=\$1/);assert.match(q.sql,/r.tenant_key=\$1/);
   assert.ok(calls.some(row=>row.sql==='ROLLBACK'));assert.equal(released(),1);
+});
+test('a timed-out CVE read reports a timeout and rolls back without preparing a partial draft',async()=>{
+  for(const action of ['readCustomerCve','prepareCustomerCve']){
+    const {api,calls,released}=await service({generation:{run_id:'run-A',promoted_at:when},
+      sourceError:Object.assign(new Error('canceling statement due to statement timeout'),{code:'57014'})});
+    await assert.rejects(()=>api[action](company.id,cve,'member'),error=>error.status===504 && /CVE evidence.*too long/i.test(error.message));
+    assert.ok(calls.some(row=>row.sql==='ROLLBACK'));assert.equal(released(),1);
+    assert.ok(calls.every(row=>!/^\s*(INSERT|UPDATE|DELETE)\b/i.test(row.sql)));
+    assert.equal(calls.filter(row=>row.sql.includes('FROM spotlight_import_records')).length,1,'do not retry an expensive query automatically');
+  }
+});
+test('an unrelated CVE storage failure keeps its original error for the storage error handler',async()=>{
+  const failure=Object.assign(new Error('connection lost'),{code:'08006'});
+  const {api,released}=await service({generation:{run_id:'run-A',promoted_at:when},sourceError:failure});
+  await assert.rejects(()=>api.readCustomerCve(company.id,cve),error=>error===failure);
+  assert.equal(released(),1);
 });
 test('detail cannot return another customer even if the source store returns mixed findings',async()=>{
   const {api,calls}=await service({findings:[finding(),finding({companyId:'CO-B',asset:'other-host'})]});
