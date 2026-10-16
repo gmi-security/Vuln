@@ -1,7 +1,8 @@
 // Restricted standalone parity/test loader: never import application initialization.
 import { readFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
-import { SourceTextModule } from 'node:vm';
+import { SourceTextModule, SyntheticModule } from 'node:vm';
+import { createHash } from 'node:crypto';
 import ts from 'typescript';
 
 async function loadReader(entry, exportName) {
@@ -21,7 +22,7 @@ export const loadDefenderSourceReader = () => loadReader('defender-source-read-m
 export const loadSpotlightSourceReader = () => loadReader('spotlight-source-read-model', 'createSpotlightSourceReader');
 
 export async function loadSpotlightSummaryModules() {
-  const allowed = new Set(['customer-source-read-model','spotlight-summary-model','spotlight-summary-store','spotlight-top-fixes','patch-recommendations','crowdstrike-dashboard','elastic-dashboard']);
+  const allowed = new Set(['customer-source-read-model','spotlight-summary-model','spotlight-summary-store','spotlight-top-fixes','patch-recommendations','crowdstrike-dashboard','elastic-dashboard','remediation-worklist']);
   const cache = new Map();
   function load(name) {
     if (!allowed.has(name)) throw new Error('Unexpected summary dependency.');
@@ -32,6 +33,8 @@ export async function loadSpotlightSummaryModules() {
     return module;
   }
   const store = load('spotlight-summary-store');
-  await store.link(spec => load(spec.replace(/^\.\//,''))); await store.evaluate();
+  await store.link(spec => spec === 'node:crypto'
+    ? new SyntheticModule(['createHash'], function(){this.setExport('createHash',createHash);})
+    : load(spec.replace(/^\.\//,''))); await store.evaluate();
   return {...store.namespace,...cache.get('spotlight-summary-model').namespace};
 }

@@ -4,6 +4,7 @@ import { customerTopFixes, ensureHydrated, getCompanyIdentity } from "./store";
 import { storedSpotlightContext, storedSpotlightProof, recheckStoredSpotlightProof, reviewedPlatformFinding } from "./customer-stored-spotlight";
 import { matchesSpotlightTenant, SPOTLIGHT_SUMMARY_VERSION } from "./spotlight-summary-model";
 import type { TopFixesResult, TopFix } from "./reporting-top-fixes";
+import { compareRemediationFixes, type RemediationWorklist } from "./remediation-worklist";
 
 function savedFixes(value: TopFixesResult | undefined, companyId: string): TopFixesResult {
   const count=(n: unknown)=>typeof n === "number" && Number.isSafeInteger(n) && n>=0;
@@ -12,6 +13,20 @@ function savedFixes(value: TopFixesResult | undefined, companyId: string): TopFi
     value.rows.some(row=>!/^CVE-\d{4}-\d{4,19}$/.test(row.cve) || typeof row.id!=="string" || typeof row.remediation!=="string" || !row.remediation.trim() ||
       !count(row.deviceCount) || !count(row.findingCount) || !Number.isFinite(row.maxRisk) || row.deviceCount>row.findingCount || row.findingCount>value.findingCount ||
       row.deviceCount>value.affectedDevices)) throw new DashboardError("Saved CrowdStrike fix summary is inconsistent. Rebuild the source summary.",503);
+  return value;
+}
+
+function savedWorklist(value: RemediationWorklist | undefined): RemediationWorklist | undefined {
+  if (!value) return undefined;
+  const count=(n: unknown)=>typeof n==="number" && Number.isSafeInteger(n) && n>=0;
+  if(!count(value.totalGroups) || value.limit!==50 || !Array.isArray(value.rows) ||
+    value.rows.length!==Math.min(50,value.totalGroups) || new Set(value.rows.map(row=>row.id)).size!==value.rows.length ||
+    value.rows.some(row=>row.grouping!=="vendor-remediation" || typeof row.id!=="string" ||
+      typeof row.remediation!=="string" || !row.remediation.trim() || typeof row.severity!=="string" ||
+      !count(row.deviceCount) || !count(row.findingCount) || row.deviceCount>row.findingCount || !Number.isFinite(row.maxRisk) ||
+      !Array.isArray(row.cves) || !row.cves.length || new Set(row.cves).size!==row.cves.length ||
+      row.cves.some(cve=>typeof cve!=="string" || !/^CVE-\d{4}-\d{4,19}$/.test(cve)) ||
+      row.cves.length>row.findingCount)) throw new DashboardError("Saved remediation worklist is inconsistent. Rebuild the source summary.",503);
   return value;
 }
 
@@ -36,12 +51,14 @@ export async function readCustomerTopFixes(value: unknown): Promise<TopFixesResu
     if (runId) {
       proof=await storedSpotlightProof(client,context,companyId,runId);
       const saved=tables.summaries ? (await client.query(`SELECT summary->'topFixes' AS fixes,summary->'vendorScope' AS vendor_scope,source_rows
-        FROM spotlight_summary_generations WHERE company_id=$1 AND run_id=$2 AND model_version=$3`,[companyId,runId,SPOTLIGHT_SUMMARY_VERSION])).rows[0] : null;
+        FROM spotlight_summary_generations WHERE company_id=$1 AND run_id=$2 AND model_version IN (4,$3)
+        ORDER BY model_version DESC LIMIT 1`,[companyId,runId,SPOTLIGHT_SUMMARY_VERSION])).rows[0] : null;
       if (!saved) notices.push("CrowdStrike fixes are waiting for the completed-import summary. An operator must run the Spotlight summary worker; refreshing this page does not rebuild millions of source records.");
       else {
         const cid=proof?.cid ?? saved.vendor_scope?.tenantId;
         if (!matchesSpotlightTenant(saved.vendor_scope,cid,saved.source_rows)) throw new DashboardError("Saved CrowdStrike fix scope is inconsistent. Review the customer source and rebuild its summary.",409);
         spotlight=savedFixes(saved.fixes,companyId);
+        savedWorklist(spotlight.remediationWorklist);
       }
     }
     await client.query("COMMIT");
@@ -56,12 +73,21 @@ export async function readCustomerTopFixes(value: unknown): Promise<TopFixesResu
   }
   if (!proof && JSON.stringify(await storedSpotlightContext(companyId))!==JSON.stringify(context)) throw new DashboardError("Customer source approval changed. Refresh to load current results.",409);
   const sources=[...(platform.findingCount || platform.missingRemediation ? ["Platform findings"] : []),...(spotlight ? ["Completed CrowdStrike import"] : [])];
-  if (!spotlight) return {...platform,sources,notices,rows:platform.rows.map(row=>({...row,source:"platform"}))};
+  const actionNotices=[...notices];
+  if(runId && spotlight && !spotlight.remediationWorklist)
+    actionNotices.push("The additional CrowdStrike remediation table is waiting for its summary. Existing Top fixes results remain available.");
+  const remediationWorklist: RemediationWorklist = {
+    totalGroups:(platform.remediationWorklist?.totalGroups ?? 0)+(spotlight?.remediationWorklist?.totalGroups ?? 0),limit:50,notices:actionNotices,
+    rows:[...(platform.remediationWorklist?.rows ?? []).map(row=>({...row,source:"platform" as const})),
+      ...(spotlight?.remediationWorklist?.rows ?? []).map(row=>({...row,source:"crowdstrike" as const}))]
+      .sort(compareRemediationFixes).slice(0,50)
+  };
+  if (!spotlight) return {...platform,sources,notices,remediationWorklist,rows:platform.rows.map(row=>({...row,source:"platform"}))};
   const severity: Record<string,number>={Critical:4,High:3,Medium:2,Low:1,Info:0,Unknown:-1};
   const rows: TopFix[]=[...platform.rows.map(row=>({...row,source:"platform" as const})),...spotlight.rows.map(row=>({...row,source:"crowdstrike" as const}))];
   rows.sort((a,b)=>b.deviceCount-a.deviceCount || (severity[b.severity]??-1)-(severity[a.severity]??-1) ||
     (a.source??"").localeCompare(b.source??"") || b.maxRisk-a.maxRisk || b.findingCount-a.findingCount || a.id.localeCompare(b.id));
-  return {...platform,calculatedAt:new Date().toISOString(),sources,notices,rows:rows.slice(0,50),
+  return {...platform,calculatedAt:new Date().toISOString(),sources,notices,remediationWorklist,rows:rows.slice(0,50),
     totalFixes:platform.totalFixes+spotlight.totalFixes,affectedDevices:platform.affectedDevices+spotlight.affectedDevices,
     findingCount:platform.findingCount+spotlight.findingCount,uniqueCves:platform.uniqueCves+spotlight.uniqueCves,
     missingRemediation:platform.missingRemediation+spotlight.missingRemediation,missingDevice:platform.missingDevice+spotlight.missingDevice};

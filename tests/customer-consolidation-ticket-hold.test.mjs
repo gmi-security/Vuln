@@ -9,7 +9,7 @@ async function harness(existing=false){
  const client={query:async(sql,params=[])=>{
   calls.push({sql,params});
   if(sql.includes("SELECT revision FROM dashboard_source_connections"))return {rows:[{revision:1}]};
-  if(sql.includes('WHERE remediation_id=$1 AND tenant_id=$2 AND scope_hash=$3 AND cves=$4'))
+  if(sql.includes('SELECT id FROM patch_group_ticket_requests'))
    return {rows:existing?[{id:'existing-draft'}]:[]};
   return {rows:[]};
  },release:()=>{}};

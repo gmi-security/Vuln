@@ -3,6 +3,27 @@ import test from 'node:test';
 import {loadSpotlightSummaryModules} from '../scripts/source-read-model-loader.mjs';
 const {createSpotlightSummaryAccumulator:create,validateSpotlightSummary:validate,matchesSpotlightTenant,summaryLimits}=await loadSpotlightSummaryModules();
 const row=(extra={})=>({source_id:'1',id:'1',company_id:'A',cve:'CVE-2026-1000',status:'open',cid:'tenant',aid:'host',raw_cve:'CVE-2026-1000',raw_status:'open',raw_severity:'HIGH',score:7.5,suppressed:false,...extra});
+
+test('additional remediation worklist groups exact actions across CVEs, severity first then unique devices',()=>{
+  const a=create('A');let id=0;
+  function add(cve,aid,severity,action='Install version 3',cid='tenant') {
+    const key=String(++id);
+    a.add(row({source_id:key,id:key,aid,cid,cve,raw_cve:cve,raw_severity:severity,
+      patch:{id:key,cid,aid,status:'open',cve:{id:cve,severity,base_score:7.5},
+        apps:[{remediation_info:{recommended_id:'r1'}}],remediation:{entities:[{id:'r1',title:'Update',action,reference:action}]}}}));
+  }
+  add('CVE-2026-1000','host','CRITICAL');add('CVE-2026-1001','host','HIGH');
+  add('CVE-2026-1001','host2','HIGH');add('CVE-2026-1002','host3','CRITICAL','Install version 4');
+  for(let i=0;i<5;i++)add('CVE-2026-1003','low'+i,'HIGH','Install version 2');
+  add('CVE-2026-1000','host','CRITICAL','Install version 3','other-tenant');
+  const result=a.finish().topFixes;
+  assert.equal(result.rows[0].deviceCount,5,'existing device-ranked table stays unchanged');
+  assert.ok(result.remediationWorklist);
+  const fixes=result.remediationWorklist.rows;
+  assert.deepEqual(fixes.map(f=>[f.severity,f.deviceCount]),[['Critical',2],['Critical',1],['Critical',1],['High',5]]);
+  assert.deepEqual(fixes[0].cves,['CVE-2026-1000','CVE-2026-1001']);
+  assert.equal(new Set(fixes.map(f=>f.id)).size,4,'tenant and target versions must stay separate');
+});
 test('completed summaries include recommended fixes without any ticket drafts',()=>{
   const patch={id:'1',cid:'tenant',aid:'host',status:'open',cve:{id:'CVE-2026-1000',severity:'HIGH',base_score:7.5},
     apps:[{remediation_info:{recommended_id:'recommended',minimum_id:'minimum'}}],remediation:{entities:[

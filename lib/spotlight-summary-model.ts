@@ -1,7 +1,7 @@
 import { emptySeverityCounts, sourceSeverities, type CustomerSourceRead, type SourceCveRow } from "./customer-source-read-model";
 import { createSpotlightTopFixes } from "./spotlight-top-fixes";
 
-export const SPOTLIGHT_SUMMARY_VERSION = 4;
+export const SPOTLIGHT_SUMMARY_VERSION = 5;
 export type SpotlightVendorScope = { version: 2; tenantId: string | null; mixed: boolean; missingRows: number; rows: number; localPlaceholderRows: number };
 export function matchesSpotlightTenant(scope: unknown, tenantId: string, sourceRows: unknown): boolean {
   const value = scope as SpotlightVendorScope | null;

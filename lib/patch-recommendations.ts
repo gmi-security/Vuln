@@ -1,4 +1,5 @@
 import { DashboardError } from "./elastic-dashboard";
+import { createHash } from "node:crypto";
 import { normalizeVulnerability, type Vulnerability } from "./crowdstrike-dashboard";
 
 export type Remediation = {
@@ -20,6 +21,16 @@ export function normalizeRemediation(raw: Json): Remediation {
   if (!raw || typeof raw !== "object" || !text(raw.id)) throw new DashboardError("CrowdStrike returned an invalid remediation. No patch request was prepared.");
   return { id: text(raw.id), title: text(raw.title), action: text(raw.action), link: text(raw.link), vendorUrl: text(raw.vendor_url),
     reference: text(raw.reference), recommendationType: text(raw.recommendation_type), published: text(raw.patch_publication_date) };
+}
+
+// CrowdStrike can reuse a remediation ID for different target versions.
+// Recommendation role is per application; the selected action defines a variant.
+export function remediationActionKey(remediation: Remediation): string {
+  return JSON.stringify([remediation.id, remediation.title, remediation.action, remediation.reference,
+    remediation.link, remediation.vendorUrl, remediation.published].map(value => value.trim().replace(/\s+/g, " ")));
+}
+export function remediationVariantId(remediation: Remediation): string {
+  return `${remediation.id}:${createHash("sha256").update(remediationActionKey(remediation)).digest("hex")}`;
 }
 
 // The application's explicit recommendation takes precedence over entity tags.

@@ -43,9 +43,13 @@ export async function persistPreparedGroups(consolidation: PatchConsolidation, a
       const id = ids[index];
       const scopeHash = createHash("sha256").update(JSON.stringify(group.hostScope)).digest("hex");
       const existing = (await client.query(`SELECT id FROM patch_group_ticket_requests
-        WHERE remediation_id=$1 AND tenant_id=$2 AND scope_hash=$3 AND cves=$4::jsonb
+        WHERE (remediation_id=$1 OR (remediation_id=$5 AND packet @> $6::jsonb))
+        AND tenant_id=$2 AND scope_hash=$3 AND cves=$4::jsonb
+        AND packet->>'appCompanyId' IS NOT DISTINCT FROM $7::text
         AND state='prepared' AND review_state IN ('pending','approved') ORDER BY prepared_at DESC LIMIT 1`,
-        [group.remediationId, group.tenantId, scopeHash, JSON.stringify(group.cves)])).rows[0];
+        [group.remediationId, group.tenantId, scopeHash, JSON.stringify(group.cves),group.vendorRemediationId ?? null,
+          JSON.stringify({title:group.title,action:group.action,reference:group.reference,link:group.link,vendorUrl:group.vendorUrl,published:group.published}),
+          group.appCompanyId ?? null])).rows[0];
       if (existing) {
         // The matching row already covers this exact scope, so it's reused
         // rather than inserting a near-duplicate -- but worst_severity/
@@ -194,8 +198,16 @@ export async function createGroupTicket(id: string, value: unknown, actor: strin
     // Manual drafts use a separate review identity so background draft cleanup
     // cannot supersede them, but the same patch/scope must still deduplicate at send.
     const baseRemediation = packet.manualOnly ? row.remediation_id.replace(/^manual:/, "") : row.remediation_id;
-    const existing = (await client.query(`SELECT id,ticket_id FROM patch_group_ticket_requests WHERE cw_target=$1 AND remediation_id=ANY($2::text[]) AND tenant_id=$3 AND company_id=$4 AND scope_hash=$5
-      AND state IN ('creating','uncertain','created') AND closed=false AND id<>$6 LIMIT 1`, [saved.target, [baseRemediation, `manual:${baseRemediation}`], row.tenant_id, routing.companyId, row.scope_hash, id])).rows[0];
+    // Compare legacy/variant identities in both directions, but only for the
+    // same action: vendor IDs alone can refer to different target versions.
+    const legacyIds=packet.vendorRemediationId ? [packet.vendorRemediationId,`manual:${packet.vendorRemediationId}`] : [];
+    const action={title:packet.title,action:packet.action,reference:packet.reference,link:packet.link,vendorUrl:packet.vendorUrl,published:packet.published};
+    const existing = (await client.query(`SELECT id,ticket_id FROM patch_group_ticket_requests WHERE cw_target=$1
+      AND (remediation_id=ANY($2::text[]) OR ((remediation_id=ANY($7::text[]) OR packet->>'vendorRemediationId'=$8) AND packet @> $9::jsonb))
+      AND tenant_id=$3 AND company_id=$4 AND scope_hash=$5
+      AND state IN ('creating','uncertain','created') AND closed=false AND id<>$6 LIMIT 1`,
+      [saved.target,[baseRemediation,`manual:${baseRemediation}`],row.tenant_id,routing.companyId,row.scope_hash,id,legacyIds,
+        packet.vendorRemediationId ? null : baseRemediation,JSON.stringify(action)])).rows[0];
     if (existing) throw new DashboardError(`This patch and device scope already has ${existing.ticket_id ? `ticket #${existing.ticket_id}` : "a ticket request in progress"}. Open its saved request below.`, 409);
     await client.query(`UPDATE patch_group_ticket_requests SET state='creating',created_by=$2,cw_target=$3,cw_revision=$4,company_id=$5,routing=$6::jsonb,title=$7,body=$8,
       started_at=now(),updated_at=now(),last_error=NULL WHERE id=$1`, [id, actor, saved.target, saved.revision, routing.companyId, JSON.stringify(routing), body.title.trim(), body.body.trim()]);

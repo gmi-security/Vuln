@@ -7,7 +7,7 @@ const socket=await realpath(process.argv[2]||'.');
 assert.ok(socket.startsWith('/home/codex/vuln-recovery/')&&socket.endsWith('/socket'));
 const options={host:socket,port:55483,user:'codex',connectionTimeoutMillis:5000,statement_timeout:15000};
 const admin=new pg.Client({...options,database:'postgres'}),name=`vuln2_summary_test_${randomUUID().replaceAll('-','')}`;
-const {createSpotlightSummaryStore:create}=await loadSpotlightSummaryModules();
+const {createSpotlightSummaryStore:create,SPOTLIGHT_SUMMARY_VERSION:VERSION}=await loadSpotlightSummaryModules();
 const request={companyId:'CO-A',now:new Date('2026-10-10'),staleAfterMs:86400000};
 let db,created=false,checks=0;const disconnected=[],ok=message=>{checks++;console.log(`PASS ${message}`);};
 const migration=await readFile('docs/sql/spotlight-source-summaries.sql','utf8');
@@ -54,15 +54,16 @@ try {
   assert.equal(guarded.state,'available');assert.doesNotMatch(JSON.stringify(guarded),/vendorScope|aaaaaaaa/);
   assert.equal((await noRaw.read({...request,spotlightTenant:'b'.repeat(32)})).state,'inconsistent');
   ok('tenant guarded reader validates whole-generation CID without returning it or scanning source rows');
-  // Preserve a v3 generation while a v4 worker catches up: counts/CVE pages must
-  // remain available, but the projection reports pending until v4 is published.
-  await db.query(`INSERT INTO spotlight_summary_generations SELECT company_id,run_id,3,source_completed_at,source_rows,count_verification,summary-'topFixes',cve_count,built_at,built_by FROM spotlight_summary_generations WHERE run_id=$1 AND model_version=4`,[first]);
-  await db.query(`INSERT INTO spotlight_summary_cves(company_id,run_id,model_version,cve,severity,cvss,affected_devices,source_instances) SELECT company_id,run_id,3,cve,severity,cvss,affected_devices,source_instances FROM spotlight_summary_cves WHERE run_id=$1 AND model_version=4`,[first]);
-  await db.query("UPDATE spotlight_summary_current SET model_version=3 WHERE company_id='CO-A'");
-  const compatible=await noRaw.read(request);assert.equal(compatible.state,'available');assert.equal(compatible.summary.sourceInstances,3);assert.equal(compatible.cves.total,2);assert.equal(compatible.projection.state,'pending');
-  await db.query("UPDATE spotlight_summary_current SET model_version=4 WHERE company_id='CO-A'");
-  await db.query("DELETE FROM spotlight_summary_generations WHERE model_version=3");
-  ok('v3 summary remains readable with projection pending during the v4 worker upgrade');
+  // Older summaries remain readable while the new worklist is being built.
+  for(const older of [3,4]) {
+    await db.query("INSERT INTO spotlight_summary_generations SELECT company_id,run_id,$2,source_completed_at,source_rows,count_verification,summary,cve_count,built_at,built_by FROM spotlight_summary_generations WHERE run_id=$1 AND model_version=$3",[first,older,VERSION]);
+    await db.query("INSERT INTO spotlight_summary_cves(company_id,run_id,model_version,cve,severity,cvss,affected_devices,source_instances) SELECT company_id,run_id,$2,cve,severity,cvss,affected_devices,source_instances FROM spotlight_summary_cves WHERE run_id=$1 AND model_version=$3",[first,older,VERSION]);
+    await db.query("UPDATE spotlight_summary_current SET model_version=$1 WHERE company_id='CO-A'",[older]);
+    const compatible=await noRaw.read(request);assert.equal(compatible.state,'available');assert.equal(compatible.summary.sourceInstances,3);assert.equal(compatible.cves.total,2);assert.equal(compatible.projection.state,'pending');
+    await db.query("UPDATE spotlight_summary_current SET model_version=$1 WHERE company_id='CO-A'",[VERSION]);
+    await db.query("DELETE FROM spotlight_summary_generations WHERE model_version=$1",[older]);
+  }
+  ok('v3 and v4 summaries remain readable with projection pending during the v5 upgrade');
 
   const hold=await db.connect();await hold.query('SELECT pg_advisory_lock(804244,1)');
   assert.equal((await store.build('CO-A','tester')).state,'busy');await hold.query('SELECT pg_advisory_unlock(804244,1)');hold.release();
