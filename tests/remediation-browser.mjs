@@ -36,6 +36,12 @@ const summary=(companyId)=>({id,cves:[cve],hostCount:2,findingCount:2,remediatio
 const group=(companyId)=>({manualOnly:true,source:'stored-findings',appCompanyId:companyId,companyName:companyId===companies[0].id?'Fixture A':'Fixture B',connectors:['defender'],title:'Install recommended patch',action:'Install recommended update',tenantId:companyId,remediationId:'manual:fixture',cves:[cve],deviceCount:2,findingCount:2,hostScope:[],deviceCves:[],maxRisk:72,worstSeverity:'High',label:cve,csv:`cve,hostname,cvss,remediation\r\n${cve},${companyId}-device,8.1,Install recommended update\r\n`,ticketTitle:`${companyId}: ${cve}`,ticketBody:`Customer: ${companyId}\nCVE: ${cve}\nRecommended remediation: Install recommended update\nCVSS: 8.1\nSee attached CSV for devices.`});
 const detail=companyId=>({companyId,cve,companyName:companyId===companies[0].id?'Fixture A':'Fixture B',observedAt:when,sourceObservations:{platform:when,crowdstrike:null},findingCount:2,deviceCount:2,hosts:[{host:`${companyId}-device`,source:'defender',severity:'High',cvss:8.1}],enrichment:{cvss_score:8.1,epss_probability:0.9,cisa_kev:true,active_exploitation:true,active_exploitation_source:'MISP',active_exploitation_detail:'Synthetic retained signal',updated_at:when},tickets:[],moreTickets:false});
 let approved=false,created=false,failPrepare=false,failIntel=false,delayDetail=false,releaseDetail;
+let ticketStatusMode='none';
+function fixStatus(related=false){
+ const state=['none','unavailable'].includes(ticketStatusMode)?ticketStatusMode:related||ticketStatusMode==='single'?'related':ticketStatusMode;
+ return {state,more:0,tickets:['none','unavailable'].includes(state)?[]:[{id:'existing-fixture',kind:ticketStatusMode==='single'?'single':'group',ticketId:['open','partial','closed'].includes(ticketStatusMode)?321:null,url:'https://tickets.invalid/321',sameFix:!related,state:ticketStatusMode==='sending'?'creating':ticketStatusMode==='uncertain'?'uncertain':'prepared',reviewState:['approved','sending','uncertain'].includes(ticketStatusMode)?'approved':'pending',closed:ticketStatusMode==='closed'}],
+  ...(!related&&['open','partial'].includes(state)?{coverage:{coveredDevices:state==='open'?9:4,remainingDevices:state==='open'?0:5,totalDevices:9}}:{})};
+}
 let emptyQueue=false,failFixes=false;
 let mismatchOverview=false,delayOverview=false,releaseOverview,withLegacyHistory=false;
 function overviewModel(companyId){
@@ -114,10 +120,10 @@ try{
       return failSource?json({error:'Fixture saved read failed'},400):json(result);
     }
     if(p==='customer-tiles')return json({canManage:true,storageReady:true,connected:true,crowdstrike:{connected:true},availableSources:{elastic:true,crowdstrike:true},queries:['table','bar'].map(display=>({id:display,title:`Fixture ${display}`,companyId,source:'crowdstrike',query:'fixture',display,chart:{category:'cve',value:'devices'},enabled:false,refreshMinutes:1440,refreshedAt:when,attemptedAt:when,error:null,result:{columns:[{name:'cve',type:'keyword'},{name:'devices',type:'long'}],rows:[[cve,2]],truncated:false}}))});
-    if(p==='remediation-ticket' && req.method()==='POST'){assert.equal(body.id,'shared-action');return json({companyId:body.companyId,groups:[{id:'prepared-remediation-fixture'}],reviewUrl:`/remediation?companyId=${body.companyId}&view=tickets`});}
+    if(p==='remediation-ticket' && req.method()==='POST'){assert.equal(body.id,'shared-action');ticketStatusMode='draft';return json({companyId:body.companyId,groups:[{id:'prepared-remediation-fixture'}],reviewUrl:`/remediation?companyId=${body.companyId}&view=tickets`});}
     if(p==='top-fixes')return failFixes ? json({error:'Top fixes temporarily unavailable.'},503) : json({companyId,calculatedAt:when,totalFixes:1,affectedDevices:18,findingCount:20,uniqueCves:1,missingRemediation:0,missingDevice:0,limit:50,
-      rows:[{id:'fixture-fix',cve,remediation:'Install the open vulnerability update',deviceCount:18,findingCount:20,maxRisk:72,severity:'High'}],
-      remediationWorklist:{totalGroups:1,limit:50,rows:[{id:'shared-action',cves:[cve,...Array.from({length:60},(_,i)=>`CVE-2026-${5678+i}`)],remediation:'One recommended patch across CVEs',deviceCount:9,findingCount:70,maxRisk:90,severity:'Critical',source:'crowdstrike',grouping:'vendor-remediation'}]}});
+      rows:[{id:'fixture-fix',cve,remediation:'Install the open vulnerability update',deviceCount:18,findingCount:20,maxRisk:72,severity:'High',ticketStatus:fixStatus(true)}],
+      remediationWorklist:{totalGroups:1,limit:50,rows:[{id:'shared-action',cves:[cve,...Array.from({length:60},(_,i)=>`CVE-2026-${5678+i}`)],remediation:'One recommended patch across CVEs',deviceCount:9,findingCount:70,maxRisk:90,severity:'Critical',source:'crowdstrike',grouping:'vendor-remediation',ticketStatus:fixStatus()}]}});
     if(p==='patch-group-tickets')return json({requests:emptyQueue?[]:[summary(companyId)],more:false,total:emptyQueue?0:1});
     if(p==='risk/summary')return json({totalOpenRisk:1,criticalRiskCount:0,swath1Open:0,swath2Open:1,kevOpen:1,internetFacingCriticalRisk:0,verifiedRemediations:0,awaitingVerification:0});
     if(p==='risk/top')return json({rows:[{id:'risk-1',cve,companyId,hostname:'fixture-host',severity:'High',riskScore:720,effectiveSwath:2,calculatedSwath:2,reasons:[],cisaKev:true,epssProbability:0.9,verificationStatus:'detected',lastSeen:when}],total:1});
@@ -250,6 +256,21 @@ try{
   assert.equal(calls.filter(c=>c.method==='POST').length,beforePrepare+1);
   assert.equal(calls.filter(c=>c.path==='remediation-ticket'&&c.method==='POST').at(-1).body.companyId,companies[0].id);
   pass('remediation row prepares one customer-scoped draft with a Tickets review link and no ticket-send request');
+  await worklist.getByText('Draft prepared',{exact:true}).waitFor();
+  const beforeStatus=calls.filter(c=>c.method==='POST').length;
+  for(const [mode,label] of [['approved','Approved - not sent'],['sending','Sending ticket'],['uncertain','Check sending outcome'],['single','Related CVE request'],['open','Open ticket'],['partial','Partially ticketed'],['closed','Ticket closed - verify findings'],['unavailable','Ticket status unavailable']]){
+    ticketStatusMode=mode;await fixes.getByRole('button',{name:'Refresh',exact:true}).click();await worklist.getByText(label,{exact:true}).waitFor();
+    if(mode==='approved')assert.match(await worklist.getByText(label,{exact:true}).getAttribute('class'),/sky/);
+    if(mode==='single'){assert.equal(await worklist.getByRole('link',{name:'Single-CVE request'}).getAttribute('href'),'/query-tiles');assert.match(await worklist.innerText(),/choose All patch tickets/);}
+    if(['sending','uncertain'].includes(mode)){assert.doesNotMatch(await worklist.innerText(),/not sent|Review approved draft/);assert.match(await worklist.innerText(),mode==='uncertain'?/sending outcome unknown/:/Review request - sending/);}
+    if(mode==='open'){assert.match(await worklist.innerText(),/9 \/ 9 devices fully covered/);assert.equal(await worklist.getByRole('link',{name:'ConnectWise #321'}).getAttribute('href'),'https://tickets.invalid/321');assert.match(await fixes.innerText(),/Related CVE request/);}
+    if(mode==='partial')assert.match(await worklist.innerText(),/5 devices still need ticket coverage review/);
+    if(mode==='unavailable')assert.doesNotMatch(await worklist.innerText(),/No tracked request/);
+  }
+  assert.equal(calls.filter(c=>c.method==='POST').length,beforeStatus,'status refresh never sends a ticket');
+  ticketStatusMode='open';await fixes.getByRole('button',{name:'Refresh',exact:true}).click();await worklist.getByText('Open ticket',{exact:true}).waitFor();
+  await page.screenshot({path:join(artifacts,'ticket-coverage-fixture.png')});
+  pass('both worklists show scoped ticket references, distinguish approval from sending, preserve counts and surface unavailable coverage');
   const intel=page.getByRole('region',{name:'Threat Intelligence'});await intel.getByRole('button',{name:`View ${cve} details`}).click();await panel.getByText(`${companies[0].id}-device`,{exact:true}).waitFor();await page.keyboard.press('Escape');
   failIntel=true;await intel.getByRole('button',{name:'Refresh saved evidence'}).click();await intel.getByRole('alert').waitFor({timeout:15000});assert.match(await intel.innerText(),/Synthetic retained signal/);
   await page.getByRole('link',{name:'View ticket queue',exact:true}).click();
