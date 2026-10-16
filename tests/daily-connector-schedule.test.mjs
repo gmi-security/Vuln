@@ -4,11 +4,20 @@ import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import ts from 'typescript';
 
+let clock = Date.parse('2026-10-17T04:00:00Z');
+class ClockDate extends Date {
+  constructor(...args) { super(...(args.length ? args : [clock])); }
+  static now() { return clock; }
+}
 async function load(file, overrides, timers = []) {
-  const context = vm.createContext({ console, process: { env: {} }, setInterval(fn, ms) { timers.push({ fn, ms }); return { unref() {} }; } });
+  const context = vm.createContext({ Date: ClockDate, console, process: { env: {} }, setInterval(fn, ms) { timers.push({ fn, ms }); return { unref() {} }; } });
   const code = ts.transpileModule(await readFile(file, 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
   const mod = new vm.SourceTextModule(code, { context });
-  await mod.link(name => {
+  await mod.link(async name => {
+    if (name === './connector-sync-schedule') {
+      const helper = new vm.SourceTextModule(ts.transpileModule(await readFile('lib/connector-sync-schedule.ts','utf8'), {compilerOptions:{module:ts.ModuleKind.ESNext}}).outputText,{context});
+      await helper.link(() => {}); return helper;
+    }
     assert.ok(overrides[name], `unexpected dependency ${name}`);
     const values = overrides[name];
     return new vm.SyntheticModule(Object.keys(values), function() { for (const [k,v] of Object.entries(values)) this.setExport(k,v); }, { context });
@@ -16,6 +25,38 @@ async function load(file, overrides, timers = []) {
   await mod.evaluate(); return mod.namespace;
 }
 const settled = () => new Promise(resolve => setImmediate(resolve));
+
+test('Arizona nightly start is stable across daylight-saving changes, month boundaries and restarts', async () => {
+  const {connectorSyncStart} = await load('lib/connector-sync-schedule.ts',{});
+  for (const [at,want] of [
+    ['2026-01-17T03:59:59.999Z',null],['2026-01-17T04:00:00Z','2026-01-17T04:00:00Z'],
+    ['2026-07-17T04:00:00Z','2026-07-17T04:00:00Z'],['2026-11-02T04:00:00Z','2026-11-02T04:00:00Z'],
+    ['2027-01-01T04:00:00Z','2027-01-01T04:00:00Z'],
+    ['2026-10-17T06:59:59Z','2026-10-17T04:00:00Z'],['2026-10-17T07:00:00Z',null],
+    ['2026-10-17T19:00:00Z',null],['2026-10-18T04:00:00Z','2026-10-18T04:00:00Z'],
+  ]) assert.equal(connectorSyncStart(Date.parse(at)),want === null ? null : Date.parse(want),at);
+  assert.equal(connectorSyncStart(NaN),null);
+});
+
+test('general connector scheduler starts at 9 PM, blocks duplicates after restart and waits again next day', async () => {
+  const ast=ts.createSourceFile('store.ts',await readFile('lib/store.ts','utf8'),ts.ScriptTarget.Latest,true);
+  const fn=ast.statements.find(node=>ts.isFunctionDeclaration(node)&&node.name?.text==='schedulerTick');
+  const {connectorSyncStart}=await load('lib/connector-sync-schedule.ts',{});
+  const s={settings:{schedule:{autoSyncEnabled:true,autoSyncIntervalHours:24,alertsEnabled:false,monthlyReportsEnabled:false}},meta:{lastMetricsSnapshotDay:'today',lastAutoSyncAt:null}};
+  let starts=0,busy=false,claimed=null;
+  const context=vm.createContext({console,Date:ClockDate,store:()=>s,todayUtc:()=> 'today',markDirty(){},connectorSyncStart,
+    claimDailyJob:async()=>{const slot=connectorSyncStart(clock);if(claimed===slot)return false;claimed=slot;return true;},
+    syncAllStatus:()=>({running:busy}),startSyncAll:options=>{assert.equal(options.scheduled,true);starts++;return {started:true};}});
+  const mod=new vm.SourceTextModule(ts.transpileModule('export '+fn.getText(ast),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText,{context});
+  await mod.link(()=>{});await mod.evaluate();
+  clock=Date.parse('2026-10-17T03:59:59Z');await mod.namespace.schedulerTick();assert.equal(starts,0);
+  clock=Date.parse('2026-10-17T04:00:00Z');await mod.namespace.schedulerTick();assert.equal(starts,1);
+  s.meta.lastAutoSyncAt=null;await mod.namespace.schedulerTick();assert.equal(starts,1,'durable claim survives loss of in-memory metadata');
+  clock=Date.parse('2026-10-18T03:59:59Z');await mod.namespace.schedulerTick();assert.equal(starts,1);
+  clock=Date.parse('2026-10-18T04:00:00Z');busy=true;await mod.namespace.schedulerTick();assert.equal(starts,1);
+  busy=false;await mod.namespace.schedulerTick();assert.equal(starts,2);
+  clock=Date.parse('2026-10-19T04:00:00Z');s.settings.schedule.autoSyncEnabled=false;await mod.namespace.schedulerTick();assert.equal(starts,2);
+});
 
 test('ConnectWise automatic sync observes a durable daily claim across ticks and restarts; manual refresh remains available', async () => {
   let due = true, checks = 0, claims = 0;
@@ -58,11 +99,12 @@ test('risk scheduler skips a recent daily run but manual risk refresh bypasses c
 });
 
 test('Defender daily gate allows first imports and failed-first retries, prevents early repeats and honors disabled customers', async () => {
+  clock = Date.parse('2026-10-17T04:00:00Z');
   const saved = { revision: 1, daily: true, last_attempt_at: null, current_run: null };
   const db = { connect: async () => ({ query: dbQuery, release() {} }), query: dbQuery };
   async function dbQuery(sql) {
     if (sql.startsWith('SELECT revision,daily')) return { rows: [{ ...saved }] };
-    if (sql.startsWith('UPDATE defender_connections SET last_attempt_at')) saved.last_attempt_at = new Date();
+    if (sql.startsWith('UPDATE defender_connections SET last_attempt_at')) saved.last_attempt_at = new ClockDate();
     return { rows: [] };
   }
   const mod = await load('lib/defender-store.ts', {
@@ -72,7 +114,7 @@ test('Defender daily gate allows first imports and failed-first retries, prevent
   const store = mod.createDefenderStore(db);
   assert.equal(await store.enqueue('CO-A', 'daily-scheduler'), 'test-run');
   assert.equal(await store.enqueue('CO-A', 'daily-scheduler'), null);
-  saved.last_attempt_at = new Date(Date.now() - 86_400_001);
+  clock = Date.parse('2026-10-18T04:00:00Z');
   assert.equal(await store.enqueue('CO-A', 'daily-scheduler'), 'test-run');
   saved.daily = false; saved.last_attempt_at = null;
   assert.equal(await store.enqueue('CO-A', 'daily-scheduler'), null);
@@ -80,11 +122,42 @@ test('Defender daily gate allows first imports and failed-first retries, prevent
 });
 
 test('daily claim returns the database decision and fails closed if it cannot be recorded', async () => {
+  clock = Date.parse('2026-10-17T04:00:00Z');
   let rows = [], broken = false;
   const mod = await load('lib/background-job-runs.ts', { './patch-ticket-store': { patchTicketDatabase: async () => ({ query: async () => { if(broken) throw Error('db down'); return { rows }; } }) } });
   assert.equal(await mod.claimDailyJob('risk-refresh'), false);
   rows = [{ job: 'risk-refresh' }]; assert.equal(await mod.claimDailyJob('risk-refresh'), true);
   broken = true; await assert.rejects(mod.claimDailyJob('risk-refresh'), /db down/);
+});
+
+test('nightly provider claims do not start daytime catch-up imports after an app restart', async () => {
+  clock = Date.parse('2026-10-17T03:59:59Z');
+  let calls = 0;
+  const mod = await load('lib/background-job-runs.ts', {'./patch-ticket-store':{patchTicketDatabase:async()=>({query:async()=>{calls++;return {rows:[{job:'risk-refresh'}]};}})}});
+  assert.equal(await mod.claimDailyJob('risk-refresh'), false);
+  assert.equal(calls, 0);
+  clock = Date.parse('2026-10-17T04:00:00Z');
+  assert.equal(await mod.claimDailyJob('risk-refresh'), true);
+  assert.equal(calls, 1);
+});
+
+test('Defender waits until 9 PM Arizona even for first import; manual sync bypasses time', async () => {
+  clock = Date.parse('2026-10-17T03:59:59Z');
+  let inserts = 0;
+  const query = async sql => {
+    if(sql.startsWith('SELECT revision,daily')) return {rows:[{revision:1,daily:true,last_attempt_at:null}]};
+    if(sql.startsWith('INSERT INTO defender_import_runs')) inserts++;
+    return {rows:[]};
+  };
+  const db={query,connect:async()=>({query,release(){}})};
+  const mod=await load('lib/defender-store.ts',{'node:crypto':{randomUUID:()=> 'run'},'./persist':{applicationDatabase:()=>db},'./defender-client':{DefenderError:Error,openDefender:()=>({}),sealDefender:()=>''}});
+  const store=mod.createDefenderStore(db);
+  assert.equal(await store.enqueue('CO-A','daily-scheduler'),null);
+  assert.equal(inserts,0);
+  assert.equal(await store.enqueue('CO-A','manual'), 'run');
+  assert.equal(inserts,1);
+  clock = Date.parse('2026-10-17T04:00:00Z');
+  assert.equal(await store.enqueue('CO-A','daily-scheduler'),'run');
 });
 
 test('scheduled Defender sync-all uses the existing daily gate; manual sync can still enqueue', async () => {

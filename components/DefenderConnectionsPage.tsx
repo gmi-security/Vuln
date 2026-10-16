@@ -57,7 +57,7 @@ export default function DefenderConnectionsPage({ initialCompanyId = "" }: { ini
       </select></label>
       {!companies.length && <p className="text-sm text-zinc-300">Create the customer on the Companies page before configuring its connection.</p>}
       <p className="text-sm text-zinc-300">Credentials and customer mapping are managed in the server environment, like the other scanner connectors. Set DEFENDER_TENANT_ID, DEFENDER_CLIENT_ID, DEFENDER_CLIENT_SECRET and DEFENDER_CUSTOMER, then restart the application.</p>
-      {saved && <p className="text-sm text-zinc-300">Tenant: {saved.tenantId} · {saved.daily ? "Daily imports enabled after the first sync" : "Manual imports"}</p>}
+      {saved && <p className="text-sm text-zinc-300">Tenant: {saved.tenantId} · {saved.daily ? "Daily imports at 9:00 PM Arizona time" : "Manual imports"}</p>}
       <div className="flex flex-wrap gap-3">
         <button className={ghostButtonClass} disabled={!loaded || !saved || !!busy || selectedRunning} onClick={()=>void action("test")}>{busy === "test" ? "Testing…" : "Test connection"}</button>
         <button className={ghostButtonClass} disabled={!saved || !!busy || selectedRunning} onClick={()=>void action("sync")}>{selectedRunning ? `${saved.phase || "Queued"}…` : "Sync now"}</button>
