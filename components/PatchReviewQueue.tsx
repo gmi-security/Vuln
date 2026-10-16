@@ -161,12 +161,12 @@ export default function PatchReviewQueue({ companyId, sla }: { companyId: string
         }{selected.group.source === "stored-findings" && selected.group.connectors?.length ? ` · ${selected.group.connectors.join(", ")}` : ""}</p></div>
         <button type="button" className={styles.button} onClick={() => setSelected(null)}>Close</button></div>
       <p className="mt-4 whitespace-pre-wrap text-sm text-zinc-200">{selected.group.action || "No remediation action was supplied by the source."}</p>
-      <p className="mt-3 max-h-20 overflow-auto text-xs text-zinc-300">Resolves <CveText text={selected.group.cves.join(", ")}/></p>
+      <p className="mt-3 max-h-20 overflow-auto text-xs text-zinc-300">Resolves <CveText text={selected.group.cves.slice(0,50).join(", ")}/>{selected.group.cves.length>50 && ` and ${(selected.group.cves.length-50).toLocaleString()} more; the ticket contents list all CVEs.`}</p>
       <div className="mt-5 flex flex-wrap items-center justify-between gap-3"><h4 className="font-medium text-white">Affected findings</h4>
-        <button type="button" className={styles.button} onClick={() => download(selected.group)}>Download full findings list</button></div>
-      <p className="mt-2 text-xs text-zinc-400">{detailRows.length.toLocaleString()} asset and CVE rows in this review packet. The download contains the complete source detail.</p>
+        <button type="button" className={styles.button} onClick={() => download(selected.group)}>{selected.group.deviceCveCoverage ? "Download host CSV" : "Download full findings list"}</button></div>
+      <p className="mt-2 text-xs text-zinc-400">{selected.group.deviceCveCoverage ? `${detailRows.length.toLocaleString()} unique devices. Each row shows its covered CVE count and highest recorded scores; devices do not necessarily share every CVE. The CSV contains all affected devices.` : `${detailRows.length.toLocaleString()} asset and CVE rows in this review packet. The download contains the complete source detail.`}</p>
       <div className={`${styles.tableScroll} mt-3`}><table className={styles.table}>
-        <thead><tr><th>Asset</th><th>CVE</th><th>Severity</th><th>Risk</th><th>Source</th><th>Host / IP</th><th>OS</th><th>Exposure</th><th>Finding ID</th></tr></thead>
+        <thead><tr><th>Asset</th><th>{selected.group.deviceCveCoverage ? "CVEs covered" : "CVE"}</th><th>Severity</th><th>Risk</th><th>Source</th><th>Host / IP</th><th>OS</th><th>Exposure</th><th>Finding ID</th></tr></thead>
         <tbody>{detailRows.slice((detailPage - 1) * 50, detailPage * 50).map((row, index) => <tr key={`${row.asset}-${row.cve}-${index}`}>
           <td>{row.asset}</td><td><CveText text={row.cve}/></td><td>{row.severity || "—"}</td>
           <td>{typeof row.risk === "number" && row.risk >= 0 ? row.risk : "—"}</td>

@@ -1,3 +1,4 @@
+import { TicketedPairs } from "./patch-coverage";
 import { createHash } from "node:crypto";
 import { DashboardError } from "./elastic-dashboard";
 import { dashboardDatabase, verifyAgainstCrowdStrike, assertPatchRequestScope } from "./elastic-dashboard-store";
@@ -194,15 +195,16 @@ async function recoverInterruptedRequests() {
 // attempt (creating/uncertain/created) represents a commitment worth honoring.
 export async function activeTicketedPairs(): Promise<Set<string>> {
   const db = await patchTicketDatabase();
-  const pairs = new Set<string>();
+  const pairs = new TicketedPairs();
   const cveRows = await db.query(`SELECT cve, packet->'hostScope' AS host_scope FROM patch_ticket_requests WHERE state IN ('creating','uncertain','created') AND closed=false`);
   for (const row of cveRows.rows) {
     for (const deviceKey of (row.host_scope ?? []) as string[]) {
       try { const [cid, hostId] = JSON.parse(deviceKey); if (cid && hostId) pairs.add(JSON.stringify([cid, hostId, row.cve])); } catch { /* skip malformed scope entries */ }
     }
   }
-  const groupRows = await db.query(`SELECT packet->'deviceCves' AS device_cves FROM patch_group_ticket_requests WHERE state IN ('creating','uncertain','created') AND closed=false`);
+  const groupRows = await db.query(`SELECT packet->'deviceCves' AS device_cves,packet->'deviceCveCoverage' AS coverage,remediation_id FROM patch_group_ticket_requests WHERE state IN ('creating','uncertain','created') AND closed=false`);
   for (const row of groupRows.rows) {
+    pairs.addCoverage(row.coverage,row.remediation_id);
     for (const entry of (row.device_cves ?? []) as { cid?: string; hostId?: string; cve?: string }[]) {
       if (entry?.cid && entry?.hostId && entry?.cve) pairs.add(JSON.stringify([entry.cid, entry.hostId, entry.cve]));
     }

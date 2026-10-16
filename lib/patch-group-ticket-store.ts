@@ -204,10 +204,11 @@ export async function createGroupTicket(id: string, value: unknown, actor: strin
     const action={title:packet.title,action:packet.action,reference:packet.reference,link:packet.link,vendorUrl:packet.vendorUrl,published:packet.published};
     const existing = (await client.query(`SELECT id,ticket_id FROM patch_group_ticket_requests WHERE cw_target=$1
       AND (remediation_id=ANY($2::text[]) OR ((remediation_id=ANY($7::text[]) OR packet->>'vendorRemediationId'=$8) AND packet @> $9::jsonb))
-      AND tenant_id=$3 AND company_id=$4 AND scope_hash=$5
+      AND tenant_id=$3 AND company_id=$4
+      AND (scope_hash=$5 OR ((packet ? 'deviceCveCoverage' OR $10::boolean) AND packet->'hostScope' ?| $11::text[]))
       AND state IN ('creating','uncertain','created') AND closed=false AND id<>$6 LIMIT 1`,
       [saved.target,[baseRemediation,`manual:${baseRemediation}`],row.tenant_id,routing.companyId,row.scope_hash,id,legacyIds,
-        packet.vendorRemediationId ? null : baseRemediation,JSON.stringify(action)])).rows[0];
+        packet.vendorRemediationId ? null : baseRemediation,JSON.stringify(action),!!packet.deviceCveCoverage,packet.hostScope])).rows[0];
     if (existing) throw new DashboardError(`This patch and device scope already has ${existing.ticket_id ? `ticket #${existing.ticket_id}` : "a ticket request in progress"}. Open its saved request below.`, 409);
     await client.query(`UPDATE patch_group_ticket_requests SET state='creating',created_by=$2,cw_target=$3,cw_revision=$4,company_id=$5,routing=$6::jsonb,title=$7,body=$8,
       started_at=now(),updated_at=now(),last_error=NULL WHERE id=$1`, [id, actor, saved.target, saved.revision, routing.companyId, JSON.stringify(routing), body.title.trim(), body.body.trim()]);

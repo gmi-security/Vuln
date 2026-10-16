@@ -51,7 +51,7 @@ export async function readCustomerTopFixes(value: unknown): Promise<TopFixesResu
     if (runId) {
       proof=await storedSpotlightProof(client,context,companyId,runId);
       const saved=tables.summaries ? (await client.query(`SELECT summary->'topFixes' AS fixes,summary->'vendorScope' AS vendor_scope,source_rows
-        FROM spotlight_summary_generations WHERE company_id=$1 AND run_id=$2 AND model_version IN (4,$3)
+        FROM spotlight_summary_generations WHERE company_id=$1 AND run_id=$2 AND model_version IN (4,5,$3)
         ORDER BY model_version DESC LIMIT 1`,[companyId,runId,SPOTLIGHT_SUMMARY_VERSION])).rows[0] : null;
       if (!saved) notices.push("CrowdStrike fixes are waiting for the completed-import summary. An operator must run the Spotlight summary worker; refreshing this page does not rebuild millions of source records.");
       else {

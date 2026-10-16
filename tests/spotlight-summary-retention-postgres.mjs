@@ -85,7 +85,7 @@ try {
   const reader=createStore({connect:async()=>{
     const client=await db.connect();return {release:v=>client.release(v),query:async(sql,args)=>{
       const response=await client.query(sql,args);
-      if(sql.includes('SELECT g.* FROM public.spotlight_summary_current')){
+      if(sql.includes('FROM public.spotlight_summary_current p')){
         await db.query("UPDATE spotlight_summary_current SET run_id=$1 WHERE company_id='CO-READER'",[readIds[0]]);
         const result=await service.run('CO-READER',{apply:true,policy});assert.equal(result.generations[0].runId,readIds[4]);pruned=true;
       }

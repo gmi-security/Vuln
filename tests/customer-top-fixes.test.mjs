@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { resolve,dirname } from 'node:path';
 import { SourceTextModule,SyntheticModule } from 'node:vm';
 import ts from 'typescript';
@@ -21,19 +21,19 @@ async function harness(options={}) {
   const db={query,connect:async()=>({query,release(){}})};
   const finding=(id,connector,extra={})=>({id,companyId,connector,cve:'CVE-2026-9999',asset:id,status:'Open',remediation:'Platform update',severity:'High',realRisk:60,...extra});
   const fakeStore={ensureHydrated:async()=>{},getCompanyIdentity:id=>id===companyId?{id,name:'Fixture'}:undefined,
-    customerTopFixes:async(id,key,include)=>{const mod=await load(resolve('lib/reporting-top-fixes.ts'));await mod.evaluate();return mod.namespace.buildTopFixes(id,[finding('cs','crowdstrike'),finding('defender','defender'),finding('other','nessus',{companyId:'CO-OTHER'})],include);}};
+    customerTopFixes:async(id,key,include)=>{const mod=await load(resolve('lib/reporting-top-fixes.ts'));if(mod.status==='unlinked')await mod.link(linker);await mod.evaluate();return mod.namespace.buildTopFixes(id,[finding('cs','crowdstrike'),finding('defender','defender'),finding('other','nessus',{companyId:'CO-OTHER'})],include);}};
   const stubs={'./persist':{applicationDatabase:()=>db},'./store':fakeStore,'./customer-spotlight-routing-server':{loadReviewedSpotlightRoutes:async()=>null}};
-  async function load(file) {
+  function load(file) {
     if(modules.has(file))return modules.get(file);
-    const code=ts.transpileModule(await readFile(file,'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText;
-    const mod=new SourceTextModule(code,{identifier:file});modules.set(file,mod);
-    await mod.link(async name=>{
-      const values=stubs[name] ?? (!name.startsWith('.')?await import(name):null);
-      if(values)return new SyntheticModule(Object.keys(values),function(){for(const key of Object.keys(values))this.setExport(key,values[key]);});
-      return load(resolve(dirname(file),name+'.ts'));
-    });return mod;
+    const code=ts.transpileModule(readFileSync(file,'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText;
+    const mod=new SourceTextModule(code,{identifier:file});modules.set(file,mod);return mod;
   }
-  const module=await load(resolve('lib/customer-top-fixes.ts'));await module.evaluate();
+  async function linker(name,parent) {
+    const values=stubs[name] ?? (!name.startsWith('.')?await import(name):null);
+    if(values)return new SyntheticModule(Object.keys(values),function(){for(const key of Object.keys(values))this.setExport(key,values[key]);});
+    return load(resolve(dirname(parent.identifier),name+'.ts'));
+  }
+  const module=load(resolve('lib/customer-top-fixes.ts'));await module.link(linker);await module.evaluate();
   return {read:module.namespace.readCustomerTopFixes,calls};
 }
 test('completed Spotlight summary replaces stale normalized CrowdStrike while retaining other customer findings',async()=>{
@@ -52,7 +52,7 @@ test('new remediation table merges customer-scoped summaries by severity without
   assert.deepEqual(r.remediationWorklist.rows.map(row=>row.source),['crowdstrike','platform']);
   assert.equal(r.remediationWorklist.totalGroups,2);
   assert.deepEqual(r.remediationWorklist.rows[0].cves,[cve]);
-  assert.ok(h.calls.some(c=>c.sql.includes('model_version IN (4,$3)')));
+  assert.ok(h.calls.some(c=>c.sql.includes('model_version IN (4,5,$3)')));
 });
 
 test('v4 summary preserves old table while additional worklist is pending; malformed v5 data is refused',async()=>{

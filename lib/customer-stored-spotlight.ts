@@ -1,3 +1,4 @@
+import { readPatchCoverage, type PatchCoverage } from "./patch-coverage";
 import type { PoolClient } from "pg";
 import type { Finding } from "./types";
 import type { SpotlightRoute } from "./customer-spotlight-routing";
@@ -79,6 +80,7 @@ export async function recheckStoredSpotlightProof(proof: StoredSpotlightScopePro
 
 export type StoredSpotlightPacket = { source?: string; appCompanyId?: string; connectors?: string[];
   storedSpotlightScope?: StoredSpotlightScopeProof; tenantId?: string; hostScope?: string[];
+  cves?:string[]; deviceCveCoverage?:PatchCoverage;
   deviceCves?: { cid: string; hostId: string; cve: string }[] };
 export async function assertStoredSpotlightPacketScope(packet: StoredSpotlightPacket) {
   if (packet.source !== "stored-findings") return;
@@ -93,15 +95,21 @@ export async function assertStoredSpotlightPacketScope(packet: StoredSpotlightPa
   if (!possibleCrowdStrike) return;
   if (!proof || proof.companyId !== packet.appCompanyId || packet.tenantId !== proof.cid || sources.size !== 1 || !sources.has("crowdstrike")) return stale();
   const hosts = new Set(packet.hostScope ?? []);
-  if (!hosts.size || !packet.deviceCves?.length) return stale();
+  if (!hosts.size || (!packet.deviceCves?.length && !packet.deviceCveCoverage)) return stale();
   for (const value of hosts) {
     let pair: unknown;
     try { pair = JSON.parse(value); } catch { return stale(); }
     if (!Array.isArray(pair) || pair.length !== 2 || pair[0] !== proof.cid || typeof pair[1] !== "string" || !pair[1].trim()) return stale();
   }
-  for (const device of packet.deviceCves) {
+  if(packet.deviceCveCoverage) {
+    let coverage:ReturnType<typeof readPatchCoverage>;
+    try {coverage=readPatchCoverage(packet.deviceCveCoverage);}catch{return stale();}
+    if(packet.deviceCves?.length || JSON.stringify(packet.cves)!==JSON.stringify(packet.deviceCveCoverage.cves) || coverage.hosts.size!==hosts.size ||
+        [...coverage.hosts.keys()].some(key=>!hosts.has(key)))return stale();
+  }
+  for (const device of packet.deviceCves ?? []) {
     if (device.cid !== proof.cid || !device.hostId || !hosts.has(JSON.stringify([device.cid, device.hostId]))) return stale();
   }
-  if (new Set(packet.deviceCves.map(device => JSON.stringify([device.cid, device.hostId]))).size !== hosts.size) return stale();
+  if (!packet.deviceCveCoverage && new Set((packet.deviceCves ?? []).map(device => JSON.stringify([device.cid, device.hostId]))).size !== hosts.size) return stale();
   await recheckStoredSpotlightProof(proof);
 }

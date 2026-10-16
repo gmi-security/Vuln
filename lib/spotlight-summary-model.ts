@@ -1,7 +1,7 @@
 import { emptySeverityCounts, sourceSeverities, type CustomerSourceRead, type SourceCveRow } from "./customer-source-read-model";
 import { createSpotlightTopFixes } from "./spotlight-top-fixes";
 
-export const SPOTLIGHT_SUMMARY_VERSION = 5;
+export const SPOTLIGHT_SUMMARY_VERSION = 6;
 export type SpotlightVendorScope = { version: 2; tenantId: string | null; mixed: boolean; missingRows: number; rows: number; localPlaceholderRows: number };
 export function matchesSpotlightTenant(scope: unknown, tenantId: string, sourceRows: unknown): boolean {
   const value = scope as SpotlightVendorScope | null;
@@ -62,7 +62,7 @@ export function createSpotlightSummaryAccumulator(companyId: string, limits = su
         typeof row.cid !== "string" || !row.cid || typeof row.aid !== "string" || !row.aid) {
       throw new Error("Eligible source finding has incomplete or conflicting identity.");
     }
-    const key = JSON.stringify([row.cid, row.aid]);
+    const key = JSON.stringify([row.cid.toLowerCase(), row.aid]);
     if (!devices.has(key)) {
       if (devices.size >= limits.devices) throw new Error("Summary device limit exceeded.");
       devices.set(key, devices.size);
@@ -97,7 +97,7 @@ export function createSpotlightSummaryAccumulator(companyId: string, limits = su
       inventoryDevices: null, unknownSuppressionInstances: unknownSuppression, excludedSuppressedInstances: suppressed, excludedNonCveInstances: nonCve,
       severity: { sourceInstances: { ...severity }, uniqueCves: unique } };
     const vendorScope: SpotlightVendorScope = { version: 2, tenantId: mixed ? null : tenantId, mixed, missingRows, rows: scanned, localPlaceholderRows };
-    return { scanned, summary, rows, vendorScope, topFixes: topFixes.finish() };
+    return { scanned, summary, rows, vendorScope, topFixes: topFixes.finish(), patchActions: topFixes.patchActions(), patchEvidenceError: topFixes.patchEvidenceError };
   }
   return { add, finish, get scanned() { return scanned; } };
 }

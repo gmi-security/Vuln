@@ -28,7 +28,10 @@ async function load(path) {
   if (modules.has(path)) return modules.get(path);
   const code = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
   const module = new SourceTextModule(code, { identifier: path }); modules.set(path, module);
-  await module.link(async (name) => {
+  return module;
+}
+async function linker(name,parent) {
+    const path=parent.identifier;
     if (name === "./store" || name === "@/lib/store") {
       const values = { getCompany: (id) => companies.get(id) };
       return new SyntheticModule(Object.keys(values), function () { for (const key of Object.keys(values)) this.setExport(key, values[key]); });
@@ -37,10 +40,9 @@ async function load(path) {
     if (name.startsWith("@/")) return load(resolve(ROOT, `${name.slice(2)}.ts`));
     const values = await import(name);
     return new SyntheticModule(Object.keys(values), function () { for (const key of Object.keys(values)) this.setExport(key, values[key]); });
-  });
-  return module;
-}
+  }
 const patchRequestModule = await load("lib/patch-request.ts");
+await patchRequestModule.link(linker);
 await patchRequestModule.evaluate();
 const patchRequest = patchRequestModule.namespace;
 
