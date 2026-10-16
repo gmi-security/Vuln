@@ -281,7 +281,7 @@ export default function VulnSettingsPage() {
           <div className="grid gap-3 lg:grid-cols-3">
             <SettingRow
               title="Auto-sync connectors"
-              hint="Pull fresh results from every configured connector on a schedule."
+              hint="Start the configured connector batch daily at 9:00 PM Arizona time. Connector starts remain staggered."
               control={
                 <Toggle
                   checked={schedule.autoSyncEnabled}
@@ -296,8 +296,8 @@ export default function VulnSettingsPage() {
               }
             />
             <SettingRow
-              title="Sync interval"
-              hint="Hours between automatic syncs (1–168)."
+              title="Vulners Bridge scan interval"
+              hint="Hours between independent full-inventory scans (1–168). Connector imports use the fixed 9:00 PM Arizona schedule."
               control={
                 <div className="flex items-center gap-2">
                   <input
@@ -312,7 +312,7 @@ export default function VulnSettingsPage() {
                       if (e.key === "Enter") commitInterval();
                     }}
                     className={`${inputClass} h-[44px] w-24 text-center`}
-                    aria-label="Sync interval in hours"
+                    aria-label="Vulners Bridge scan interval in hours"
                   />
                   <span className="text-xs text-zinc-500">hrs</span>
                 </div>

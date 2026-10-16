@@ -1,4 +1,6 @@
 import { createCommittedCache } from "./committed-cache.mjs";
+import { connectorSyncStart } from "./connector-sync-schedule";
+import { claimDailyJob, recordJobRun } from "./background-job-runs";
 import { buildExecutiveReport, type ExecReport } from "./executive-report";
 import { cachedTopFixes } from "./reporting-top-fixes";
 import { loadReviewedScannerRoutes } from "@/lib/customer-scanner-routing-server";
@@ -1303,18 +1305,16 @@ async function schedulerTick(): Promise<void> {
   const sched = s.settings.schedule;
   const now = Date.now();
 
-  // Scheduled sync-all: interval elapsed and nothing currently running.
-  // lastAutoSyncAt is persisted, so a restart doesn't immediately re-sync.
+  // Nightly Arizona start, claimed durably before launching provider work.
   if (sched.autoSyncEnabled && !syncAllStatus().running) {
-    const intervalHours = Math.min(168, Math.max(1, sched.autoSyncIntervalHours));
-    const intervalMs = intervalHours * 3_600_000;
+    const start = connectorSyncStart(now);
     const last = s.meta.lastAutoSyncAt ?? 0;
-    if (now - last >= intervalMs) {
+    if (start !== null && last < start && await claimDailyJob("connector-sync-all")) {
       s.meta.lastAutoSyncAt = now;
       markDirty({});
       const r = startSyncAll({ scheduled: true });
       if (r.started) {
-        console.log("[scheduler] auto sync-all started");
+        console.log("[scheduler] nightly Arizona connector sync started");
       }
     }
   }
@@ -6781,6 +6781,13 @@ export function startSyncAll(options: { scheduled?: boolean } = {}): { started: 
     }
     // Post-sync hooks: metrics history snapshot + alert evaluation. The job
     // status above is already finalized, so failures here can't break it.
+    if (options.scheduled) {
+      const status = syncAllStatus();
+      const failed = !!status.error || !!status.results?.some(result => result.configured && !result.ok);
+      await recordJobRun("connector-sync-all", failed ? "failed" : "succeeded", undefined,
+        failed ? "One or more connector starts/imports failed; inspect connector sync status." : undefined)
+        .catch(() => {});
+    }
     try {
       await runPostSyncTasks(syncAllStatus().results ?? []);
     } catch (err) {

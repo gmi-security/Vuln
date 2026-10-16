@@ -85,7 +85,7 @@ export default function VulnSchedulePage() {
             <Pill className={data.autoSync.enabled ? "bg-emerald-500/15 text-emerald-300" : "bg-zinc-500/15 text-zinc-400"}>
               {data.autoSync.enabled ? "Enabled" : "Disabled"}
             </Pill>
-            <span>Every {data.autoSync.intervalHours}h</span>
+            <span>Daily at 9:00 PM Arizona time (America/Phoenix)</span>
             <span className="text-zinc-500">Last run: {fmt(data.autoSync.lastRunAt)}</span>
             {!data.bridgeConfigured ? (
               <Pill className="bg-amber-500/15 text-amber-300">Vulners Bridge not configured</Pill>

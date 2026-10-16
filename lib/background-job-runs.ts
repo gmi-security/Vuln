@@ -1,4 +1,5 @@
 import { patchTicketDatabase } from "./patch-ticket-store";
+import { connectorSyncStart } from "./connector-sync-schedule";
 
 // A fire-and-forget trigger (validate-closures, abandon-and-replace,
 // close-and-recut) returns before its work finishes, on purpose -- the
@@ -14,12 +15,14 @@ export type JobRun = { job: string; status: JobRunStatus; result: unknown; error
 // survives restarts and prevents two app processes starting the same job.
 // A failed automatic attempt waits until tomorrow; manual refresh is separate.
 export async function claimDailyJob(job: string): Promise<boolean> {
+  const start = connectorSyncStart();
+  if (start === null) return false;
   const db = await patchTicketDatabase();
   const result = await db.query(`INSERT INTO background_job_runs(job,status,result,error,started_at,finished_at)
     VALUES($1,'running',NULL,NULL,now(),NULL)
     ON CONFLICT(job) DO UPDATE SET status='running',result=NULL,error=NULL,started_at=now(),finished_at=NULL
-    WHERE background_job_runs.started_at <= now()-interval '24 hours'
-    RETURNING job`, [job]);
+    WHERE background_job_runs.started_at < $2::timestamptz
+    RETURNING job`, [job, new Date(start).toISOString()]);
   return result.rows.length === 1;
 }
 

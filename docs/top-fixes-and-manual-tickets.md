@@ -18,7 +18,7 @@ Automatic draft generation and auto-create have been removed. The old auto-creat
 
 ## Scheduled processing
 
-`VULN_DISABLE_SCHEDULER=false` restores the existing configured import cadence, dashboard query refresh, risk enrichment and ticket-status reads. `settings.schedule.autoSyncEnabled` and its interval still determine sync-all timing. Existing per-source settings remain in effect, including Defender daily scheduling. Sync-all deliberately staggers configured connectors by 25 minutes; an enabled scheduler does not mean every connector starts immediately.
+`VULN_DISABLE_SCHEDULER=false` enables configured imports, dashboard query refresh, risk enrichment and ticket-status reads. The connector batch starts daily at **9:00 PM America/Phoenix**, when `settings.schedule.autoSyncEnabled` is enabled. Defender's enabled daily imports, ConnectWise ticket-status reads and risk refresh use the same nightly start. Sync-all deliberately staggers configured connectors by 25 minutes; the batch starts at 9 PM and later connectors start afterward. Saved dashboard tile intervals and independent scanner schedules remain unchanged. See [connector scheduling](connector-sync-schedule.md) for restart and missed-run behavior.
 
 The general scheduler, scanner export and Vulners Bridge timer guards now clear the same promise that they store. This fixes the previous one-tick-only behavior and still prevents overlapping ticks.
 
