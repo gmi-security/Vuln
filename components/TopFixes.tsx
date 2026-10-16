@@ -1,6 +1,7 @@
 "use client";
 import CveText from "./CveText";
 import RemediationWorklist from "./RemediationWorklist";
+import FixTicketStatus from "./FixTicketStatus";
 import { useEffect, useState } from "react";
 import { readDashboardResponse } from "@/lib/dashboard-browser-client";
 import type { TopFixesResult } from "@/lib/reporting-top-fixes";
@@ -72,12 +73,13 @@ export default function TopFixes({ companyId, canManage=false, refreshToken, rev
             </div>
             <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-zinc-900" aria-hidden="true"><span className="block h-full rounded-full bg-[#b30e14]" style={{width:`${row.deviceCount/maxDevices*100}%`}}/></div>
             <p className="mt-2 text-xs text-zinc-300">{row.severity} · {row.source==="crowdstrike" ? "CrowdStrike / GMI patch score" : "Platform risk"} {format(row.maxRisk)} · {format(row.findingCount)} open findings</p>
+            <FixTicketStatus status={row.ticketStatus} companyId={companyId}/>
           </li>)}
         </ol>
       </>}
     </>}
     <a href={reviewHref} className="mt-5 inline-block text-sm text-sky-300 underline underline-offset-2">View ticket queue</a>
   </section>
-  <RemediationWorklist key={companyId} companyId={companyId} canManage={canManage} data={data?.remediationWorklist} loading={loading}/>
+  <RemediationWorklist key={companyId} companyId={companyId} canManage={canManage} data={data?.remediationWorklist} loading={loading} onPrepared={()=>setVersion(v=>v+1)}/>
   </>;
 }

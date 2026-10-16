@@ -5,9 +5,10 @@ import type { RemediationWorklist as Worklist } from "@/lib/remediation-worklist
 
 import { dashboardRequest } from "@/lib/dashboard-browser-client";
 import Link from "next/link";
+import FixTicketStatus from "./FixTicketStatus";
 import styles from "./QueryDashboard.module.css";
 
-export default function RemediationWorklist({ data, loading, companyId, canManage }: { data: Worklist | undefined; loading: boolean; companyId:string; canManage:boolean }) {
+export default function RemediationWorklist({ data, loading, companyId, canManage, onPrepared }: { data: Worklist | undefined; loading: boolean; companyId:string; canManage:boolean;onPrepared?:()=>void }) {
   const live=useRef(true),inFlight=useRef(false);
   const [busy,setBusy]=useState<string|null>(null),[message,setMessage]=useState<{id:string;error?:string;count?:number}|null>(null);
   useEffect(()=>{live.current=true;return()=>{live.current=false;};},[]);
@@ -17,7 +18,7 @@ export default function RemediationWorklist({ data, loading, companyId, canManag
     try {
       const result=await dashboardRequest<{companyId:string;groups:{id:string}[]}>("remediation-ticket",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({companyId,id})});
       if(result.companyId!==companyId || !Array.isArray(result.groups) || !result.groups.length)throw new Error("The server did not confirm this customer's draft. Check the Tickets page before retrying.");
-      if(live.current)setMessage({id,count:result.groups.length});
+      if(live.current){setMessage({id,count:result.groups.length});onPrepared?.();}
     }catch(cause){if(live.current)setMessage({id,error:cause instanceof Error?cause.message:"Could not prepare the draft. Check the Tickets page before retrying."});}
     finally {inFlight.current=false;if(live.current)setBusy(null);}
   }
@@ -35,7 +36,7 @@ export default function RemediationWorklist({ data, loading, companyId, canManag
       {!!data.rows.length && <div className="mt-4 max-h-[36rem] overflow-auto rounded-xl border border-zinc-800" tabIndex={0} aria-label="Scrollable remediation table">
         <table className="w-full min-w-[780px] text-left text-sm">
           <thead className="sticky top-0 z-10 bg-[#171717] text-zinc-200"><tr>
-            {["Severity","Recommended remediation","Unique devices","CVEs covered","Source / highest risk",...(canManage?["Patch request"]:[])].map(label=><th key={label} scope="col" className="px-4 py-3 font-medium">{label}</th>)}
+            {["Severity","Recommended remediation","Unique devices","CVEs covered","Source / highest risk","Ticket status",...(canManage?["Patch request"]:[])].map(label=><th key={label} scope="col" className="px-4 py-3 font-medium">{label}</th>)}
           </tr></thead>
           <tbody>{data.rows.map(row=>{
             const open=expanded?.id===row.id, offset=Math.min(expanded?.offset ?? 0,Math.max(0,Math.floor((row.cves.length-1)/pageSize)*pageSize));
@@ -54,6 +55,7 @@ export default function RemediationWorklist({ data, loading, companyId, canManag
               </>}
               {row.grouping==="single-cve" && <p className="mt-2 text-xs text-zinc-300">Single-CVE evidence; no shared vendor patch ID.</p>}</td>
             <td className="px-4 py-4 text-zinc-200">{row.source==="crowdstrike" ? "CrowdStrike · GMI patch score" : "Platform risk"}<strong className="mt-1 block tabular-nums">{row.maxRisk.toLocaleString()}</strong><p className="mt-1 text-xs text-zinc-300">{row.findingCount.toLocaleString()} findings</p></td>
+            <td className="min-w-56 px-4 py-4"><FixTicketStatus status={row.ticketStatus} companyId={companyId}/></td>
             {canManage && <td className="min-w-56 px-4 py-4">
               <button type="button" className={styles.button} disabled={!!busy || loading} onClick={()=>void prepare(row.id)}>{busy===row.id?"Preparing draft...":"Prepare ticket draft"}</button>
               {message?.id===row.id && (message.error?<p role="alert" className="mt-2 text-sm text-red-300">{message.error}</p>:<div role="status" className="mt-2 text-sm text-zinc-200">
@@ -65,6 +67,7 @@ export default function RemediationWorklist({ data, loading, companyId, canManag
         </table>
       </div>}
       <p className="mt-3 text-xs text-zinc-300">Devices are counted once within each action and source. A device may need several actions. Counts across sources are not deduplicated. Platform sources without a shared vendor patch ID remain grouped within one CVE. Risk scores break ties within a source.</p>
+      <p className="mt-2 text-xs text-zinc-300">Ticket status uses customer-linked requests tracked by this platform and their last saved ConnectWise status. Ticket coverage describes planned work, not confirmed patch completion.</p>
     </>}
   </section>;
 }

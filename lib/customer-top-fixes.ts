@@ -5,6 +5,7 @@ import { storedSpotlightContext, storedSpotlightProof, recheckStoredSpotlightPro
 import { matchesSpotlightTenant, SPOTLIGHT_SUMMARY_VERSION } from "./spotlight-summary-model";
 import type { TopFixesResult, TopFix } from "./reporting-top-fixes";
 import { compareRemediationFixes, type RemediationWorklist } from "./remediation-worklist";
+import {withFixTicketStatus} from "./customer-fix-ticket-status";
 
 function savedFixes(value: TopFixesResult | undefined, companyId: string): TopFixesResult {
   const count=(n: unknown)=>typeof n === "number" && Number.isSafeInteger(n) && n>=0;
@@ -30,7 +31,7 @@ function savedWorklist(value: RemediationWorklist | undefined): RemediationWorkl
   return value;
 }
 
-export async function readCustomerTopFixes(value: unknown): Promise<TopFixesResult> {
+export async function readCustomerTopFixes(value: unknown, tickets?:()=>Pick<import("pg").Pool,"connect">): Promise<TopFixesResult> {
   if (typeof value!=="string" || !value || value.length>100) throw new DashboardError("Choose an existing customer.",400);
   await ensureHydrated();
   const company=getCompanyIdentity(value);
@@ -82,13 +83,17 @@ export async function readCustomerTopFixes(value: unknown): Promise<TopFixesResu
       ...(spotlight?.remediationWorklist?.rows ?? []).map(row=>({...row,source:"crowdstrike" as const}))]
       .sort(compareRemediationFixes).slice(0,50)
   };
-  if (!spotlight) return {...platform,sources,notices,remediationWorklist,rows:platform.rows.map(row=>({...row,source:"platform"}))};
+  if (!spotlight) {
+    const result:TopFixesResult={...platform,sources,notices,remediationWorklist,rows:platform.rows.map(row=>({...row,source:"platform"}))};
+    return tickets ? withFixTicketStatus(db,result,runId,tickets):result;
+  }
   const severity: Record<string,number>={Critical:4,High:3,Medium:2,Low:1,Info:0,Unknown:-1};
   const rows: TopFix[]=[...platform.rows.map(row=>({...row,source:"platform" as const})),...spotlight.rows.map(row=>({...row,source:"crowdstrike" as const}))];
   rows.sort((a,b)=>b.deviceCount-a.deviceCount || (severity[b.severity]??-1)-(severity[a.severity]??-1) ||
     (a.source??"").localeCompare(b.source??"") || b.maxRisk-a.maxRisk || b.findingCount-a.findingCount || a.id.localeCompare(b.id));
-  return {...platform,calculatedAt:new Date().toISOString(),sources,notices,remediationWorklist,rows:rows.slice(0,50),
+  const result:TopFixesResult={...platform,calculatedAt:new Date().toISOString(),sources,notices,remediationWorklist,rows:rows.slice(0,50),
     totalFixes:platform.totalFixes+spotlight.totalFixes,affectedDevices:platform.affectedDevices+spotlight.affectedDevices,
     findingCount:platform.findingCount+spotlight.findingCount,uniqueCves:platform.uniqueCves+spotlight.uniqueCves,
     missingRemediation:platform.missingRemediation+spotlight.missingRemediation,missingDevice:platform.missingDevice+spotlight.missingDevice};
+  return tickets ? withFixTicketStatus(db,result,runId,tickets):result;
 }

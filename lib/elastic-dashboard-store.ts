@@ -27,7 +27,8 @@ const runtime = globalThis as typeof globalThis & {
 };
 const state: NonNullable<typeof runtime.__elasticDashboard> = runtime.__elasticDashboard ??= { running: 0, previews: new Map<string, number>() };
 
-export async function dashboardDatabase(): Promise<Pool> {
+// Pool access only: readers must not initialize schemas or install saved tiles.
+export function dashboardReadDatabase(): Pool {
   const url = process.env.ELASTIC_VULN_DATABASE_URL;
   if (url && !dedicatedPool) {
     dedicatedPool = new Pool({ connectionString: url, ...(process.env.VULN_RUNTIME_ROLE === "web" ? { options: "-c default_transaction_read_only=on" } : {}), max: 2, connectionTimeoutMillis: 5000, idleTimeoutMillis: 30_000, statement_timeout: 5000 });
@@ -40,6 +41,11 @@ export async function dashboardDatabase(): Promise<Pool> {
   }
   const db = url ? dedicatedPool : applicationDatabase();
   if (!db) throw new DashboardError("Dashboard storage is not configured.", 503);
+  return db;
+}
+
+export async function dashboardDatabase(): Promise<Pool> {
+  const db = dashboardReadDatabase();
   if (process.env.VULN_RUNTIME_ROLE === "web") return db;
   if (!ready) {
     ready = (async () => {

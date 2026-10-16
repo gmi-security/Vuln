@@ -3,10 +3,12 @@ import { setImmediate } from "node:timers/promises";
 import type { Finding } from "./types";
 import { reportingFindingClass } from "./reporting-metrics";
 import type { RemediationWorklist } from "./remediation-worklist";
+import type { FixTicketStatus } from "./fix-ticket-status";
 
 export type TopFix = {
   id: string; cve: string; remediation: string; deviceCount: number;
   findingCount: number; maxRisk: number; severity: string; source?: "platform" | "crowdstrike";
+  ticketStatus?: FixTicketStatus;
 };
 export type TopFixesResult = {
   companyId: string; calculatedAt: string; totalFixes: number; affectedDevices: number;
