@@ -98,7 +98,7 @@ test('a timed-out CVE read reports a timeout and rolls back without preparing a 
   for(const action of ['readCustomerCve','prepareCustomerCve']){
     const {api,calls,released}=await service({generation:{run_id:'run-A',promoted_at:when},
       sourceError:Object.assign(new Error('canceling statement due to statement timeout'),{code:'57014'})});
-    await assert.rejects(()=>api[action](company.id,cve,'member'),error=>error.status===504 && /CVE evidence.*too long/i.test(error.message));
+    await assert.rejects(()=>api[action](company.id,cve,'member'),error=>error.status===504 && error.retryable===false && /CVE evidence.*too long/i.test(error.message));
     assert.ok(calls.some(row=>row.sql==='ROLLBACK'));assert.equal(released(),1);
     assert.ok(calls.every(row=>!/^\s*(INSERT|UPDATE|DELETE)\b/i.test(row.sql)));
     assert.equal(calls.filter(row=>row.sql.includes('FROM spotlight_import_records')).length,1,'do not retry an expensive query automatically');
@@ -109,6 +109,20 @@ test('an unrelated CVE storage failure keeps its original error for the storage 
   const {api,released}=await service({generation:{run_id:'run-A',promoted_at:when},sourceError:failure});
   await assert.rejects(()=>api.readCustomerCve(company.id,cve),error=>error===failure);
   assert.equal(released(),1);
+});
+test('the HTTP error response preserves no-retry intent without exposing unknown storage errors',async()=>{
+  const dashboard=await loadModule('lib/elastic-dashboard.ts');
+  const http=await loadModule('lib/elastic-dashboard-http.ts',{
+    './elastic-dashboard':dashboard,'./auth':{authOptions:{}},
+    './elastic-vuln-server':{elasticVulnEnabled:()=>true},
+    'next-auth':{getServerSession:async()=>null},
+    'next/server':{NextResponse:{json:(value,options)=>Response.json(value,options)}},
+  });
+  const response=http.dashboardFailure(new dashboard.DashboardError('CVE lookup timed out',504,false));
+  assert.equal(response.status,504);assert.deepEqual(await response.json(),{error:'CVE lookup timed out',retryable:false});
+  const unavailable=http.dashboardFailure(new Error('private database connection details'));
+  assert.equal(unavailable.status,503);
+  const value=await unavailable.json();assert.equal(value.retryable,undefined);assert.doesNotMatch(value.error,/private database/);
 });
 test('detail cannot return another customer even if the source store returns mixed findings',async()=>{
   const {api,calls}=await service({findings:[finding(),finding({companyId:'CO-B',asset:'other-host'})]});

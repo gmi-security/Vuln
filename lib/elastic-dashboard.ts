@@ -7,7 +7,7 @@ export type QueryResult = {
 };
 
 export class DashboardError extends Error {
-  constructor(message: string, public status = 400) { super(message); }
+  constructor(message: string, public status = 400, public retryable?: boolean) { super(message); }
 }
 export type DashboardSource = "elastic" | "crowdstrike";
 export type CrowdStrikeOptions = {

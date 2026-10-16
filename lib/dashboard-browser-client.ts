@@ -23,7 +23,8 @@ export async function readDashboardResponse<T>(response: Response): Promise<T> {
   if (!data || typeof data !== "object" || Array.isArray(data)) throw new DashboardRequestError(fallback, retryable);
   if (!response.ok) {
     const detail = (data as { error?: unknown }).error;
-    throw new DashboardRequestError(typeof detail === "string" && detail ? detail : fallback, retryable);
+    throw new DashboardRequestError(typeof detail === "string" && detail ? detail : fallback,
+      retryable && (data as { retryable?: unknown }).retryable !== false);
   }
   return data as T;
 }

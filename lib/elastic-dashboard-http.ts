@@ -42,6 +42,7 @@ export function dashboardJson(value: unknown, status = 200) {
 }
 
 export function dashboardFailure(error: unknown) {
-  return dashboardJson({ error: error instanceof DashboardError ? error.message : "Dashboard storage is unavailable. Try again shortly." },
+  return dashboardJson({ error: error instanceof DashboardError ? error.message : "Dashboard storage is unavailable. Try again shortly.",
+    ...(error instanceof DashboardError && error.retryable !== undefined ? { retryable: error.retryable } : {}) },
     error instanceof DashboardError ? error.status : 503);
 }

@@ -90,6 +90,14 @@ test("save, preview and delete requests are never automatically replayed", async
   }
 });
 
+test("an explicit non-retryable CVE timeout is surfaced after one request", async () => {
+  const message="Saved CVE evidence took too long to load.";
+  await withFetch([json({error:message,retryable:false},504),json({unexpected:'automatic retry'})],async calls=>{
+    await assert.rejects(()=>dashboardRequest("customer-cve?companyId=CO-A&cve=CVE-2026-1234"),error=>error.message===message);
+    assert.equal(calls.length,1);
+  });
+});
+
 test("an abandoned dashboard read never starts or retries another request", async () => {
   const controller = new AbortController();
   controller.abort();
