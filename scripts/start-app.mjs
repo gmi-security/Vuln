@@ -87,7 +87,7 @@ export async function superviseRuntime(configuration, {
         const heapMb = role === "web" ? configuration.webHeapMb : configuration.workerHeapMb;
         // Explicit CLI limits override only the inherited heap setting; retain
         // the rest of NODE_OPTIONS and its current behavior when no limit is set.
-        const args = auxiliary ? ["--max-old-space-size=512", runtimeScript, auxiliary.script, ...auxiliary.args]
+        const args = auxiliary ? [`--max-old-space-size=${role === "summary" ? 1024 : 512}`, runtimeScript, auxiliary.script, ...auxiliary.args]
           : [...(heapMb === undefined ? [] : [`--max-old-space-size=${heapMb}`]), serverScript];
         const child = spawn(process.execPath, args, { env, stdio: ["ignore", "inherit", "inherit", "ipc"], windowsHide: true });
         const ready = deferred(), done = deferred();

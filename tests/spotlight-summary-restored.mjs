@@ -23,7 +23,7 @@ try {
       if(/^(INSERT|UPDATE|DELETE)/.test(sql))assert.ok(sql.startsWith('INSERT INTO public.spotlight_summary_'),'Only summary table writes allowed');
       if(sql.includes('spotlight_import_records')){assert.ok(building,'Saved reader/replay must not touch raw records');reads++;}
       const result=await client.query(sql,args);
-      if(building&&sql.includes('ORDER BY r.source_id')&&reads%100===0)console.log(JSON.stringify({phase:'summary-build',sourceBatches:reads-1}));
+      if(building&&sql.includes('CROSS JOIN LATERAL jsonb_to_record(r.raw)')&&reads%100===0)console.log(JSON.stringify({phase:'summary-build',sourceBatches:reads-1}));
       return result;
     }};
   }});

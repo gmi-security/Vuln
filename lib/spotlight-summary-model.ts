@@ -19,7 +19,7 @@ export type SummaryInput = {
   local_placeholder?: boolean;
   patch?: Record<string,unknown>;
 };
-export const summaryLimits = { records: 5_000_000, pairs: 3_000_000, devices: 100_000, cves: 100_000 };
+export const summaryLimits = { records: 5_000_000, pairs: 5_000_000, devices: 100_000, cves: 100_000 };
 const ranks = ["UNKNOWN", "NONE", "LOW", "MEDIUM", "HIGH", "CRITICAL"];
 export function summaryCount(value: unknown): number {
   if (typeof value !== "number" && (typeof value !== "string" || !/^\d+$/.test(value))) throw new Error("Invalid summary count.");

@@ -9,7 +9,7 @@
     "start": "node scripts/start-app.mjs",
     "lint": "eslint",
     "build:summary-worker": "tsc -p tsconfig.summary-worker.json",
-    "worker:summary": "node --max-old-space-size=512 scripts/spotlight-summary-worker.mjs",
+    "worker:summary": "node --max-old-space-size=1024 scripts/spotlight-summary-worker.mjs",
     "build:reporting-worker": "tsc -p tsconfig.reporting-worker.json",
     "worker:reporting": "node --max-old-space-size=512 scripts/customer-reporting-worker.mjs"
   },

@@ -37,7 +37,7 @@ export function createSpotlightSummaryStore(db: Database) {
     const started = Date.now();
     const deadline = () => {
       if (options.signal?.aborted) throw new Error("Summary worker stopped; previous summary retained.");
-      if (Date.now()-started > 300000) throw new Error("Summary build exceeded five minutes; previous summary retained.");
+      if (Date.now()-started > 900000) throw new Error("Summary build exceeded fifteen minutes; previous summary retained.");
     };
     try {
       // A single summary build across workers limits memory and source database load.
@@ -57,19 +57,17 @@ export function createSpotlightSummaryStore(db: Database) {
       if (previous?.run_id === runId && previous.model_version === VERSION) {
         await source.query("COMMIT"); return { state: "reused" as const, runId };
       }
-      const integrity = (await source.query(`SELECT COUNT(*) AS records,
-        COUNT(*) FILTER (WHERE tenant_key<>$2 OR company_id<>$2) AS misplaced
-        FROM public.spotlight_import_records WHERE run_id=$1`, [runId, companyId])).rows[0];
-      const total = summaryCount(integrity.records), verified = Number(current.checkpoint_version) >= 2;
-      if (summaryCount(integrity.misplaced) || (verified && (current.expected_count == null || total !== summaryCount(current.expected_count) ||
-          total !== summaryCount(current.hydrated_count)))) throw new Error("Source generation count or ownership mismatch.");
+      const verified = Number(current.checkpoint_version) >= 2;
+      const expected = verified ? summaryCount(current.expected_count) : null;
+      if (verified && expected !== summaryCount(current.hydrated_count)) throw new Error("Source generation count mismatch.");
       const limits = options.limits ?? summaryLimits;
       const accumulator = createSpotlightSummaryAccumulator(companyId, limits);
-      if (total > limits.records) throw new Error("Summary record limit exceeded.");
-      let after = "";
+      if (expected !== null && expected > limits.records) throw new Error("Summary record limit exceeded.");
+      let after: { tenant_key: string; source_id: string } | undefined;
       for (;;) {
         deadline(); await options.checkpoint?.(accumulator.scanned);
-        const rows: SummaryInput[] = (await source.query(`SELECT r.source_id,r.cve,r.status,r.company_id,
+        // Walk the whole run in primary-key order; filtering by tenant would hide misplaced rows.
+        const rows: (SummaryInput & { tenant_key: string })[] = (await source.query(`SELECT r.tenant_key,r.source_id,r.cve,r.status,r.company_id,
           v.id,v.cid,v.aid,v.status AS raw_status,v.cve->>'id' AS raw_cve,v.cve->>'severity' AS raw_severity,
           v.cve->'base_score' AS score,v.suppression_info->'is_suppressed' AS suppressed,
           jsonb_build_object('id',v.id,'cid',v.cid,'aid',v.aid,'status',v.status,'apps',COALESCE(v.apps,'[]'::jsonb),'remediation',v.remediation,
@@ -78,18 +76,23 @@ export function createSpotlightSummaryStore(db: Database) {
               'exploitability_score',v.cve->'exploitability_score')) AS patch,
           (r.status='closed' AND r.cve='CS-'||r.source_id AND
             r.raw=jsonb_build_object('id',r.source_id,'unresolved',true)) AS local_placeholder
-          FROM (SELECT source_id,cve,status,company_id,raw FROM public.spotlight_import_records
-            WHERE run_id=$1 AND tenant_key=$2 AND source_id>$3 ORDER BY source_id LIMIT 2000) r
+          FROM (SELECT tenant_key,source_id,cve,status,company_id,raw FROM public.spotlight_import_records
+            WHERE run_id=$1 ${after ? "AND (tenant_key,source_id)>($2,$3)" : ""}
+            ORDER BY tenant_key,source_id LIMIT 2000) r
           CROSS JOIN LATERAL jsonb_to_record(r.raw) AS v(id text,cid jsonb,aid jsonb,status text,cve jsonb,suppression_info jsonb,apps jsonb,remediation jsonb)
-          ORDER BY r.source_id`, [runId, companyId, after])).rows;
+          ORDER BY r.tenant_key,r.source_id`, after ? [runId, after.tenant_key, after.source_id] : [runId])).rows;
         if (!rows.length) break;
-        for (const row of rows) accumulator.add(row);
-        const next = rows.at(-1)!.source_id;
-        if (next === after) throw new Error("Summary source cursor did not advance.");
-        after = next;
+        for (const row of rows) {
+          if (row.tenant_key !== companyId || row.company_id !== companyId) throw new Error("Source generation ownership mismatch.");
+          accumulator.add(row);
+        }
+        const next = rows.at(-1)!;
+        if (next.tenant_key === after?.tenant_key && next.source_id === after.source_id) throw new Error("Summary source cursor did not advance.");
+        after = { tenant_key: next.tenant_key, source_id: next.source_id };
       }
       const artifact = accumulator.finish();
-      if (artifact.scanned !== total) throw new Error("Summary scan did not cover the completed source generation.");
+      const total = artifact.scanned;
+      if (expected !== null && total !== expected) throw new Error("Summary scan did not cover the completed source generation count.");
       deadline(); await source.query("COMMIT");
       source.release(); source = undefined;
       await writer.query("BEGIN");
