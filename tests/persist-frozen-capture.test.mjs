@@ -16,7 +16,7 @@ async function harness(){
  const index=new Map(Object.keys(platformCollections).map(k=>[k,new Map()]));
  const record=platformRecord('scans',data.scans[0],1024);
  index.get('scans').set('S-1',{hash:record.record_hash,order:record.store_order,bucket:record.store_bucket});
- const queries=[],written=[];let onWrite,connections=0;
+ const queries=[],written=[],reported=[];let onWrite,connections=0;
  const client={release(){},async query(sql,params){
   queries.push(sql);
   if(sql.includes('to_regclass'))return {rows:[{relation:'app_store_authority'}]};
@@ -28,7 +28,7 @@ async function harness(){
  const pool={on(){},async query(){return {rows:[]}},async connect(){connections++;return client;}};
  const env={DATABASE_URL:'postgresql://localhost/unit-only',VULN_PLATFORM_STORE:'sql'};
  const context=createContext({Buffer,URL,process:{env},console:{info(){},error(){}},setTimeout,clearTimeout,setImmediate});
- const revisions={createReportingInputDigests:()=>({async bucket(){},finish:()=>[],committed(){}}),publishReportingInputRevisions:async()=>{},publishSqlReportingChanges:async()=>{},reportingSnapshotManifest:async()=>null};
+ const revisions={createReportingInputDigests:()=>({async bucket(){},finish:()=>[],committed(){}}),publishReportingInputRevisions:async()=>{},publishSqlReportingChanges:async(c,k,t,plan)=>{reported.push(plan);},reportingSnapshotManifest:async()=>null};
  const code=ts.transpileModule(await readFile('lib/persist.ts','utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText;
  const m=new SourceTextModule(code,{context});
  await m.link(name=>{const values=name==='pg'?{Pool:class{constructor(){return pool}}}:name.endsWith('customer-reporting-revisions.mjs')?revisions:name.endsWith('platform-store.mjs')?platform:name.endsWith('platform-authority.mjs')?authority:name.endsWith('platform-reader.mjs')?reader:crypto;return new SyntheticModule(Object.keys(values),function(){for(const[k,v]of Object.entries(values))this.setExport(k,v)},{context});});
@@ -36,7 +36,7 @@ async function harness(){
  const state=context.__vulnDatabasePersistenceV1;
  state.platformAuthority={...auth};state.platformState={authority:{...auth},index,metaHash:platformHash(platformJson({counter:1}))};
  data.scans[0][1].progress=50;
- return {persist:m.namespace,data,queries,written,state,onWrite:fn=>{onWrite=fn},connections:()=>connections};
+ return {persist:m.namespace,data,queries,written,reported,state,onWrite:fn=>{onWrite=fn},connections:()=>connections};
 }
 
 test('RAM changes during preparation reject the capture before a connection is borrowed',async()=>{
@@ -61,6 +61,7 @@ test('scoped frozen writes commit one capture and preserve a later mutation for 
  const h=await harness();let changed=false;h.onWrite(()=>{changed=true;h.data.scans[0][1].progress=90});
  await h.persist.saveSnapshot(h.data,{changes:{scans:['S-1']},captureGuard(){if(changed)throw Error('capture changed')}});
  assert.equal(h.written[0].payload.progress,50);assert.equal(h.state.platformAuthority.revision,'6');
+ assert.equal(h.reported[0].writes.get('scans')[0].payload.progress,50,'reporting receives the same detached generation as SQL');
  await h.persist.saveSnapshot(h.data,{changes:{scans:['S-1']}});assert.equal(h.written[1].payload.progress,90);
 });
 

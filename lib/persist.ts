@@ -454,6 +454,7 @@ export async function saveSnapshot(data: unknown, options?: { guard?: () => void
       : Object.values(options.changes).reduce((n, ids) => n + ids.length, 0);
     let deadline = startedAt + 300000, cancelled = false, captureFrozen = false, phase = "prepare";
     let client: PoolClient | undefined;
+    let writeMs = 0, reportingMs = 0, phaseStartedAt = startedAt;
     const guard = () => {
       if (cancelled || Date.now() >= deadline) throw new Error(`SQL platform ${phase} deadline exceeded.`);
       options?.guard?.();
@@ -480,11 +481,15 @@ export async function saveSnapshot(data: unknown, options?: { guard?: () => void
       if (timeoutMs > 300000) console.info(`[persist] Large SQL publication started: ${options?.changes?.findings?.length ?? prepared?.findingChanges} findings; ${timeoutMs / 1000}s limit.`);
       const next = await withTimeout((async () => {
         phase = "write";
+        phaseStartedAt = Date.now();
         await activeClient.query("BEGIN; SET LOCAL statement_timeout='60s'; SET LOCAL lock_timeout='10s'; SET LOCAL idle_in_transaction_session_timeout='90s'");
         const next = await commitPreparedPlatformStore(activeClient, prepared, { guard });
+        writeMs = Date.now() - phaseStartedAt;
         phase = "reporting";
-        if ("changedKeys" in next) await publishSqlReportingChanges(activeClient, next.changedKeys, next.reportingTargets);
+        phaseStartedAt = Date.now();
+        if ("changedKeys" in next) await publishSqlReportingChanges(activeClient, next.changedKeys, next.reportingTargets, prepared);
         else await publishReportingInputRevisions(activeClient, digests!);
+        reportingMs = Date.now() - phaseStartedAt;
         guard();
         phase = "commit";
         await activeClient.query("COMMIT");
@@ -493,10 +498,10 @@ export async function saveSnapshot(data: unknown, options?: { guard?: () => void
       persistence.platformState = next; persistence.platformAuthority = next.authority;
       if ("changedKeys" in next) reportingDigestCache.clear();
       else reporting.committed();
-      console.info(`[persist] SQL save committed: scope=${options?.changes === undefined ? "full" : "delta"} reason=${options?.changes === undefined ? "scope-not-declared" : "declared-records"} candidates=${candidateRecords} compared=${next.comparedRecords} prepareMs=${preparedMs} totalMs=${Date.now() - startedAt} inserted=${next.counts.inserted} updated=${next.counts.updated} deleted=${next.counts.deleted} metadata=${next.counts.metadata}.`);
+      console.info(`[persist] SQL save committed: scope=${options?.changes === undefined ? "full" : "delta"} reason=${options?.changes === undefined ? "scope-not-declared" : "declared-records"} candidates=${candidateRecords} compared=${next.comparedRecords} prepareMs=${preparedMs} writeMs=${writeMs} reportingMs=${reportingMs} totalMs=${Date.now() - startedAt} inserted=${next.counts.inserted} updated=${next.counts.updated} deleted=${next.counts.deleted} metadata=${next.counts.metadata}.`);
     } catch (error) {
       cancelled = true;
-      console.error(`[persist] SQL save stopped: phase=${phase} scope=${options?.changes === undefined ? "full" : "delta"} elapsedMs=${Date.now() - startedAt} code=${(error as {code?: string})?.code ?? "none"}.`);
+      console.error(`[persist] SQL save stopped: phase=${phase} scope=${options?.changes === undefined ? "full" : "delta"} elapsedMs=${Date.now() - startedAt} writeMs=${writeMs || (phase === "write" ? Date.now() - phaseStartedAt : 0)} reportingMs=${reportingMs || (phase === "reporting" ? Date.now() - phaseStartedAt : 0)} code=${(error as {code?: string})?.code ?? "none"}.`);
       client?.release(error instanceof Error ? error : new Error(String(error)));
       throw error;
     }

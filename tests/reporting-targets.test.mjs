@@ -46,3 +46,37 @@ test('reporting scopes collect both previous and frozen new owners, including de
  plan.changedKeys.push('companies:00');
  assert.equal(await revisions.collectSqlReportingTargets({query(){throw Error('should use full fallback')}},plan),undefined);
 });
+
+for(const kind of ['findings','assets','scans'])test(`bulk ${kind} reporting reuses frozen writes while retaining SQL order, unchanged rows and both owners`,async()=>{
+ const key=`${kind}:00`,before=baseline();
+ before[key]=Array.from({length:1003},(_,i)=>[`r-${i}`,{id:`r-${i}`,companyId:i===1002?'C':'A',status:'Open',hostname:'before'}]);
+ const current=await digest(before),after=structuredClone(before);
+ for(let i=0;i<1000;i++)Object.assign(after[key][i][1],{companyId:i%3===0?'B':'A',status:'Resolved',hostname:'after',enrichments:{nested:{b:2,a:1}}});
+ after[key].splice(1001,1); // Deleted rows must disappear; unchanged r-1000 must survive.
+ const frozen=after[key].slice(0,1000).map(([id,payload],i)=>({id,payload:structuredClone(payload),store_bucket:0,store_order:Math.floor(i/2)*1024}));
+ // Equal store_order values are legal: the DB's ID order must remain authoritative.
+ const sqlRows=after[key].map(([id,record],i)=>({id,record,store_order:Math.floor(i/2)*1024}));
+ const published=[],payloadReads=[],identityReads=[];
+ const client={async query(sql,p=[]){
+  if(sql.startsWith('SELECT company_id,format_version'))return {rows:current.map(r=>({company_id:r.companyId,format_version:3,bucket_map:r.buckets,content_hash:r.hash}))};
+  if(sql==='SELECT id FROM app_companies ORDER BY id')return {rows:['A','B','C'].map(id=>({id}))};
+  if(sql.startsWith('SELECT id,store_order')){
+   const rows=sqlRows.filter(r=>(r.store_order>p[1]||r.store_order===p[1]&&r.id>p[2])&&p[3].includes(r.record.companyId)).slice(0,500);
+   if(sql.includes(' record FROM'))payloadReads.push(...rows.map(r=>r.id));else identityReads.push(...rows.map(r=>r.id));
+   return {rows:rows.map(r=>sql.includes(' record FROM')?r:{id:r.id,store_order:r.store_order})};
+  }
+  if(sql.startsWith('SELECT id,')&&sql.includes('WHERE id=ANY')){
+   payloadReads.push(...p[0]);return {rows:sqlRows.filter(r=>p[0].includes(r.id)).reverse()};
+  }
+  if(sql.includes('pg_try_advisory'))return {rows:[{acquired:true}]};
+  if(sql.startsWith('INSERT INTO public.customer_reporting_inputs'))published.push({companyId:p[0],hash:p[3],buckets:JSON.parse(p[4])});
+  if(sql.includes('to_regclass'))return {rows:[{relation:'app_store_authority'}]};
+  if(sql.includes('FROM public.app_store_authority'))return {rows:[{mode:'sql',enforced:true,epoch:'2',revision:'6'}]};
+  if(sql.includes('current_database()'))return {rows:[{db:'test',relation:'123'}]};
+  return {rows:[]};
+ }};
+ await revisions.publishSqlReportingChanges(client,[key],{[key]:['A','B']},{writes:new Map([[kind,frozen]])});
+ assert.deepEqual(published,await digest(after));
+ assert.equal(identityReads.length,1001);
+ assert.deepEqual(payloadReads,['r-1000'],'only the unchanged record needs its payload read from SQL');
+});
