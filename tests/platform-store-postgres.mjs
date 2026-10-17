@@ -121,10 +121,10 @@ try{
  const reporting=revisionModule.createReportingInputDigests();
  await tx(db,async()=>{await transitionPlatformStore(db,'sql',reversed.authority,{actor:'integration',reporting});await revisionModule.publishReportingInputRevisions(db,reporting.finish());});
  const nativePool=new pg.Pool({...config,database:name,max:2});
- let loans=0,preparedOutside=0,deltaPreparedOutside=0,recordWritten=false,afterRecord;const reportReads=[];
+ let loans=0,preparedOutside=0,deltaPreparedOutside=0,recordWritten=false,afterRecord;const reportReads=[],identityReads=[];
  const observedPool={on:(...a)=>nativePool.on(...a),end:()=>nativePool.end(),query:(...a)=>nativePool.query(...a),async connect(){
   const c=await nativePool.connect();loans++;
-  return {release(e){loans--;c.release(e);},async query(sql,params){if(sql.startsWith('SELECT id,store_order,'))reportReads.push({sql,params});const result=await c.query(sql,params);if(sql.startsWith('INSERT INTO app_findings')){recordWritten=true;const hook=afterRecord;afterRecord=undefined;hook?.();}return result;}};
+  return {release(e){loans--;c.release(e);},async query(sql,params){if(sql.startsWith('SELECT id,store_order,'))reportReads.push({sql,params});if(sql.startsWith('SELECT id,store_order FROM'))identityReads.push({sql,params});const result=await c.query(sql,params);if(sql.startsWith('INSERT INTO app_findings')){recordWritten=true;const hook=afterRecord;afterRecord=undefined;hook?.();}return result;}};
  }};
  const observedStore={...storeModule,async preparePlatformDelta(...args){
   assert.equal(loans,0,'scoped serialization must precede a DB connection');
@@ -208,12 +208,13 @@ try{
    scanId:'defender:CO-1',cve:`CVE-2026-${10000+i%10000}`,asset:`device-${i%600}`,severity:'High',cvss:8.1,
    realRisk:44.5,status:'Open',firstSeen:'2026-10-01T00:00:00Z',lastSeen:'2026-10-14T00:00:00Z',
    remediation:'Synthetic patch instructions. '.repeat(30),defender:{runId:'bulk-run',deviceId:`device-${i%600}`,active:true}}]);
-  const started=performance.now();
+  const started=performance.now();identityReads.length=0;
   await runtime.saveSnapshot({...data,findings:bulk,meta:{...data.meta,defenderGenerations:{'CO-1':'bulk-run'}}},{changes:{findings:bulk.map(([id])=>id)}});
   console.log(JSON.stringify({bulkRows:bulkCount,saveMilliseconds:Math.round(performance.now()-started)}));
   assert.equal((await db.query("SELECT count(*)::int n FROM app_findings WHERE id LIKE 'B-%'")).rows[0].n,bulkCount);
   assert.equal((await db.query("SELECT payload->'meta'->'defenderGenerations'->>'CO-1' marker FROM app_store_metadata WHERE id=1")).rows[0].marker,'bulk-run');
   assert.equal((await db.query("SELECT count(*)::int n FROM (SELECT store_bucket,store_order FROM app_findings GROUP BY store_bucket,store_order HAVING count(*)>1)t")).rows[0].n,0);
+  if(bulkCount>=64000)assert.ok(identityReads.length>0,'bulk publication must reuse frozen reporting payloads');
   const bulkRevision=await revisionModule.readReportingInputRevision(db,'CO-1');
   const bulkDigest=revisionModule.createReportingInputDigests();
   for(const [kind,c] of Object.entries(platformCollections)){
