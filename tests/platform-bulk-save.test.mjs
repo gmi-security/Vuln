@@ -7,8 +7,8 @@ import * as platformStore from '../lib/db/platform-store.mjs';
 test('large scoped imports have a bounded publication budget without extending ordinary saves',()=>{
  assert.equal(platformStore.platformSaveTimeoutMs?.(),300000);
  assert.equal(platformStore.platformSaveTimeoutMs?.({findings:['one']}),300000);
- assert.equal(platformStore.platformSaveTimeoutMs?.({findings:Array(100000).fill('fixture')}),900000);
- assert.equal(platformStore.platformSaveTimeoutMs?.({findings:Array(1000000).fill('fixture')}),900000);
+ assert.equal(platformStore.platformSaveTimeoutMs?.({findings:Array(100000).fill('fixture')}),1800000);
+ assert.equal(platformStore.platformSaveTimeoutMs?.({findings:Array(1000000).fill('fixture')}),1800000);
 });
 
 test('bulk inserts allocate stable orders in memory and keep SQL writes batched',async()=>{
