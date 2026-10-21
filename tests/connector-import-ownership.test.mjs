@@ -242,6 +242,34 @@ test('approved consolidation customers cannot use the unsafe general merge or im
  assert.equal(s.companies.size,1);
 });
 
+test('unconsolidated Nessus folders keep their existing customer and import recurring results once',async()=>{
+ for(const [id,name,parentId] of [['CO-9150','GMI Scans','CO-229336'],['CO-9153','Valor Global Scans','CO-229438']]){
+  const s=fixture([company(id,name),company(parentId,'Parent')]);
+  folders=[{id:11,name,type:'custom'}];scans=[{id:166,folderId:11,name:'Recurring scan',status:'completed',lastModified:20}];
+  const old={id:'OLD',companyId:id,connector:'nessus',status:'Completed',completedAt:new Date(10000).toISOString(),vendor:{nessusScanId:166,nessusLastModified:10,imported:true}};
+  s.scans.set(old.id,old);
+  nessusResults={findings:Array.from({length:501},(_,i)=>({cve:`CVE-2026-${10000+i}`,cves:[`CVE-2026-${10000+i}`],asset:'host.example',assetAliases:['host.example'],title:'Finding',severity:'High',cvss:8,remediation:'Patch'})),scannedHosts:[{hostname:'host.example',assetAliases:['host.example']}]};
+  const first=await store.importFromNessus();assert.equal(first.scansImported,1);assert.deepEqual(first.errors,[]);
+  assert.equal(s.findings.size,501);assert.ok([...s.findings.values()].every(f=>f.companyId===id));assert.equal(s.companies.size,2);
+  assert.equal(s.scans.get('OLD'),old);assert.equal(s.scans.size,2);
+  assert.equal((await store.importFromNessus()).scansImported,0);assert.equal(nessusReads.length,1);assert.equal(s.scans.size,2);
+ }
+});
+
+test('legacy Nessus exceptions cannot recreate, guess or cross customer ownership',async()=>{
+ for(const kind of ['missing','wrong-id','duplicate','foreign-scan','consolidated']){
+  const id='CO-9153',name='Valor Global Scans';
+  const companies=[company('CO-229438','Valor Global, LLC')];
+  if(kind!=='missing')companies.push(company(kind==='wrong-id'?'CO-OTHER':id,name));
+  if(kind==='duplicate')companies.push(company('CO-DUP',name));
+  const s=fixture(companies);folders=[{id:11,name,type:'custom'}];scans=[{id:166,folderId:11,name:'Scan',status:'completed',lastModified:20}];
+  if(kind==='foreign-scan')s.scans.set('FOREIGN',{id:'FOREIGN',companyId:'CO-229438',vendor:{nessusScanId:166,imported:true,nessusLastModified:10}});
+  if(kind==='consolidated')s.meta.customerConsolidation={version:1};
+  const before=s.companies.size,result=await store.importFromNessus();
+  assert.ok(result.error||result.errors.length);assert.equal(nessusReads.length,0);assert.equal(s.findings.size,0);assert.equal(s.companies.size,before);
+ }
+});
+
 test('CrowdStrike inventory cannot overwrite canonical Automate metadata after consolidation',async()=>{
  const destination=company('CO-229336','Global Market Innovators, Inc.','internal');
  const s=fixture([destination]);
