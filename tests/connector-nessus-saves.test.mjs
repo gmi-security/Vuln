@@ -29,7 +29,7 @@ test('Nessus provider failure does not close previous findings and can retry the
  fail=false;await h.store.importFromNessus();h.assertPersisted();assert.equal(h.disk.value.scans.length,1);assert.equal(h.disk.value.scans[0][1].vendor.imported,true);
 });
 test('partial application failure saves touched records without a false completion marker or closure',async()=>{
- const partial=result();Object.defineProperty(partial.findings[1],'assetAliases',{get(){throw Error('Bad source record');}});
+ const partial=result();Object.defineProperty(partial.findings[1],'cvss',{get(){throw Error('Bad source record');}});
  const h=await mutationHarness({disk:{value:initial()},providers:providers(()=>partial),now});await h.store.refreshVendorScans(h.memory());await h.flush();h.assertPersisted();
  assert.notEqual(h.lastScope(),undefined);assert.equal(new Map(h.disk.value.findings).get('VLN-1001').status,'Open');assert.equal(new Map(h.disk.value.findings).get('F-stale').status,'Open');assert.equal(h.disk.value.scans[0][1].vendor.imported,false);
 });

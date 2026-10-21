@@ -236,6 +236,8 @@ export type Finding = {
   // (same CVE, same asset) — populated once a second scanner corroborates it;
   // absent/one entry means only `connector` has ever seen it.
   seenBy?: ConnectorId[];
+  // Latest presence per recurring Nessus scan; a discovery policy cannot clear another policy's evidence.
+  nessusObservations?: Record<string, { observedAt: string; present: boolean }>;
   // Stable Defender source ownership survives correlation and restarts.
   defender?: { deviceId: string; hostname: string; runId: string; observedAt: string; active: boolean; cvss: number | null; remediation: string; otherRemediation?: string };
   // Sources that enriched this finding without independently reporting it.

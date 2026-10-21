@@ -395,6 +395,7 @@ async function closeStaleFindings(
       if (
         (f.status === "Open" || f.status === "In Remediation") &&
         !(connector !== "defender" && f.defender?.active) &&
+        !Object.values(f.nessusObservations ?? {}).some(observation => observation.present) &&
         coveredAssetKeys.has(resolveAssetKey(s, companyId, assetIndex, f.asset)) &&
         !touchedKeys.has(correlationKey(s, companyId, f.cve, f.asset))
       ) {
@@ -634,6 +635,7 @@ type InternalScan = Omit<Scan, "progress" | "status"> & {
     // importFromNessus to detect a fresh completed run of a scan it has
     // already imported before, instead of skipping it forever.
     nessusLastModified?: number | null;
+    nessusEvidenceVersion?: 1;
   } | null;
   // Stable reference to an external source scan (e.g. "spiderfoot:<id>") so
   // pull-based imports stay idempotent. Absent for native/demo scans.
@@ -2035,7 +2037,7 @@ async function refreshVendorScans(s: StoreShape): Promise<void> {
   catch { for (const scan of pending) { scan.vendor!.lastPoll = now; scan.error = "Reviewed scanner routing is unavailable."; } markDirty({scans: pending.map(scan => scan.id)}); return; }
   const rosters = new Map<number, Promise<Awaited<ReturnType<typeof nessusListScans>>>>();
   for (const scan of pending) {
-    if (!scan.vendor) continue;
+    if (!scan.vendor || nessusImportsInFlight.has(`${scan.companyId}:${scan.vendor.nessusScanId}`)) continue;
     const active =
       scan.status === "Running" || scan.status === "Paused" || scan.status === "Queued" ||
       scan.status === "Completed" && !scan.vendor.imported;
@@ -2050,6 +2052,7 @@ async function refreshVendorScans(s: StoreShape): Promise<void> {
           throw new Error("Nessus scan is no longer in its reviewed customer folder.");
       }
       const remote = await nessusScanStatus(scan.vendor.nessusScanId, context?.config);
+      if (nessusImportsInFlight.has(`${scan.companyId}:${scan.vendor.nessusScanId}`) || scan.vendor.imported) continue;
       scan.progressFrozenAt = remote.progress;
       scan.status = NESSUS_STATUS_MAP[remote.status] ?? scan.status;
       markDirty({scans: [scan.id]});
@@ -2074,24 +2077,98 @@ async function refreshVendorScans(s: StoreShape): Promise<void> {
   }
 }
 
+function nessusRunTimestamp(scan: InternalScan): number {
+  return scan.vendor?.nessusLastModified ?? (Date.parse(scan.completedAt ?? "") / 1000 || 0);
+}
+function newestNessusRun(a: InternalScan, b: InternalScan): number {
+  return nessusRunTimestamp(b) - nessusRunTimestamp(a) ||
+    (b.vendor?.nessusEvidenceVersion ?? 0) - (a.vendor?.nessusEvidenceVersion ?? 0);
+}
+function nessusObservations(s: StoreShape, finding: Finding) {
+  if (!finding.nessusObservations) {
+    const origin = s.scans.get(finding.scanId);
+    const sourceId = origin?.companyId === finding.companyId ? origin.vendor?.nessusScanId : undefined;
+    // Unknown historical ownership remains positive until it can be investigated, never inferred clean.
+    finding.nessusObservations = finding.connector !== "nessus" ? {} : { [sourceId ?? "unknown"]: {
+      observedAt: origin?.completedAt ?? finding.lastSeen, present: true,
+    } };
+    markDirty({ findings: [finding.id] });
+  }
+  return finding.nessusObservations;
+}
+
+async function reconcileNessusFindings(s: StoreShape, scan: InternalScan, covered: Set<string>, touched: Set<string>, observedAt: string) {
+  const sourceId = String(scan.vendor!.nessusScanId), latest = new Map<number, InternalScan>();
+  for (const candidate of s.scans.values()) {
+    if (candidate.companyId !== scan.companyId || candidate.connector !== "nessus" || !candidate.vendor) continue;
+    const old = latest.get(candidate.vendor.nessusScanId);
+    if (!old || (candidate.vendor.imported && (!old.vendor?.imported ||
+        newestNessusRun(candidate, old) < 0)))
+      latest.set(candidate.vendor.nessusScanId, candidate);
+  }
+  latest.set(scan.vendor!.nessusScanId, scan);
+  const baselineReady = [...latest.values()].every(candidate => candidate === scan ||
+    (candidate.vendor?.imported && candidate.vendor.nessusEvidenceVersion === 1));
+  const assets = buildCompanyAssetKeyIndex(s, scan.companyId);
+  let i = 0;
+  for (const finding of s.findings.values()) {
+    if (finding.companyId === scan.companyId && (finding.connector === "nessus" || finding.nessusObservations) &&
+        (finding.status === "Open" || finding.status === "In Remediation")) {
+      const observations = nessusObservations(s, finding), previous = observations[sourceId];
+      if (previous && previous.observedAt <= observedAt &&
+          covered.has(resolveAssetKey(s, scan.companyId, assets, finding.asset)) &&
+          !touched.has(finding.id)) {
+        observations[sourceId] = { observedAt, present: false };
+        markDirty({ findings: [finding.id] });
+      }
+      if (baselineReady && finding.connector === "nessus" && !finding.defender?.active &&
+          (finding.seenBy ?? ["nessus"]).every(provider => provider === "nessus") &&
+          Object.values(observations).every(observation => !observation.present)) {
+        finding.status = "Resolved";
+        finding.resolvedAt = Object.values(observations).map(observation => observation.observedAt).sort().at(-1)!;
+        markDirty({ findings: [finding.id] });
+      }
+    }
+    if (++i % 500 === 0) await new Promise(resolve => setImmediate(resolve));
+  }
+}
+
+const nessusImportsInFlight = new Set<string>();
 async function importVendorFindings(s: StoreShape, scan: InternalScan, prepared?: NessusImportFindingsResult): Promise<void> {
-  const { findings: imported, scannedHosts } = prepared ?? await collectNessusFindings(scan.companyId, scan.vendor!.nessusScanId);
+  const key = `${scan.companyId}:${scan.vendor!.nessusScanId}`;
+  if (nessusImportsInFlight.has(key)) throw new Error("This Nessus scan is already being imported; retry after it completes.");
+  nessusImportsInFlight.add(key);
+  try { await applyNessusFindings(s, scan, prepared); }
+  finally { nessusImportsInFlight.delete(key); }
+}
+
+async function applyNessusFindings(s: StoreShape, scan: InternalScan, prepared?: NessusImportFindingsResult): Promise<void> {
   const completedAt = scan.completedAt ?? new Date().toISOString();
+  const { findings: imported, scannedHosts } = prepared ?? await collectNessusFindings(scan.companyId, scan.vendor!.nessusScanId);
+  for (const previous of s.scans.values()) {
+    if (previous.companyId === scan.companyId && previous.vendor?.nessusScanId === scan.vendor!.nessusScanId &&
+        previous.vendor.imported && nessusRunTimestamp(previous) > Date.parse(completedAt) / 1000)
+      throw new Error("An older Nessus result cannot replace a newer completed import.");
+  }
   // Company-scoped, cross-connector correlation: customers can share asset
   // strings (10.x IPs, DESKTOP-XXXX), so one client's finding must never
   // swallow another's, but a CVE another connector already reported on the
   // same host in the same company is the same real vulnerability.
+  // Finish alias matching before computing keys; a later hostname must not invalidate an earlier IP key.
+  for (const item of imported) linkIdentities(s, scan.companyId, item.assetAliases);
   const index = buildCorrelationIndex(s, scan.companyId);
   const touchedKeys = new Set<string>();
   for (const item of imported) {
-    linkIdentities(s, scan.companyId, item.assetAliases);
     const key = correlationKey(s, scan.companyId, item.cve, item.asset);
-    touchedKeys.add(key);
     const existing = index.get(key);
     if (existing) {
+      touchedKeys.add(existing.id);
+      nessusObservations(s, existing)[String(scan.vendor!.nessusScanId)] = { observedAt: completedAt, present: true };
+      existing.cves = [...new Set([...(existing.cves ?? [existing.cve]), ...(item.cves ?? [item.cve])])];
       correlateFinding(s, existing, {
         connector: scan.connector, cvss: item.cvss, cvssV3: item.cvssV3, cvssV2: item.cvssV2,
-        vpr: item.vpr, epss: 0, exploitAvailable: item.exploitAvailable, severity: item.severity, lastSeen: completedAt,
+        vpr: item.vpr, epss: 0, exploitAvailable: item.exploitAvailable, severity: item.severity,
+        lastSeen: existing.lastSeen > completedAt ? existing.lastSeen : completedAt,
       });
       continue;
     }
@@ -2101,6 +2178,7 @@ async function importVendorFindings(s: StoreShape, scan: InternalScan, prepared?
       companyId: scan.companyId,
       companyName: scan.companyName,
       connector: scan.connector,
+      nessusObservations: { [String(scan.vendor!.nessusScanId)]: { observedAt: completedAt, present: true } },
       cve: item.cve,
       cves: item.cves,
       title: item.title,
@@ -2130,6 +2208,7 @@ async function importVendorFindings(s: StoreShape, scan: InternalScan, prepared?
         companyId: scan.companyId,
       }),
     };
+    touchedKeys.add(created.id);
     s.findings.set(created.id, created);
     index.set(key, created);
   }
@@ -2150,7 +2229,8 @@ async function importVendorFindings(s: StoreShape, scan: InternalScan, prepared?
   // scanned clean.
   scan.scannedHostAliases = Array.from(coveredAliases);
   markDirty({ scans: [scan.id] });
-  await closeStaleFindings(s, scan.companyId, scan.connector, coveredAssetKeys, touchedKeys, completedAt);
+  await reconcileNessusFindings(s, scan, coveredAssetKeys, touchedKeys, completedAt);
+  scan.vendor!.nessusEvidenceVersion = 1;
   const all = Array.from(s.findings.values()).filter((f) => f.scanId === scan.id);
   scan.findingsCount = all.length;
   const counts = emptySeverityCounts();
@@ -7312,8 +7392,8 @@ export async function importFromNessus(): Promise<
     // Imports follow the most recently observed run. The scan ID is
     // reused by Nessus, so choosing the oldest local record would reimport a
     // newer completed run on every sync.
-    const existing = existingScans.sort((a, b) =>
-      (b.vendor?.nessusLastModified ?? 0) - (a.vendor?.nessusLastModified ?? 0))[0];
+    if (nessusImportsInFlight.has(`${companyId}:${summary.id}`)) { skipped++; continue; }
+    const existing = existingScans.sort(newestNessusRun)[0];
     if (existing?.vendor && !existing.vendor.imported && summary.status !== "completed") {
       // The existing pending record is handled by polling; do not duplicate it.
       skipped++;
@@ -7328,23 +7408,14 @@ export async function importFromNessus(): Promise<
       // against what this record actually reflects (completedAt, which the
       // original import derived from that run's lastModified) and only treat
       // it as caught-up when Nessus's current value is no newer than that.
-      if (existing.vendor && existing.vendor.nessusLastModified == null) {
-        const recordedAt = existing.completedAt
-          ? Math.floor(new Date(existing.completedAt).getTime() / 1000)
-          : 0;
-        if (!summary.lastModified || summary.lastModified <= recordedAt) {
-          existing.vendor.nessusLastModified = summary.lastModified;
+      const recordedAt = nessusRunTimestamp(existing);
+      if (!summary.lastModified || summary.lastModified < recordedAt) { skipped++; continue; }
+      if (summary.lastModified === recordedAt) {
+        if (existing.vendor.nessusLastModified == null) {
+          existing.vendor.nessusLastModified = recordedAt;
           markDirty({ scans: [existing.id] });
-          skipped += 1;
-          continue;
         }
-        // Nessus has already completed a newer run than this record reflects
-        // — fall through and import it as a fresh scan record below, which
-        // stamps its own nessusLastModified.
-      } else if (existing.vendor?.nessusLastModified === summary.lastModified) {
-        // Same run we've already imported — nothing new.
-        skipped += 1;
-        continue;
+        if (existing.vendor.nessusEvidenceVersion === 1) { skipped++; continue; }
       }
       // Otherwise: this scan has completed a new scheduled run since we last
       // imported it. Fall through and import it as a fresh scan record.
@@ -7358,6 +7429,13 @@ export async function importFromNessus(): Promise<
       }
       if (!s.companies.has(companyId) || demoCompanyIds(s).has(companyId)) { errors.push("Nessus destination changed during import."); skipped++; continue; }
     }
+    // Reviewed collection yields; a concurrent import may have claimed or completed this source meanwhile.
+    if (nessusImportsInFlight.has(`${companyId}:${summary.id}`) || [...s.scans.values()].some(candidate =>
+        candidate.companyId === companyId && candidate.vendor?.nessusScanId === summary.id && candidate.vendor.imported &&
+        (nessusRunTimestamp(candidate) > (summary.lastModified ?? 0) ||
+         (nessusRunTimestamp(candidate) === summary.lastModified && candidate.vendor.nessusEvidenceVersion === 1)))) {
+      skipped++; continue;
+    }
     const company = s.companies.get(companyId)!;
     const folder = ensureFolder(s, companyId, "Nessus");
     const status = NESSUS_STATUS_MAP[summary.status] ?? "Completed";
@@ -7368,7 +7446,8 @@ export async function importFromNessus(): Promise<
           ? new Date(summary.lastModified * 1000).toISOString()
           : nowIso
         : null;
-    if (summary.status === "completed" && existing?.vendor && !existing.vendor.imported) {
+    if (summary.status === "completed" && existing?.vendor && (!existing.vendor.imported ||
+        (existing.vendor.nessusLastModified === summary.lastModified && existing.vendor.nessusEvidenceVersion !== 1))) {
       // A pending or previously failed run keeps its local identity when its
       // completed result has passed the current ownership checks.
       existing.completedAt = completedAt;
@@ -7424,7 +7503,7 @@ export async function importFromNessus(): Promise<
         scan.vendor!.imported = true;
         findingsImported += scan.findingsCount;
       } catch (error) {
-        if (routes !== null) errors.push(error instanceof Error ? error.message : "Nessus result could not be applied.");
+        errors.push(error instanceof Error ? error.message : "Nessus result could not be applied.");
         // leave imported=false so a later poll retries the findings import
       } finally {
         // Completion metadata and any findings changed after an awaited import
