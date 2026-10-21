@@ -328,6 +328,7 @@ test('reviewed Nessus rejects missing routing before API/state changes and suppo
 test('reviewed Nessus clean-host reconciliation changes only the approved customer after full validation',async()=>{
  const s=scannerFixture();const old={id:'old',companyId:acme.id,companyName:acme.name,scanId:'prior',connector:'nessus',status:'Open',asset:'10.0.0.1',cve:'CVE-2026-1234',severity:'High',cvss:8,lastSeen:'2026-01-01'};
  s.findings.set('old',old);s.findings.set('other',{...old,id:'other',companyId:beacon.id});
+ s.scans.set('prior',{id:'prior',companyId:acme.id,connector:'nessus',completedAt:new Date(50000).toISOString(),vendor:{nessusScanId:10,nessusLastModified:50,imported:true}});
  assert.equal((await store.importFromNessus()).errors.length,0);assert.equal(old.status,'Resolved');assert.equal(s.findings.get('other').status,'Open');
  const next=scannerFixture();next.findings.set('old',{...old,status:'Open'});nessusResults.scannedHosts.push({hostname:'foreign',assetAliases:['10.1.0.1']});
  assert.ok((await store.importFromNessus()).errors.length);assert.equal(next.findings.get('old').status,'Open');assert.equal(next.scans.size,0);

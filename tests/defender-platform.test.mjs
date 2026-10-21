@@ -96,8 +96,10 @@ test("missing or stale devices never supply patch closure evidence",()=>{
 test("existing inventory and Nessus corroboration are reused; Defender cannot close another source",()=>{
  const first=plan(),asset={...[...first.assets.values()][0],id:"INVENTORY-1",identifier:"host1",source:"manual",defenderDeviceId:undefined,criticality:"Crown Jewel"};
  const nessus={...one(first),id:"NESSUS-1",connector:"nessus",seenBy:["nessus"],asset:"host1",defender:undefined,remediation:"Nessus vendor fix"};
+ nessus.nessusObservations={156:{observedAt,present:true},14:{observedAt,present:false}};
  const second=plan(snapshot(),[nessus],[asset]);assert.equal(second.assets.size,1);assert.equal([...second.assets.keys()][0],"INVENTORY-1");
  assert.equal(one(second).id,"NESSUS-1");assert.deepEqual(one(second).seenBy,["nessus","defender"]);
+ assert.deepEqual(one(second).nessusObservations,nessus.nessusObservations);
  const cleared=one(plan(snapshot({runId:"run2",findings:[],devices:[{...device(),lastSeen:"2026-10-08T00:00:00Z"}]}),[one(second)],[...second.assets.values()]));
  assert.equal(cleared.status,"Open");assert.deepEqual(cleared.seenBy,["nessus"]);
  const again=one(plan(snapshot({runId:"run3"}),[one(second)],[...second.assets.values()]));assert.match(again.remediation,/Nessus vendor fix/);

@@ -86,6 +86,7 @@ export function planDefenderProjection(snapshot: DefenderSnapshot, companyName: 
       defender:{ deviceId:row.deviceId,hostname:row.hostname,runId:snapshot.runId,observedAt:snapshot.observedAt,active:true,cvss:row.cvss,remediation:row.remediation } };
     if (old) {
       f.enrichments = old.enrichments; f.slaBreachAlertedAt = old.slaBreachAlertedAt;
+      f.nessusObservations = old.nessusObservations;
       if (otherSources.length) {
         mergeFindingAssessment(f,old); f.lastSeen = [old.lastSeen,row.lastSeen ?? snapshot.observedAt].sort().at(-1)!; f.connector = old.connector; f.scanId = old.scanId;
         f.seenBy = [...new Set([...otherSources,"defender" as const])];
