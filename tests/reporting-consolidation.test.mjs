@@ -103,3 +103,68 @@ test('automatic patch drafts exclude OSINT and non-CVE service findings', () => 
   assert.equal(groups[0].findingCount, 1);
   assert.deepEqual(groups[0].connectors, ['nessus']);
 });
+
+const defenderUpdate = (overrides = {}) => ({ softwareVendor: 'microsoft', softwareName: 'windows_11', softwareVersion: '10.0.26200.9448', remediation: 'October 2026 Security Updates', remediationId: '5127648', ...overrides });
+const defenderFinding = (id, overrides = {}) => finding(id, 'defender', 'CVE-2026-100202', {
+  remediation: `windows_11 ? installed-build-${id} ? October 2026 Security Updates ? 5127648`,
+  defender: { active: true, deviceId: id, runId: 'published-run', hostname: `host-${id}` }, ...overrides,
+});
+
+test('Defender installed builds consolidate into five product/update drafts with all 505 devices', () => {
+  const counts = [['windows_11','5127648',494],['windows_server_2022','5126655',6],['windows_server_2025','5126646',2],['windows_10','5126657',2],['windows_11','5126653',1]];
+  const findings = [], updates = new Map();
+  for (const [product, update, count] of counts) for (let n = 0; n < count; n++) {
+    const id = `${product}-${update}-${n}`;
+    findings.push(defenderFinding(id));
+    updates.set(id, [defenderUpdate({ softwareName: product, remediationId: update, softwareVersion: `build-${n % 27}` })]);
+  }
+  const groups = buildStoredFindingGroups(company, findings, new Set(), updates);
+  assert.equal(groups.length, 5);
+  assert.deepEqual(groups.map(g => g.deviceCount).sort((a,b)=>b-a), [494,6,2,2,1]);
+  assert.equal(new Set(groups.flatMap(g => g.hostScope)).size, 505);
+  assert.equal(groups.reduce((sum,g)=>sum+g.findingCount,0), 505);
+  const largest = groups.find(g=>g.deviceCount===494);
+  assert.equal(largest.title, 'Windows 11 — Install KB5127648');
+  assert.equal(largest.reference, 'KB5127648');
+  assert.match(largest.csv, /installed_versions/);
+  assert.match(largest.csv, /build-26/);
+  assert.doesNotMatch(largest.ticketBody, /host-windows|build-26/);
+  assert.match(largest.ticketBody, /Windows 11/);
+});
+
+test('Defender keeps multiple installed versions in one host row but separates different recommended updates', () => {
+  const item = defenderFinding('one');
+  const updates = new Map([['one',[defenderUpdate(), defenderUpdate({softwareVersion:'10.0.26200.9457'}), defenderUpdate({remediationId:'5126653'})]]]);
+  const groups = buildStoredFindingGroups(company, [item], new Set(), updates);
+  assert.equal(groups.length, 2);
+  assert.ok(groups.every(g=>g.deviceCount===1 && g.deviceCves.length===1 && g.findingCount===1));
+  const first=groups.find(g=>g.reference==='KB5127648');
+  assert.match(first.csv, /10.0.26200.9448; 10.0.26200.9457/);
+  assert.equal(first.csv.trim().split('\n').length, 2);
+  const newer = buildStoredFindingGroups(company,[item],new Set(),new Map([['one',[defenderUpdate({softwareVersion:'newer-installed-build'})]]]));
+  assert.equal(newer[0].remediationId, first.remediationId);
+  const changedAction = buildStoredFindingGroups(company,[item],new Set(),new Map([['one',[defenderUpdate({remediation:'Different update instructions'})]]]));
+  assert.notEqual(changedAction[0].remediationId, first.remediationId);
+});
+
+test('Defender identity retains customer, CVE, vendor and product boundaries and active-ticket exclusions', () => {
+  const one=defenderFinding('one'), other=defenderFinding('other',{cve:'CVE-2026-100203'});
+  const evidence=new Map([['one',[defenderUpdate(),defenderUpdate({softwareName:'windows_10'}),defenderUpdate({softwareVendor:'another-vendor'})]],['other',[defenderUpdate()]]]);
+  const groups=buildStoredFindingGroups(company,[one,other,defenderFinding('foreign',{companyId:'CO-B'})],new Set(),evidence);
+  assert.equal(groups.length,4);
+  const moved=buildStoredFindingGroups({id:'CO-B',name:'B'},[{...one,companyId:'CO-B'}],new Set(),evidence);
+  assert.ok(moved.every(m=>groups.every(g=>m.remediationId!==g.remediationId)));
+  const excluded=new Set([JSON.stringify([company.id,one.asset,one.cve])]);
+  assert.equal(buildStoredFindingGroups(company,[one,other],excluded,evidence).length,1);
+});
+
+test('incomplete Defender evidence and corroborating scanner actions retain conservative exact-action grouping', () => {
+  const one=defenderFinding('one'), two=defenderFinding('two');
+  for (const updates of [new Map(),new Map([['one',[defenderUpdate(),defenderUpdate({remediationId:''})]],['two',[defenderUpdate({softwareName:''})]]])]) {
+    assert.equal(buildStoredFindingGroups(company,[one,two],new Set(),updates).length,2);
+  }
+  const mixed=defenderFinding('mixed',{seenBy:['defender','nessus'],remediation:'Install another scanner fix; Defender update',defender:{...one.defender,otherRemediation:'Install another scanner fix'}});
+  const [group]=buildStoredFindingGroups(company,[mixed],new Set(),new Map([['mixed',[defenderUpdate()]]]));
+  assert.match(group.ticketBody,/another scanner fix/);
+  assert.equal(group.title, `${mixed.cve} remediation`);
+});
