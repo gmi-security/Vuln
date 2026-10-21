@@ -78,7 +78,7 @@ test('full preparation preserves deletes, metadata, and 500-row write batches',a
 
 test('actual full-import changes receive the same bounded budget as explicit imports',()=>{
  assert.equal(store.platformSaveTimeoutMs(undefined,1),300000);
- assert.equal(store.platformSaveTimeoutMs(undefined,100000),900000);
+ assert.equal(store.platformSaveTimeoutMs(undefined,100000),1800000);
 });
 
 test('comparison counts distinguish a scoped save from hashing the whole collection',async()=>{

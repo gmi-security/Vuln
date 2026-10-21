@@ -121,12 +121,12 @@ try{
  const reporting=revisionModule.createReportingInputDigests();
  await tx(db,async()=>{await transitionPlatformStore(db,'sql',reversed.authority,{actor:'integration',reporting});await revisionModule.publishReportingInputRevisions(db,reporting.finish());});
  const nativePool=new pg.Pool({...config,database:name,max:2});
- let loans=0,preparedOutside=0,deltaPreparedOutside=0,recordWritten=false,afterRecord;const reportReads=[],identityReads=[];
+ let loans=0,preparedOutside=0,deltaPreparedOutside=0,recordWritten=false,afterRecord,testTimeout,loseCommit=false;const reportReads=[],identityReads=[];
  const observedPool={on:(...a)=>nativePool.on(...a),end:()=>nativePool.end(),query:(...a)=>nativePool.query(...a),async connect(){
   const c=await nativePool.connect();loans++;
-  return {release(e){loans--;c.release(e);},async query(sql,params){if(sql.startsWith('SELECT id,store_order,'))reportReads.push({sql,params});if(sql.startsWith('SELECT id,store_order FROM'))identityReads.push({sql,params});const result=await c.query(sql,params);if(sql.startsWith('INSERT INTO app_findings')){recordWritten=true;const hook=afterRecord;afterRecord=undefined;hook?.();}return result;}};
+  return {release(e){loans--;c.release(e);},async query(sql,params){if(sql.startsWith('SELECT id,store_order,'))reportReads.push({sql,params});if(sql.startsWith('SELECT id,store_order FROM'))identityReads.push({sql,params});const result=await c.query(sql,params);if(sql.startsWith('INSERT INTO app_findings')){recordWritten=true;const hook=afterRecord;afterRecord=undefined;await hook?.(c);}if(sql==='COMMIT'&&loseCommit){loseCommit=false;throw Object.assign(Error('lost COMMIT acknowledgement'),{code:'08006'});}return result;}};
  }};
- const observedStore={...storeModule,async preparePlatformDelta(...args){
+ const observedStore={...storeModule,platformSaveTimeoutMs:(...args)=>testTimeout??storeModule.platformSaveTimeoutMs(...args),async preparePlatformDelta(...args){
   assert.equal(loans,0,'scoped serialization must precede a DB connection');
   const plan=await storeModule.preparePlatformDelta(...args);
   assert.equal(loans,0);deltaPreparedOutside++;return plan;
@@ -188,6 +188,24 @@ try{
   assert.equal((await db.query('SELECT payload FROM app_findings WHERE id=$1',[data.findings[0][0]])).rows[0].payload.title,'Scoped later generation');
   assert.ok(deltaPreparedOutside>=4);assert.equal(loans,0);
   ok('scoped preparation borrows no SQL connection and frozen captures preserve later mutations for the next commit');
+  const retryBefore=await readPlatformAuthority(db),retryReport=await revisionModule.readReportingInputRevision(db,'CO-1');
+  data.findings[0][1].title='Frozen timeout retry';testTimeout=500;
+  afterRecord=async c=>{data.findings[0][1].title='Later than timeout';await c.query('SELECT pg_sleep(2)');};
+  await runtime.saveSnapshot(data,{changes:{findings:[data.findings[0][0]]}});testTimeout=undefined;
+  assert.equal((await db.query('SELECT payload FROM app_findings WHERE id=$1',[data.findings[0][0]])).rows[0].payload.title,'Frozen timeout retry');
+  assert.equal(Number((await readPlatformAuthority(db)).revision),Number(retryBefore.revision)+1);
+  assert.equal(Number((await revisionModule.readReportingInputRevision(db,'CO-1')).revision),Number(retryReport.revision)+1);
+  assert.equal(loans,0);
+  await runtime.saveSnapshot(data,{changes:{findings:[data.findings[0][0]]}});
+  assert.equal((await db.query('SELECT payload FROM app_findings WHERE id=$1',[data.findings[0][0]])).rows[0].payload.title,'Later than timeout');
+  ok('real deadline destroys an in-flight transaction, retries the frozen generation once and retains later edits');
+  data.findings[0][1].title='Statement timeout retry';
+  afterRecord=async c=>{await c.query("SET LOCAL statement_timeout='10ms'");await c.query('SELECT pg_sleep(1)');};
+  const statementBefore=await readPlatformAuthority(db);
+  await runtime.saveSnapshot(data,{changes:{findings:[data.findings[0][0]]}});
+  assert.equal(Number((await readPlatformAuthority(db)).revision),Number(statementBefore.revision)+1);
+  assert.equal((await db.query('SELECT payload FROM app_findings WHERE id=$1',[data.findings[0][0]])).rows[0].payload.title,'Statement timeout retry');
+  ok('PostgreSQL statement cancellation after a row write rolls back and automatically retries without restart');
   const move=['T-move',{id:'T-move',companyId:'CO-1',connector:'nessus',status:'Open'}];
   const remove=['T-delete',{id:'T-delete',companyId:'CO-2',connector:'nessus',status:'Open'}];
   data.findings.push(move,remove);await runtime.saveSnapshot(data,{changes:{findings:['T-move','T-delete']}});
@@ -232,6 +250,13 @@ try{
   assert.deepEqual(await readPlatformAuthority(db),bulkAuthority);
   assert.deepEqual(await revisionModule.readReportingInputRevision(db,'CO-1'),bulkRevision);
   ok('bulk scoped findings and their publication marker commit together with unique append orders and valid reporting revisions');
+  const ambiguousBefore=await readPlatformAuthority(db);loseCommit=true;
+  await assert.rejects(runtime.saveSnapshot({...data,findings:[['B-0',{...bulk[0][1],status:'In Remediation'}]],meta:{...data.meta,defenderGenerations:{'CO-1':'bulk-run'}}},
+   {changes:{findings:['B-0']}}),/lost COMMIT acknowledgement/);
+  assert.equal(Number((await readPlatformAuthority(db)).revision),Number(ambiguousBefore.revision)+1,'COMMIT happened despite the lost response');
+  await assert.rejects(runtime.saveSnapshot(data,{changes:{}}),/authority changed/);
+  assert.equal((await db.query("SELECT status FROM app_findings WHERE id='B-0'")).rows[0].status,'In Remediation');
+  ok('an ambiguous committed response is never retried or acknowledged and the stale writer cannot overwrite it');
   const restarted=await instance();assert.equal((await restarted.loadSnapshot()).findings[0][1].severity,'Critical');
   const a=await readPlatformAuthority(db);await restarted.saveSnapshot(await restarted.loadSnapshot());assert.deepEqual(await readPlatformAuthority(db),a);
   process.env.VULN_PLATFORM_STORE='legacy';await assert.rejects((await instance()).loadSnapshot(),/requires VULN_PLATFORM_STORE/);

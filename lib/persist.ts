@@ -210,13 +210,13 @@ function getPool(): Pool | null {
 
 // Reject if the DB op doesn't finish in time, so a slow/unreachable DB never
 // blocks a request indefinitely.
-async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+async function withTimeout<T>(promise: Promise<T>, ms: number, label: string, code?: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       promise,
       new Promise<T>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+        timer = setTimeout(() => reject(Object.assign(new Error(`${label} timed out after ${ms}ms`), code ? { code } : {})), ms);
       }),
     ]);
   } finally {
@@ -452,13 +452,12 @@ export async function saveSnapshot(data: unknown, options?: { guard?: () => void
     const candidateRecords = options?.changes === undefined
       ? ["companies", "folders", "scans", "findings", "assets"].reduce((n, kind) => n + (Array.isArray(obj[kind]) ? obj[kind].length : 0), 0)
       : Object.values(options.changes).reduce((n, ids) => n + ids.length, 0);
-    let deadline = startedAt + 300000, cancelled = false, captureFrozen = false, phase = "prepare";
-    let client: PoolClient | undefined;
-    let writeMs = 0, reportingMs = 0, phaseStartedAt = startedAt;
+    const deadline = startedAt + 300000;
+    let preparedComplete = false;
     const guard = () => {
-      if (cancelled || Date.now() >= deadline) throw new Error(`SQL platform ${phase} deadline exceeded.`);
+      if (Date.now() >= deadline) throw new Error("SQL platform prepare deadline exceeded.");
       options?.guard?.();
-      if (!captureFrozen) options?.captureGuard?.();
+      options?.captureGuard?.();
     };
     try {
       const prepared = options?.changes === undefined
@@ -470,43 +469,62 @@ export async function saveSnapshot(data: unknown, options?: { guard?: () => void
       // Later RAM edits remain dirty in store.ts for the next serialized save;
       // they must not repeatedly cancel this already-frozen generation. Both
       // full and scoped writes now use detached rows and metadata.
-      captureFrozen = true;
+      preparedComplete = true;
       const preparedMs = Date.now() - startedAt;
       const timeoutMs = platformSaveTimeoutMs(options?.changes, prepared?.findingChanges);
-      phase = "connect";
-      client = await p.connect();
-      guard();
-      const activeClient = client;
-      deadline = Date.now() + timeoutMs;
-      if (timeoutMs > 300000) console.info(`[persist] Large SQL publication started: ${options?.changes?.findings?.length ?? prepared?.findingChanges} findings; ${timeoutMs / 1000}s limit.`);
-      const next = await withTimeout((async () => {
-        phase = "write";
-        phaseStartedAt = Date.now();
-        await activeClient.query("BEGIN; SET LOCAL statement_timeout='60s'; SET LOCAL lock_timeout='10s'; SET LOCAL idle_in_transaction_session_timeout='90s'");
-        const next = await commitPreparedPlatformStore(activeClient, prepared, { guard });
-        writeMs = Date.now() - phaseStartedAt;
-        phase = "reporting";
-        phaseStartedAt = Date.now();
-        if ("changedKeys" in next) await publishSqlReportingChanges(activeClient, next.changedKeys, next.reportingTargets, prepared);
-        else await publishReportingInputRevisions(activeClient, digests!);
-        reportingMs = Date.now() - phaseStartedAt;
-        guard();
-        phase = "commit";
-        await activeClient.query("COMMIT");
-        return next;
-      })(), timeoutMs, "SQL platform save");
-      persistence.platformState = next; persistence.platformAuthority = next.authority;
-      if ("changedKeys" in next) reportingDigestCache.clear();
-      else reporting.committed();
-      console.info(`[persist] SQL save committed: scope=${options?.changes === undefined ? "full" : "delta"} reason=${options?.changes === undefined ? "scope-not-declared" : "declared-records"} candidates=${candidateRecords} compared=${next.comparedRecords} prepareMs=${preparedMs} writeMs=${writeMs} reportingMs=${reportingMs} totalMs=${Date.now() - startedAt} inserted=${next.counts.inserted} updated=${next.counts.updated} deleted=${next.counts.deleted} metadata=${next.counts.metadata}.`);
+      for (let attempt = 0; ; attempt++) {
+        let client: PoolClient | undefined, cancelled = false, phase = "connect";
+        let writeMs = 0, reportingMs = 0, phaseStartedAt = Date.now(), writeDeadline = Infinity;
+        const writeGuard = () => {
+          if (cancelled || Date.now() >= writeDeadline)
+            throw Object.assign(new Error(`SQL platform ${phase} deadline exceeded.`), { code: "platform-save-timeout" });
+          options?.guard?.();
+        };
+        try {
+          client = await p.connect();
+          writeGuard();
+          const activeClient = client;
+          writeDeadline = Date.now() + timeoutMs;
+          if (timeoutMs > 300000) console.info(`[persist] Large SQL publication started: ${options?.changes?.findings?.length ?? prepared?.findingChanges} findings; ${timeoutMs / 1000}s limit; attempt=${attempt + 1}.`);
+          const next = await withTimeout((async () => {
+            phase = "write";
+            phaseStartedAt = Date.now();
+            await activeClient.query("BEGIN; SET LOCAL statement_timeout='60s'; SET LOCAL lock_timeout='10s'; SET LOCAL idle_in_transaction_session_timeout='90s'");
+            const next = await commitPreparedPlatformStore(activeClient, prepared, { guard: writeGuard });
+            writeGuard();
+            writeMs = Date.now() - phaseStartedAt;
+            phase = "reporting";
+            phaseStartedAt = Date.now();
+            if ("changedKeys" in next) await publishSqlReportingChanges(activeClient, next.changedKeys, next.reportingTargets, prepared);
+            else await publishReportingInputRevisions(activeClient, digests!);
+            reportingMs = Date.now() - phaseStartedAt;
+            writeGuard();
+            phase = "commit";
+            await activeClient.query("COMMIT");
+            return next;
+          })(), timeoutMs, "SQL platform save", "platform-save-timeout");
+          persistence.platformState = next; persistence.platformAuthority = next.authority;
+          if ("changedKeys" in next) reportingDigestCache.clear();
+          else reporting.committed();
+          console.info(`[persist] SQL save committed: scope=${options?.changes === undefined ? "full" : "delta"} reason=${options?.changes === undefined ? "scope-not-declared" : "declared-records"} candidates=${candidateRecords} compared=${next.comparedRecords} prepareMs=${preparedMs} writeMs=${writeMs} reportingMs=${reportingMs} totalMs=${Date.now() - startedAt} inserted=${next.counts.inserted} updated=${next.counts.updated} deleted=${next.counts.deleted} metadata=${next.counts.metadata}.`);
+          return;
+        } catch (error) {
+          cancelled = true;
+          const code = (error as { code?: string })?.code;
+          console.error(`[persist] SQL save stopped: phase=${phase} scope=${options?.changes === undefined ? "full" : "delta"} elapsedMs=${Date.now() - startedAt} writeMs=${writeMs || (phase === "write" ? Date.now() - phaseStartedAt : 0)} reportingMs=${reportingMs || (phase === "reporting" ? Date.now() - phaseStartedAt : 0)} code=${code ?? "none"} attempt=${attempt + 1}.`);
+          client?.release(error instanceof Error ? error : new Error(String(error))); client = undefined;
+          // Closing the old connection aborts its transaction. The fresh attempt
+          // locks and rechecks the original authority before writing frozen rows.
+          // Never retry an uncertain COMMIT, a stale writer or a transport error.
+          if (attempt > 0 || !["write", "reporting"].includes(phase) || !["platform-save-timeout", "57014", "55P03", "40P01", "40001"].includes(code ?? "")) throw error;
+          console.info(`[persist] Retrying frozen SQL publication in 30s after ${code}; database authority will be rechecked.`);
+          await new Promise(resolve => setTimeout(resolve, 30000));
+        } finally { client?.release(); }
+      }
     } catch (error) {
-      cancelled = true;
-      console.error(`[persist] SQL save stopped: phase=${phase} scope=${options?.changes === undefined ? "full" : "delta"} elapsedMs=${Date.now() - startedAt} writeMs=${writeMs || (phase === "write" ? Date.now() - phaseStartedAt : 0)} reportingMs=${reportingMs || (phase === "reporting" ? Date.now() - phaseStartedAt : 0)} code=${(error as {code?: string})?.code ?? "none"}.`);
-      client?.release(error instanceof Error ? error : new Error(String(error)));
+      if (!preparedComplete) console.error(`[persist] SQL save stopped: phase=prepare scope=${options?.changes === undefined ? "full" : "delta"} elapsedMs=${Date.now() - startedAt} writeMs=0 reportingMs=0 code=${(error as {code?: string})?.code ?? "none"}.`);
       throw error;
     }
-    client?.release();
-    return;
   }
 
   const rows = await shardSnapshot(obj);
