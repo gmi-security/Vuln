@@ -7230,7 +7230,10 @@ export async function importFromNessus(): Promise<
   // "My Scans" (type "main"), and the virtual "All Scans" view — since those
   // aren't clients.
   const BUILTIN_FOLDERS = new Set(["my scans", "all scans", "trash"]);
-  const reviewedLegacyFolders = new Map([["gmi scans", "CO-229336"], ["valor global scans", "CO-229438"]]);
+  const reviewedLegacyFolders = new Map([
+    ["gmi scans", { existing: "CO-9150", consolidated: "CO-229336" }],
+    ["valor global scans", { existing: "CO-9153", consolidated: "CO-229438" }],
+  ]);
   const folderToCompany = new Map<number, string>();
   let companiesCreated = 0;
   let companiesMatched = 0;
@@ -7241,18 +7244,20 @@ export async function importFromNessus(): Promise<
       if (!route) continue;
       if (folder.type !== "custom") { errors.push("Approved Nessus folder is not a customer folder."); continue; }
       const canonical = reviewedLegacyFolders.get(folder.name.trim().toLowerCase());
-      if (canonical && route.companyId !== canonical) { errors.push("Legacy Nessus folder needs its reviewed canonical customer route."); continue; }
+      if (canonical && route.companyId !== canonical.consolidated) { errors.push("Legacy Nessus folder needs its reviewed canonical customer route."); continue; }
       folderToCompany.set(folder.id, route.companyId); companiesMatched++; continue;
     }
     if (folder.type === "trash" || folder.type === "main") continue;
     if (BUILTIN_FOLDERS.has(folder.name.trim().toLowerCase())) continue;
-    if (reviewedLegacyFolders.has(folder.name.trim().toLowerCase())) {
-      errors.push("Legacy Nessus customer requires a reviewed folder route before import.");
-      continue;
-    }
     const matches = Array.from(s.companies.values()).filter(
       (c) => normalizeCompanyName(c.name) === normalizeCompanyName(folder.name),
     );
+    const legacy = reviewedLegacyFolders.get(folder.name.trim().toLowerCase());
+    // The rollout retained these customers; require their exact existing identity, never recreate or merge them.
+    if (legacy && (matches.length !== 1 || matches[0].id !== legacy.existing)) {
+      errors.push("Legacy Nessus customer requires a reviewed folder route before import.");
+      continue;
+    }
     if (matches.length > 1) {
       errors.push(`${folder.name}: multiple platform companies match; review customer mapping.`);
       continue;
@@ -7304,10 +7309,10 @@ export async function importFromNessus(): Promise<
       skipped += 1;
       continue;
     }
-    // Reviewed imports follow the most recently observed run. The scan ID is
+    // Imports follow the most recently observed run. The scan ID is
     // reused by Nessus, so choosing the oldest local record would reimport a
     // newer completed run on every sync.
-    const existing = routes === null ? existingScans[0] : existingScans.sort((a, b) =>
+    const existing = existingScans.sort((a, b) =>
       (b.vendor?.nessusLastModified ?? 0) - (a.vendor?.nessusLastModified ?? 0))[0];
     if (existing?.vendor && !existing.vendor.imported && summary.status !== "completed") {
       // The existing pending record is handled by polling; do not duplicate it.
