@@ -68,13 +68,15 @@ test('source mismatch and over-limit input are rejected',()=>{
   assert.throws(()=>model.scopedSpotlightRows(company.id,cve,Array(10001).fill({})),/No partial/);
 });
 
-async function service({records=[],generation=null,findings=[finding()],tickets=[],prior=null,sourceError=null}={}){
+async function service({records=[],generation=null,findings=[finding()],tickets=[],prior=null,sourceError=null,defenderRecords=[],defenderError=null,activeGroups=[]}={}){
   const calls=[];let released=0;
   const query=async(sql,params=[])=>{
     calls.push({sql,params});
     if(sql.includes('to_regclass'))return{rows:[{spotlight:true,enrichment:false}]};
     if(sql.includes('FROM spotlight_import_current'))return{rows:generation?[generation]:[]};
     if(sql.includes('FROM spotlight_import_records')){if(sourceError)throw sourceError;return{rows:records};}
+    if(sql.includes('FROM defender_records')){if(defenderError)throw defenderError;return{rows:defenderRecords};}
+    if(sql.includes("AS devices,packet->'deviceCveCoverage'"))return{rows:activeGroups};
     if(sql.includes('SELECT id,state,review_state'))return{rows:tickets};
     if(sql.includes("AND state='prepared'"))return{rows:prior?[{id:prior}]:[]};
     if(sql.includes("SELECT id FROM patch_group_ticket_requests WHERE id="))return{rows:[],rowCount:0};
@@ -87,6 +89,83 @@ async function service({records=[],generation=null,findings=[finding()],tickets=
     './persist':{applicationDatabase:()=>db},'./patch-ticket-store':{patchTicketDatabase:async()=>db},
   });return{api,calls,released:()=>released};
 }
+
+const defenderRun='00000000-0000-4000-8000-000000000001';
+const publishedDefenderFinding=(id,deviceId)=>finding({id,asset:deviceId,remediation:`windows_11 · installed-${id} · Security Updates · 5127648`,
+  defender:{runId:defenderRun,deviceId,active:true,remediation:`windows_11 · installed-${deviceId} · Security Updates · 5127648`}});
+const defenderRecord=(deviceId,changes={})=>({run_id:defenderRun,device_id:deviceId,softwareVendor:'microsoft',softwareName:'windows_11',
+  softwareVersion:`installed-${deviceId}`,remediation:'Security Updates',remediationId:'5127648',...changes});
+
+test('manual preparation uses structured Defender evidence from the published run, customer, CVE and devices only',async()=>{
+  const findings=[publishedDefenderFinding('f1','d1'),publishedDefenderFinding('f2','d2')];
+  const {api,calls}=await service({findings,defenderRecords:[defenderRecord('d1'),defenderRecord('d2'),defenderRecord('foreign'),defenderRecord('d1',{run_id:'another-run',remediationId:'BAD'})]});
+  const result=await api.prepareCustomerCve(company.id,cve,'member');
+  assert.equal(result.groups.length,1);
+  const group=result.groups[0].group;
+  assert.equal(group.deviceCount,2);assert.equal(group.title,'Windows 11 — Install KB5127648');
+  assert.match(group.csv,/installed-d1/);assert.match(group.csv,/installed-d2/);
+  assert.doesNotMatch(JSON.stringify(result),/foreign|BAD/);
+  const query=calls.find(c=>c.sql.includes('FROM defender_records'));
+  assert.equal(query.params[0],company.id);assert.equal(query.params[1],cve);
+  assert.deepEqual(JSON.parse(query.params[2]),[{run_id:defenderRun,device_id:'d1'},{run_id:defenderRun,device_id:'d2'}]);
+  assert.equal(query.params[3],10001);
+  assert.match(query.sql,/runs.company_id=\$1/);assert.match(query.sql,/r.cve=\$2/);
+  assert.match(query.sql,/runs.status='succeeded'/);
+  assert.doesNotMatch(query.sql,/current_run/);
+  assert.ok(calls.some(c=>c.sql==='BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY'));
+  const prior=calls.find(c=>c.sql.includes('FOR UPDATE'));
+  assert.match(prior.sql,/review_state='pending'/,'never overwrite approved or dismissed drafts');
+});
+
+test('opening a CVE does not perform the extra Defender patch lookup',async()=>{
+  const {api,calls}=await service({findings:[publishedDefenderFinding('f1','d1')]});
+  await api.readCustomerCve(company.id,cve);
+  assert.ok(calls.every(c=>!c.sql.includes('FROM defender_records')));
+});
+
+test('missing retained Defender records keep every device with its exact saved remediation',async()=>{
+  const {api}=await service({findings:[publishedDefenderFinding('f1','d1'),publishedDefenderFinding('f2','d2')],defenderRecords:[defenderRecord('d1')]});
+  const result=await api.prepareCustomerCve(company.id,cve,'member');
+  assert.equal(result.groups.length,2);
+  assert.equal(result.groups.reduce((n,{group})=>n+group.deviceCount,0),2);
+  assert.ok(result.groups.some(({group})=>group.action.includes('installed-f2')));
+});
+
+test('Defender source overflow and timeouts stop before any partial draft is saved',async()=>{
+  for(const options of [{defenderRecords:Array(10001).fill(defenderRecord('d1'))},{defenderError:Object.assign(new Error('timeout'),{code:'57014'})}]) {
+    const {api,calls,released}=await service({findings:[publishedDefenderFinding('f1','d1')],...options});
+    await assert.rejects(()=>api.prepareCustomerCve(company.id,cve,'member'),e=>[413,504].includes(e.status));
+    assert.ok(calls.some(c=>c.sql==='ROLLBACK'));assert.equal(released(),1);
+    assert.ok(calls.every(c=>!/^\s*(INSERT|UPDATE|DELETE)\b/i.test(c.sql)));
+  }
+});
+
+test('a partially pruned Defender run cannot drop installed versions or another required update',async()=>{
+  for(const extra of [defenderRecord('d1',{softwareVersion:'second-installed-build'}),defenderRecord('d1',{remediationId:'5126653'})]) {
+    const item=publishedDefenderFinding('f1','d1');
+    const line=[extra.softwareName,extra.softwareVersion,extra.remediation,extra.remediationId].join(' · ');
+    item.defender.remediation+='\n'+line;item.remediation=item.defender.remediation;
+    const {api}=await service({findings:[item],defenderRecords:[defenderRecord('d1')]});
+    const {groups}=await api.prepareCustomerCve(company.id,cve,'member');
+    assert.equal(groups.length,1);assert.equal(groups[0].group.title,`${cve} remediation`);
+    assert.ok(groups[0].group.ticketBody.includes(line));
+  }
+});
+
+test('ticketing one Defender update does not hide another required update for the same device/CVE',async()=>{
+  const item=publishedDefenderFinding('f1','d1'),records=[defenderRecord('d1'),defenderRecord('d1',{remediationId:'5126653'})];
+  item.defender.remediation=records.map(r=>[r.softwareName,r.softwareVersion,r.remediation,r.remediationId].join(' · ')).join('\n');
+  item.remediation=item.defender.remediation;
+  const first=await service({findings:[item],defenderRecords:records});
+  const prepared=await first.api.prepareCustomerCve(company.id,cve,'member');
+  const ticketed=prepared.groups.find(({group})=>group.reference==='KB5127648').group;
+  assert.equal(ticketed.deviceCves.length,1,'retain device/CVE evidence for review and verification');
+  const second=await service({findings:[item],defenderRecords:records,activeGroups:[{
+    devices:ticketed.deviceCves,coverage:ticketed.deviceCveCoverage,remediation_id:ticketed.remediationId,
+  }]});
+  const remaining=await second.api.prepareCustomerCve(company.id,cve,'member');
+  assert.equal(remaining.groups.length,1);assert.equal(remaining.groups[0].group.reference,'KB5126653');
+});
 test('saved completed generation wins over stale normalized CrowdStrike data',async()=>{
   const {api,calls,released}=await service({generation:{run_id:'run-A',promoted_at:when},findings:[finding({connector:'crowdstrike'})]});
   await assert.rejects(()=>api.readCustomerCve(company.id,cve),/No open findings/);
