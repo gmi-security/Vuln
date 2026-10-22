@@ -112,7 +112,7 @@ export default function CustomerReportingPage({ initialCompanyId="", canManage, 
       {overview && <CustomerTiles companyId={companyId} canManage={canManage}/>}
         {prioritize && <TopFixes companyId={companyId} canManage={canManage && remediation} reviewHref={remediation ? remediationHref(companyId,"tickets") : undefined}/>}
       {remediation && prioritize && <CustomerThreatIntelligence companyId={companyId}/>}
-      {prioritize && canManage && <RiskDashboard companyId={companyId}/>}
+      {!remediation && prioritize && canManage && <RiskDashboard companyId={companyId}/>}
       {remediation && prioritize && <PatchPriorityWorklist key={companyId} companyId={companyId} canManage={canManage}/>}
       {tickets && <div id="consolidation-review" className="grid items-start gap-6 2xl:grid-cols-2">
         <PatchReviewQueue companyId={companyId} sla={sla}/>

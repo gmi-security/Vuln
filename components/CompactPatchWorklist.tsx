@@ -78,9 +78,9 @@ export default function CompactPatchWorklist(props:Props) {
   const current=props.data?.companyId===props.companyId?props.data:null,loaded=current?.[grouping]??[];
   const rows=filterPatchWorklist(loaded,filters),review=loaded.find(row=>row.id===selected);
   const total=grouping==="byCve"?current?.totalCves:current?.totalRemediations;
-  return <section id="compact-patch-worklist" aria-label="Compact patch worklist" aria-busy={props.loading} className="rounded-2xl border border-red-900/60 bg-[#090909] p-5 sm:p-7">
-    <header className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs uppercase tracking-[0.2em] text-red-400">New layout · Live customer data</p>
-      <h2 className="mt-2 text-2xl font-semibold text-white">Compact patch worklist</h2><p className="mt-2 text-sm text-zinc-300">Find a priority, review its evidence, then prepare a ticket draft. Same ranking and saved evidence as the worklist above.</p></div>
+  return <section id="compact-patch-worklist" aria-label="Patch worklist" aria-busy={props.loading} className="rounded-2xl border border-red-900/60 bg-[#090909] p-5 sm:p-7">
+    <header className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs uppercase tracking-[0.2em] text-red-400">Patch planning · Live customer data</p>
+      <h2 className="mt-2 text-2xl font-semibold text-white">Patch worklist</h2><p className="mt-2 text-sm text-zinc-300">Prioritized fixes from this customer's saved evidence. Review affected devices and ticket coverage, then prepare a ticket draft.</p></div>
       <button className={button} disabled={props.loading} onClick={props.refresh}>{props.loading?"Loading…":"Refresh worklists"}</button></header>
     <div className="mt-5 flex flex-wrap gap-2" role="group" aria-label="Group compact worklist">{(["byRemediation","byCve"] as const).map(mode=><button key={mode} aria-pressed={grouping===mode}
       className={`${button} ${grouping===mode?"border-red-700 bg-red-950/50":""}`} onClick={()=>{setGrouping(mode);setSelected(null);}}>{mode==="byCve"?"By CVE":"By remediation"}</button>)}</div>
