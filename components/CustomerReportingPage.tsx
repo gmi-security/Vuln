@@ -18,6 +18,7 @@ import styles from "./QueryDashboard.module.css";
 import CustomerCveProvider from "./CustomerCveProvider";
 import CustomerThreatIntelligence from "./CustomerThreatIntelligence";
 import PatchPriorityWorklist from "./PatchPriorityWorklist";
+import PrioritizeLayoutPreview from "./PrioritizeLayoutPreview";
 import CustomerSavedSources from "./CustomerSavedSources";
 import CustomerPlatformComparison from "./CustomerPlatformComparison";
 import { remediationHref, remediationView, remediationViews, type RemediationView } from "@/lib/remediation-view";
@@ -114,6 +115,7 @@ export default function CustomerReportingPage({ initialCompanyId="", canManage, 
       {remediation && prioritize && <CustomerThreatIntelligence companyId={companyId}/>}
       {prioritize && canManage && <RiskDashboard companyId={companyId}/>}
       {remediation && prioritize && <PatchPriorityWorklist key={companyId} companyId={companyId} canManage={canManage}/>}
+      {remediation && prioritize && <PrioritizeLayoutPreview/>}
       {tickets && <div id="consolidation-review" className="grid items-start gap-6 2xl:grid-cols-2">
         <PatchReviewQueue companyId={companyId} sla={sla}/>
         {canManage && <PatchTicketTracker companyId={companyId} sla={sla} allowGlobalActions={false}/>}
