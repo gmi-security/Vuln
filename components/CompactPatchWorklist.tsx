@@ -26,6 +26,7 @@ function Priority({row}:{row:PriorityRow}) {
 
 function Review({row,grouping,close,...props}:Props&{row:PriorityRow;grouping:Grouping;close:()=>void}) {
   const dialog=useRef<HTMLDialogElement>(null),openCve=useCustomerCve();
+  const [page,setPage]=useState(0),size=25,lastPage=Math.max(0,Math.ceil(row.cves.length/size)-1),currentPage=Math.min(page,lastPage);
   useEffect(()=>{dialog.current?.showModal();},[]);
   return <dialog ref={dialog} aria-labelledby="compact-review-title" onClose={close}
     className="fixed inset-y-0 left-auto right-0 m-0 h-dvh max-h-dvh w-full max-w-2xl overflow-y-auto border-l border-zinc-700 bg-[#0c0c0c] p-6 text-zinc-200 shadow-2xl backdrop:bg-black/70">
@@ -47,8 +48,10 @@ function Review({row,grouping,close,...props}:Props&{row:PriorityRow;grouping:Gr
     <h4 className="mt-6 font-semibold text-white">CVEs and affected products</h4>
     <p className="mt-2 text-sm">{row.products.join(" · ")||"Product unknown"}</p>
     <p className="mt-2 text-xs text-zinc-300">{count(row.cves.length)} CVEs · {count(row.findingCount)} findings. Select a CVE to inspect devices and source evidence.</p>
-    <div className="mt-3 flex max-h-44 flex-wrap gap-2 overflow-auto">{row.cves.map(cve=><button key={cve} className={`${button} text-sky-300`} disabled={!openCve}
+    <div className="mt-3 flex max-h-44 flex-wrap gap-2 overflow-auto">{row.cves.slice(currentPage*size,(currentPage+1)*size).map(cve=><button key={cve} className={`${button} text-sky-300`} disabled={!openCve}
       onClick={()=>{dialog.current?.close();openCve?.(cve);}}>{cve}</button>)}</div>
+    {row.cves.length>size&&<div className="mt-3 flex items-center gap-3 text-xs"><button className={button} disabled={!currentPage} onClick={()=>setPage(currentPage-1)}>Previous CVEs</button>
+      <span>{currentPage*size+1}–{Math.min((currentPage+1)*size,row.cves.length)} of {count(row.cves.length)}</span><button className={button} disabled={currentPage>=lastPage} onClick={()=>setPage(currentPage+1)}>Next CVEs</button></div>}
     <h4 className="mt-6 font-semibold text-white">Ticket coverage</h4><FixTicketStatus status={row.ticketStatus} companyId={props.companyId}/>
     <p className="mt-3 text-xs text-zinc-300">Check existing requests and devices before preparing another draft. This does not create a ticket in ConnectWise; review and send from Tickets.</p>
     <div className="mt-4 flex flex-wrap gap-3">
@@ -113,6 +116,6 @@ export default function CompactPatchWorklist(props:Props) {
           </tr>)}</tbody></table></div>}
       <p className="mt-3 text-xs leading-relaxed text-zinc-300">Counts cover available sources. Devices are unique within each source group; cross-source CVE totals can be lower bounds. Existing tickets describe planned work, not confirmed resolution. Summary calculated {when(current.calculatedAt)}.</p>
     </>}
-    {review&&<Review {...props} row={review} grouping={grouping} close={()=>setSelected(null)}/>}
+    {review&&<Review key={`${grouping}:${review.id}`} {...props} row={review} grouping={grouping} close={()=>setSelected(null)}/>}
   </section>;
 }
