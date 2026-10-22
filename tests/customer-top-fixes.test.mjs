@@ -10,8 +10,9 @@ const fix={companyId,calculatedAt:'2026-10-14T00:00:00Z',totalFixes:1,affectedDe
 async function harness(options={}) {
   const modules=new Map(),calls=[];let pointers=0;
   const query=async(sql,args)=>{
-    assert.match(sql,/^(SELECT|SET|BEGIN|COMMIT|ROLLBACK)/);assert.doesNotMatch(sql,/spotlight_import_records|patch_group_ticket|UPDATE|INSERT/);
+    assert.match(sql,/^(SELECT|SET|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE)/);assert.doesNotMatch(sql,/spotlight_import_records|patch_group_ticket|UPDATE|INSERT/);
     calls.push({sql,args});
+    if(sql.includes('cve_enrichment')){if(options.enrichmentFailed)throw Error('cache timeout');return {rows:[]};}
     if(sql.includes('to_regclass'))return {rows:[{imports:'spotlight_import_current',summaries:'spotlight_summary_generations'}]};
     if(sql.startsWith('SELECT run_id')) {pointers++;return {rows:options.noGeneration?[]:[{run_id:options.changeGeneration&&pointers>1?'next':'current'}]};}
     if(sql.includes("summary->'topFixes'"))return {rows:options.pending?[]:[{fixes:options.fixes??fix,source_rows:20,
@@ -21,7 +22,7 @@ async function harness(options={}) {
   const db={query,connect:async()=>({query,release(){}})};
   const finding=(id,connector,extra={})=>({id,companyId,connector,cve:'CVE-2026-9999',asset:id,status:'Open',remediation:'Platform update',severity:'High',realRisk:60,...extra});
   const fakeStore={ensureHydrated:async()=>{},getCompanyIdentity:id=>id===companyId?{id,name:'Fixture'}:undefined,
-    customerTopFixes:async(id,key,include)=>{const mod=await load(resolve('lib/reporting-top-fixes.ts'));if(mod.status==='unlinked')await mod.link(linker);await mod.evaluate();return mod.namespace.buildTopFixes(id,[finding('cs','crowdstrike'),finding('defender','defender'),finding('other','nessus',{companyId:'CO-OTHER'})],include);}};
+    customerTopFixes:async(id,key,include,threats)=>{const mod=await load(resolve('lib/reporting-top-fixes.ts'));if(mod.status==='unlinked')await mod.link(linker);await mod.evaluate();return mod.namespace.buildTopFixes(id,[finding('cs','crowdstrike'),finding('defender','defender'),finding('other','nessus',{companyId:'CO-OTHER'})],include,threats);}};
   const stubs={'./persist':{applicationDatabase:()=>db},'./store':fakeStore,'./customer-spotlight-routing-server':{loadReviewedSpotlightRoutes:async()=>null}};
   function load(file) {
     if(modules.has(file))return modules.get(file);
@@ -52,7 +53,7 @@ test('new remediation table merges customer-scoped summaries by severity without
   assert.deepEqual(r.remediationWorklist.rows.map(row=>row.source),['crowdstrike','platform']);
   assert.equal(r.remediationWorklist.totalGroups,2);
   assert.deepEqual(r.remediationWorklist.rows[0].cves,[cve]);
-  assert.ok(h.calls.some(c=>c.sql.includes('model_version IN (4,5,$3)')));
+  assert.ok(h.calls.some(c=>c.sql.includes('model_version IN (4,5,6,$3)')));
 });
 
 test('v4 summary preserves old table while additional worklist is pending; malformed v5 data is refused',async()=>{
@@ -76,4 +77,19 @@ test('unknown customers, cross-customer saved data, mixed tenant provenance and 
   for(const options of [{fixes:{...fix,companyId:'CO-OTHER'}},{fixes:{...fix,findingCount:0}},{mixed:true},{changeGeneration:true}]) {
     const scoped=await harness(options);await assert.rejects(scoped.read(companyId),e=>[409,503].includes(e.status));
   }
+});
+
+test('optional enrichment failures leave old tables unchanged and priority rows explicitly incomplete',async()=>{
+ const h=await harness({enrichmentFailed:true}),old=await h.read(companyId);
+ assert.equal(old.findingCount,21);assert.ok(!h.calls.some(c=>c.sql.includes('cve_enrichment')));
+ const r=await h.read(companyId,undefined,true);assert.equal(r.rows.length,2);assert.equal(r.priorityWorklist.byCve.length,1);
+ assert.ok(r.priorityWorklist.notices.some(n=>n.includes('enrichment is unavailable')));
+ assert.equal(r.priorityWorklist.byCve[0].active,null);
+ assert.ok(h.calls.some(c=>c.sql==='ROLLBACK TO SAVEPOINT priority_threats'));
+});
+
+test('malformed saved priority data is refused without affecting the existing worklists',async()=>{
+ const h=await harness({fixes:{...fix,priorityWorklist:{version:1,byCve:[{source:'foreign'}]}}});
+ assert.equal((await h.read(companyId)).rows.length,2);
+ await assert.rejects(h.read(companyId,undefined,true),/priority summary is inconsistent/);
 });

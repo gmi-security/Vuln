@@ -16,7 +16,7 @@ import type { PatchGroup } from "./patch-request";
 export async function prepareRemediationTicket(companyId:string,id:unknown,actor:string) {
   if(typeof id!=="string" || !id || id.length>250)throw new DashboardError("Choose a remediation from this customer's worklist.",400);
   const {company}=await resolveCustomerScope(companyId),worklist=await readCustomerTopFixes(companyId);
-  const row=worklist.remediationWorklist?.rows.find(row=>row.id===id);
+  const row=worklist.remediationWorklist?.rows.find(row=>row.id===id)??(await readCustomerTopFixes(companyId,undefined,true)).priorityWorklist?.byRemediation.find(row=>row.id===id);
   if(!row)throw new DashboardError("This remediation is no longer in the customer's current worklist. Refresh and select it again.",409);
   const context=await storedSpotlightContext(companyId),db=applicationDatabase();
   if(!db)throw new DashboardError("Source database is unavailable.",503);
@@ -33,10 +33,11 @@ export async function prepareRemediationTicket(companyId:string,id:unknown,actor
       proof=await storedSpotlightProof(client,context,companyId,runId);
       // Only the selected action leaves SQL. Raw findings never enter this request.
       const saved=(await client.query(`SELECT summary->'patchActions'->($4::text) AS evidence,summary->>'patchEvidenceError' AS evidence_error,summary->'vendorScope' AS vendor_scope,source_rows
-        FROM spotlight_summary_generations WHERE company_id=$1 AND run_id=$2 AND model_version=$3`,[companyId,runId,SPOTLIGHT_SUMMARY_VERSION,id])).rows[0];
+        FROM spotlight_summary_generations WHERE company_id=$1 AND run_id=$2 AND model_version IN (6,$3)
+        ORDER BY model_version DESC LIMIT 1`,[companyId,runId,SPOTLIGHT_SUMMARY_VERSION,id])).rows[0];
       const evidence=saved?.evidence as RemediationEvidence|undefined;
       if(saved?.evidence_error)throw new DashboardError(saved.evidence_error,413);
-      if(!evidence)throw new DashboardError("Ticket evidence is being prepared by the summary worker. Try again when the summary finishes; no source re-import is needed.",409);
+      if(!evidence)throw new DashboardError("Saved ticket evidence is pending or exceeds the summary capacity for this action. Review its individual CVEs to prepare smaller requests; no source re-import is needed.",409);
       const cid=proof?.cid ?? saved.vendor_scope?.tenantId;
       if(!matchesSpotlightTenant(saved.vendor_scope,cid,saved.source_rows) || evidence.id!==id ||
           id!==`crowdstrike:${cid}:${remediationVariantId(evidence.remediation)}` || evidence.hosts.some(h=>h.cid!==cid))

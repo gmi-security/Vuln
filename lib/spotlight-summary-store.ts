@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from "pg";
+import {optionalPriorityThreats} from "./patch-priority-threats";
 import { importFreshness, validateSourceRead, type CustomerSourceRead, type CustomerSourceReadRequest, type SourceCveRow } from "./customer-source-read-model";
 import { createSpotlightSummaryAccumulator, SPOTLIGHT_SUMMARY_VERSION as VERSION, spotlightSummaryDefinition,
   summaryCount, summaryLimits, validateSpotlightSummary, matchesSpotlightTenant, type SpotlightSummary, type SummaryInput } from "./spotlight-summary-model";
@@ -61,7 +62,8 @@ export function createSpotlightSummaryStore(db: Database) {
       const expected = verified ? summaryCount(current.expected_count) : null;
       if (verified && expected !== summaryCount(current.hydrated_count)) throw new Error("Source generation count mismatch.");
       const limits = options.limits ?? summaryLimits;
-      const accumulator = createSpotlightSummaryAccumulator(companyId, limits);
+      const savedThreats=await optionalPriorityThreats(source);
+      const accumulator = createSpotlightSummaryAccumulator(companyId, limits,savedThreats.threats);
       if (expected !== null && expected > limits.records) throw new Error("Summary record limit exceeded.");
       let after: { tenant_key: string; source_id: string } | undefined;
       for (;;) {
@@ -70,7 +72,7 @@ export function createSpotlightSummaryStore(db: Database) {
         const rows: (SummaryInput & { tenant_key: string })[] = (await source.query(`SELECT r.tenant_key,r.source_id,r.cve,r.status,r.company_id,
           v.id,v.cid,v.aid,v.status AS raw_status,v.cve->>'id' AS raw_cve,v.cve->>'severity' AS raw_severity,
           v.cve->'base_score' AS score,v.suppression_info->'is_suppressed' AS suppressed,
-          jsonb_build_object('id',v.id,'cid',v.cid,'aid',v.aid,'status',v.status,'host_info',v.host_info,'apps',COALESCE(v.apps,'[]'::jsonb),'remediation',v.remediation,
+          jsonb_build_object('id',v.id,'cid',v.cid,'aid',v.aid,'status',v.status,'updated_timestamp',v.updated_timestamp,'host_info',v.host_info,'apps',COALESCE(v.apps,'[]'::jsonb),'remediation',v.remediation,
             'cve',jsonb_build_object('id',v.cve->'id','severity',v.cve->'severity','base_score',v.cve->'base_score',
               'exprt_rating',v.cve->'exprt_rating','exploit_status',v.cve->'exploit_status','cisa_info',v.cve->'cisa_info','is_cisa_kev',v.cve->'is_cisa_kev',
               'exploitability_score',v.cve->'exploitability_score')) AS patch,
@@ -79,7 +81,7 @@ export function createSpotlightSummaryStore(db: Database) {
           FROM (SELECT tenant_key,source_id,cve,status,company_id,raw FROM public.spotlight_import_records
             WHERE run_id=$1 ${after ? "AND (tenant_key,source_id)>($2,$3)" : ""}
             ORDER BY tenant_key,source_id LIMIT 2000) r
-          CROSS JOIN LATERAL jsonb_to_record(r.raw) AS v(id text,cid jsonb,aid jsonb,status text,cve jsonb,suppression_info jsonb,apps jsonb,remediation jsonb,host_info jsonb)
+          CROSS JOIN LATERAL jsonb_to_record(r.raw) AS v(id text,cid jsonb,aid jsonb,status text,updated_timestamp text,cve jsonb,suppression_info jsonb,apps jsonb,remediation jsonb,host_info jsonb)
           ORDER BY r.tenant_key,r.source_id`, after ? [runId, after.tenant_key, after.source_id] : [runId])).rows;
         if (!rows.length) break;
         for (const row of rows) {
@@ -91,6 +93,7 @@ export function createSpotlightSummaryStore(db: Database) {
         after = { tenant_key: next.tenant_key, source_id: next.source_id };
       }
       const artifact = accumulator.finish();
+      if(savedThreats.notice)artifact.topFixes.priorityWorklist!.notices.push(savedThreats.notice);
       const total = artifact.scanned;
       if (expected !== null && total !== expected) throw new Error("Summary scan did not cover the completed source generation count.");
       deadline(); await source.query("COMMIT");
@@ -156,7 +159,7 @@ export function createSpotlightSummaryStore(db: Database) {
           const saved = (await client.query(`SELECT g.company_id,g.run_id,g.model_version,g.source_completed_at,g.source_rows,g.count_verification,g.cve_count,g.built_at,
             g.summary-'patchActions'-'topFixes'-'patchEvidenceError' AS summary FROM public.spotlight_summary_current p JOIN public.spotlight_summary_generations g
             ON g.company_id=p.company_id AND g.run_id=p.run_id AND g.model_version=p.model_version
-            WHERE p.company_id=$1 AND p.model_version IN (3,4,5,$2)`, [companyId, VERSION])).rows[0];
+            WHERE p.company_id=$1 AND p.model_version IN (3,4,5,6,$2)`, [companyId, VERSION])).rows[0];
           base.projection = { state: saved?.run_id === current.run_id && saved.model_version === VERSION ? "ready" : "pending", currentImportId: current.run_id,
             builtAt: saved ? iso(saved.built_at) : null, modelVersion: VERSION };
           if (!saved) result = unavailable("summary-pending");

@@ -1,6 +1,7 @@
 import type {Pool,PoolClient} from "pg";
 import type {TopFixesResult} from "./reporting-top-fixes";
 import {fixTicketStatus,ticketMatchesFix,type FixTicket,type TicketScope,type FixEvidence,type FixTicketStatus} from "./fix-ticket-status";
+import {SPOTLIGHT_SUMMARY_VERSION} from "./spotlight-summary-model";
 
 // Optional workflow overlay. Failure must never remove the vulnerability rows
 // or turn an unknown ticket lookup into "no ticket". No provider calls or DDL.
@@ -59,8 +60,9 @@ export async function withFixTicketStatus(db:Pick<Pool,"connect">,result:TopFixe
         SELECT a.key AS id,a.value->'coverage' AS coverage,(a.value->>'findingCount')::bigint AS findings
         FROM spotlight_summary_generations g JOIN spotlight_import_current c ON c.tenant_key=g.company_id AND c.run_id=g.run_id
         CROSS JOIN LATERAL jsonb_each(g.summary->'patchActions') a
-        WHERE g.company_id=$1 AND g.run_id=$2 AND g.model_version=6 AND a.key=ANY($3::text[])
-      ) SELECT id,findings,CASE WHEN sum(octet_length(coverage::text)) OVER ()<=8388608 THEN coverage END AS coverage FROM selected`,[result.companyId,runId,current.map(row=>row.id)]);
+        WHERE g.company_id=$1 AND g.run_id=$2 AND g.model_version=(SELECT MAX(m.model_version) FROM spotlight_summary_generations m
+          WHERE m.company_id=$1 AND m.run_id=$2 AND m.model_version IN (6,$4)) AND a.key=ANY($3::text[])
+      ) SELECT id,findings,CASE WHEN sum(octet_length(coverage::text)) OVER ()<=8388608 THEN coverage END AS coverage FROM selected`,[result.companyId,runId,current.map(row=>row.id),SPOTLIGHT_SUMMARY_VERSION]);
       evidence=saved.rows.filter(row=>row.coverage).map(row=>({id:row.id,coverage:row.coverage,findingCount:Number(row.findings)}));
       await client.query("COMMIT");
     }
