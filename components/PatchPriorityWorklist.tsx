@@ -3,6 +3,7 @@ import {useEffect,useRef,useState} from "react";
 import Link from "next/link";
 import CveText from "./CveText";
 import FixTicketStatus from "./FixTicketStatus";
+import CompactPatchWorklist from "./CompactPatchWorklist";
 import {dashboardRequest} from "@/lib/dashboard-browser-client";
 import {priorityLabels,type PriorityWorklist,type PriorityRow} from "@/lib/patch-priority";
 import styles from "./QueryDashboard.module.css";
@@ -45,7 +46,7 @@ export default function PatchPriorityWorklist({companyId,canManage}:{companyId:s
     finally{inFlight.current=false;if(alive.current)setBusy(null);}
   }
   const current=data?.companyId===companyId?data:null,rows=current?.[grouping]??[],total=grouping==="byCve"?current?.totalCves:current?.totalRemediations;
-  return <section aria-label="Risk-based patch worklist" aria-busy={loading} className="rounded-2xl border border-red-900/60 bg-[#080808] p-5 sm:p-7">
+  return <><section aria-label="Risk-based patch worklist" aria-busy={loading} className="rounded-2xl border border-red-900/60 bg-[#080808] p-5 sm:p-7">
     <div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-xs uppercase tracking-[0.2em] text-red-400">New · patch planning</p>
       <h2 className="mt-2 text-2xl font-semibold text-white">Risk-based patch worklist</h2><p className="mt-2 max-w-4xl text-sm text-zinc-300">Urgency first, then affected devices, then earliest recorded due date. Click a CVE to review devices and required fixes.</p></div>
       <button className={styles.button} disabled={loading} onClick={()=>setVersion(v=>v+1)}>{loading?"Loading…":"Refresh worklist"}</button></div>
@@ -85,5 +86,6 @@ export default function PatchPriorityWorklist({companyId,canManage}:{companyId:s
       </tr>)}</tbody></table></div>}
       <p className="mt-3 text-xs leading-relaxed text-zinc-300">Device counts are unique within each source group. CVE rows spanning source inventories show a lower bound, not a summed estate total. Threat values are group maxima or any recorded positive signal; review individual CVEs before acting. Existing tickets describe planned work, not confirmed resolution. CSVs and ticket contents are prepared through the existing review workflow.</p>
     </>}
-  </section>;
+  </section><CompactPatchWorklist key={companyId} companyId={companyId} canManage={canManage} data={current} loading={loading} error={error} busy={busy} message={message}
+    refresh={()=>setVersion(v=>v+1)} prepare={prepare}/></>;
 }
