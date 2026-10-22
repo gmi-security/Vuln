@@ -29,7 +29,7 @@ export default function PatchPriorityWorklist({companyId,canManage}:{companyId:s
   useEffect(()=>{alive.current=true;return()=>{alive.current=false;};},[]);
   useEffect(()=>{
     let active=true;
-    const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),25000);setLoading(true);setError("");
+    const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),45000);setLoading(true);setError("");
     dashboardRequest<Result>(`patch-priority?companyId=${encodeURIComponent(companyId)}`,{signal:controller.signal})
       .then(result=>{if(result.companyId!==companyId)throw Error("Worklist returned a different customer.");if(!controller.signal.aborted)setData(result);})
       .catch(cause=>{if(active)setError(controller.signal.aborted?"Priority worklist took too long. Try Refresh.":cause instanceof Error?cause.message:"Could not load the worklist.");})

@@ -44,21 +44,23 @@ type Device=string|number;
 type Group={row:PriorityRow;devices:Set<Device>;cves:Set<string>};
 export function createPriorityWorklist(source:PriorityRow["source"]) {
   const cves=new Map<string,Group>(),fixes=new Map<string,Group>(),context=new Map<Device,{exposed:boolean|null;critical:boolean|null}>();
+  let lastInput:PriorityInput|undefined,prepared:{decision:ReturnType<typeof priorityDecision>;due:string|null;observed:string|null;threat:string|null}|undefined;
   function add(map:Map<string,Group>,id:string,cve:string,device:Device|undefined,input:PriorityInput,sharedDevices?:Set<Device>){
-    const decision=priorityDecision(input);
+    if(lastInput!==input){prepared={decision:priorityDecision(input),due:date(input.dueAt),observed:date(input.observedAt),threat:date(input.threatAt)};lastInput=input;}
+    const decision={...prepared!.decision,gaps:[...prepared!.decision.gaps],reasons:[...prepared!.decision.reasons]};
     if(device===undefined){decision.gaps.push("Device identity missing");if(decision.urgency===4){decision.urgency=3;decision.reasons=["Complete missing evidence before scheduling"];}}
     let group=map.get(id);
-    if(!group){if(map.size>=100000)throw Error("Priority summary group capacity exceeded");group={devices:sharedDevices??new Set(),cves:new Set(),row:{
+    if(!group){if(map.size>=(map===fixes&&source==="platform"?250000:100000))throw Error("Priority summary group capacity exceeded");group={devices:sharedDevices??new Set(),cves:new Set(),row:{
       id,cves:[],source,sources:[source],remediation:input.remediation.slice(0,2000),products:[],deviceCount:0,deviceCountIsLowerBound:false,findingCount:0,severity:"Unknown",cvss:null,cvssSources:[],
       kev:input.kev,active:input.active,publicExploit:input.publicExploit,epss:null,exposedDevices:null,criticalDevices:null,...decision,owners:[],unassignedFindings:0,dueAt:null,lastObserved:null,threatObserved:null,missingRemediation:0}};map.set(id,group);}
-    const row=group.row;group.cves.add(cve);if(device!==undefined)group.devices.add(device);else row.deviceCountIsLowerBound=true;row.findingCount++;
+    const row=group.row;group.cves.add(cve);if(device!==undefined)group.devices.add(device);else row.deviceCountIsLowerBound=true;row.findingCount++;row.deviceCount=group.devices.size;
     if((ranks[input.severity.toUpperCase()]??-1)>(ranks[row.severity.toUpperCase()]??-1))row.severity=input.severity;
     const cvss=finite(input.cvss,0,10),epss=finite(input.epss,0,1);if(cvss!==null)row.cvss=Math.max(row.cvss??0,cvss);if(epss!==null)row.epss=Math.max(row.epss??0,epss);
     row.kev=tri(row.kev,input.kev);row.active=tri(row.active,input.active);row.publicExploit=tri(row.publicExploit,input.publicExploit);
     if(decision.urgency<row.urgency){row.urgency=decision.urgency;row.reasons=decision.reasons;}else if(decision.urgency===row.urgency)append(row.reasons,decision.reasons,4);
     append(row.gaps,decision.gaps);append(row.products,input.products);if(cvss!==null)append(row.cvssSources,[input.cvssSource]);
     if(input.owner)append(row.owners,[input.owner]);else row.unassignedFindings++;
-    row.dueAt=minDate(row.dueAt,date(input.dueAt));row.lastObserved=maxDate(row.lastObserved,date(input.observedAt));row.threatObserved=maxDate(row.threatObserved,date(input.threatAt));
+    row.dueAt=minDate(row.dueAt,prepared!.due);row.lastObserved=maxDate(row.lastObserved,prepared!.observed);row.threatObserved=maxDate(row.threatObserved,prepared!.threat);
     if(!input.remediation.trim())row.missingRemediation++;
     if(device!==undefined){const previous=context.get(device);context.set(device,{exposed:previous?tri(previous.exposed,input.exposed):input.exposed,critical:previous?tri(previous.critical,input.critical):input.critical});}
   }
@@ -71,7 +73,7 @@ export function createPriorityWorklist(source:PriorityRow["source"]) {
   }
   return {addCve(cve:string,device:Device|undefined,input:PriorityInput,devices?:Set<Device>){add(cves,`cve:${cve}`,cve,device,input,devices);},
     addFix(id:string,cve:string,device:Device|undefined,input:PriorityInput,devices?:Set<Device>){add(fixes,id,cve,device,input,devices);},
-    finish():PriorityWorklist {return {version:1,byCve:[...cves.values()].map(display).sort(comparePriority),byRemediation:[...fixes.values()].map(display).sort(comparePriority).slice(0,50),totalCves:cves.size,totalRemediations:fixes.size,notices:[]};}};
+    finish():PriorityWorklist {return {version:1,byCve:[...cves.values()].map(display).sort(comparePriority),byRemediation:[...fixes.values()].sort((a,b)=>comparePriority(a.row,b.row)).slice(0,50).map(display),totalCves:cves.size,totalRemediations:fixes.size,notices:[]};}};
 }
 
 // Across independent source inventories a summed count is not a unique estate count.
