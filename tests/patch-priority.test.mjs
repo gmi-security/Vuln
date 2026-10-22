@@ -64,3 +64,12 @@ test('cross-source CVE counts are explicit lower bounds and preserve the stronge
 test('existing worklist path does not build optional priority metadata',async()=>{
  const r=await mod.namespace.buildTopFixes(company,[f('a')]);assert.equal(r.priorityWorklist,undefined);assert.equal(r.rows.length,1);
 });
+
+test('large platform fix populations retain all counts and select the best 50 before formatting device evidence',async()=>{
+ const {createPriorityWorklist}=modules.get(resolve('lib/patch-priority.ts')).namespace,acc=createPriorityWorklist('platform');
+ const input={severity:'High',cvss:7.5,cvssSource:'fixture',kev:false,active:false,publicExploit:false,epss:0,exposed:null,critical:null,products:[],remediation:'Update'};
+ for(let i=0;i<120000;i++)acc.addFix('fix'+i,'CVE-2026-1000','host',input);
+ acc.addFix('urgent','CVE-2026-2000','host',{...input,kev:true});const result=acc.finish();
+ assert.equal(result.totalRemediations,120001);assert.equal(result.byRemediation.length,50);assert.equal(result.byRemediation[0].id,'urgent');
+ assert.equal(result.byRemediation[0].exposedDevices,null);
+});
