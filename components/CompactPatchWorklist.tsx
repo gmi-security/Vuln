@@ -81,9 +81,13 @@ export default function CompactPatchWorklist(props:Props) {
   return <section id="compact-patch-worklist" aria-label="Patch worklist" aria-busy={props.loading} className="rounded-2xl border border-red-900/60 bg-[#090909] p-5 sm:p-7">
     <header className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs uppercase tracking-[0.2em] text-red-400">Patch planning · Live customer data</p>
       <h2 className="mt-2 text-2xl font-semibold text-white">Patch worklist</h2><p className="mt-2 text-sm text-zinc-300">Prioritized fixes from this customer's saved evidence. Review affected devices and ticket coverage, then prepare a ticket draft.</p></div>
-      <button className={button} disabled={props.loading} onClick={props.refresh}>{props.loading?"Loading…":"Refresh worklists"}</button></header>
+      <button className={button} disabled={props.loading} onClick={props.refresh}>{props.loading?"Loading…":"Refresh worklist"}</button></header>
     <div className="mt-5 flex flex-wrap gap-2" role="group" aria-label="Group compact worklist">{(["byRemediation","byCve"] as const).map(mode=><button key={mode} aria-pressed={grouping===mode}
       className={`${button} ${grouping===mode?"border-red-700 bg-red-950/50":""}`} onClick={()=>{setGrouping(mode);setSelected(null);}}>{mode==="byCve"?"By CVE":"By remediation"}</button>)}</div>
+    <details className="mt-4 text-sm text-zinc-300"><summary className="cursor-pointer text-zinc-100">How priority is assigned</summary><p className="mt-2 max-w-5xl leading-relaxed">
+      Urgent: recorded KEV or observed exploitation. High: Critical/High severity, CVSS ≥ 7, a public exploit, EPSS ≥ 10%, or verified exposed/critical assets.
+      Review: evidence needed for a routine decision is missing. Routine: no elevated signal in complete recorded evidence. This is a transparent GMI review policy, not an official SSVC classification or a ConnectWise SLA priority.
+      A group takes its most urgent finding; missing evidence remains visible. Cached threat signals can be older than the latest source situation. Rows are ordered by urgency, then affected devices, then earliest recorded due date.</p></details>
     <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-[2fr_1fr_1fr_1fr]">
       <label className="text-xs text-zinc-300">Search loaded results<input type="search" value={filters.search} onChange={e=>setFilters({...filters,search:e.target.value})} className={control} placeholder="CVE, product or recommended fix"/></label>
       <label className="text-xs text-zinc-300">Severity<select value={filters.severity} onChange={e=>setFilters({...filters,severity:e.target.value})} className={control}><option value="all">All severities</option>{["Critical","High","Medium","Low","Info","None","Unknown"].map(s=><option key={s} value={s}>{s}</option>)}</select></label>
