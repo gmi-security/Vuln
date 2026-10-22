@@ -2,7 +2,7 @@
 import Link from "next/link";
 import type {FixTicketStatus as Status} from "@/lib/fix-ticket-status";
 
-const labels:Record<Status["state"],string>={none:"No tracked request",draft:"Draft prepared",approved:"Approved - not sent",sending:"Sending ticket",
+export const ticketStatusLabels:Record<Status["state"],string>={none:"No tracked request",draft:"Draft prepared",approved:"Approved - not sent",sending:"Sending ticket",
   uncertain:"Check sending outcome",failed:"Sending failed",open:"Open ticket",partial:"Partially ticketed",closed:"Ticket closed - verify findings",
   related:"Related CVE request",unavailable:"Ticket status unavailable"};
 export default function FixTicketStatus({status,companyId}:{status?:Status;companyId:string}) {
@@ -11,7 +11,7 @@ export default function FixTicketStatus({status,companyId}:{status?:Status;compa
     ["draft","approved","related","sending"].includes(state)?"border-sky-900 bg-sky-950/30 text-sky-200":
     state==="none" ? "border-zinc-700 text-zinc-300":"border-amber-900 bg-amber-950/30 text-amber-200";
   return <div className="mt-3 space-y-2 text-xs" aria-label="Ticket coverage">
-    <span className={`inline-block rounded-md border px-2 py-1 font-medium ${color}`}>{labels[state]}</span>
+    <span className={`inline-block rounded-md border px-2 py-1 font-medium ${color}`}>{ticketStatusLabels[state]}</span>
     {status?.coverage && <p className="text-zinc-200">{status.coverage.coveredDevices.toLocaleString()} / {status.coverage.totalDevices.toLocaleString()} devices fully covered by open tickets
       {status.coverage.remainingDevices>0 && <span className="block text-amber-200">{status.coverage.remainingDevices.toLocaleString()} devices still need ticket coverage review.</span>}</p>}
     {state==="open" && !status?.coverage && <p className="text-zinc-300">Current device coverage has not been verified.</p>}
