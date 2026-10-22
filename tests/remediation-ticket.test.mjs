@@ -73,6 +73,12 @@ test('sparse evidence expansion is rejected before dense allocation and leaves n
  for(let i=0;i<20000;i++)acc.add(id,remedy,row({hostId:'h'+i,cve:'CVE-2026-'+(1000+i)}));
  assert.deepEqual(acc.finish([id]),{});assert.match(acc.unavailableReason,/bounded summary capacity/);
 });
+test('optional priority actions cannot erase usable existing ticket evidence when serialization exceeds capacity',()=>{
+ const acc=model.createRemediationEvidence();acc.add('existing',remedy,row());
+ for(let i=0;i<20000;i++)acc.add('optional',remedy,row({hostId:'h'+i,cve:'CVE-2026-'+(1000+i)}));
+ const result=acc.finish(['existing'],['optional']);assert.deepEqual(Object.keys(result),['existing']);
+ assert.equal(result.existing.findingCount,1);assert.equal(acc.unavailableReason,undefined);
+});
 async function preparation(options={}){
  const acc=model.createRemediationEvidence(),id='crowdstrike:'+row().cid+':'+recommendations.remediationVariantId(remedy);acc.add(id,remedy,row());
  const evidence=acc.finish([id])[id],saved=[],calls=[];let pointers=0;

@@ -1,7 +1,8 @@
 import { emptySeverityCounts, sourceSeverities, type CustomerSourceRead, type SourceCveRow } from "./customer-source-read-model";
 import { createSpotlightTopFixes } from "./spotlight-top-fixes";
+import type {PriorityThreat} from "./patch-priority";
 
-export const SPOTLIGHT_SUMMARY_VERSION = 6;
+export const SPOTLIGHT_SUMMARY_VERSION = 7;
 export type SpotlightVendorScope = { version: 2; tenantId: string | null; mixed: boolean; missingRows: number; rows: number; localPlaceholderRows: number };
 export function matchesSpotlightTenant(scope: unknown, tenantId: string, sourceRows: unknown): boolean {
   const value = scope as SpotlightVendorScope | null;
@@ -27,7 +28,7 @@ export function summaryCount(value: unknown): number {
   if (!Number.isSafeInteger(n) || n < 0) throw new Error("Invalid summary count.");
   return n;
 }
-export function createSpotlightSummaryAccumulator(companyId: string, limits = summaryLimits) {
+export function createSpotlightSummaryAccumulator(companyId: string, limits = summaryLimits,threats:Map<string,PriorityThreat>=new Map()) {
   for (const key of Object.keys(summaryLimits) as (keyof typeof summaryLimits)[]) {
     if (!Number.isSafeInteger(limits[key]) || limits[key] < 1 || limits[key] > summaryLimits[key]) throw new Error("Invalid summary limits.");
   }
@@ -35,7 +36,7 @@ export function createSpotlightSummaryAccumulator(companyId: string, limits = su
   let tenantId: string | null = null, mixed = false, missingRows = 0, localPlaceholderRows = 0;
   const severity = emptySeverityCounts(), devices = new Map<string, number>();
   const cves = new Map<string, SourceCveRow & { deviceKeys: Set<number> }>();
-  const topFixes = createSpotlightTopFixes(companyId);
+  const topFixes = createSpotlightTopFixes(companyId,threats);
   function add(row: SummaryInput) {
     if (row.company_id !== companyId || !row.source_id) throw new Error("Source row does not match the selected customer.");
     if (++scanned > limits.records) throw new Error("Summary record limit exceeded.");
@@ -79,11 +80,11 @@ export function createSpotlightSummaryAccumulator(companyId: string, limits = su
       cves.set(row.cve, cve);
     }
     const device = devices.get(key)!;
-    topFixes.add(row.patch,row.cve,device);
     if (!cve.deviceKeys.has(device)) {
       if (pairs >= limits.pairs) throw new Error("Summary device/CVE limit exceeded.");
       cve.deviceKeys.add(device); cve.affectedDevices++; pairs++;
     }
+    topFixes.add(row.patch,row.cve,device,cve.deviceKeys);
     if (ranks.indexOf(rating) > ranks.indexOf(cve.severity)) cve.severity = rating;
     if (cvss !== null) cve.cvss = cve.cvss === null ? cvss : Math.max(cve.cvss, cvss);
     cve.sourceInstances++; instances++; severity[rating]++;

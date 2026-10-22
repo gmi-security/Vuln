@@ -6,6 +6,8 @@ import { matchesSpotlightTenant, SPOTLIGHT_SUMMARY_VERSION } from "./spotlight-s
 import type { TopFixesResult, TopFix } from "./reporting-top-fixes";
 import { compareRemediationFixes, type RemediationWorklist } from "./remediation-worklist";
 import {withFixTicketStatus} from "./customer-fix-ticket-status";
+import {optionalPriorityThreats} from "./patch-priority-threats";
+import {combinePriorityWorklists,validSavedPriority,type PriorityThreat} from "./patch-priority";
 
 function savedFixes(value: TopFixesResult | undefined, companyId: string): TopFixesResult {
   const count=(n: unknown)=>typeof n === "number" && Number.isSafeInteger(n) && n>=0;
@@ -31,7 +33,7 @@ function savedWorklist(value: RemediationWorklist | undefined): RemediationWorkl
   return value;
 }
 
-export async function readCustomerTopFixes(value: unknown, tickets?:()=>Pick<import("pg").Pool,"connect">): Promise<TopFixesResult> {
+export async function readCustomerTopFixes(value: unknown, tickets?:()=>Pick<import("pg").Pool,"connect">,includePriority=false): Promise<TopFixesResult> {
   if (typeof value!=="string" || !value || value.length>100) throw new DashboardError("Choose an existing customer.",400);
   await ensureHydrated();
   const company=getCompanyIdentity(value);
@@ -41,32 +43,40 @@ export async function readCustomerTopFixes(value: unknown, tickets?:()=>Pick<imp
   const client=await db.connect();
   let runId: string | null=null, proof: Awaited<ReturnType<typeof storedSpotlightProof>>=null, spotlight: TopFixesResult | null=null;
   const notices: string[]=[];
+  let threats:Map<string,PriorityThreat>|undefined,priorityNotice:string|undefined;
   let installed=false;
   try {
     await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
     await client.query("SET LOCAL statement_timeout='5s'");
     await client.query("SET LOCAL lock_timeout='1s'");
+    if(includePriority){const savedThreats=await optionalPriorityThreats(client);threats=savedThreats.threats;priorityNotice=savedThreats.notice;}
     const tables=(await client.query("SELECT to_regclass('public.spotlight_import_current') AS imports, to_regclass('public.spotlight_summary_generations') AS summaries")).rows[0];
     installed=Boolean(tables?.imports);
     if (installed) runId=(await client.query("SELECT run_id FROM spotlight_import_current WHERE tenant_key=$1",[companyId])).rows[0]?.run_id ?? null;
     if (runId) {
       proof=await storedSpotlightProof(client,context,companyId,runId);
-      const saved=tables.summaries ? (await client.query(`SELECT summary->'topFixes' AS fixes,summary->'vendorScope' AS vendor_scope,source_rows
-        FROM spotlight_summary_generations WHERE company_id=$1 AND run_id=$2 AND model_version IN (4,5,$3)
-        ORDER BY model_version DESC LIMIT 1`,[companyId,runId,SPOTLIGHT_SUMMARY_VERSION])).rows[0] : null;
+      const saved=tables.summaries ? (await client.query(`SELECT CASE WHEN $4::boolean THEN summary->'topFixes' ELSE (summary->'topFixes')-'priorityWorklist' END AS fixes,summary->'vendorScope' AS vendor_scope,source_rows
+        FROM spotlight_summary_generations WHERE company_id=$1 AND run_id=$2 AND model_version IN (4,5,6,$3)
+        ORDER BY model_version DESC LIMIT 1`,[companyId,runId,SPOTLIGHT_SUMMARY_VERSION,includePriority])).rows[0] : null;
       if (!saved) notices.push("CrowdStrike fixes are waiting for the completed-import summary. An operator must run the Spotlight summary worker; refreshing this page does not rebuild millions of source records.");
       else {
         const cid=proof?.cid ?? saved.vendor_scope?.tenantId;
         if (!matchesSpotlightTenant(saved.vendor_scope,cid,saved.source_rows)) throw new DashboardError("Saved CrowdStrike fix scope is inconsistent. Review the customer source and rebuild its summary.",409);
         spotlight=savedFixes(saved.fixes,companyId);
         savedWorklist(spotlight.remediationWorklist);
+        if(includePriority&&spotlight.priorityWorklist&&!validSavedPriority(spotlight.priorityWorklist))
+          throw new DashboardError("Saved priority summary is inconsistent. Rebuild the source summary.",503);
       }
     }
     await client.query("COMMIT");
   } catch (error) {await client.query("ROLLBACK").catch(()=>{});throw error;} finally {client.release();}
   // Same source authority as CVE details/patch preparation. Completed Spotlight
   // supersedes legacy RAM CrowdStrike findings, even when its summary is pending.
-  const platform=await customerTopFixes(companyId,JSON.stringify([context,runId]),row=>reviewedPlatformFinding(row,context,Boolean(runId)));
+  const threatRevision=threats?[...threats.values()].reduce((latest,t)=>t.updatedAt&&t.updatedAt>latest?t.updatedAt:latest,""):"";
+  const rawPlatform=await customerTopFixes(companyId,JSON.stringify([context,runId,includePriority,threatRevision]),row=>reviewedPlatformFinding(row,context,Boolean(runId)),threats);
+  const {priorityWorklist:platformPriority,...platform}=rawPlatform;
+  const priorityWorklist=includePriority?combinePriorityWorklists([...(platformPriority?[platformPriority]:[]),...(spotlight?.priorityWorklist?[spotlight.priorityWorklist]:[])],
+    [...notices,...(priorityNotice?[priorityNotice]:[]),...(runId&&!spotlight?.priorityWorklist?["CrowdStrike priority summary is pending. Existing tables remain available while the summary worker prepares it."]:[])]):undefined;
   await recheckStoredSpotlightProof(proof);
   if (installed) {
     const current=(await db.query("SELECT run_id FROM spotlight_import_current WHERE tenant_key=$1",[companyId])).rows[0]?.run_id ?? null;
@@ -84,14 +94,14 @@ export async function readCustomerTopFixes(value: unknown, tickets?:()=>Pick<imp
       .sort(compareRemediationFixes).slice(0,50)
   };
   if (!spotlight) {
-    const result:TopFixesResult={...platform,sources,notices,remediationWorklist,rows:platform.rows.map(row=>({...row,source:"platform"}))};
+    const result:TopFixesResult={...platform,sources,notices,remediationWorklist,priorityWorklist,rows:platform.rows.map(row=>({...row,source:"platform"}))};
     return tickets ? withFixTicketStatus(db,result,runId,tickets):result;
   }
   const severity: Record<string,number>={Critical:4,High:3,Medium:2,Low:1,Info:0,Unknown:-1};
   const rows: TopFix[]=[...platform.rows.map(row=>({...row,source:"platform" as const})),...spotlight.rows.map(row=>({...row,source:"crowdstrike" as const}))];
   rows.sort((a,b)=>b.deviceCount-a.deviceCount || (severity[b.severity]??-1)-(severity[a.severity]??-1) ||
     (a.source??"").localeCompare(b.source??"") || b.maxRisk-a.maxRisk || b.findingCount-a.findingCount || a.id.localeCompare(b.id));
-  const result:TopFixesResult={...platform,calculatedAt:new Date().toISOString(),sources,notices,remediationWorklist,rows:rows.slice(0,50),
+  const result:TopFixesResult={...platform,calculatedAt:new Date().toISOString(),sources,notices,remediationWorklist,priorityWorklist,rows:rows.slice(0,50),
     totalFixes:platform.totalFixes+spotlight.totalFixes,affectedDevices:platform.affectedDevices+spotlight.affectedDevices,
     findingCount:platform.findingCount+spotlight.findingCount,uniqueCves:platform.uniqueCves+spotlight.uniqueCves,
     missingRemediation:platform.missingRemediation+spotlight.missingRemediation,missingDevice:platform.missingDevice+spotlight.missingDevice};

@@ -36,6 +36,22 @@ test('completed summaries include recommended fixes without any ticket drafts',(
   assert.equal(result.totalFixes,1);assert.equal(result.affectedDevices,2);assert.equal(result.findingCount,2);
   assert.equal(result.rows[0].remediation,'Install version 3');assert.equal(result.rows[0].deviceCount,2);
 });
+test('priority summary selects exploited low-volume actions outside legacy top 50 and retains their complete evidence',()=>{
+ const a=create('A');
+ for(let i=0;i<56;i++){
+  const cve='CVE-2026-'+(1000+i),id=String(i),urgent=i===55;
+  a.add(row({source_id:id,id,cve,raw_cve:cve,raw_severity:urgent?'LOW':'CRITICAL',aid:'host'+i,
+   patch:{id,cid:'tenant',aid:'host'+i,status:'open',updated_timestamp:'2026-10-21T00:00:00Z',
+    cve:{id:cve,severity:urgent?'LOW':'CRITICAL',base_score:urgent?2:9.8,exploit_status:urgent?90:0},
+    apps:[{product_name:'Product '+i,remediation_info:{recommended_id:'r'+i}}],
+    remediation:{entities:[{id:'r'+i,title:'Update '+i,action:'Install update '+i}]}}}));
+ }
+ const result=a.finish(),priority=result.topFixes.priorityWorklist;
+ const first=priority.byRemediation[0];assert.equal(first.urgency,1);assert.deepEqual(first.cves,['CVE-2026-1055']);
+ assert.ok(!result.topFixes.remediationWorklist.rows.some(r=>r.id===first.id));
+ assert.equal(result.patchActions[first.id].hosts.length,1);assert.equal(priority.totalCves,56);assert.equal(priority.byCve.length,56);
+ assert.equal(first.lastObserved,'2026-10-21T00:00:00.000Z');
+});
 test('deduplicates device/CVE pairs but retains source instances, nullable scores and highest CVE severity',()=>{
   const a=create('A');a.add(row());a.add(row({source_id:'2',id:'2',raw_severity:'CRITICAL',score:null}));
   a.add(row({source_id:'3',id:'3',cid:'other',raw_severity:'LOW',score:1}));

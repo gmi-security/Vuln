@@ -40,16 +40,17 @@ export function createRemediationEvidence() {
     if(row.exprt && !host.exprt.includes(row.exprt))host.exprt.push(row.exprt);
     action.findings++;
   }
-  function finish(ids:string[]) {
+  function finish(ids:string[],optionalIds:string[]=[]) {
     const result:Record<string,RemediationEvidence>={};let bytes=0;
     if(unavailableReason)return result;
-    for(const id of ids) {
+    const required=new Set(ids);
+    for(const id of new Set([...ids,...optionalIds])) {
       const action=actions.get(id);if(!action)throw new Error("Missing remediation evidence.");
       const cves=[...action.cves.keys()].sort(), newIndices=new Map(cves.map((c,i)=>[c,i]));
       // Bound the dense serialized form BEFORE allocating host buffers. Sparse
       // evidence can otherwise expand dramatically when hosts have disjoint CVEs.
       const denseBytes=action.hosts.size*(4*Math.ceil(Math.ceil(cves.length/8)/3)+200);
-      if(bytes+denseBytes>32*1024*1024){capacity();return {};}
+      if(bytes+denseBytes>32*1024*1024){if(!required.has(id))continue;capacity();return {};}
       const remap=[...action.cves.keys()].map(c=>newIndices.get(c)!);
       const coverage:PatchCoverage={cves,hosts:[]}, hostRows:Host[]=[];
       for(const {blocks,...host} of action.hosts.values()) {
@@ -60,7 +61,9 @@ export function createRemediationEvidence() {
         coverage.hosts.push({cid:host.cid,hostId:host.hostId,bits:bits.toString("base64")});hostRows.push(host);
       }
       const evidence={id,remediation:action.remediation,hosts:hostRows,coverage,findingCount:action.findings};
-      if((bytes+=Buffer.byteLength(JSON.stringify(evidence)))>32*1024*1024){capacity();return {};}
+      const size=Buffer.byteLength(JSON.stringify(evidence));
+      if(bytes+size>32*1024*1024){if(!required.has(id))continue;capacity();return {};}
+      bytes+=size;
       result[id]=evidence;
     }
     return result;
