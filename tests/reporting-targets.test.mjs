@@ -7,7 +7,7 @@ const baseline=()=>Object.fromEntries(revisions.reportingKeys.map(k=>[k,k==='met
  [['A',{id:'A',name:'A'}],['B',{id:'B',name:'B'}],['C',{id:'C',name:'C'}]]:[]]));
 async function digest(data){const d=revisions.createReportingInputDigests();for(const [k,v]of Object.entries(data))await d.bucket(k,JSON.stringify(v));return d.finish();}
 
-for(const action of ['update','move','delete','source-only'])test(`targeted reporting ${action} equals full digest and never reads an unrelated customer`,async()=>{
+for(const action of ['update','move','delete','source-only','duplicate-scope'])test(`targeted reporting ${action} equals full digest and never reads an unrelated customer`,async()=>{
  const before=baseline();before['findings:00']=[['f',{id:'f',companyId:'A',status:'Open'}],['g',{id:'g',companyId:'C',status:'Open'}]];
  const current=await digest(before),after=structuredClone(before);
  if(action==='update')after['findings:00'][0][1].status='Resolved';
@@ -19,7 +19,9 @@ for(const action of ['update','move','delete','source-only'])test(`targeted repo
   if(sql.startsWith('SELECT company_id,format_version'))return {rows:current.map(r=>({company_id:r.companyId,format_version:3,bucket_map:r.buckets,content_hash:r.hash}))};
   if(sql==='SELECT id FROM app_companies ORDER BY id')return {rows:['A','B','C'].map(id=>({id}))};
   if(sql.startsWith('SELECT id,store_order,')){
-   const rows=after['findings:00'].map(([id,record],i)=>({id,record,store_order:(i+1)*1024})).filter(r=>r.store_order>p[1]&&(!sql.includes('company_id=ANY')||p[3].includes(r.record.companyId)));
+   assert.match(sql,/company_id=\$4\b/,'ordered customer reads must use the customer stream index equality prefix');
+   assert.equal(typeof p[3],'string');
+   const rows=after['findings:00'].map(([id,record],i)=>({id,record,store_order:(i+1)*1024})).filter(r=>r.store_order>p[1]&&p[3]===r.record.companyId);
    readOwners.push(...rows.map(r=>r.record.companyId));return {rows};
   }
   if(sql.includes('pg_try_advisory'))return {rows:[{acquired:true}]};
@@ -29,7 +31,7 @@ for(const action of ['update','move','delete','source-only'])test(`targeted repo
   if(sql.includes('current_database()'))return {rows:[{db:'test',relation:'123'}]};
   return {rows:[]};
  }};
- await revisions.publishSqlReportingChanges(client,['findings:00'],{'findings:00':action==='move'?['A','B']:['A']});
+ await revisions.publishSqlReportingChanges(client,['findings:00'],{'findings:00':action==='move'?['A','B']:action==='duplicate-scope'?['A','A']:['A']});
  assert.deepEqual(published,await digest(after));
  assert.ok(!readOwners.includes('C'),'unaffected customer must not be read even when it shares the changed bucket');
 });
@@ -61,7 +63,9 @@ for(const kind of ['findings','assets','scans'])test(`bulk ${kind} reporting reu
   if(sql.startsWith('SELECT company_id,format_version'))return {rows:current.map(r=>({company_id:r.companyId,format_version:3,bucket_map:r.buckets,content_hash:r.hash}))};
   if(sql==='SELECT id FROM app_companies ORDER BY id')return {rows:['A','B','C'].map(id=>({id}))};
   if(sql.startsWith('SELECT id,store_order')){
-   const rows=sqlRows.filter(r=>(r.store_order>p[1]||r.store_order===p[1]&&r.id>p[2])&&p[3].includes(r.record.companyId)).slice(0,500);
+   assert.match(sql,/company_id=\$4\b/,'bulk reporting must seek each customer separately, not filter a global ordered index');
+   assert.equal(typeof p[3],'string');
+   const rows=sqlRows.filter(r=>(r.store_order>p[1]||r.store_order===p[1]&&r.id>p[2])&&p[3]===r.record.companyId).slice(0,500);
    if(sql.includes(' record FROM'))payloadReads.push(...rows.map(r=>r.id));else identityReads.push(...rows.map(r=>r.id));
    return {rows:rows.map(r=>sql.includes(' record FROM')?r:{id:r.id,store_order:r.store_order})};
   }

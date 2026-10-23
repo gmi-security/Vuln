@@ -212,7 +212,7 @@ try{
   const co1Before=await revisionModule.readReportingInputRevision(db,'CO-1'),co2Before=await revisionModule.readReportingInputRevision(db,'CO-2');
   move[1].companyId='CO-2';data.findings=data.findings.filter(([id])=>id!=='T-delete');reportReads.length=0;
   await runtime.saveSnapshot(data,{changes:{findings:['T-move','T-delete']}});
-  assert.ok(reportReads.length>0&&reportReads.every(q=>q.sql.includes('company_id=ANY')&&Array.isArray(q.params[3])),'every scoped report read is customer filtered');
+  assert.ok(reportReads.length>0&&reportReads.every(q=>q.sql.includes('company_id=$4')&&typeof q.params[3]==='string'),'every scoped report read uses the ordered customer index equality prefix');
   const movedDigest=revisionModule.createReportingInputDigests();
   for(const [kind,c]of Object.entries(platformCollections))for(let b=0;b<c.buckets;b++)await movedDigest.bucket(`${kind}:${String(b).padStart(2,'0')}`,JSON.stringify(data[kind].filter(([id])=>platformBucket(id,c.buckets)===b)));
   await movedDigest.bucket('meta',JSON.stringify(Object.fromEntries(Object.entries(data).filter(([k])=>!platformCollections[k]))));

@@ -50,3 +50,20 @@ Separate the RAM capture check from general cancellation: check the capture thro
 Nessus new-scan imports also mark their completion/partial failure dirty after the awaited import, so a capture taken during the API request cannot suppress persistence of later findings and completion metadata. Regression coverage includes queued-save acknowledgment, restart, preparation refusal, delta capture rejection and general cancellation after INSERT, plus real PostgreSQL row/reporting consistency across a later RAM mutation.
 
 Verification: 949 tests passed, seven optional database tests skipped, zero failed; the separate disposable PostgreSQL suite passed all 20 checks. Independent review found no remaining code issues. During verification the previously deployed version completed a full production save (411 inserted records, 234 updated), followed by successful scoped scan updates; the final change avoids the observed write-phase recapture loop.
+
+## October 23: scoped reporting stream timeout
+
+The latest failure was a reachable database with application writes blocked after two 30-minute publication attempts. Both reached the reporting phase: the final attempt spent 1,299,283 ms writing and 500,718 ms reporting before its deadline. The completed Defender source import remained stored, but its generation differed from the platform publication marker. Capture-change retries and unrelated malformed Server Action messages do not establish the cause of this timeout.
+
+The reporting ID stream used `company_id=ANY($4::text[])`. Production EXPLAIN selected the global bucket/order index and filtered unrelated customers from heap rows. A scalar `company_id=$4` used the existing customer/bucket/order index. A read-only comparison of the same 15,722 IDs across 33 pages took 2,488 ms with the old predicate and 256 ms with equality. These are sample query timings, not a whole-publication benchmark.
+
+Scoped publication now streams each unique affected customer separately, resetting the pagination cursor per customer. This preserves each customer's order, reporting hashes, moved/deleted-record handling, frozen payload reuse, and the atomic data/reporting commit. Unscoped publication remains supported. No timeout, schema, schedule, credentials, or ticket behavior changes.
+
+Validation before deployment:
+
+- Targeted regression tests failed against the old array predicate, then passed with scalar scopes. Duplicate customer scopes retain the prior SQL membership semantics.
+- Full suite: 1,083 passed, seven optional database tests skipped, zero failed. TypeScript, Linux Next production build, and both auxiliary worker builds passed.
+- Fresh private PostgreSQL cluster: all 25 checks passed, including rollback, timed-out transaction retry, customer moves/deletions, uncertain COMMIT handling, stale-writer rejection, and restart. A 64,001-row bulk fixture committed with independently matched reporting hashes. No production database writes were used for these tests.
+- Independent review found no blocking issues. Additional checks covered equal-order pagination, reversed/duplicate scopes, and unscoped company additions.
+
+Release acceptance requires the pending production generation to commit, its source and platform markers to agree, subsequent ordinary saves to succeed, and read/write health to remain ready. The slow write phase is unchanged; the sample speedup alone does not establish that the entire production save fits its budget. Genuine database failures must still block saving rather than silently discard data.
