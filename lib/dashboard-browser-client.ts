@@ -46,7 +46,7 @@ function retryDelay(ms: number, signal?: AbortSignal | null) {
   });
 }
 
-export async function dashboardRequest<T = Record<string, any>>(path: string, init: RequestInit = {}): Promise<T> {
+export async function dashboardRequest<T = Record<string, any>>(path: string, init: RequestInit = {}, requestTimeoutMs = 20_000): Promise<T> {
   const readOnly = !init.method || init.method.toUpperCase() === "GET";
   for (let attempt = 0; ; attempt++) {
     init.signal?.throwIfAborted();
@@ -55,7 +55,7 @@ export async function dashboardRequest<T = Record<string, any>>(path: string, in
       try {
         response = await fetch(`/api/elastic-dashboard${path ? `/${path}` : ""}`, {
           ...init, cache: "no-store", headers: { Accept: "application/json", ...init.headers },
-          signal: init.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000),
+          signal: init.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(requestTimeoutMs)]) : AbortSignal.timeout(requestTimeoutMs),
         });
       } catch {
         init.signal?.throwIfAborted();

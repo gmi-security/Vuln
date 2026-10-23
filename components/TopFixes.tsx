@@ -19,7 +19,7 @@ export default function TopFixes({ companyId, canManage=false, refreshToken, rev
   useEffect(() => {
     let active = true;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20_000);
+    const timeout = setTimeout(() => controller.abort(), 45_000);
     setLoading(true); setError("");
     void (async () => {
       try {

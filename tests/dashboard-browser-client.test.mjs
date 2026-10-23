@@ -122,3 +122,23 @@ test("unmount cancellation reaches the active fetch and does not become a retrya
     assert.equal(calls, 1);
   } finally { globalThis.fetch = original; }
 });
+
+test("a worklist's 45-second deadline is not silently shortened to the ordinary 20-second request limit", async () => {
+  const originalTimeout=AbortSignal.timeout,originalFetch=globalThis.fetch,timers=[];
+  AbortSignal.timeout=ms=>{const controller=new AbortController();timers.push({ms,controller});return controller.signal;};
+  const pending=Promise.withResolvers();
+  const controller=new AbortController();let request;
+  globalThis.fetch=async(_url,init)=>{
+    await pending.promise;
+    init.signal.throwIfAborted();
+    return json({rows:[{id:'complete'}]});
+  };
+  try {
+    request=dashboardRequest('patch-priority?companyId=fixture',{signal:controller.signal},45_000);
+    // Simulate the 26-second cold calculation seen in production.
+    for(const timer of timers)if(timer.ms<=26_000)timer.controller.abort();
+    assert.equal(timers[0].controller.signal.aborted,false,'cold worklist must still be allowed to finish');
+    pending.resolve();assert.deepEqual(await request,{rows:[{id:'complete'}]});
+    await dashboardRequest('jobs/test');assert.equal(timers[1].ms,20_000,'ordinary requests keep their existing bound');
+  } finally {controller.abort();pending.resolve();await request?.catch(()=>{});AbortSignal.timeout=originalTimeout;globalThis.fetch=originalFetch;}
+});
