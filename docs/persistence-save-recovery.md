@@ -67,3 +67,5 @@ Validation before deployment:
 - Independent review found no blocking issues. Additional checks covered equal-order pagination, reversed/duplicate scopes, and unscoped company additions.
 
 Release acceptance requires the pending production generation to commit, its source and platform markers to agree, subsequent ordinary saves to succeed, and read/write health to remain ready. The slow write phase is unchanged; the sample speedup alone does not establish that the entire production save fits its budget. Genuine database failures must still block saving rather than silently discard data.
+
+The PR security gate also identified newly reported vulnerabilities in the existing Next.js 16.4.0 dependency. This release updates Next.js and its ESLint configuration to 16.4.1, retaining the already-patched sharp 0.35.5 image library. This dependency patch is separate from the persistence root cause. The repeated full suite again passed 1,083 tests with seven optional skips; TypeScript, the Linux production build, and both worker builds passed against the patched lockfile.
