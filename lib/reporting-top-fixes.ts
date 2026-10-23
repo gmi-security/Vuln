@@ -28,13 +28,14 @@ const clean = (value: string) => value.trim().replace(/\s+/g, " ");
 // matching prose across CVEs does not prove that one patch covers both.
 // Iterate once without copying/sorting the full findings collection or
 // constructing host CSVs. Only the highest-impact summaries leave this module.
-export async function buildTopFixes(companyId: string, findings: Iterable<Finding>, include?: (finding: Finding) => boolean, threats?:Map<string,PriorityThreat>,sla?:SlaSettings): Promise<TopFixesResult> {
+export async function buildTopFixes(companyId: string, findings: Iterable<Finding>, include?: (finding: Finding) => boolean, threats?:Map<string,PriorityThreat>,sla?:SlaSettings,signal?:AbortSignal): Promise<TopFixesResult> {
+  signal?.throwIfAborted();
   const priority=threats?createPriorityWorklist("platform"):undefined;
   const groups = new Map<string, { id:string;cve: string; remediation: string; devices: Set<string>; findingCount: number; maxRisk: number; severity: string }>();
   const devices = new Set<string>(), cves = new Set<string>();
   let findingCount = 0, missingRemediation = 0, missingDevice = 0, visited = 0;
   for (const finding of findings) {
-    if (++visited % 5000 === 0) await setImmediate();
+    if (++visited % 5000 === 0) { await setImmediate(); signal?.throwIfAborted(); }
     if (finding.companyId !== companyId || (finding.status !== "Open" && finding.status !== "In Remediation")) continue;
     if (reportingFindingClass(finding.connector) === "osint" || !/^CVE-\d{4}-\d{4,19}$/i.test(finding.cve)) continue;
     if (include && !include(finding)) continue;
@@ -70,7 +71,7 @@ export async function buildTopFixes(companyId: string, findings: Iterable<Findin
     list.splice(low,0,entry); if (list.length>LIMIT) list.pop();
   }
   for (const entry of groups) {
-    if (++visited % 5000 === 0) await setImmediate();
+    if (++visited % 5000 === 0) { await setImmediate(); signal?.throwIfAborted(); }
     retain(top,entry,compare); retain(severityTop,entry,bySeverity);
   }
   const display = ([key,group]: [string,Group]) => ({
@@ -79,6 +80,7 @@ export async function buildTopFixes(companyId: string, findings: Iterable<Findin
       findingCount: group.findingCount, maxRisk: group.maxRisk, severity: group.severity,
     });
   const rows = top.map(display);
+  signal?.throwIfAborted();
   return { companyId, calculatedAt: new Date().toISOString(), totalFixes: groups.size, affectedDevices: devices.size,
     findingCount, uniqueCves: cves.size, missingRemediation, missingDevice, limit: LIMIT, rows,priorityWorklist:priority?.finish(),
     remediationWorklist:{totalGroups:groups.size,limit:LIMIT,rows:severityTop.map(entry=>{
@@ -90,20 +92,43 @@ export async function buildTopFixes(companyId: string, findings: Iterable<Findin
 // revision. Map replacement covers hydration; TTL bounds legacy mutations.
 // Host sets and full packet data are never retained in this cache.
 const cache = new Map<string, { findings: WeakRef<ReadonlyMap<string,Finding>>; revision: number; expires: number; result: TopFixesResult }>();
-let computing: { key: string; findings: ReadonlyMap<string,Finding>; revision: number; promise: Promise<TopFixesResult> } | undefined;
-export async function cachedTopFixes(companyId: string, findings: ReadonlyMap<string,Finding>, revision: number, policyKey="platform", include?: (finding: Finding) => boolean,threats?:Map<string,PriorityThreat>,sla?:SlaSettings): Promise<TopFixesResult> {
+let computing: { key: string; findings: ReadonlyMap<string,Finding>; revision: number; signal?:AbortSignal; promise: Promise<TopFixesResult> } | undefined;
+
+// A disconnected waiter must release its old findings generation immediately,
+// without waiting for another customer's aggregation to finish.
+function waitForScan(promise:Promise<TopFixesResult>,signal?:AbortSignal):Promise<TopFixesResult> {
+  if(!signal)return promise;
+  signal.throwIfAborted();
+  return new Promise((resolve,reject)=>{
+    const abort=()=>{signal.removeEventListener("abort",abort);reject(signal.reason);};
+    signal.addEventListener("abort",abort,{once:true});
+    promise.then(value=>{signal.removeEventListener("abort",abort);resolve(value);},error=>{signal.removeEventListener("abort",abort);reject(error);});
+  });
+}
+export async function cachedTopFixes(companyId: string, findings: ReadonlyMap<string,Finding>, revision: number, policyKey="platform", include?: (finding: Finding) => boolean,threats?:Map<string,PriorityThreat>,sla?:SlaSettings,signal?:AbortSignal): Promise<TopFixesResult> {
+  signal?.throwIfAborted();
   const key=JSON.stringify([companyId,policyKey]), previous = cache.get(key);
   if (previous && previous.findings.deref() === findings && previous.revision === revision && previous.expires > Date.now()) return previous.result;
   if (computing) {
-    if (computing.key === key && computing.findings === findings && computing.revision === revision) return computing.promise;
+    const active=computing;
     // Avoid several customers allocating large aggregation sets concurrently.
-    await computing.promise;
-    return cachedTopFixes(companyId,findings,revision,policyKey,include,threats,sla);
+    try {
+      const result=await waitForScan(active.promise,signal);
+      signal?.throwIfAborted();
+      if(active.key===key && active.findings===findings && active.revision===revision)return result;
+    } catch(error) {
+      signal?.throwIfAborted();
+      // A live waiter can outlast the request that started the shared scan.
+      // Retry with its own signal; never cache or return a partial scan.
+      if(!active.signal?.aborted)throw error;
+    }
+    return cachedTopFixes(companyId,findings,revision,policyKey,include,threats,sla,signal);
   }
-  const promise = buildTopFixes(companyId,findings.values(),include,threats,sla);
-  computing = { key,findings,revision,promise };
+  const promise = buildTopFixes(companyId,findings.values(),include,threats,sla,signal);
+  computing = { key,findings,revision,promise,signal };
   try {
     const result = await promise;
+    signal?.throwIfAborted();
     cache.delete(key);
     if (cache.size >= 16) cache.delete(cache.keys().next().value!);
     cache.set(key, { findings: new WeakRef(findings), revision, expires: Date.now() + 60_000, result });

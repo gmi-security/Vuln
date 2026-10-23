@@ -2,4 +2,4 @@ import {dashboardAccess,dashboardFailure,dashboardJson} from "@/lib/elastic-dash
 import {dashboardReadDatabase} from "@/lib/elastic-dashboard-store";
 import {customerPatchPriority} from "@/lib/customer-patch-priority";
 export const dynamic="force-dynamic";
-export async function GET(request:Request){try{await dashboardAccess();return dashboardJson(await customerPatchPriority(new URL(request.url).searchParams.get("companyId"),dashboardReadDatabase));}catch(error){return dashboardFailure(error);}}
+export async function GET(request:Request){try{await dashboardAccess();return dashboardJson(await customerPatchPriority(new URL(request.url).searchParams.get("companyId"),dashboardReadDatabase,request.signal));}catch(error){return dashboardFailure(error);}}

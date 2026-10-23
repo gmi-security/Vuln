@@ -4,6 +4,9 @@ import { resolve, dirname } from 'node:path';
 import { SourceTextModule, SyntheticModule } from 'node:vm';
 import test from 'node:test';
 import ts from 'typescript';
+import {setImmediate as nextTurn} from 'node:timers/promises';
+
+let yieldNow=nextTurn;
 
 const modules = new Map();
 async function load(path) {
@@ -13,7 +16,7 @@ async function load(path) {
   const mod = new SourceTextModule(code,{identifier:path}); modules.set(path,mod);
   await mod.link(async name => {
     if (name.startsWith('.')) return load(resolve(dirname(path),name+'.ts'));
-    const values=await import(name);
+    const values=name==='node:timers/promises'?{setImmediate:(...args)=>yieldNow(...args)}:await import(name);
     return new SyntheticModule(Object.keys(values),function(){for(const key of Object.keys(values))this.setExport(key,values[key]);});
   });
   return mod;
@@ -90,4 +93,48 @@ test('source policy changes invalidate cached rankings and long scans yield to o
   assert.equal(filtered.findingCount,6000);
   const [a,b]=await Promise.all([cachedTopFixes(companyId,findings,2),cachedTopFixes(companyId,findings,2)]);
   assert.equal(a,b);
+});
+
+test('aborted queued requests settle before the active scan and never scan their obsolete generation',async()=>{
+  const activeRows=new Map(Array.from({length:5001},(_,i)=>[String(i),finding(String(i))]));
+  let release,scans=0,settled=false;
+  yieldNow=()=>new Promise(resolve=>{release=resolve;});
+  const active=cachedTopFixes(companyId,activeRows,30);
+  const obsolete=new Map([['old',finding('old')]]),values=obsolete.values.bind(obsolete);
+  obsolete.values=()=>{scans++;return values();};
+  const controller=new AbortController();
+  const queued=cachedTopFixes(companyId,obsolete,31,'platform',undefined,undefined,undefined,controller.signal)
+    .then(()=>{settled=true;return null;},error=>{settled=true;return error;});
+  controller.abort();
+  try {
+    await nextTurn();
+    assert.equal(settled,true,'abandoned request must not wait for another customer scan');
+    assert.equal((await queued)?.name,'AbortError');
+  } finally {yieldNow=nextTurn;release();await active;await queued;}
+  assert.equal(scans,0,'abandoned generation must never be scanned');
+});
+
+test('active cancellation discards partial summaries and a live shared waiter retries successfully',async()=>{
+  const rows=new Map(Array.from({length:5001},(_,i)=>[String(i),finding(String(i))]));
+  let release,scans=0;const values=rows.values.bind(rows);
+  rows.values=()=>{scans++;return values();};
+  yieldNow=()=>new Promise(resolve=>{release=resolve;});
+  const owner=new AbortController();
+  const active=cachedTopFixes(companyId,rows,40,'platform',undefined,undefined,undefined,owner.signal)
+    .then(()=>null,error=>error);
+  const waiter=cachedTopFixes(companyId,rows,40);
+  owner.abort();yieldNow=nextTurn;release();
+  assert.equal((await active)?.name,'AbortError');
+  const result=await waiter;
+  assert.equal(result.findingCount,5001);assert.equal(scans,2);
+  assert.equal(await cachedTopFixes(companyId,rows,40),result);
+  assert.equal(scans,2,'only the complete retry is cached');
+});
+
+test('already aborted requests cannot use a cached result or start a scan',async()=>{
+  const rows=new Map([['one',finding('one')]]);
+  await cachedTopFixes(companyId,rows,50);
+  const controller=new AbortController();controller.abort();
+  await assert.rejects(cachedTopFixes(companyId,rows,50,'platform',undefined,undefined,undefined,controller.signal),{name:'AbortError'});
+  await assert.rejects(buildTopFixes(companyId,rows.values(),undefined,undefined,undefined,controller.signal),{name:'AbortError'});
 });
