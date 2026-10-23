@@ -22,7 +22,7 @@ async function harness(options={}) {
   const db={query,connect:async()=>({query,release(){}})};
   const finding=(id,connector,extra={})=>({id,companyId,connector,cve:'CVE-2026-9999',asset:id,status:'Open',remediation:'Platform update',severity:'High',realRisk:60,...extra});
   const fakeStore={ensureHydrated:async()=>{},getCompanyIdentity:id=>id===companyId?{id,name:'Fixture'}:undefined,
-    customerTopFixes:async(id,key,include,threats)=>{const mod=await load(resolve('lib/reporting-top-fixes.ts'));if(mod.status==='unlinked')await mod.link(linker);await mod.evaluate();return mod.namespace.buildTopFixes(id,[finding('cs','crowdstrike'),finding('defender','defender'),finding('other','nessus',{companyId:'CO-OTHER'})],include,threats);}};
+    customerTopFixes:async(id,key,include,threats,signal)=>{options.onPlatform?.(signal);const mod=await load(resolve('lib/reporting-top-fixes.ts'));if(mod.status==='unlinked')await mod.link(linker);await mod.evaluate();return mod.namespace.buildTopFixes(id,[finding('cs','crowdstrike'),finding('defender','defender'),finding('other','nessus',{companyId:'CO-OTHER'})],include,threats,undefined,signal);}};
   const stubs={'./persist':{applicationDatabase:()=>db},'./store':fakeStore,'./customer-spotlight-routing-server':{loadReviewedSpotlightRoutes:async()=>null}};
   function load(file) {
     if(modules.has(file))return modules.get(file);
@@ -92,4 +92,14 @@ test('malformed saved priority data is refused without affecting the existing wo
  const h=await harness({fixes:{...fix,priorityWorklist:{version:1,byCve:[{source:'foreign'}]}}});
  assert.equal((await h.read(companyId)).rows.length,2);
  await assert.rejects(h.read(companyId,undefined,true),/priority summary is inconsistent/);
+});
+
+test('request cancellation reaches platform aggregation and pre-aborted reads do no database work',async()=>{
+ const controller=new AbortController();let received;
+ const h=await harness({onPlatform:signal=>{received=signal;controller.abort();}});
+ await assert.rejects(h.read(companyId,undefined,true,controller.signal),{name:'AbortError'});
+ assert.equal(received,controller.signal);
+ const before=h.calls.length;
+ await assert.rejects(h.read(companyId,undefined,true,controller.signal),{name:'AbortError'});
+ assert.equal(h.calls.length,before);
 });

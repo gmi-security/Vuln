@@ -7,6 +7,6 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   try {
     await dashboardAccess();
-    return dashboardJson(await readCustomerTopFixes(new URL(request.url).searchParams.get("companyId"),dashboardReadDatabase));
+    return dashboardJson(await readCustomerTopFixes(new URL(request.url).searchParams.get("companyId"),dashboardReadDatabase,false,request.signal));
   } catch (error) { return dashboardFailure(error); }
 }

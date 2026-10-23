@@ -33,9 +33,11 @@ function savedWorklist(value: RemediationWorklist | undefined): RemediationWorkl
   return value;
 }
 
-export async function readCustomerTopFixes(value: unknown, tickets?:()=>Pick<import("pg").Pool,"connect">,includePriority=false): Promise<TopFixesResult> {
+export async function readCustomerTopFixes(value: unknown, tickets?:()=>Pick<import("pg").Pool,"connect">,includePriority=false,signal?:AbortSignal): Promise<TopFixesResult> {
+  signal?.throwIfAborted();
   if (typeof value!=="string" || !value || value.length>100) throw new DashboardError("Choose an existing customer.",400);
   await ensureHydrated();
+  signal?.throwIfAborted();
   const company=getCompanyIdentity(value);
   if (!company || company.isDemo) throw new DashboardError("Customer not found.",404);
   const companyId=company.id, context=await storedSpotlightContext(companyId), db=applicationDatabase();
@@ -70,10 +72,12 @@ export async function readCustomerTopFixes(value: unknown, tickets?:()=>Pick<imp
     }
     await client.query("COMMIT");
   } catch (error) {await client.query("ROLLBACK").catch(()=>{});throw error;} finally {client.release();}
+  signal?.throwIfAborted();
   // Same source authority as CVE details/patch preparation. Completed Spotlight
   // supersedes legacy RAM CrowdStrike findings, even when its summary is pending.
   const threatRevision=threats?[...threats.values()].reduce((latest,t)=>t.updatedAt&&t.updatedAt>latest?t.updatedAt:latest,""):"";
-  const rawPlatform=await customerTopFixes(companyId,JSON.stringify([context,runId,includePriority,threatRevision]),row=>reviewedPlatformFinding(row,context,Boolean(runId)),threats);
+  const rawPlatform=await customerTopFixes(companyId,JSON.stringify([context,runId,includePriority,threatRevision]),row=>reviewedPlatformFinding(row,context,Boolean(runId)),threats,signal);
+  signal?.throwIfAborted();
   const {priorityWorklist:platformPriority,...platform}=rawPlatform;
   const priorityWorklist=includePriority?combinePriorityWorklists([...(platformPriority?[platformPriority]:[]),...(spotlight?.priorityWorklist?[spotlight.priorityWorklist]:[])],
     [...notices,...(priorityNotice?[priorityNotice]:[]),...(runId&&!spotlight?.priorityWorklist?["CrowdStrike priority summary is pending. Existing tables remain available while the summary worker prepares it."]:[])]):undefined;
@@ -83,6 +87,7 @@ export async function readCustomerTopFixes(value: unknown, tickets?:()=>Pick<imp
     if (current!==runId) throw new DashboardError("Source import changed while loading top fixes. Refresh to load the current results.",409);
   }
   if (!proof && JSON.stringify(await storedSpotlightContext(companyId))!==JSON.stringify(context)) throw new DashboardError("Customer source approval changed. Refresh to load current results.",409);
+  signal?.throwIfAborted();
   const sources=[...(platform.findingCount || platform.missingRemediation ? ["Platform findings"] : []),...(spotlight ? ["Completed CrowdStrike import"] : [])];
   const actionNotices=[...notices];
   if(runId && spotlight && !spotlight.remediationWorklist)

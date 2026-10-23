@@ -8190,9 +8190,11 @@ export function isRemediationFinding(f: Finding): boolean {
 
 // Caller resolves the customer and awaits ensureHydrated first. This read
 // deliberately avoids tick(), full-collection copying and risk sorting.
-export async function customerTopFixes(companyId: string, policyKey = "platform", include?: (finding: Finding) => boolean,threats?:Map<string,import("./patch-priority").PriorityThreat>) {
+export async function customerTopFixes(companyId: string, policyKey = "platform", include?: (finding: Finding) => boolean,threats?:Map<string,import("./patch-priority").PriorityThreat>,signal?:AbortSignal) {
+  signal?.throwIfAborted();
   const findings = store().findings, revision = persistGlobal.__vulnMutationVersion ?? 0;
-  const result = await cachedTopFixes(companyId, findings, revision, policyKey, include,threats,store().settings.sla);
+  const result = await cachedTopFixes(companyId, findings, revision, policyKey, include,threats,store().settings.sla,signal);
+  signal?.throwIfAborted();
   if (findings !== store().findings || revision !== (persistGlobal.__vulnMutationVersion ?? 0)) {
     throw new Error("Findings changed while calculating top fixes. Refresh to load the latest results.");
   }
