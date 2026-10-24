@@ -31,7 +31,7 @@ const originalSecret = process.env.NEXTAUTH_SECRET;
 process.env.NEXTAUTH_SECRET = 'local-connectwise-test-secret-only-123456789';
 test.after(() => { if (originalSecret === undefined) delete process.env.NEXTAUTH_SECRET; else process.env.NEXTAUTH_SECRET = originalSecret; });
 let replies = [], calls = [], resolvedAddress = '8.8.8.8';
-const client = await loader({
+const loadClient = loader({
   'node:dns/promises': { lookup: async () => ({ address: resolvedAddress, family: 4 }) },
   'node:https': { request: (url, options, callback) => {
     const req = new EventEmitter(); req.destroy = () => { req.emit('error', new Error('test')); req.emit('close'); };
@@ -42,7 +42,9 @@ const client = await loader({
     }); };
     return req;
   } },
-})('lib/connectwise-client.ts');
+});
+const client = await loadClient('lib/connectwise-client.ts');
+const dashboard = await loadClient('lib/elastic-dashboard.ts');
 
 test('credentials encrypt, reject tampering, support private key punctuation and redact errors', () => {
   assert.deepEqual(client.parseCWConnection(connection), connection);
@@ -78,8 +80,8 @@ test('real list names, selected values past page one, board status filtering and
   replies = Array.from({ length: 3 }, () => ({ body: { id: 999, name: 'Wrong reference' } }));
   await assert.rejects(client.validateCWRouting(connection, { boardId: 1, statusId: 2, priorityId: 3 }), /unavailable/);
 });
-test('routing uses defaults without reading priority or status setup and ignores legacy selections', async () => {
-  assert.deepEqual(client.parseRouting({ companyId: 30, boardId: 10, statusId: 11, priorityId: 12 }), { companyId: 30, boardId: 10 });
+test('routing uses defaults without reading priority or status setup when no priority is chosen', async () => {
+  assert.deepEqual(client.parseRouting({ companyId: 30, boardId: 10, statusId: 11 }), { companyId: 30, boardId: 10 });
   calls = []; replies = [{ body: { id: 10, name: 'Patch board' } }];
   const labels = await client.validateCWRouting(connection, { boardId: 10 });
   assert.equal(labels.board.name, 'Patch board');
@@ -88,6 +90,84 @@ test('routing uses defaults without reading priority or status setup and ignores
   calls = []; replies = [{ status: 403, body: { message: 'You do not have security permission to perform this action.' } }];
   await assert.rejects(client.cwOptions(connection, 'boards'), /HTTP 403/);
   assert.equal(calls.length, 1, 'No fallback to the more privileged setup endpoint and no trial ticket');
+});
+
+test('selected priority is retained and validated against active ConnectWise references', async () => {
+  const routing = { companyId: 30, boardId: 10, priorityId: 21 };
+  assert.deepEqual(client.parseRouting({ ...routing, statusId: 11 }), routing);
+  for (const priorityId of [0, -1, 1.5, '21', null, {}, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(() => client.parseRouting({ ...routing, priorityId }), /priority/i);
+  }
+  calls = []; replies = [{ body: { id: 10, name: 'Patch board' } }, { body: { id: 21, name: 'Priority 2 - High' } }];
+  const labels = await client.validateCWRouting(connection, { boardId: 10, priorityId: 21 });
+  assert.deepEqual(labels.priority, { id: 21, name: 'Priority 2 - High' });
+  assert.match(calls[1].url.pathname, /\/service\/priorities\/21$/);
+  for (const invalid of [{ id: 21, name: 'Inactive', inactiveFlag: true }, { id: 22, name: 'Wrong ID' }, { id: 21, name: '' }]) {
+    replies = [{ body: { id: 10, name: 'Patch board' } }, { body: invalid }];
+    await assert.rejects(client.validateCWRouting(connection, { boardId: 10, priorityId: 21 }), /priority.*unavailable/);
+  }
+});
+
+for (const grouped of [false, true]) test(`${grouped ? 'group' : 'CVE'} creation sends selected priority, saves returned priority, and never posts an invalid selection`, async () => {
+  for (const mode of ['default', 'selected', 'unavailable', 'stale']) {
+    const id = randomUUID(), now = new Date().toISOString(), table = grouped ? 'patch_group_ticket_requests' : 'patch_ticket_requests';
+    const row = { id, cve: 'CVE-2026-1234', cves: ['CVE-2026-1234'], state: 'prepared', review_state: 'approved',
+      tenant_ids: ['tenant'], tenant_id: 'tenant', crowdstrike_revision: 1, prepared_at: now, updated_at: now,
+      host_count: 1, packet: { csv: 'host\nfixture', hostScope: ['fixture'], label: 'Fixture update' } };
+    const dbCalls = [], posts = [];
+    const db = { connect: async () => ({ query: db.query, release() {} }), query: async (sql, args = []) => {
+      dbCalls.push({ sql, args });
+      if (sql.startsWith('SELECT * FROM patch_connectwise_connection')) return { rows: [{ secret: client.sealCWConnection(connection), target: client.cwTarget(connection), revision: 1, defaults: {} }] };
+      if (sql.startsWith('SELECT revision')) return { rows: [{ revision: 1 }] };
+      if (sql.startsWith('SELECT id,ticket_id')) return { rows: [] };
+      if (sql.startsWith('SELECT ') && sql.includes(`FROM ${table} WHERE id=$1`)) return { rows: [{ ...row }] };
+      if (sql.startsWith(`UPDATE ${table} SET state='creating'`)) Object.assign(row, { state: 'creating', created_by: args[1], cw_target: args[2], cw_revision: args[3], company_id: args[4], routing: JSON.parse(args[5]), title: args[6], body: args[7] });
+      if (sql.startsWith(`UPDATE ${table} SET labels=`)) row.labels = JSON.parse(args[1]);
+      if (sql.startsWith(`UPDATE ${table} SET state='created'`)) Object.assign(row, { state: 'created', ticket_id: args[1], ticket_url: args[2], ticket_status: args[3], closed: args[4], attachment_state: 'pending', ticket_priority_id: args[5], ticket_priority_name: args[6] });
+      if (sql.startsWith(`UPDATE ${table} SET attachment_state='uploading'`)) { row.attachment_state = 'uploading'; return { rows: [{ ...row }] }; }
+      if (sql.startsWith(`UPDATE ${table} SET attachment_state='attached'`)) row.attachment_state = 'attached';
+      if (sql.startsWith(`UPDATE ${table} SET state=CASE`)) { row.state = row.ticket_id ? 'created' : args[1]; row.last_error = args[2]; }
+      return { rows: [], rowCount: 1 };
+    } };
+    let ticket;
+    const api = await loader({
+      './elastic-dashboard': dashboard,
+      './elastic-dashboard-store': { dashboardDatabase: async () => db, assertPatchRequestScope: async () => {}, verifyAgainstCrowdStrike: async () => assert.fail('Unexpected provider call') },
+      './reporting-tenant-scope': { customerFalconTenantIds: () => [] },
+      './reporting-direct-sources': { atlasFalconReviewPacket: group => group },
+      './customer-consolidation-hold': { requiresConsolidationManualReview: () => false },
+      './connectwise-client': { ...client,
+        validateCWRouting: async (c, routing) => {
+          calls = []; replies = [{ body: { id: 30, name: 'Customer' } }, { body: { id: 10, name: 'Patch board' } }];
+          if (routing.priorityId) replies.push({ body: { id: 21, name: 'Priority 2 - High', inactiveFlag: mode === 'unavailable' } });
+          return client.validateCWRouting(c, routing);
+        },
+        cwRequest: async (_c, path, method, body) => {
+          if (method === 'POST') {
+            assert.equal(path, '/service/tickets'); posts.push(body);
+            ticket = { id: 100, company: body.company, externalXRef: body.externalXRef, priority: { id: body.priority?.id ?? 24, name: body.priority ? 'Priority 2 - High' : 'Priority 4 - Low' } };
+          }
+          return ticket;
+        },
+        uploadPatchCsv: async () => 700,
+      },
+    })(`lib/${grouped ? 'patch-group-ticket-store' : 'patch-ticket-store'}.ts`);
+    const create = grouped ? api.createGroupTicket : api.createPatchTicket;
+    const read = grouped ? api.readGroupTicket : api.readPatchTicket;
+    const payload = { title: 'Fixture ticket', body: 'Fixture contents', connectionRevision: mode === 'stale' ? 2 : 1,
+      routing: { companyId: 30, boardId: 10, ...(mode !== 'default' ? { priorityId: 21 } : {}) } };
+    if (mode === 'stale') { await assert.rejects(create(id, payload, 'analyst'), /connection changed/); assert.equal(posts.length, 0); continue; }
+    await create(id, payload, 'analyst');
+    for (let i = 0; i < 100 && row.attachment_state !== 'attached' && row.state !== 'failed'; i++) await new Promise(r => setTimeout(r, 10));
+    if (mode === 'unavailable') { assert.equal(row.state, 'failed'); assert.match(row.last_error, /priority.*unavailable/); assert.equal(posts.length, 0); continue; }
+    assert.equal(row.attachment_state, 'attached'); assert.equal(posts.length, 1);
+    assert.ok(!('status' in posts[0]));
+    if (mode === 'default') assert.ok(!('priority' in posts[0])); else assert.deepEqual(posts[0].priority, { id: 21 });
+    const { request } = await read(id);
+    assert.equal(request.priorityId, ticket.priority.id); assert.equal(request.priorityName, ticket.priority.name);
+    assert.equal(row.routing.priorityId, payload.routing.priorityId);
+    await create(id, payload, 'analyst'); assert.equal(posts.length, 1, 'Repeated submission must not create another ticket');
+  }
 });
 test('HTTP transport pins public DNS, sends authentication, rejects redirects, never retries POST', async () => {
   calls = []; replies = [{ status: 502, body: { message: 'Unavailable' } }];
@@ -139,7 +219,7 @@ test('durable ticket lifecycle and duplicate protection in PostgreSQL', { skip: 
   await db.query("TRUNCATE patch_ticket_requests,patch_connectwise_connection,patch_ticket_audit; CREATE TABLE IF NOT EXISTS dashboard_source_connections(source TEXT PRIMARY KEY,revision INT); INSERT INTO dashboard_source_connections VALUES('crowdstrike',1) ON CONFLICT(source) DO UPDATE SET revision=1");
   const packet = { cve: 'CVE-2026-1234', collectedAt: new Date().toISOString(), region: 'us-1', hostCount: 1, findingCount: 1, csvRows: 1, title: 'Patch', body: 'Recommended remediation only', csv: 'host\nserver', warnings: [], tenantIds: ['a'.repeat(32)], hostScope: ['tenant:device'] };
   const draft = async (extra = {}) => { const id = randomUUID(); await store.persistPreparedPatch(id, { ...packet, ...extra }, 'user@example.test', 1); return id; };
-  const submit = { title: 'Patch CVE', body: packet.body, connectionRevision: 1, routing: { companyId: 30, boardId: 10, statusId: 11, priorityId: 12 } };
+  const submit = { title: 'Patch CVE', body: packet.body, connectionRevision: 1, routing: { companyId: 30, boardId: 10, statusId: 11 } };
   async function waitFor(id, predicate) { for (let i = 0; i < 200; i++) { const { request } = await store.readPatchTicket(id); if (predicate(request)) { await new Promise(r => setTimeout(r, 20)); return request; } await new Promise(r => setTimeout(r, 10)); } assert.fail('Worker did not reach expected state'); }
   try {
     await store.saveCWSettings(connection, 'admin@example.test');

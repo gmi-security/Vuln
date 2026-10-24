@@ -4,7 +4,7 @@ import { dashboardRequest } from "@/lib/dashboard-browser-client";
 import { automatedTicketBody, patchTicketState, type PatchTicketDetail, type PatchTicketSummary } from "@/lib/patch-ticket-types";
 import type { PatchRequest } from "@/lib/patch-request";
 import type { CWDefaults } from "@/lib/connectwise-client";
-import { ConnectWiseRouting, ConnectWiseSelect, type CWSettings } from "@/components/ConnectWiseFields";
+import { ConnectWiseRouting, ConnectWiseSelect, ConnectWiseTicketPriority, type CWSettings } from "@/components/ConnectWiseFields";
 import styles from "./QueryDashboard.module.css";
 
 export default function ConnectWisePatchTicket({ cve, packet, requestId, onResume }: {
@@ -13,6 +13,7 @@ export default function ConnectWisePatchTicket({ cve, packet, requestId, onResum
   const [settings, setSettings] = useState<CWSettings | null>(null), [requests, setRequests] = useState<PatchTicketSummary[]>([]);
   const [current, setCurrent] = useState<PatchTicketSummary | null>(null), [review, setReview] = useState(false);
   const [routing, setRouting] = useState<CWDefaults>({}), [companyId, setCompanyId] = useState<number>();
+  const [ticketPriority, setTicketPriority] = useState<number>();
   const [title, setTitle] = useState(""), [body, setBody] = useState(""), [busy, setBusy] = useState("");
   const [error, setError] = useState(""), [message, setMessage] = useState("");
   const [editingPriority, setEditingPriority] = useState(false), [priorityDraft, setPriorityDraft] = useState<number>();
@@ -34,7 +35,7 @@ export default function ConnectWisePatchTicket({ cve, packet, requestId, onResum
     return () => { live = false; generation.current++; controller.abort(); };
   }, [cve]);
   useEffect(() => {
-    let live = true; setReview(false); setCompanyId(undefined); setCurrent(null); setMessage(""); setEditingPriority(false);
+    let live = true; setReview(false); setCompanyId(undefined); setTicketPriority(undefined); setCurrent(null); setMessage(""); setEditingPriority(false);
     if (packet) { setTitle(`Patch ${packet.cve} | ${packet.hostCount} affected devices`.slice(0, 100)); setBody(automatedTicketBody(packet)); }
     if (requestId) dashboardRequest<{ request: PatchTicketSummary }>(`patch-tickets/${requestId}`).then(data => { if (live) { setCurrent(data.request); void reload().catch(() => {}); } }).catch(e => { if (live) setError(e.message); });
     return () => { live = false; };
@@ -91,11 +92,12 @@ export default function ConnectWisePatchTicket({ cve, packet, requestId, onResum
     {packet && !requestId && <p className={styles.resultNote}>Prepare a fresh request to save its report and enable ticket creation.</p>}
     {packet?.tenantIds?.length && packet.tenantIds.length > 1 ? <p className={styles.patchError}>This report spans {packet.tenantIds.length} CrowdStrike tenants. Select one tenant above and prepare its report before sending a customer ticket.</p> : null}
     {canCreate && !review && <button type="button" className={styles.primaryButton} disabled={Boolean(busy)} onClick={() => { setReview(true); setError(""); }}>Review ConnectWise ticket</button>}
-    {review && canCreate && <form className="mt-5 space-y-4" onSubmit={e => { e.preventDefault(); void action(requestId!, "create", { routing: { ...routing, companyId }, title, body, connectionRevision: settings?.revision }); }}>
+    {review && canCreate && <form className="mt-5 space-y-4" onSubmit={e => { e.preventDefault(); void action(requestId!, "create", { routing: { ...routing, companyId, priorityId: ticketPriority }, title, body, connectionRevision: settings?.revision }); }}>
       <p className={styles.resultNote}>{packet.hostCount.toLocaleString()} devices · CrowdStrike tenant <span className="break-all">{packet.tenantIds[0]}</span><br />Collected {new Date(packet.collectedAt).toLocaleString()}. Choose the ConnectWise company that owns this scope.</p>
       {requests.some(r => r.ticketId && !r.closed) && <p className={styles.patchWarnings}>There are already linked tickets for this CVE below. Check their company and device count before creating another request.</p>}
       <ConnectWiseSelect label="ConnectWise company" kind="companies" value={companyId} onChange={setCompanyId} revision={settings?.revision} disabled={Boolean(busy)} />
       <ConnectWiseRouting value={routing} onChange={setRouting} revision={settings?.revision} disabled={Boolean(busy)} />
+      <ConnectWiseTicketPriority value={ticketPriority} onChange={setTicketPriority} revision={settings?.revision} disabled={Boolean(busy)} />
       <label className={styles.patchLabel}>Ticket title<input required maxLength={100} value={title} onChange={e => setTitle(e.target.value)} disabled={Boolean(busy)} /></label>
       <label className={styles.patchLabel}>Ticket contents<textarea required maxLength={200000} value={body} onChange={e => setBody(e.target.value)} rows={10} disabled={Boolean(busy)} /></label>
       <p className={styles.resultNote}>{packet.cve}-patch-request.csv will be attached with the complete asset list and recommended remediations. Asset names are kept in the CSV.</p>
