@@ -7,8 +7,8 @@ import styles from "./QueryDashboard.module.css";
 
 export type CWSettings = { configured: boolean; endpoint?: string; companyId?: string; clientId?: string; authMode?: "encoded" | "separate"; revision?: number; defaults: CWDefaults; error?: string };
 type Lookup = { options: CWOption[]; more: boolean; page: number; revision: number };
-export function ConnectWiseSelect({ label, kind, value, onChange, boardId, revision, optional = false, disabled = false }: {
-  label: string; kind: string; value?: number; onChange: (id: number | undefined) => void; boardId?: number; revision?: number; optional?: boolean; disabled?: boolean;
+export function ConnectWiseSelect({ label, kind, value, onChange, boardId, revision, optional = false, disabled = false, defaultLabel = "Use board default" }: {
+  label: string; kind: string; value?: number; onChange: (id: number | undefined) => void; boardId?: number; revision?: number; optional?: boolean; disabled?: boolean; defaultLabel?: string;
 }) {
   const id = useId();
   const generation = useRef(0);
@@ -47,7 +47,7 @@ export function ConnectWiseSelect({ label, kind, value, onChange, boardId, revis
     </div>}
     <select id={id} className={`${selectClass} mt-2 block w-full`} required={!optional} disabled={disabled || busy || (["statuses", "teams"].includes(kind) && !boardId)} value={value ?? ""}
       onChange={e => onChange(e.target.value ? Number(e.target.value) : undefined)}>
-      <option value="">{busy ? "Loading from ConnectWise…" : optional ? "Use board default" : `Choose ${label.toLowerCase()}`}</option>
+      <option value="">{busy ? "Loading from ConnectWise…" : optional ? defaultLabel : `Choose ${label.toLowerCase()}`}</option>
       {value && !options.some(option => option.id === value) && <option value={value} disabled>{busy ? "Loading saved selection…" : "Selection unavailable — choose an active option"}</option>}
       {options.map(option => <option value={option.id} key={option.id}>{option.name}{option.identifier ? ` (${option.identifier})` : ""}</option>)}
     </select>
@@ -62,6 +62,16 @@ export function ConnectWiseRouting({ value, onChange, revision, disabled = false
   return <div className="grid gap-4 sm:grid-cols-2">
     <ConnectWiseSelect label="Service board" kind="boards" value={value.boardId} revision={revision} disabled={disabled} onChange={boardId => onChange({ boardId, teamId: undefined })} />
     <ConnectWiseSelect label="Team" kind="teams" optional value={value.teamId} boardId={value.boardId} revision={revision} disabled={disabled} onChange={teamId => onChange({ ...value, teamId })} />
-    <p className={`${styles.resultNote} sm:col-span-2`}>ConnectWise will apply its default ticket priority and initial status.</p>
+    <p className={`${styles.resultNote} sm:col-span-2`}>ConnectWise applies the board's initial ticket status.</p>
   </div>;
+}
+
+export function ConnectWiseTicketPriority({ value, onChange, revision, disabled }: {
+  value?: number; onChange: (id: number | undefined) => void; revision?: number; disabled?: boolean;
+}) {
+  return <fieldset className="rounded-lg border border-zinc-700 p-4">
+    <legend className="px-2 text-sm font-medium text-zinc-100">Ticket priority</legend>
+    <ConnectWiseSelect label="ConnectWise priority" kind="priorities" optional defaultLabel="Use ConnectWise default" value={value} onChange={onChange} revision={revision} disabled={disabled} />
+    <p className={styles.resultNote}>Choose the priority for this ticket, or leave the default. These are your ConnectWise priorities; this does not change the vulnerability's severity.</p>
+  </fieldset>;
 }

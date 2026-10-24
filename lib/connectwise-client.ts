@@ -6,8 +6,8 @@ import { isPublicIPv4 } from "./elastic-query-client";
 
 export type ConnectWiseConnection = { endpoint: string; companyId: string; clientId: string; publicKey: string; privateKey: string; authMode?: "encoded" };
 export type CWOption = { id: number; name: string; identifier?: string };
-export type TicketRouting = { companyId: number; boardId: number; teamId?: number };
-export type CWDefaults = Omit<Partial<TicketRouting>, "companyId">;
+export type TicketRouting = { companyId: number; boardId: number; teamId?: number; priorityId?: number };
+export type CWDefaults = Omit<Partial<TicketRouting>, "companyId" | "priorityId">;
 export type CWRecord = Record<string, any>;
 
 export function normalizeCWEndpoint(value: unknown): string {
@@ -127,8 +127,8 @@ export const cwId = (v: unknown): v is number => typeof v === "number" && Number
 export function parseRouting(value: unknown): TicketRouting {
   const body = value as TicketRouting | null;
   if (!body || ![body.companyId, body.boardId].every(cwId) || (body.teamId !== undefined && !cwId(body.teamId))) throw new DashboardError("Choose a company and board from ConnectWise.");
-  // Ignore legacy status/priority selections; ConnectWise applies its defaults.
-  return { companyId: body.companyId, boardId: body.boardId, ...(body.teamId ? { teamId: body.teamId } : {}) };
+  if (body.priorityId !== undefined && !cwId(body.priorityId)) throw new DashboardError("Choose a valid ConnectWise priority or use its default.");
+  return { companyId: body.companyId, boardId: body.boardId, ...(body.teamId ? { teamId: body.teamId } : {}), ...(body.priorityId ? { priorityId: body.priorityId } : {}) };
 }
 export async function cwOptions(connection: ConnectWiseConnection, kind: string, boardId?: number, page = 1, search = "", selectedId?: number) {
   // BoardInfo uses ticket inquiry access rather than the board setup-table API.
@@ -210,7 +210,8 @@ export async function cwAddTicketNote(connection: ConnectWiseConnection, ticketI
 }
 export async function validateCWRouting(connection: ConnectWiseConnection, routing: TicketRouting | Omit<TicketRouting, "companyId">) {
   const refs = { ...("companyId" in routing ? { company: `/company/companies/${routing.companyId}` } : {}), board: `/service/info/boards/${routing.boardId}`,
-    ...(routing.teamId ? { team: `/service/boards/${routing.boardId}/teams/${routing.teamId}` } : {}) };
+    ...(routing.teamId ? { team: `/service/boards/${routing.boardId}/teams/${routing.teamId}` } : {}),
+    ...(routing.priorityId ? { priority: `/service/priorities/${routing.priorityId}` } : {}) };
   const entries = await Promise.all(Object.entries(refs).map(async ([name, path]) => {
     const row = await cwRequest(connection, path);
     if (!row || !cwId(row.id) || row.id !== Number(path.split("/").at(-1)) || typeof row.name !== "string" || !row.name.trim() || row.inactiveFlag || row.inactive || row.deletedFlag) throw new DashboardError(`The selected ConnectWise ${name} is unavailable. Reload its list.`);

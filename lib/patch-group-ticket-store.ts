@@ -221,8 +221,9 @@ export async function createGroupTicket(id: string, value: unknown, actor: strin
 async function recordTicket(id: string, ticket: CWRecord, connection: ConnectWiseConnection) {
   if (!cwId(ticket?.id)) throw new CWRequestError("ConnectWise did not return a ticket number. Check the creation outcome.", true);
   const db = await patchTicketDatabase();
-  await db.query(`UPDATE patch_group_ticket_requests SET state='created',ticket_id=$2,ticket_url=$3,ticket_status=$4,closed=$5,attachment_state='pending',last_error=NULL,updated_at=now() WHERE id=$1 AND ticket_id IS NULL`,
-    [id, ticket.id, ticketUrl(connection, ticket.id), typeof ticket.status?.name === "string" ? ticket.status.name : "Created", ticket.closedFlag === true]);
+  await db.query(`UPDATE patch_group_ticket_requests SET state='created',ticket_id=$2,ticket_url=$3,ticket_status=$4,closed=$5,ticket_priority_id=$6,ticket_priority_name=$7,attachment_state='pending',last_error=NULL,updated_at=now() WHERE id=$1 AND ticket_id IS NULL`,
+    [id, ticket.id, ticketUrl(connection, ticket.id), typeof ticket.status?.name === "string" ? ticket.status.name : "Created", ticket.closedFlag === true,
+      cwId(ticket.priority?.id) ? ticket.priority.id : null, typeof ticket.priority?.name === "string" ? ticket.priority.name : null]);
 }
 async function runCreation(id: string) {
   const db = await patchTicketDatabase(); let writeStarted = false, ticketSaved = false;
@@ -239,6 +240,7 @@ async function runCreation(id: string) {
     writeStarted = true;
     const ticket = await cwRequest(saved.value, "/service/tickets", "POST", { summary: row.title, initialDescription: row.body, recordType: "ServiceTicket",
       board: { id: row.routing.boardId }, company: { id: row.routing.companyId },
+      ...(row.routing.priorityId ? { priority: { id: row.routing.priorityId } } : {}),
       ...(row.routing.teamId ? { team: { id: row.routing.teamId } } : {}), externalXRef: `GMI-GRP-${id}` });
     await recordTicket(id, ticket, saved.value); ticketSaved = true;
     // Once a ConnectWise ticket is confirmed created for a customer, this

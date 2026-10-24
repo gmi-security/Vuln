@@ -4,7 +4,7 @@ import { dashboardRequest } from "@/lib/dashboard-browser-client";
 import { automatedGroupTicketBody, patchGroupTicketState, type PatchGroupTicketSummary } from "@/lib/patch-group-ticket-types";
 import type { PatchGroup } from "@/lib/patch-request";
 import type { CWDefaults } from "@/lib/connectwise-client";
-import { ConnectWiseRouting, ConnectWiseSelect, type CWSettings } from "@/components/ConnectWiseFields";
+import { ConnectWiseRouting, ConnectWiseSelect, ConnectWiseTicketPriority, type CWSettings } from "@/components/ConnectWiseFields";
 import styles from "./QueryDashboard.module.css";
 
 export default function ConnectWiseGroupTicket({ group, requestId, customerScope }: { group: PatchGroup; requestId: string; customerScope?: string }) {
@@ -12,6 +12,7 @@ export default function ConnectWiseGroupTicket({ group, requestId, customerScope
   const [settings, setSettings] = useState<CWSettings | null>(null);
   const [current, setCurrent] = useState<PatchGroupTicketSummary | null>(null), [review, setReview] = useState(false);
   const [routing, setRouting] = useState<CWDefaults>({}), [companyId, setCompanyId] = useState<number>();
+  const [ticketPriority, setTicketPriority] = useState<number>();
   const [title, setTitle] = useState(group.ticketTitle), [body, setBody] = useState(automatedGroupTicketBody(group)), [busy, setBusy] = useState("");
   const [error, setError] = useState(""), [message, setMessage] = useState("");
   const [editingPriority, setEditingPriority] = useState(false), [priorityDraft, setPriorityDraft] = useState<number>();
@@ -27,6 +28,7 @@ export default function ConnectWiseGroupTicket({ group, requestId, customerScope
   useEffect(() => {
     const controller = new AbortController(); lifetime.current = controller;
     let live = true;
+    setTicketPriority(undefined);
     Promise.all([dashboardRequest<CWSettings>("connectwise", { signal: controller.signal }), dashboardRequest<{ request: PatchGroupTicketSummary }>(requestPath, { signal: controller.signal })])
       .then(([config, data]) => { if (live) { setSettings(config); setRouting(config.defaults); setCurrent(data.request); } })
       .catch(e => { if (live) setError(e.message); });
@@ -78,10 +80,11 @@ export default function ConnectWiseGroupTicket({ group, requestId, customerScope
     {current && current.reviewState !== "approved" && !current.ticketId && <p className={styles.resultNote}>This draft must be approved in the review queue before a ticket can be sent.</p>}
     {settings && !settings.configured && <p className={styles.resultNote}>Open <strong>Connections → ConnectWise</strong> to enter your keys and load your boards.</p>}
     {canCreate && !review && <button type="button" className={styles.primaryButton} disabled={Boolean(busy)} onClick={() => { setReview(true); setError(""); }}>Review ConnectWise ticket</button>}
-    {review && canCreate && <form className="mt-4 space-y-4" onSubmit={e => { e.preventDefault(); void action("create", { routing: { ...routing, companyId }, title, body, connectionRevision: settings?.revision }); }}>
+    {review && canCreate && <form className="mt-4 space-y-4" onSubmit={e => { e.preventDefault(); void action("create", { routing: { ...routing, companyId, priorityId: ticketPriority }, title, body, connectionRevision: settings?.revision }); }}>
       <p className={styles.resultNote}>{group.deviceCount.toLocaleString()} {group.source === "stored-findings" ? "assets" : "devices"} · resolves {group.cves.join(", ")} · {group.source === "stored-findings" ? `Customer ${group.companyName} · sources ${group.connectors?.join(", ")}` : <>CrowdStrike tenant <span className="break-all">{group.tenantId}</span></>}<br />Choose the ConnectWise company that owns this scope.</p>
       <ConnectWiseSelect label="ConnectWise company" kind="companies" value={companyId} onChange={setCompanyId} revision={settings?.revision} disabled={Boolean(busy)} />
       <ConnectWiseRouting value={routing} onChange={setRouting} revision={settings?.revision} disabled={Boolean(busy)} />
+      <ConnectWiseTicketPriority value={ticketPriority} onChange={setTicketPriority} revision={settings?.revision} disabled={Boolean(busy)} />
       <label className={styles.patchLabel}>Ticket title<input required maxLength={100} value={title} onChange={e => setTitle(e.target.value)} disabled={Boolean(busy)} /></label>
       <label className={styles.patchLabel}>Ticket contents<textarea required maxLength={200000} value={body} onChange={e => setBody(e.target.value)} rows={10} disabled={Boolean(busy)} /></label>
       <p className={styles.resultNote}>{group.label}-patch-request.csv will be attached with the affected device list. One ticket covers every CVE this patch resolves.</p>
