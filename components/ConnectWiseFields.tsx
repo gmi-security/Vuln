@@ -69,7 +69,7 @@ export function ConnectWiseRouting({ value, onChange, revision, disabled = false
 export function ConnectWiseTicketPriority({ value, onChange, revision, disabled }: {
   value?: number; onChange: (id: number | undefined) => void; revision?: number; disabled?: boolean;
 }) {
-  return <fieldset className="rounded-lg border border-zinc-700 p-4">
+  return <fieldset className="min-w-0 rounded-lg border border-zinc-700 p-4">
     <legend className="px-2 text-sm font-medium text-zinc-100">Ticket priority</legend>
     <ConnectWiseSelect label="ConnectWise priority" kind="priorities" optional defaultLabel="Use ConnectWise default" value={value} onChange={onChange} revision={revision} disabled={disabled} />
     <p className={styles.resultNote}>Choose the priority for this ticket, or leave the default. These are your ConnectWise priorities; this does not change the vulnerability's severity.</p>

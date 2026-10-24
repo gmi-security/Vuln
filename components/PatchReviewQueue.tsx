@@ -110,7 +110,7 @@ export default function PatchReviewQueue({ companyId, sla }: { companyId: string
     const haystack = [row.remediationTitle, ...row.cves, row.companyName, row.tenantId].filter(Boolean).join(" ").toLowerCase();
     return haystack.includes(needle);
   }), [rows, stateFilter, needle]);
-  return <section aria-label="Consolidation review queue" className="rounded-2xl border border-zinc-800 bg-[#080808] p-5 sm:p-7">
+  return <section aria-label="Consolidation review queue" className="min-w-0 rounded-2xl border border-zinc-800 bg-[#080808] p-5 sm:p-7">
     <div className="flex flex-wrap items-start justify-between gap-3"><div>
       <p className="text-xs uppercase tracking-[0.25em] text-red-500">Consolidation</p>
       <h2 className="mt-2 text-xl font-semibold text-white">Review queue</h2>
