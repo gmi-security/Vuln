@@ -4,9 +4,10 @@ export type ProgressTicket = {id:string;kind:'single'|'group';companyId:string;t
   createdAt:string;scopeHash:string;packet:Record<string,unknown>;ticketUrl?:string;ticketStatus?:string;closed?:boolean};
 export type ProgressPair = {key:string;deviceKey:string;source:string;hostId:string;cid?:string;cve:string;findingId?:string;hostname?:string};
 export type ProgressScope = {ticket:ProgressTicket;pairs:ProgressPair[];error?:string};
+export type DefenderProgressProof = {deviceId:string;revision:number;observedAt:string};
 export type ProgressEvidence = {complete:boolean;scopeMatches:boolean;assessmentAt:string|null;generation:string;
-  present:boolean;covered:boolean;suppressed?:boolean;reason?:string;absenceIsFix?:boolean};
-export type ProgressObservation = ProgressPair & {state:'detected'|'clear'|'unknown';reason:string;assessmentAt:string|null;generation:string|null;reappeared?:boolean};
+  present:boolean;covered:boolean;suppressed?:boolean;reason?:string;absenceIsFix?:boolean;retained?:boolean;defenderProof?:DefenderProgressProof};
+export type ProgressObservation = ProgressPair & {state:'detected'|'clear'|'unknown';reason:string;assessmentAt:string|null;generation:string|null;reappeared?:boolean;retained?:boolean;defenderProof?:DefenderProgressProof};
 export type ProgressSummary = {devices:number;detected:number;clear:number;unknown:number;reappeared:number;pairs:number};
 const validCve=(v:unknown):v is string=>typeof v==='string'&&/^CVE-\d{4}-\d{4,19}$/.test(v);
 const text=(v:unknown)=>typeof v==='string'?v:'';
@@ -57,13 +58,14 @@ export function progressScope(ticket:ProgressTicket):ProgressScope {
 }
 
 export function assessProgress(pair:ProgressPair,baseline:string,evidence:ProgressEvidence|null):ProgressObservation {
-  const row:ProgressObservation={...pair,state:'unknown',reason:'No qualifying completed assessment is available.',assessmentAt:evidence?.assessmentAt??null,generation:evidence?.generation??null};
+  const row:ProgressObservation={...pair,state:'unknown',reason:'No qualifying completed assessment is available.',assessmentAt:evidence?.assessmentAt??null,generation:evidence?.generation??null,
+    ...(evidence?.defenderProof?{defenderProof:evidence.defenderProof}:{}),...(evidence?.retained?{retained:true}:{})};
   if(!evidence)return row;
   if(!evidence.complete||!evidence.scopeMatches)return {...row,reason:evidence.reason||'Source scope or publication is not verified.'};
-  if(!evidence.assessmentAt||!Number.isFinite(Date.parse(baseline))||!(Date.parse(evidence.assessmentAt)>Date.parse(baseline)))return {...row,reason:evidence.reason||'Waiting for an assessment after ticket creation.'};
+  if(!evidence.assessmentAt||!Number.isFinite(Date.parse(baseline))||!(Date.parse(evidence.assessmentAt)>Date.parse(baseline)))return {...row,reason:evidence.reason||'Waiting for fresh device data after ticket creation.'};
   if(evidence.present)return {...row,state:'detected',reason:'Still detected by the source after ticket creation.'};
   if(evidence.suppressed)return {...row,reason:'Suppressed or excluded evidence cannot verify remediation.'};
-  if(evidence.covered||pair.source==='crowdstrike'&&evidence.absenceIsFix)return {...row,state:'clear',reason:evidence.absenceIsFix?'Fixed: no longer reported by the next completed CrowdStrike import.':'No longer detected in a later completed assessment covering this device.'};
+  if(evidence.covered||pair.source==='crowdstrike'&&evidence.absenceIsFix)return {...row,state:'clear',reason:evidence.absenceIsFix?'Fixed: no longer reported by the next completed CrowdStrike import.':evidence.retained?'Earlier verified absence retained at the original evidence date; no new device assessment is claimed.':'No longer detected in a later completed assessment covering this device.'};
   return {...row,reason:evidence.reason||'Device coverage is not verified; absence alone is not proof.'};
 }
 export function markReappearances(rows:ProgressObservation[],previouslyClear:ReadonlySet<string>){

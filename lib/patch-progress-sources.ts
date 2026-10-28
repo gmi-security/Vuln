@@ -7,7 +7,7 @@ import {matchesSpotlightTenant} from './spotlight-summary-model';
 import {loadReviewedScannerRoutes} from './customer-scanner-routing-server';
 import {nessusEvidenceScope} from './nessus-evidence-scope';
 
-const iso=(value:unknown)=>value?new Date(String(value)).toISOString():null;
+const iso=(value:unknown)=>value?(value instanceof Date?value.toISOString():new Date(String(value)).toISOString()):null;
 const fingerprint=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export type ProgressCollection={rows:ProgressObservation[];fingerprint:string;newDevices:Record<string,number|null>;sourceTimes:Record<string,string|null>;capturedAt:string};
 
@@ -28,12 +28,39 @@ async function legacyProgressSpotlight(client:PoolClient,company:string){
   return {...row,cid};
 }
 
-export function defenderProgressEvidence(f:Finding|undefined,run:{id:string;published:boolean;finishedAt:string}|null,device:{lastSeen?:string|null}|undefined,present:boolean):ProgressEvidence|null {
+type DefenderProgressRun={id:string;published:boolean;finishedAt:string;revision:number};
+type DefenderHistory={run:DefenderProgressRun;device:{lastSeen?:string|null}|undefined;present:boolean};
+export function defenderProgressEvidence(f:Finding|undefined,run:DefenderProgressRun|null,device:{lastSeen?:string|null}|undefined,present:boolean,
+  history?:DefenderHistory,previous?:ProgressObservation):ProgressEvidence|null {
   if(!f?.defender||!run)return null;
   const heartbeat=device?.lastSeen||null;
-  return {complete:run.published&&!!heartbeat&&Date.parse(heartbeat)<=Date.parse(run.finishedAt),scopeMatches:f.defender.runId===run.id,generation:run.id,
+  const current:ProgressEvidence={complete:run.published&&!!heartbeat&&Date.parse(heartbeat)<=Date.parse(run.finishedAt),scopeMatches:f.defender.runId===run.id,generation:run.id,
     assessmentAt:heartbeat,present,covered:!!device&&!!heartbeat&&Date.parse(heartbeat)<=Date.parse(run.finishedAt),
     reason:!device?'Device was not included in the completed inventory.':!heartbeat?'Device assessment time is unavailable.':undefined};
+  const source=f.defender,observed=Date.parse(source.observedAt),finished=Date.parse(run.finishedAt);
+  const proof={deviceId:source.deviceId,revision:run.revision,observedAt:source.observedAt};
+  const validProof=!!source.deviceId&&Number.isInteger(run.revision)&&run.revision>0&&Number.isFinite(observed)&&observed<=finished;
+  if(!run.published||present||current.scopeMatches){
+    if(current.scopeMatches&&validProof&&observed===finished)current.defenderProof=proof;
+    return current;
+  }
+  const waiting={...current,reason:'Waiting for fresh device data; no qualifying earlier verification is available.'};
+  if(source.active!==false||!validProof)return waiting;
+  // Verify the published source negative, never the editable workflow status.
+  if(history){
+    const old=history.run,at=history.device?.lastSeen||null;
+    if(!old.published||old.id!==source.runId||old.revision!==run.revision||Date.parse(old.finishedAt)!==observed||history.present)return waiting;
+    if(history.device)return {complete:!!at&&Date.parse(at)<=observed,scopeMatches:true,generation:old.id,assessmentAt:at,
+      present:false,covered:!!at&&Date.parse(at)<=observed,retained:true,defenderProof:proof};
+  }
+  // Completed observations preserve the exact proof after source retention prunes raw rows.
+  if(previous?.state==='clear'&&previous.generation===source.runId&&previous.defenderProof?.deviceId===source.deviceId&&
+    previous.defenderProof.revision===run.revision&&previous.defenderProof.observedAt===source.observedAt&&
+    previous.assessmentAt&&Date.parse(previous.assessmentAt)<=observed){
+    return {complete:true,scopeMatches:true,generation:source.runId,assessmentAt:previous.assessmentAt,
+      present:false,covered:true,retained:true,defenderProof:proof};
+  }
+  return waiting;
 }
 export function nessusProgressEvidence(f:Finding|undefined,scans:Map<string,{completedAt:string;imported:boolean;version:number}>,allowed:Set<string>):ProgressEvidence|null {
   if(!f?.nessusObservations)return null;
@@ -60,13 +87,14 @@ export async function collectPatchProgress(db:Pool,scope:ProgressScope):Promise<
     const tables=(await client.query(`SELECT to_regclass('public.defender_connections') defender,to_regclass('public.spotlight_import_current') spotlight`)).rows[0];
     const exists=(await client.query('SELECT id FROM app_companies WHERE id=$1',[company])).rowCount;
     if(!exists)throw Error('Customer is unavailable.');
-    let defender:{id:string;published:boolean;finishedAt:string}|null=null;
+    let defender:DefenderProgressRun|null=null;
     if(tables.defender&&scope.pairs.some(p=>p.source==='defender')){
-      const r=(await client.query(`SELECT r.id,r.finished_at,r.status,c.revision=r.revision AS matches,
+      const r=(await client.query(`SELECT r.id,r.finished_at,r.status,r.revision,c.revision=r.revision AND r.company_id=c.company_id AS matches,
         m.payload->'meta'->'defenderGenerations'->>$1 AS published FROM defender_connections c
         JOIN defender_import_runs r ON r.id=c.current_run CROSS JOIN app_store_metadata m
         WHERE c.company_id=$1 AND m.id=1`,[company])).rows[0];
-      if(r)defender={id:r.id,published:r.status==='succeeded'&&r.matches&&r.published===r.id,finishedAt:iso(r.finished_at)!};
+      if(r)defender={id:r.id,revision:r.revision,published:r.status==='succeeded'&&r.matches&&r.published===r.id,finishedAt:iso(r.finished_at)!};
+      if(defender&&!defender.published)throw Error('Defender publication is not ready for progress verification.');
       sourceTimes.defender=defender?.published?defender.finishedAt:null;
     }
     const scans=new Map<string,{completedAt:string;imported:boolean;version:number}>(),allowed=new Set<string>();
@@ -120,10 +148,27 @@ export async function collectPatchProgress(db:Pool,scope:ProgressScope):Promise<
       const byId=new Map(findings.map(f=>[f.id,f]));
       const deviceIds=[...new Set(findings.map(f=>f.defender?.deviceId).filter(Boolean))];
       const devices=new Map<string,{lastSeen?:string|null}>(),positives=new Set<string>();
+      const defenderHistory=new Map<string,DefenderHistory>(),previousDefender=new Map<string,ProgressObservation>();
       if(defender?.published&&deviceIds.length){
         for(const r of (await client.query('SELECT device_id,record FROM defender_devices WHERE run_id=$1 AND device_id=ANY($2::text[])',[defender.id,deviceIds])).rows)devices.set(r.device_id,r.record);
         for(const r of (await client.query(`SELECT DISTINCT device_id,cve FROM defender_records WHERE run_id=$1 AND device_id=ANY($2::text[]) AND cve=ANY($3::text[]) LIMIT 10001`,[defender.id,deviceIds,[...new Set(batch.map(p=>p.cve))]])).rows){positives.add(JSON.stringify([r.device_id,r.cve]));}
         if(positives.size>10000)throw Error('Defender comparison batch exceeds its evidence budget.');
+        const prior=(await client.query(`SELECT o.pair_key,o.observation FROM patch_progress_tickets t
+          JOIN patch_progress_evaluations e ON e.id=t.latest_evaluation AND e.completed_at IS NOT NULL AND e.company_id=t.company_id AND e.scope_hash=t.scope_hash
+          JOIN patch_progress_observations o ON o.evaluation_id=e.id
+          WHERE t.company_id=$1 AND t.kind=$2 AND t.request_id=$3 AND t.scope_hash=$4 AND o.pair_key=ANY($5::text[]) AND o.state='clear'`,
+          [company,scope.ticket.kind,scope.ticket.id,scope.ticket.scopeHash,batch.filter(p=>p.source==='defender').map(p=>p.key)])).rows;
+        for(const r of prior)previousDefender.set(r.pair_key,r.observation);
+        const old=findings.filter(f=>f.defender?.active===false&&f.defender.runId!==defender!.id&&/^[a-f0-9-]{36}$/i.test(f.defender.runId))
+          .map(f=>({finding_id:f.id,run_id:f.defender!.runId,device_id:f.defender!.deviceId,cve:f.cve}));
+        if(old.length){
+          const history=(await client.query(`SELECT p.finding_id,r.id,r.revision,r.status,r.finished_at,d.record,
+            EXISTS(SELECT 1 FROM defender_records v WHERE v.run_id=r.id AND v.device_id=p.device_id AND v.cve=p.cve) present
+            FROM jsonb_to_recordset($2::jsonb) p(finding_id text,run_id uuid,device_id text,cve text)
+            JOIN defender_import_runs r ON r.id=p.run_id AND r.company_id=$1
+            LEFT JOIN defender_devices d ON d.run_id=r.id AND d.device_id=p.device_id`,[company,JSON.stringify(old)])).rows;
+          for(const r of history)defenderHistory.set(r.finding_id,{run:{id:r.id,revision:r.revision,published:r.status==='succeeded',finishedAt:iso(r.finished_at)!},device:r.record||undefined,present:r.present});
+        }
       }
       const csRows=new Map<string,{present:boolean;suppressed:boolean;assessment:string|null}>();
       const csPairs=batch.filter(p=>p.source==='crowdstrike'&&p.cid===cs?.cid);
@@ -143,7 +188,7 @@ export async function collectPatchProgress(db:Pool,scope:ProgressScope):Promise<
         let evidence:ProgressEvidence|null=null;
         const f=p.findingId?byId.get(p.findingId):undefined;
         const valid=f?.companyId===company&&f.asset===p.hostId&&f.cve===p.cve?f:undefined;
-        if(p.source==='defender')evidence=defenderProgressEvidence(valid,defender,devices.get(valid?.defender?.deviceId||''),positives.has(JSON.stringify([valid?.defender?.deviceId,p.cve])));
+        if(p.source==='defender')evidence=defenderProgressEvidence(valid,defender,devices.get(valid?.defender?.deviceId||''),positives.has(JSON.stringify([valid?.defender?.deviceId,p.cve])),defenderHistory.get(valid?.id||''),previousDefender.get(p.key));
         if(p.source==='nessus')evidence=nessusProgressEvidence(valid,scans,allowed);
         if(p.source==='crowdstrike'&&cs&&p.cid===cs.cid){const found=csRows.get(JSON.stringify([p.hostId,p.cve]));evidence={complete:true,scopeMatches:true,generation:cs.runId,present:!!found?.present,covered:false,suppressed:found?.suppressed,
           assessmentAt:sourceTimes.crowdstrike,absenceIsFix:csAbsenceReady,reason:'Waiting for a complete matching CrowdStrike import started after ticket creation.'};}
@@ -160,7 +205,7 @@ export async function collectPatchProgress(db:Pool,scope:ProgressScope):Promise<
     }
     if(cves.length<=1000&&cs){newDevices.crowdstrike=Number((await client.query(`SELECT count(DISTINCT raw->>'aid')::int n FROM spotlight_import_records WHERE run_id=$1 AND tenant_key=$2 AND company_id=$2 AND cve=ANY($3::text[]) AND lower(raw->>'cid')=$4 AND status IN ('open','reopen') AND raw->'suppression_info'->>'is_suppressed'='false' AND NOT(raw->>'aid'=ANY($5::text[]))`,[cs.runId,company,cves,cs.cid,scope.pairs.filter(p=>p.source==='crowdstrike').map(p=>p.hostId)])).rows[0].n);}
     await client.query('COMMIT');
-    return {rows,fingerprint:fingerprint([scope.ticket.scopeHash,rows.map(r=>[r.key,r.state,r.assessmentAt,r.generation,r.reason]),newDevices,sourceTimes]),newDevices,sourceTimes,capturedAt};
+    return {rows,fingerprint:fingerprint([scope.ticket.scopeHash,rows.map(r=>[r.key,r.state,r.assessmentAt,r.generation,r.reason,r.defenderProof,r.retained]),newDevices,sourceTimes]),newDevices,sourceTimes,capturedAt};
   }catch(error){await client.query('ROLLBACK').catch(()=>{});throw error;}finally{client.release();}
 }
 

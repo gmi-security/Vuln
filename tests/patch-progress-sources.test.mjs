@@ -14,6 +14,45 @@ test('Defender requires published current generation and a device observation, n
  assert.equal(api.defenderProgressEvidence(f,{...r,id:'different'},{lastSeen:'2026-10-24'},false).scopeMatches,false);
  assert.equal(api.defenderProgressEvidence(f,r,{lastSeen:'2026-10-26'},true).complete,false);
 });
+
+test('Defender retains dated source absence from an earlier completed import, never a workflow label',()=>{
+ const old={id:'old',published:true,revision:1,finishedAt:'2026-10-22T00:00:00Z'};
+ const current={...old,id:'current',finishedAt:'2026-10-25T00:00:00Z'};
+ const f={status:'Resolved',defender:{deviceId:'device',runId:'old',active:false,observedAt:old.finishedAt}};
+ const history={run:old,device:{lastSeen:'2026-10-21T00:00:00Z'},present:false};
+ const result=api.defenderProgressEvidence(f,current,undefined,false,history);
+ assert.equal(result.complete,true);assert.equal(result.scopeMatches,true);assert.equal(result.covered,true);
+ assert.equal(result.assessmentAt,'2026-10-21T00:00:00Z');assert.equal(result.generation,'old');assert.equal(result.retained,true);
+ assert.deepEqual(result.defenderProof,{deviceId:'device',revision:1,observedAt:old.finishedAt});
+ for(const bad of [undefined,{...history,present:true},{...history,device:undefined},{...history,device:{lastSeen:'2026-10-26'}},
+   {...history,run:{...old,published:false}},{...history,run:{...old,revision:2}},{...history,run:{...old,id:'foreign'}},
+   {...history,run:{...old,finishedAt:'2026-10-23'}}]){
+   const e=api.defenderProgressEvidence(f,current,undefined,false,bad);assert.ok(!e.complete||!e.scopeMatches||!e.covered);
+ }
+ assert.equal(api.defenderProgressEvidence({...f,defender:{...f.defender,active:true}},current,undefined,false,history).covered,false);
+ assert.equal(api.defenderProgressEvidence(f,{...current,published:false},undefined,false,history).complete,false);
+});
+
+test('Defender keeps verified proof after raw retention but rejects changed identity, scope and new positives',()=>{
+ const observedAt='2026-10-22T00:00:00Z',current={id:'current',published:true,revision:1,finishedAt:'2026-10-25T00:00:00Z'};
+ const f={defender:{deviceId:'device',runId:'old',active:false,observedAt}};
+ const previous={state:'clear',generation:'old',assessmentAt:'2026-10-21T00:00:00Z',defenderProof:{deviceId:'device',revision:1,observedAt}};
+ const result=api.defenderProgressEvidence(f,current,undefined,false,undefined,previous);
+ assert.equal(result.complete,true);assert.equal(result.covered,true);assert.equal(result.assessmentAt,previous.assessmentAt);
+ const pruning={run:{...current,id:'old',finishedAt:observedAt},device:undefined,present:false};
+ assert.equal(api.defenderProgressEvidence(f,current,undefined,false,pruning,previous).complete,true,'raw device pruning before run pruning must preserve previously verified proof');
+ for(const bad of [{...previous,state:'unknown'},{...previous,generation:'other'},{...previous,assessmentAt:'bad'},
+  {...previous,assessmentAt:'2026-10-26'},{...previous,defenderProof:undefined},
+  {...previous,defenderProof:{...previous.defenderProof,revision:2}},
+  {...previous,defenderProof:{...previous.defenderProof,deviceId:'other'}},
+  {...previous,defenderProof:{...previous.defenderProof,observedAt:'2026-10-23'}}]){
+  const e=api.defenderProgressEvidence(f,current,undefined,false,undefined,bad);assert.ok(!e.complete||!e.scopeMatches||!e.covered);
+ }
+ const returned=api.defenderProgressEvidence(f,current,{lastSeen:'2026-10-24'},true,undefined,previous);
+ assert.equal(returned.present,true);assert.notEqual(returned.retained,true);
+ const fresh=api.defenderProgressEvidence({...f,defender:{...f.defender,active:true,runId:'current',observedAt:current.finishedAt}},current,{lastSeen:'2026-10-24'},true,undefined,previous);
+ assert.equal(fresh.complete,true);assert.equal(fresh.scopeMatches,true);assert.equal(fresh.present,true);assert.notEqual(fresh.retained,true);
+});
 test('Nessus cannot use one clean policy to erase another positive or unassessed policy',()=>{
  const a='2026-10-23T00:00:00Z',b='2026-10-24T00:00:00Z';
  const f={nessusObservations:{'1':{present:false,observedAt:a},'2':{present:true,observedAt:b}}},scans=new Map([['1',{imported:true,version:1,completedAt:a}],['2',{imported:true,version:1,completedAt:b}]]),allowed=new Set(['1','2']);

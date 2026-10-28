@@ -33,14 +33,14 @@ try{
  for(const id of [company,'CO-B'])await db.query('INSERT INTO app_companies(id,payload) VALUES($1,$2)',[id,JSON.stringify({id,name:id})]);
  await db.query('INSERT INTO app_store_metadata VALUES(1,$1)',[JSON.stringify({meta:{defenderGenerations:{[company]:run}}})]);
  await db.query('INSERT INTO defender_connections VALUES($1,$2,1)',[company,run]);
- await db.query("INSERT INTO defender_import_runs VALUES($1,$2,1,'succeeded','2026-10-22T00:00:00Z',$3)",[run,company,JSON.stringify({findings:1})]);
+ await db.query("INSERT INTO defender_import_runs VALUES($1,$2,1,'succeeded','2026-10-22T00:00:00.123Z',$3)",[run,company,JSON.stringify({findings:1})]);
  for(const asset of ['a','b']){
   await db.query('INSERT INTO defender_devices VALUES($1,$2,$3)',[run,asset,JSON.stringify({deviceId:asset,lastSeen:'2026-10-21T00:00:00Z'})]);
-  const f={id:'f'+asset,companyId:company,asset,cve,connector:'defender',status:asset==='a'?'Open':'Resolved',defender:{deviceId:asset,runId:run,active:asset==='a'},seenBy:['defender']};
+  const f={id:'f'+asset,companyId:company,asset,cve,connector:'defender',status:asset==='a'?'Open':'Resolved',defender:{deviceId:asset,runId:run,active:asset==='a',observedAt:'2026-10-22T00:00:00.123Z'},seenBy:['defender']};
   await db.query('INSERT INTO app_findings(id,company_id,connector,status,cve,asset,payload) VALUES($1,$2,$3,$4,$5,$6,$7)',[f.id,company,f.connector,f.status,cve,asset,JSON.stringify(f)]);
  }
  await db.query('INSERT INTO defender_records VALUES($1,$2,$3)',[run,'a',cve]);
- const scan={id:'scan',companyId:company,connector:'defender',status:'Completed',completedAt:'2026-10-22T00:00:00Z'};
+ const scan={id:'scan',companyId:company,connector:'defender',status:'Completed',completedAt:'2026-10-22T00:00:00.123Z'};
  await db.query('INSERT INTO app_scans(id,company_id,connector,status,created_at,payload) VALUES($1,$2,$3,$4,now(),$5)',[scan.id,company,scan.connector,scan.status,JSON.stringify(scan)]);
  const model=await load('lib/patch-progress.ts'),sources=await load('lib/patch-progress-sources.ts'),store=await load('lib/patch-progress-store.ts');
  const ticket={id:'33333333-3333-4333-8333-333333333333',kind:'group',companyId:company,ticketId:12,hostCount:2,createdAt:'2026-10-20T00:00:00Z',scopeHash:'scope',packet:{appCompanyId:company,source:'stored-findings',connectors:['defender'],cves:[cve],reviewRows:['a','b'].map(asset=>({asset,cve,findingId:'f'+asset}))}};
@@ -79,6 +79,53 @@ try{
  console.log('PASS total and source trend counts publish atomically');
  const regressionFailures=[];
  async function regression(name,fn){try{await fn();console.log('PASS '+name);}catch(e){regressionFailures.push(name+': '+e.message);console.error('FAIL '+name,e.message);}}
+ await regression('Defender historical verification survives later imports and pruning, but not a return or a scope change',async()=>{
+  const newerRun='88888888-8888-4888-8888-888888888888';
+  const original=(await db.query("SELECT payload FROM app_findings WHERE id='fb'")).rows[0].payload;
+  const retainedScope=model.progressScope({...ticket,id:'77777777-7777-4777-8777-777777777777',hostCount:1,packet:{...ticket.packet,reviewRows:[{asset:'b',cve,findingId:'fb'}]}});
+  async function current(id){await db.query('UPDATE defender_connections SET current_run=$1',[id]);await db.query('UPDATE app_store_metadata SET payload=$1',[JSON.stringify({meta:{defenderGenerations:{[company]:id}}})]);}
+  try{
+   await db.query("INSERT INTO defender_import_runs VALUES($1,$2,1,'succeeded','2026-10-25T00:00:00Z','{}')",[newerRun,company]);
+   await db.query('INSERT INTO defender_devices VALUES($1,$2,$3)',[newerRun,'b',JSON.stringify({deviceId:'b',lastSeen:'2026-10-21T00:00:00Z'})]);await current(newerRun);
+   let result=await sources.collectPatchProgress(db,retainedScope);
+   assert.equal(result.rows[0].state,'clear');assert.equal(result.rows[0].retained,true);assert.equal(result.rows[0].generation,run);
+   assert.equal(result.rows[0].assessmentAt,'2026-10-21T00:00:00Z');
+   assert.equal((await sources.collectPatchProgress(db,{...retainedScope,ticket:{...retainedScope.ticket,createdAt:'2026-10-23'}})).rows[0].state,'unknown','an earlier fix cannot verify a later ticket');
+   await db.query('UPDATE defender_import_runs SET company_id=$1 WHERE id=$2',['CO-B',run]);
+   assert.equal((await sources.collectPatchProgress(db,retainedScope)).rows[0].state,'unknown');
+   await db.query('UPDATE defender_import_runs SET company_id=$1 WHERE id=$2',[company,run]);
+   await db.query('INSERT INTO defender_records VALUES($1,$2,$3)',[run,'b',cve]);
+   assert.equal((await sources.collectPatchProgress(db,retainedScope)).rows[0].state,'unknown','a resolved label cannot override a source positive');
+   await db.query("DELETE FROM defender_records WHERE run_id=$1 AND device_id='b'",[run]);
+   await store.recordProgressAttempt(db,retainedScope);await store.saveProgressCollection(db,retainedScope,result);
+   await db.query("DELETE FROM defender_devices WHERE run_id=$1 AND device_id='b'",[run]);
+   result=await sources.collectPatchProgress(db,retainedScope);assert.equal(result.rows[0].state,'clear','in-flight pruning must retain proof');
+   await store.saveProgressCollection(db,retainedScope,result);
+   await db.query('DELETE FROM defender_import_runs WHERE id=$1',[run]);
+   result=await sources.collectPatchProgress(db,retainedScope);assert.equal(result.rows[0].state,'clear');
+   await store.saveProgressCollection(db,retainedScope,result);
+   assert.equal(Number((await db.query('SELECT count(*) n FROM patch_progress_evaluations WHERE request_id=$1',[retainedScope.ticket.id])).rows[0].n),1,'retained proof must be idempotent');
+   await db.query("UPDATE defender_import_runs SET status='running' WHERE id=$1",[newerRun]);
+   await assert.rejects(sources.collectPatchProgress(db,retainedScope),/publication/i,'an incomplete publication must not replace the saved verification');
+   await db.query("UPDATE defender_import_runs SET status='succeeded' WHERE id=$1",[newerRun]);
+   assert.equal((await sources.collectPatchProgress(db,retainedScope)).rows[0].state,'clear');
+   assert.equal((await sources.collectPatchProgress(db,{...retainedScope,ticket:{...retainedScope.ticket,scopeHash:'other'}})).rows[0].state,'unknown');
+   assert.equal((await sources.collectPatchProgress(db,{...retainedScope,ticket:{...retainedScope.ticket,companyId:'CO-B'}})).rows[0].state,'unknown');
+   await db.query('UPDATE defender_connections SET revision=2');
+   await assert.rejects(sources.collectPatchProgress(db,retainedScope),/publication/i);await db.query('UPDATE defender_connections SET revision=1');
+   await db.query('INSERT INTO defender_records VALUES($1,$2,$3)',[newerRun,'b',cve]);
+   assert.notEqual((await sources.collectPatchProgress(db,retainedScope)).rows[0].state,'clear','even a stale source positive must prevent retaining clearance');
+   await db.query("UPDATE defender_devices SET record=$1 WHERE run_id=$2 AND device_id='b'",[JSON.stringify({deviceId:'b',lastSeen:'2026-10-24T00:00:00Z'}),newerRun]);
+   await db.query("UPDATE app_findings SET payload=$1 WHERE id='fb'",[JSON.stringify({...original,defender:{...original.defender,active:true,runId:newerRun,observedAt:'2026-10-25T00:00:00Z'}})]);
+   result=await sources.collectPatchProgress(db,retainedScope);assert.equal(result.rows[0].state,'detected');await store.saveProgressCollection(db,retainedScope,result);
+   assert.equal((await store.readPatchProgress(db,company)).tickets.find(t=>t.requestId===retainedScope.ticket.id).summary.reappeared,1);
+  }finally{
+   await db.query("INSERT INTO defender_import_runs VALUES($1,$2,1,'succeeded','2026-10-22T00:00:00.123Z','{}') ON CONFLICT(id) DO UPDATE SET company_id=EXCLUDED.company_id",[run,company]);
+   await db.query("INSERT INTO defender_devices VALUES($1,'b',$2) ON CONFLICT DO NOTHING",[run,JSON.stringify({deviceId:'b',lastSeen:'2026-10-21T00:00:00Z'})]);
+   await db.query("UPDATE app_findings SET payload=$1 WHERE id='fb'",[JSON.stringify(original)]);await db.query('UPDATE defender_connections SET revision=1');await current(run);
+   await db.query('DELETE FROM defender_records WHERE run_id=$1',[newerRun]);await db.query('DELETE FROM defender_devices WHERE run_id=$1',[newerRun]);await db.query('DELETE FROM defender_import_runs WHERE id=$1',[newerRun]);
+  }
+ });
  await regression('older-created scan completion creates a new history observation',async()=>{
    for(const [id,created,completed] of [['old','2026-10-01','2026-10-23'],['new','2026-10-20','2026-10-24']])await db.query(`INSERT INTO app_scans(id,company_id,connector,status,created_at,payload) VALUES($1,$2,'nessus','Completed',$3,$4)`,[id,company,created,JSON.stringify({id,status:'Completed',completedAt:completed,vendor:{nessusScanId:id==='old'?7:8,imported:true,nessusEvidenceVersion:1}})]);
    const firstClient=await db.connect();let first;try{first=await sources.collectProgressTrends(firstClient,company);}finally{firstClient.release();}await store.saveProgressTrends(db,company,first);
