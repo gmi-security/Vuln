@@ -98,7 +98,9 @@ export async function collectPatchProgress(db:Pool,scope:ProgressScope):Promise<
         }else{
           const summary=(await client.query(`SELECT g.summary->'vendorScope' scope,g.source_rows FROM spotlight_summary_current s JOIN spotlight_summary_generations g USING(company_id,run_id,model_version) WHERE s.company_id=$1 AND s.run_id=$2`,[company,current.run_id])).rows[0];
           if(!cs||!summary||!matchesSpotlightTenant(summary.scope,cs.cid,summary.source_rows))cs=null;
-          else csAbsenceReady=summary.scope.localPlaceholderRows===0&&Date.parse(iso(run.started_at)!)>Date.parse(scope.ticket.createdAt);
+          // Validated local tombstones mean the entities response no longer
+          // returned a discovered ID; they do not invalidate completed discovery.
+          else csAbsenceReady=Date.parse(iso(run.started_at)!)>Date.parse(scope.ticket.createdAt);
         }
       }
     }else if(hasCs&&tables.spotlight&&context&&!context.reviewed){
@@ -106,7 +108,7 @@ export async function collectPatchProgress(db:Pool,scope:ProgressScope):Promise<
       if(saved){
         cs={companyId:company,runId:saved.run_id,cid:saved.cid};
         sourceTimes.crowdstrike=iso(saved.finished_at);
-        csAbsenceReady=saved.summary.vendorScope.localPlaceholderRows===0&&Date.parse(iso(saved.started_at)!)>Date.parse(scope.ticket.createdAt);
+        csAbsenceReady=Date.parse(iso(saved.started_at)!)>Date.parse(scope.ticket.createdAt);
       }
     }
     const savedProof=scope.ticket.packet.storedSpotlightScope as StoredSpotlightScopeProof|undefined;
@@ -144,7 +146,7 @@ export async function collectPatchProgress(db:Pool,scope:ProgressScope):Promise<
         if(p.source==='defender')evidence=defenderProgressEvidence(valid,defender,devices.get(valid?.defender?.deviceId||''),positives.has(JSON.stringify([valid?.defender?.deviceId,p.cve])));
         if(p.source==='nessus')evidence=nessusProgressEvidence(valid,scans,allowed);
         if(p.source==='crowdstrike'&&cs&&p.cid===cs.cid){const found=csRows.get(JSON.stringify([p.hostId,p.cve]));evidence={complete:true,scopeMatches:true,generation:cs.runId,present:!!found?.present,covered:false,suppressed:found?.suppressed,
-          assessmentAt:sourceTimes.crowdstrike,absenceIsFix:csAbsenceReady,reason:'Waiting for a complete CrowdStrike import started after ticket creation, without unresolved source records.'};}
+          assessmentAt:sourceTimes.crowdstrike,absenceIsFix:csAbsenceReady,reason:'Waiting for a complete matching CrowdStrike import started after ticket creation.'};}
         rows.push(assessProgress(p,scope.ticket.createdAt,evidence));
       }
       await new Promise(resolve=>setImmediate(resolve));
