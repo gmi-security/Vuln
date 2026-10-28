@@ -109,6 +109,27 @@ try{
  const summary={deviceCveFindings:1,vendorScope:{version:2,tenantId:cid,mixed:false,missingRows:0,rows:1,localPlaceholderRows:0}};
  await db.query("INSERT INTO spotlight_summary_generations VALUES($1,$2,7,$3,'2026-10-22',1)",[company,csRun,JSON.stringify(summary)]);
  const csScope=model.progressScope({...ticket,packet:{appCompanyId:company,source:'stored-findings',connectors:['crowdstrike'],cves:[cve],hostScope:['a','b'].map(h=>JSON.stringify([cid,h])),deviceCves:['a','b'].map(hostId=>({cid,hostId,cve}))}});
+ async function placeholderDisappearance(){
+   const withPlaceholder={...summary,vendorScope:{...summary.vendorScope,rows:2,localPlaceholderRows:1}};
+   await db.query("INSERT INTO spotlight_import_records VALUES($1,$2,$2,'gone','CS-gone','closed',$3)",[csRun,company,JSON.stringify({id:'gone',unresolved:true})]);
+   await db.query('UPDATE spotlight_import_runs SET expected_count=2,hydrated_count=2');
+   await db.query('UPDATE spotlight_summary_generations SET summary=$1,source_rows=2',[JSON.stringify(withPlaceholder)]);
+   try{
+     const result=await sources.collectPatchProgress(db,csScope);
+     assert.deepEqual(result.rows.map(r=>r.state),['detected','clear'],'local no-longer-returned placeholders must not block other disappeared CVEs');
+     assert.match(result.rows[1].reason,/no longer reported/);
+     await db.query(`UPDATE spotlight_import_records SET raw=jsonb_set(raw,'{suppression_info,is_suppressed}','true') WHERE source_id='source1'`);
+     assert.deepEqual((await sources.collectPatchProgress(db,csScope)).rows.map(r=>r.state),['unknown','clear'],'suppression must not count as a fix');
+     await db.query(`UPDATE spotlight_import_records SET raw=jsonb_set(raw,'{suppression_info,is_suppressed}','false') WHERE source_id='source1'`);
+     await db.query("UPDATE spotlight_import_runs SET started_at='2026-10-19'");
+     assert.deepEqual((await sources.collectPatchProgress(db,csScope)).rows.map(r=>r.state),['detected','unknown'],'disappearance needs an import started after the ticket');
+   }finally{
+     await db.query("DELETE FROM spotlight_import_records WHERE source_id='gone'");
+     await db.query(`UPDATE spotlight_import_records SET raw=jsonb_set(raw,'{suppression_info,is_suppressed}','false') WHERE source_id='source1'`);
+     await db.query("UPDATE spotlight_import_runs SET expected_count=1,hydrated_count=1,started_at='2026-10-21'");
+     await db.query('UPDATE spotlight_summary_generations SET summary=$1,source_rows=1',[JSON.stringify(summary)]);
+   }
+ }
  assert.deepEqual((await sources.collectPatchProgress(db,csScope)).rows.map(r=>r.state),['detected','clear']);
  await regression('uppercase vendor CID and status stay detected instead of becoming falsely fixed',async()=>{
   await db.query(`UPDATE spotlight_import_records SET raw=jsonb_set(raw,'{cid}',$1::jsonb)`,[JSON.stringify(cid.toUpperCase())]);
@@ -125,11 +146,13 @@ try{
    assert.equal(legacy.find(t=>t.source==='total')?.count,2);
    const different={...csScope,pairs:csScope.pairs.map(p=>({...p,cid:'f'.repeat(32)}))};
    assert.ok((await sources.collectPatchProgress(db,different)).rows.every(r=>r.state==='unknown'));
+   await regression('legacy completed import allows disappearance despite local tombstones',placeholderDisappearance);
    reviewedSpotlight=true;
    await db.query('INSERT INTO customer_spotlight_routes VALUES($1,\'crowdstrike\',true,$2)',[company,cid]);
    await db.query('INSERT INTO spotlight_import_run_scopes VALUES($1,$2,$3,$4)',[csRun,company,cid,binding]);
    await db.query('UPDATE spotlight_import_runs SET checkpoint_version=4');
  });
+ await regression('reviewed completed import allows disappearance despite local tombstones',placeholderDisappearance);
  await db.query("UPDATE spotlight_import_runs SET expected_count=0,hydrated_count=0");await db.query('DELETE FROM spotlight_import_records');
  assert.deepEqual((await sources.collectPatchProgress(db,csScope)).rows.map(r=>r.state),['clear','clear']);
  await regression('valid zero CrowdStrike generation is recorded as zero customer history',async()=>{
