@@ -39,7 +39,7 @@ The October 25 UTC publication involved 778,868 candidate findings and timed out
 - [x] Add checkpointed private publication and reporting preparation. Inject interruption between stage batches, resume with a new client, verify all records and independent reporting hashes.
 - [x] Integrate large saves and safe retry handling. Preserve ordinary-save behavior and uncertain-COMMIT blocking; record concise stage progress.
 - [x] Run the full regression suite, TypeScript, worker and Linux production builds, a production-size synthetic publication and independent code review.
-- [ ] Merge through a PR, deploy the tested build/schema, publish the existing completed Defender import, verify later normal commits and current read/write health.
+- [x] Merge through a PR, deploy the tested build/schema, publish the existing completed Defender import, verify later normal commits and current read/write health.
 
 ## Execution record
 
@@ -50,7 +50,12 @@ The October 25 UTC publication involved 778,868 candidate findings and timed out
 - Exact customer/order query used `app_findings_customer_stream_idx` through the view (500 rows, zero heap fetches, 0.53 ms in the synthetic fixture).
 - Independent review found and verified fixes for no-code PostgreSQL transport failures, A-to-B-to-A abandoned plan reuse, and dependent Defender risk refresh after deferred publication. No remaining code blocker reported.
 - Clean Linux install initially rejected main's React 19.2.4 / React DOM 19.3.1 mismatch. Align React to 19.3.1. Both worker builds and the Next.js webpack production build then passed; the fresh Linux dependency install passed all 1,102 tests (seven optional DB skips). The separate PostgreSQL run passed all ten checks, including forward/reverse maintenance transitions.
-- Production ownership was checked read-only: the application role owns `app_findings`; it has no explicit relation grants to copy. No production schema or runtime change has been made yet.
+- Production ownership was checked read-only: the application role owns `app_findings`; it has no explicit relation grants to copy.
+- PR #91 passed all GitHub checks and was merged as `871973d`. Its tree matched the tested build. Migration 003 and that build were deployed on October 28, 2026; environment and operator-file hashes were preserved. Public login returned HTTP 200 after hydration, and ordinary saves advanced the authority from revision 17518 to 17523.
+- The first installer attempt stopped before migration 003 because the historical migration 001/002 ledger contained CRLF checksums. Exact alternate-line-ending hashes proved their SQL was unchanged. Installation retained those original ledger entries. The follow-up runner accepts only exact LF/CRLF alternatives for these two historical files; later migrations and actual SQL changes remain strict. Ten focused tests and independent review passed.
+- Live verification: the previously failing completed Defender import published at 16:44:49 UTC, revision 17524. All 778,868 changed finding rows reached private checkpoints before the final switch. The complete save took 528,817 ms including 66,952 ms preparation; the final write phase took 8,030 ms and reporting publication 73 ms. The platform marker now matches the completed source run; no provider re-download was needed for this recovery.
+- An independent read counted 1,299,076 active findings, exactly matching the published generation. Reporting manifests for the affected customer and an unchanged customer matched the committed authority. A subsequent ordinary save committed one changed record with a 16 ms write phase. Read/write health remained ready with `persistBlocked=false`. Seven optional database tests remain separate from the 1,102-test suite; the ten explicit PostgreSQL checks did run and pass.
+- Runtime limitations remain explicit: ordinary platform writes are serialized; building a new generation does not make large imports instantaneous. Temporary private-stage failures resume from checkpoints. Actual database corruption, a stale writer or an uncertain final COMMIT still blocks saving until resolved. Existing external scanner bridge errors are separate from this repaired persistence failure.
 
 ## Deployment and recovery
 

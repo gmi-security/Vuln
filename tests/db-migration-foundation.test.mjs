@@ -4,6 +4,17 @@ import { createHash } from "node:crypto";
 
 const checksum = text => createHash("sha256").update(text).digest("hex");
 
+test('historical core migrations accept only the verified Windows line-ending variant without changing their ledger',async()=>{
+ const {runMigrations}=await import('../lib/db/migration-runner.mjs');
+ const sql='CREATE TABLE example (id text);\n-- Original migration\n',calls=[];
+ const client={release(){},async query(statement){calls.push(statement);return {rows:statement.includes('SELECT name, checksum')?[{name:'001_core_storage.sql',checksum:checksum(sql.replace(/\n/g,'\r\n'))}]:[]};}};
+ const migration={name:'001_core_storage.sql',sql,checksum:checksum(sql)};
+ assert.deepEqual(await runMigrations({connect:async()=>client},[migration]),[]);
+ assert.ok(!calls.some(s=>s.startsWith('INSERT INTO app_schema_migrations')||s.startsWith('UPDATE app_schema_migrations')||s===sql));
+ const changed=sql.replace('id text','id bigint');
+ await assert.rejects(runMigrations({connect:async()=>client},[{...migration,sql:changed,checksum:checksum(changed)}]),/checksum mismatch/);
+});
+
 test("migration runner applies pending migrations under one transaction and lock", async () => {
   const { runMigrations } = await import("../lib/db/migration-runner.mjs");
   const calls = [];
