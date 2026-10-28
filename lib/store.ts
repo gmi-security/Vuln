@@ -7,6 +7,7 @@ import { loadReviewedScannerRoutes } from "@/lib/customer-scanner-routing-server
 import type { ScannerRoute } from "@/lib/customer-scanner-routing";
 import { scannerTargetMatcher, assertScannerResultScope, scannerExactTargetKey, scannerWebOrigin } from "@/lib/scanner-target-scope";
 import type { NessusConfig, NessusImportFindingsResult } from "@/lib/nessus";
+import { nessusEvidenceScope } from "@/lib/nessus-evidence-scope";
 import { loadReviewedSpotlightRoutes } from "@/lib/customer-spotlight-routing-server";
 import { DEMO_ASSETS, DEMO_PORTS, VULN_CATALOG } from "@/lib/catalog";
 import { normalizeCompanyName, findNearDuplicateCompanyName } from "@/lib/company-name";
@@ -636,6 +637,7 @@ type InternalScan = Omit<Scan, "progress" | "status"> & {
     // already imported before, instead of skipping it forever.
     nessusLastModified?: number | null;
     nessusEvidenceVersion?: 1;
+    nessusProgressScope?: string;
   } | null;
   // Stable reference to an external source scan (e.g. "spiderfoot:<id>") so
   // pull-based imports stay idempotent. Absent for native/demo scans.
@@ -2031,7 +2033,7 @@ async function collectNessusFindings(companyId: string, scanId: number, lastModi
       current.config.insecure !== context.config.insecure)
     throw new Error("Nessus assignment changed during import; results were not applied.");
   assertScannerResultScope(context.targets, result);
-  return result;
+  return {...result,reviewedScopeHash:nessusEvidenceScope(context.route)};
 }
 
 async function refreshVendorScans(s: StoreShape): Promise<void> {
@@ -2152,7 +2154,8 @@ async function importVendorFindings(s: StoreShape, scan: InternalScan, prepared?
 
 async function applyNessusFindings(s: StoreShape, scan: InternalScan, prepared?: NessusImportFindingsResult): Promise<void> {
   const completedAt = scan.completedAt ?? new Date().toISOString();
-  const { findings: imported, scannedHosts } = prepared ?? await collectNessusFindings(scan.companyId, scan.vendor!.nessusScanId);
+  const collected = prepared ?? await collectNessusFindings(scan.companyId, scan.vendor!.nessusScanId);
+  const { findings: imported, scannedHosts } = collected;
   for (const previous of s.scans.values()) {
     if (previous.companyId === scan.companyId && previous.vendor?.nessusScanId === scan.vendor!.nessusScanId &&
         previous.vendor.imported && nessusRunTimestamp(previous) > Date.parse(completedAt) / 1000)
@@ -2239,6 +2242,7 @@ async function applyNessusFindings(s: StoreShape, scan: InternalScan, prepared?:
   markDirty({ scans: [scan.id] });
   await reconcileNessusFindings(s, scan, coveredAssetKeys, touchedKeys, completedAt);
   scan.vendor!.nessusEvidenceVersion = 1;
+  scan.vendor!.nessusProgressScope = collected.reviewedScopeHash;
   const all = Array.from(s.findings.values()).filter((f) => f.scanId === scan.id);
   scan.findingsCount = all.length;
   const counts = emptySeverityCounts();

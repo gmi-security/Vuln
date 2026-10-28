@@ -79,4 +79,7 @@ export async function register(): Promise<void> {
   delayedStart("Defender customer import worker", 300_000, () =>
     import("@/lib/defender-worker").then((m) => m.startDefenderWorker()),
   );
+  delayedStart("patch progress worker", 360_000, () =>
+    import("@/lib/patch-progress-worker").then((m) => m.startPatchProgressWorker()),
+  );
 }

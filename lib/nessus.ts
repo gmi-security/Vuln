@@ -371,6 +371,7 @@ export type NessusScannedHost = {
 };
 
 export type NessusImportFindingsResult = {
+  reviewedScopeHash?: string;
   findings: NessusFinding[];
   // Every host actually included in this scan's result set, whether or not
   // it currently has any vulnerabilities — lets the caller reconcile (close
