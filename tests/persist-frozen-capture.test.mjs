@@ -38,18 +38,33 @@ async function harness(){
  const revisions={createReportingInputDigests:()=>({async bucket(){},finish:()=>[],committed(){}}),publishReportingInputRevisions:async()=>{},publishSqlReportingChanges:async(c,k,t,plan)=>{reported.push(plan);},reportingSnapshotManifest:async()=>null};
  const code=ts.transpileModule(await readFile('lib/persist.ts','utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText;
  const m=new SourceTextModule(code,{context});
- await m.link(name=>{const values=name==='pg'?{Pool:class{constructor(){return pool}}}:name.endsWith('customer-reporting-revisions.mjs')?revisions:name.endsWith('platform-store.mjs')?platform:name.endsWith('platform-authority.mjs')?authority:name.endsWith('platform-reader.mjs')?reader:crypto;return new SyntheticModule(Object.keys(values),function(){for(const[k,v]of Object.entries(values))this.setExport(k,v)},{context});});
+ let reportError;
+ const storeModule={...platform,preparePlatformReporting:async(p,plan)=>{if(reportError)throw reportError;reported.push(plan);return [];}};
+ await m.link(name=>{const values=name==='pg'?{Pool:class{constructor(){return pool}}}:name.endsWith('customer-reporting-revisions.mjs')?revisions:name.endsWith('platform-store.mjs')?storeModule:name.endsWith('platform-authority.mjs')?authority:name.endsWith('platform-reader.mjs')?reader:crypto;return new SyntheticModule(Object.keys(values),function(){for(const[k,v]of Object.entries(values))this.setExport(k,v)},{context});});
  await m.evaluate();
  const state=context.__vulnDatabasePersistenceV1;
  state.platformAuthority={...auth};state.platformState={authority:{...auth},index,metaHash:platformHash(platformJson({counter:1}))};
  data.scans[0][1].progress=50;
- return {persist:m.namespace,data,queries,written,reported,state,released,waits,auth,onWrite:fn=>{onWrite=fn},onQuery:fn=>{onQuery=fn},expire:()=>deadline(),connections:()=>connections};
+ return {persist:m.namespace,data,queries,written,reported,state,released,waits,auth,reportError:e=>{reportError=e},onWrite:fn=>{onWrite=fn},onQuery:fn=>{onQuery=fn},expire:()=>deadline(),connections:()=>connections};
 }
 
 test('RAM changes during preparation reject the capture before a connection is borrowed',async()=>{
  const h=await harness();
  await assert.rejects(h.persist.saveSnapshot(h.data,{captureGuard(){throw Error('capture changed')}}),/capture changed/);
  assert.equal(h.connections(),0);
+});
+test('reporting preparation finishes before any authoritative row writes',async()=>{
+ const h=await harness();h.onWrite(()=>{assert.equal(h.reported.length,1,'reporting must be prepared before opening the write transaction');});
+ await h.persist.saveSnapshot(h.data,{changes:{scans:['S-1']}});
+ assert.equal(h.reported.length,1);
+});
+for(const message of ['Connection terminated unexpectedly','Connection terminated due to connection timeout','timeout exceeded when trying to connect'])
+test(`private preparation safely defers pg transport error: ${message}`,async()=>{
+ const h=await harness();h.reportError(new Error(message));
+ await assert.rejects(h.persist.saveSnapshot(h.data,{changes:{scans:['S-1']}}),e=>e.code==='platform-publication-deferred');
+ assert.equal(h.written.length,0);assert.equal(h.state.platformAuthority.revision,'5');
+ h.reportError(undefined);await h.persist.saveSnapshot(h.data,{changes:{scans:['S-1']}});
+ assert.equal(h.state.platformAuthority.revision,'6');
 });
 
 test('a frozen capture commits despite later RAM changes and the next save retains them',async()=>{

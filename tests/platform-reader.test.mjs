@@ -15,7 +15,7 @@ function database(){
  state.records.set('companies',[row('companies','CO-1',{name:'Customer'})]);
  state.records.set('findings',[row('findings','F-1',{companyId:'CO-1',status:'Open',future:{evidence:'kept'}}),row('findings','F-2',{companyId:'CO-1',status:'Open'})]);
  const client={async query(sql,params=[]){
-  if(sql.includes('to_regclass'))return {rows:[{relation:'app_store_authority'}]};
+  if(sql.includes('to_regclass'))return {rows:[{relation:sql.includes('app_finding_head')?null:'app_store_authority'}]};
   if(sql.includes('FROM public.app_store_authority'))return {rows:[{...state.authority}]};
   if(sql.startsWith('SELECT set_config'))return {rows:[]};
   if(sql.includes('FROM app_store_commits')){state.reads.push('commits');return {rows:structuredClone(state.commits)};}

@@ -814,6 +814,7 @@ const persistGlobal = globalThis as unknown as {
   // flusher can skip serializing an unchanged store.
   __vulnDirty?: boolean;
   __vulnMutationVersion?: number;
+  __vulnSaveRetryAt?: number;
   __vulnMutationScope?: Partial<Record<keyof PlatformChanges, Set<string>>> | null;
   // 60s scheduler driving auto-sync, daily metrics snapshots, and monthly
   // reports (same singleton pattern as the flusher).
@@ -919,6 +920,10 @@ function persistSnapshot(throwOnError = false): Promise<void> {
     return Promise.resolve();
   }
   const run = (persistGlobal.__vulnFlushing ?? Promise.resolve()).then(async () => {
+    if (Date.now() < (persistGlobal.__vulnSaveRetryAt ?? 0)) {
+      if (throwOnError) throw Object.assign(new Error("Import preparation will retry shortly; the last saved data remains available."), { code:"platform-publication-deferred" });
+      return;
+    }
     if (!globalStore.__vulnStore || persistGlobal.__vulnPersistBlocked) {
       if (throwOnError) throw new Error("Application storage is unavailable; snapshot was not saved.");
       return;
@@ -941,6 +946,7 @@ function persistSnapshot(throwOnError = false): Promise<void> {
             },
           });
           if (version === (persistGlobal.__vulnMutationVersion ?? 0)) persistGlobal.__vulnMutationScope = {};
+          persistGlobal.__vulnSaveRetryAt = 0;
           break;
         } catch (error) {
           if ((error as { code?: string })?.code !== "platform-capture-changed" || attempt >= 2) throw error;
@@ -950,7 +956,9 @@ function persistSnapshot(throwOnError = false): Promise<void> {
       persistGlobal.__vulnDirty = true;
       // Do not serve uncommitted RAM as a successful SQL generation. A busy
       // capture can retry; a database/fence failure requires a fresh hydration.
-      if (strictPlatformPersistence() && (err as { code?: string })?.code !== "platform-capture-changed")
+      const code = (err as { code?: string })?.code;
+      if (code === "platform-publication-deferred") persistGlobal.__vulnSaveRetryAt = Date.now() + 60000;
+      if (strictPlatformPersistence() && !["platform-capture-changed","platform-publication-deferred"].includes(code ?? ""))
         persistGlobal.__vulnPersistBlocked = true;
       console.error("[persist] snapshot save failed:", err);
       throw err;
