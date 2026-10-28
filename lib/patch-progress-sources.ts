@@ -11,6 +11,23 @@ const iso=(value:unknown)=>value?new Date(String(value)).toISOString():null;
 const fingerprint=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export type ProgressCollection={rows:ProgressObservation[];fingerprint:string;newDevices:Record<string,number|null>;sourceTimes:Record<string,string|null>;capturedAt:string};
 
+/** Match the existing Top fixes legacy reader: a customer-owned, reconciled
+ * generation and a whole-generation summary proving one vendor CID. */
+async function legacyProgressSpotlight(client:PoolClient,company:string){
+  const row=(await client.query(`SELECT i.run_id,r.status,r.started_at,r.finished_at,r.checkpoint_version,r.expected_count,r.hydrated_count,
+    g.summary,g.source_rows FROM spotlight_import_current i
+    JOIN spotlight_import_runs r ON r.id=i.run_id AND r.tenant_key=i.tenant_key
+    LEFT JOIN spotlight_summary_current s ON s.company_id=i.tenant_key AND s.run_id=i.run_id
+    LEFT JOIN spotlight_summary_generations g ON g.company_id=s.company_id AND g.run_id=s.run_id AND g.model_version=s.model_version
+    WHERE i.tenant_key=$1`,[company])).rows[0];
+  if(!row)return null;
+  const cid=row.summary?.vendorScope?.tenantId;
+  if(row.status!=='completed'||!row.finished_at||![2,3].includes(row.checkpoint_version)||
+    row.expected_count===null||Number(row.expected_count)!==Number(row.hydrated_count)||Number(row.expected_count)!==Number(row.source_rows)||
+    !matchesSpotlightTenant(row.summary?.vendorScope,cid,row.source_rows))throw Error('Saved CrowdStrike generation is not ready for progress verification.');
+  return {...row,cid};
+}
+
 export function defenderProgressEvidence(f:Finding|undefined,run:{id:string;published:boolean;finishedAt:string}|null,device:{lastSeen?:string|null}|undefined,present:boolean):ProgressEvidence|null {
   if(!f?.defender||!run)return null;
   const heartbeat=device?.lastSeen||null;
@@ -68,7 +85,7 @@ export async function collectPatchProgress(db:Pool,scope:ProgressScope):Promise<
       }
       sourceTimes.nessus=[...scans.values()].map(s=>s.completedAt).sort().at(-1)||null;
     }
-    let cs:StoredSpotlightScopeProof|null=null,csAbsenceReady=false;
+    let cs:(Pick<StoredSpotlightScopeProof,'companyId'|'runId'|'cid'> & {bindingKey?:string})|null=null,csAbsenceReady=false;
     if(hasCs&&tables.spotlight&&context?.reviewed){
       const current=(await client.query('SELECT run_id FROM spotlight_import_current WHERE tenant_key=$1',[company])).rows[0];
       if(current){
@@ -83,6 +100,13 @@ export async function collectPatchProgress(db:Pool,scope:ProgressScope):Promise<
           if(!cs||!summary||!matchesSpotlightTenant(summary.scope,cs.cid,summary.source_rows))cs=null;
           else csAbsenceReady=summary.scope.localPlaceholderRows===0&&Date.parse(iso(run.started_at)!)>Date.parse(scope.ticket.createdAt);
         }
+      }
+    }else if(hasCs&&tables.spotlight&&context&&!context.reviewed){
+      const saved=await legacyProgressSpotlight(client,company);
+      if(saved){
+        cs={companyId:company,runId:saved.run_id,cid:saved.cid};
+        sourceTimes.crowdstrike=iso(saved.finished_at);
+        csAbsenceReady=saved.summary.vendorScope.localPlaceholderRows===0&&Date.parse(iso(saved.started_at)!)>Date.parse(scope.ticket.createdAt);
       }
     }
     const savedProof=scope.ticket.packet.storedSpotlightScope as StoredSpotlightScopeProof|undefined;
@@ -155,6 +179,9 @@ export async function collectProgressTrends(client:PoolClient,company:string):Pr
       if((await client.query('SELECT 1 FROM spotlight_import_records WHERE run_id=$1 LIMIT 1',[run.id])).rowCount)return [];
       cs={run_id:run.id,source_completed_at:run.finished_at,summary:{deviceCveFindings:0},source_rows:0};
     }else if(!cs||!matchesSpotlightTenant(cs.summary.vendorScope,configuredCs.source_scope,cs.source_rows))return [];
+  }else if(!(process.env.VULN_REVIEWED_SPOTLIGHT_PROVIDERS||'').split(',').map(v=>v.trim()).includes('crowdstrike')){
+    const legacy=await legacyProgressSpotlight(client,company);
+    if(legacy)cs={run_id:legacy.run_id,source_completed_at:legacy.finished_at,summary:legacy.summary,source_rows:legacy.source_rows};
   }
   // A failed/in-flight import cannot become a successful lower-count observation.
   const scans=(await client.query(`SELECT id,connector,status,created_at,payload->>'completedAt' completed_at,

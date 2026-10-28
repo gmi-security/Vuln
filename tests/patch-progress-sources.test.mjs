@@ -25,6 +25,7 @@ test('Nessus cannot use one clean policy to erase another positive or unassessed
 test('generic history counts all normalized vulnerability sources and never records failed scan totals',async()=>{
  const seen=[];const client={async query(sql,params){seen.push([sql,params]);
   if(sql.includes('customer_spotlight_routes'))return {rows:[]};
+  if(sql.includes('FROM spotlight_import_current'))return {rows:[]};
   if(sql.includes('FROM app_scans'))return {rows:[{connector:'nessus',status:'Completed',completed_at:'2026-10-24',payload:{id:'s',vendor:{imported:true}}},{connector:'zap',status:'Completed',completed_at:'2026-10-24',payload:{id:'z'}}]};
   if(sql.includes('patch_progress_trends'))return {rows:[],rowCount:0};
   if(sql.includes('FROM app_findings'))return {rows:[{connector:'nessus',n:10},{connector:'zap',n:3},{connector:'new-scanner',n:2}]};throw Error(sql);
@@ -36,6 +37,6 @@ test('generic history counts all normalized vulnerability sources and never reco
  assert.deepEqual(await api.collectProgressTrends(failed,'CO-A'),[]);
 });
 test('repeat completed publication skips aggregation instead of duplicating a history point',async()=>{
- const client={async query(sql){if(sql.includes('customer_spotlight_routes'))return {rows:[]};if(sql.includes('FROM app_scans'))return {rows:[{connector:'defender',status:'Completed',payload:{id:'s'},completed_at:'2026-10-24'}]};if(sql.includes('patch_progress_trends'))return {rowCount:1};throw Error('unexpected aggregation');}};
+ const client={async query(sql){if(sql.includes('customer_spotlight_routes')||sql.includes('FROM spotlight_import_current'))return {rows:[]};if(sql.includes('FROM app_scans'))return {rows:[{connector:'defender',status:'Completed',payload:{id:'s'},completed_at:'2026-10-24'}]};if(sql.includes('patch_progress_trends'))return {rowCount:1};throw Error('unexpected aggregation');}};
  assert.deepEqual(await api.collectProgressTrends(client,'CO-A'),[]);
 });
