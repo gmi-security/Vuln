@@ -10,8 +10,9 @@ assert.match(host||'',/^\/home\/codex\/vuln-recovery\/.+\/socket$/);assert.match
 const db=new pg.Pool({host,port:55483,database,user:'codex',max:1,statement_timeout:15000,connectionTimeoutMillis:5000});
 const cid='a'.repeat(32),company='CO-A',cve='CVE-2026-100202',run='11111111-1111-4111-8111-111111111111',csRun='22222222-2222-4222-8222-222222222222',binding='b'.repeat(64);
 const route={companyId:company,sourceScope:'55',candidateId:'candidate',connectionRef:'nessus-server',revision:1,bindingRevision:1,targets:['10.0.0.0/24']};
+let reviewedSpotlight=true;
 const stubs={persist:{applicationDatabase:()=>db},'elastic-dashboard':{DashboardError:class extends Error{}},'customer-scanner-routing-server':{loadReviewedScannerRoutes:async()=>[route]},
- 'customer-spotlight-routing-server':{loadReviewedSpotlightRoutes:async()=>[{companyId:company,sourceScope:cid,bindingKey:binding}]},
+ 'customer-spotlight-routing-server':{loadReviewedSpotlightRoutes:async()=>reviewedSpotlight?[{companyId:company,sourceScope:cid,bindingKey:binding}]:null},
  'spotlight-summary-model':{matchesSpotlightTenant:(s,id,n)=>s?.version===2&&s.tenantId===id&&s.rows===Number(n)&&s.missingRows===0&&!s.mixed}};
 async function load(entry){const cache=new Map();function read(path){path=resolve(path);if(cache.has(path))return cache.get(path);const m=new SourceTextModule(ts.transpileModule(readFileSync(path,'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText,{identifier:path});cache.set(path,m);return m;}const m=read(entry);await m.link(async(s,p)=>{const stub=stubs[s.split('/').at(-1)];if(!stub&&s.startsWith('.'))return read(resolve(dirname(p.identifier),s+(extname(s)?'':'.ts')));const v=stub||await import(s);return new SyntheticModule(Object.keys(v),function(){for(const k of Object.keys(v))this.setExport(k,v[k]);});});await m.evaluate();return m.namespace;}
 try{
@@ -114,6 +115,20 @@ try{
   assert.deepEqual((await sources.collectPatchProgress(db,csScope)).rows.map(r=>r.state),['detected','clear']);
   await db.query(`UPDATE spotlight_import_records SET raw=jsonb_set(raw,'{status}','"OPEN"')`);
   assert.deepEqual((await sources.collectPatchProgress(db,csScope)).rows.map(r=>r.state),['detected','clear']);
+ });
+ await regression('existing legacy CrowdStrike import supplies both ticket evidence and customer total',async()=>{
+   reviewedSpotlight=false;
+   await db.query('DELETE FROM customer_spotlight_routes; DELETE FROM spotlight_import_run_scopes; UPDATE spotlight_import_runs SET checkpoint_version=3');
+   assert.deepEqual((await sources.collectPatchProgress(db,csScope)).rows.map(r=>r.state),['detected','clear']);
+   const client=await db.connect();let legacy;try{legacy=await sources.collectProgressTrends(client,company);}finally{client.release();}
+   assert.equal(legacy.find(t=>t.source==='crowdstrike')?.count,1);
+   assert.equal(legacy.find(t=>t.source==='total')?.count,2);
+   const different={...csScope,pairs:csScope.pairs.map(p=>({...p,cid:'f'.repeat(32)}))};
+   assert.ok((await sources.collectPatchProgress(db,different)).rows.every(r=>r.state==='unknown'));
+   reviewedSpotlight=true;
+   await db.query('INSERT INTO customer_spotlight_routes VALUES($1,\'crowdstrike\',true,$2)',[company,cid]);
+   await db.query('INSERT INTO spotlight_import_run_scopes VALUES($1,$2,$3,$4)',[csRun,company,cid,binding]);
+   await db.query('UPDATE spotlight_import_runs SET checkpoint_version=4');
  });
  await db.query("UPDATE spotlight_import_runs SET expected_count=0,hydrated_count=0");await db.query('DELETE FROM spotlight_import_records');
  assert.deepEqual((await sources.collectPatchProgress(db,csScope)).rows.map(r=>r.state),['clear','clear']);

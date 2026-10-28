@@ -38,6 +38,8 @@ Keep the customer selector, worklists, ticket workflow and connector schedule. N
 
 ## Release behavior and limits
 
+- Live deployment verification found that the production CrowdStrike source still uses checkpoint version 3 and legacy customer-owned summaries, as the existing Top fixes view does. The compatibility follow-up uses that same validated whole-generation CID/count evidence when reviewed routing is disabled. Reviewed routing retains its strict version-4 binding checks. A legacy empty generation without CID evidence remains unverified. Regression tests reproduce the production configuration, verify its counts and ticket evidence, and reject a different ticket CID.
+
 - Apply the additive `patch-progress` SQL through the existing release migration manifest, then deploy the verified build and restart the separate worker. No production change has been made in this task.
 - The worker starts six minutes after worker-runtime startup, checks every minute, handles ten customers and at most two ticket comparisons per pass, and revisits a ticket no sooner than 30 minutes. A database lease prevents overlapping workers. Existing scheduler pause settings are respected.
 - Pages only read saved history. Refresh does not trigger a provider import or heavy comparison. Overview displays the last 90 recorded points per source. Tickets are paginated 20 at a time; details 100 at a time, within scrollable tables.
