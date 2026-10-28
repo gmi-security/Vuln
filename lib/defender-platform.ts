@@ -5,8 +5,15 @@ async function reconcile(refreshDependents: boolean, companyId?: string) {
   await ensureHydrated();
   const store = defenderStore();
   let changed = false;
+  const recovered = new Map<string,string>();
   for (const connection of await store.list(companyId)) {
-    if (!connection.currentRun || defenderProjectedRun(connection.companyId) === connection.currentRun) continue;
+    if (!connection.currentRun) continue;
+    if (defenderProjectedRun(connection.companyId) === connection.currentRun) {
+      if (deferred.get(connection.companyId) === connection.currentRun) {
+        changed = true; recovered.set(connection.companyId,connection.currentRun);
+      }
+      continue;
+    }
     const snapshot = await store.platformSnapshot(connection.companyId);
     if (!snapshot) continue;
     publishing.add(snapshot.companyId);
@@ -14,8 +21,12 @@ async function reconcile(refreshDependents: boolean, companyId?: string) {
       publishDefenderSnapshot(snapshot);
       await flushNow({ throwOnError:true });
       changed = true;
+      recovered.set(snapshot.companyId,snapshot.runId);
     } catch (error) {
-      invalidateDefenderPublication(snapshot.companyId,snapshot.runId);
+      if ((error as {code?:string})?.code === "platform-publication-deferred")
+        deferred.set(snapshot.companyId,snapshot.runId);
+      else
+        invalidateDefenderPublication(snapshot.companyId,snapshot.runId);
       console.error("[defender] Shared findings were not saved; publication will retry from the completed import.");
       throw error;
     } finally {
@@ -26,13 +37,15 @@ async function reconcile(refreshDependents: boolean, companyId?: string) {
   if (changed && refreshDependents) {
     const { refreshDefenderRisk } = await import("./defender-risk");
     await refreshDefenderRisk(false,companyId);
+    for (const [id,run] of recovered) if (deferred.get(id) === run) deferred.delete(id);
     // Import publication refreshes data and scores. Drafts are only prepared
     // by a user from a CVE, regardless of the import scheduler setting.
   }
 }
 
-const runtime = globalThis as typeof globalThis & { __defenderPublication?: Promise<void>; __defenderPublishing?: Set<string> };
+const runtime = globalThis as typeof globalThis & { __defenderPublication?: Promise<void>; __defenderPublishing?: Set<string>; __defenderDeferredPublications?: Map<string,string> };
 const publishing = runtime.__defenderPublishing ??= new Set<string>();
+const deferred = runtime.__defenderDeferredPublications ??= new Map<string,string>();
 export function defenderPublicationPending(companyId: string): boolean {
   return publishing.has(companyId);
 }

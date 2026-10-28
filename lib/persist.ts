@@ -1,8 +1,8 @@
 import { Pool, type PoolClient } from "pg";
 import { createHash } from "node:crypto";
-import { createReportingInputDigests, publishReportingInputRevisions, publishSqlReportingChanges, reportingSnapshotManifest } from "./db/customer-reporting-revisions.mjs";
+import { createReportingInputDigests, publishReportingInputRevisions, reportingSnapshotManifest } from "./db/customer-reporting-revisions.mjs";
 import { readPlatformAuthority, bindPlatformWriter } from "./db/platform-authority.mjs";
-import { loadPlatformStore, preparePlatformStore, commitPreparedPlatformStore, preparePlatformDelta, platformSaveTimeoutMs } from "./db/platform-store.mjs";
+import { loadPlatformStore, preparePlatformStore, commitPreparedPlatformStore, preparePlatformDelta, platformSaveTimeoutMs, prepareFindingPublication, preparePlatformReporting } from "./db/platform-store.mjs";
 import { loadCommittedPlatform } from "./db/platform-reader.mjs";
 
 // Snapshot persistence. The in-memory store (companies, folders, scans,
@@ -471,7 +471,35 @@ export async function saveSnapshot(data: unknown, options?: { guard?: () => void
       // full and scoped writes now use detached rows and metadata.
       preparedComplete = true;
       const preparedMs = Date.now() - startedAt;
-      const timeoutMs = platformSaveTimeoutMs(options?.changes, prepared?.findingChanges);
+      let publication: Awaited<ReturnType<typeof prepareFindingPublication>> | undefined;
+      let readyReports = digests;
+      try {
+        if (prepared.findingGeneration && prepared.findingChanges >= 10000) {
+          let lastLog = 0;
+          console.info(`[persist] Private finding publication started: changes=${prepared.findingChanges}.`);
+          publication = await prepareFindingPublication(p, prepared, { guard: options?.guard,
+            checkpoint: progress => {
+              if (Date.now() - lastLog >= 30000) {
+                console.info(`[persist] Private publication progress: phase=${progress.phase} elapsedMs=${Date.now()-startedAt}.`);
+                lastLog = Date.now();
+              }
+            },
+          });
+          readyReports = publication.report_digests;
+        } else if (options?.changes !== undefined) {
+          readyReports = await preparePlatformReporting(p, prepared);
+        }
+      } catch (error) {
+        const code = (error as { code?: string })?.code;
+        console.error(`[persist] Publication preparation stopped before live writes: elapsedMs=${Date.now()-startedAt} code=${code ?? "none"}.`);
+        // Private checkpoints may have committed, but no live data or authority
+        // changed. A later attempt reads those checkpoints instead of guessing.
+        if (["57014","55P03","40P01","40001","08006","08003","57P01","57P02","57P03","53300","ECONNRESET","ECONNREFUSED","ETIMEDOUT"].includes(code ?? "") ||
+            ["Connection terminated unexpectedly","Connection terminated due to connection timeout","timeout exceeded when trying to connect"].includes((error as Error)?.message))
+          throw Object.assign(new Error("Import preparation was interrupted; saved progress will retry automatically."), { code:"platform-publication-deferred", cause:error });
+        throw error;
+      }
+      const timeoutMs = prepared.findingGeneration ? 300000 : platformSaveTimeoutMs(options?.changes, prepared?.findingChanges);
       for (let attempt = 0; ; attempt++) {
         let client: PoolClient | undefined, cancelled = false, phase = "connect";
         let writeMs = 0, reportingMs = 0, phaseStartedAt = Date.now(), writeDeadline = Infinity;
@@ -490,13 +518,12 @@ export async function saveSnapshot(data: unknown, options?: { guard?: () => void
             phase = "write";
             phaseStartedAt = Date.now();
             await activeClient.query("BEGIN; SET LOCAL statement_timeout='60s'; SET LOCAL lock_timeout='10s'; SET LOCAL idle_in_transaction_session_timeout='90s'");
-            const next = await commitPreparedPlatformStore(activeClient, prepared, { guard: writeGuard });
+            const next = await commitPreparedPlatformStore(activeClient, prepared, { guard: writeGuard, publication, reportingPrepared:true });
             writeGuard();
             writeMs = Date.now() - phaseStartedAt;
             phase = "reporting";
             phaseStartedAt = Date.now();
-            if ("changedKeys" in next) await publishSqlReportingChanges(activeClient, next.changedKeys, next.reportingTargets, prepared);
-            else await publishReportingInputRevisions(activeClient, digests!);
+            await publishReportingInputRevisions(activeClient, readyReports!);
             reportingMs = Date.now() - phaseStartedAt;
             writeGuard();
             phase = "commit";

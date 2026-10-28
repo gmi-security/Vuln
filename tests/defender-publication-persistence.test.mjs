@@ -18,7 +18,7 @@ const seed = () => ({ companies:[[company.id,company]], folders:[], scans:[], fi
 
 async function harness(disk = { value:seed() }, strict = false, scheduled = false, role = undefined, nessusFixture = undefined) {
   const intervals = [], logs = [], modules = new Map();
-  let failSave = false, saveCalls = 0, snapshotReads = 0, gate, frozenGate, lastChanges;
+  let failSave = false, saveCalls = 0, snapshotReads = 0, riskCalls = 0, gate, frozenGate, lastChanges;
   const context = createContext({ Buffer, URL, URLSearchParams, TextEncoder, TextDecoder, AbortController, Response, Request, Headers, structuredClone,
     process:{ env:{VULN_DISABLE_SCHEDULER:scheduled?"false":"true", VULN_RUNTIME_ROLE:role},once(){} },
     console:{ log:(...args)=>logs.push(args.join(" ")), info:(...args)=>logs.push(args.join(" ")), error:(...args)=>logs.push(args.join(" ")),warn(){} },
@@ -37,7 +37,7 @@ async function harness(disk = { value:seed() }, strict = false, scheduled = fals
     },
     saveSnapshot:async (value,options)=>{saveCalls++;
       let frozen;if(frozenGate && options?.changes===undefined){options?.captureGuard?.();frozen=clone(value);await frozenGate();}
-      if(gate)await (typeof gate === "function" ? gate() : gate);if(failSave)throw new Error("simulated database save failure");options?.guard?.();if(!frozen)options?.captureGuard?.();
+      if(gate)await (typeof gate === "function" ? gate() : gate);if(failSave)throw failSave instanceof Error?failSave:new Error("simulated database save failure");options?.guard?.();if(!frozen)options?.captureGuard?.();
       lastChanges=options?.changes;const next=frozen??clone(value);
       if(options?.changes!==undefined)for(const kind of ['companies','folders','scans','findings','assets']){
         const entries=new Map(disk.value[kind]),incoming=new Map(next[kind]);
@@ -61,7 +61,8 @@ async function harness(disk = { value:seed() }, strict = false, scheduled = fals
       return modules.get(path);
     }
     if(!modules.has(path))modules.set(path,(async()=>new SourceTextModule(ts.transpileModule((await readFile(path,"utf8"))+(path===resolve("lib/store.ts")?'\nexport { refreshVendorScans };':''),{
-      compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText,{identifier:path,context}))());
+      compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText,{identifier:path,context,
+       importModuleDynamically:async name=>{assert.equal(name,'./defender-risk');const m=synthetic({refreshDefenderRisk:async()=>{riskCalls++;}});await m.link(()=>{});await m.evaluate();return m;}}))());
     return modules.get(path);
   }
   async function linker(name,parent) {
@@ -74,8 +75,8 @@ async function harness(disk = { value:seed() }, strict = false, scheduled = fals
   const store=(await moduleAt("lib/store.ts")).namespace;
   await store.ensureHydrated();await context.__vulnFlushing;
   return { requestContext,context,store,platform:mod.namespace,disk,logs,intervals,
-    fail:()=>{failSave=true;},recover:()=>{failSave=false;},block:value=>{gate=value;},freezeBlock:value=>{frozenGate=value;},
-    saves:()=>saveCalls,reads:()=>snapshotReads,changes:()=>lastChanges };
+    fail:()=>{failSave=true;},defer:()=>{failSave=Object.assign(new Error('private batch interrupted'),{code:'platform-publication-deferred'});},recover:()=>{failSave=false;},block:value=>{gate=value;},freezeBlock:value=>{frozenGate=value;},
+    saves:()=>saveCalls,reads:()=>snapshotReads,risks:()=>riskCalls,changes:()=>lastChanges };
 }
 
 test("automatic snapshot saves retry after failure and save later mutations",async()=>{
@@ -87,6 +88,27 @@ test("automatic snapshot saves retry after failure and save later mutations",asy
   h.recover();h.intervals.find(timer=>timer.ms === 6000).fn();await h.context.__vulnFlushing;
   assert.equal(h.disk.value.findings.length,1);assert.equal(h.context.__vulnDirty,false);
   assert.equal(h.context.__vulnFlushing,null);
+});
+
+test('a deferred private publication retains the Defender marker and retries after cooldown without blocking storage',async()=>{
+ const h=await harness(undefined,true);h.defer();
+ await assert.rejects(h.platform.reconcileDefenderPlatform(false),/private batch interrupted/);
+ assert.equal(h.store.persistenceBlocked(),false);
+ assert.equal(h.store.defenderProjectedRun(company.id),snapshot.runId);
+ assert.equal(h.disk.value.findings.length,0);
+ assert.equal(h.context.__vulnDirty,true);
+ const calls=h.saves();h.intervals.find(t=>t.ms===6000).fn();await h.context.__vulnFlushing;
+ assert.equal(h.saves(),calls,'cooldown prevents a six-second retry loop');
+ h.recover();h.context.__vulnSaveRetryAt=0;
+ await h.platform.reconcileDefenderPlatform(false);
+ assert.equal(h.disk.value.findings.length,1);
+ assert.equal(h.disk.value.meta.defenderGenerations[company.id],snapshot.runId);
+ assert.equal(h.reads(),1,'retry saves the existing source projection');
+ await h.platform.reconcileDefenderPlatform(true);
+ assert.equal(h.risks(),1,'deferred publication still refreshes dependent risk after its commit');
+ await h.platform.reconcileDefenderPlatform(true);assert.equal(h.risks(),1);
+ const restarted=await harness(h.disk,true);
+ assert.equal(restarted.store.defenderProjectedRun(company.id),snapshot.runId);
 });
 
 test("failed Defender save cannot report publication and the next pass retries without an API import",async()=>{

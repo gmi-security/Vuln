@@ -29,7 +29,7 @@ try{
  await assert.rejects(applyPlatformReleaseMigrations(db,changed),/differs/);
  console.log('PASS ordered release schema installs once and rejects changed applied checksums');
  const core=await loadMigrations(new URL('../db/migrations/',import.meta.url));
- assert.equal((await runMigrations(pool,core)).length,2);assert.deepEqual(await runMigrations(pool,core),[]);
+ assert.equal((await runMigrations(pool,core)).length,3);assert.deepEqual(await runMigrations(pool,core),[]);
  const authority=(await db.query('SELECT mode,enforced FROM app_store_authority')).rows[0];assert.deepEqual(authority,{mode:'legacy',enforced:false});
  assert.equal((await db.query('SELECT count(*)::int n FROM customer_connector_bindings')).rows[0].n,0);
  assert.equal((await db.query('SELECT data FROM vuln_store')).rows[0].data.keep,true);
