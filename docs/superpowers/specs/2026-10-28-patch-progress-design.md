@@ -50,4 +50,4 @@ Store compact state transitions and summary counts, not another complete copy of
 
 ## Current status
 
-Implemented on `design/patch-progress-20261028`; execution evidence and release limits are recorded in `docs/superpowers/plans/2026-10-28-patch-progress.md`. Production schema and running services have not been changed for this feature. History starts with its first successful collection, without reconstructing unrecorded past counts.
+Deployed through PRs #93 and #94 on 2026-10-28. Execution evidence, required read indexes and release limits are recorded in `docs/superpowers/plans/2026-10-28-patch-progress.md`. History starts with its first successful collection, without reconstructing unrecorded past counts.
