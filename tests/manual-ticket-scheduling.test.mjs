@@ -10,7 +10,7 @@ test('startup runs imports, data refresh and ticket tracking without automatic d
   const names={ '@/lib/store':'ensureHydrated','@/lib/elastic-dashboard-store':'startElasticDashboardScheduler','@/lib/elastic-dashboard-jobs':'startDashboardJobWorker',
     '@/lib/reporting-queue':'startReportingQueueScheduler','@/lib/ticket-status-sync':'startTicketStatusSyncScheduler','@/lib/ticket-sla-escalation':'startTicketSlaEscalationScheduler',
     '@/lib/group-draft-dedup':'startGroupDraftDedupScheduler','@/lib/group-auto-create':'startGroupAutoCreateScheduler','@/lib/group-closure-validation':'startClosureValidationScheduler',
-    '@/lib/risk-refresh-scheduler':'startRiskRefreshScheduler','@/lib/defender-worker':'startDefenderWorker'};
+    '@/lib/risk-refresh-scheduler':'startRiskRefreshScheduler','@/lib/defender-worker':'startDefenderWorker','@/lib/patch-progress-worker':'startPatchProgressWorker'};
   const code=ts.transpileModule(await readFile('instrumentation.ts','utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText;
   const mod=new SourceTextModule(code,{context,importModuleDynamically:async name=>{
     const exports=name==='@/lib/group-severity-backfill'?['backfillWorstSeverity']:name==='@/lib/group-company-backfill'?['backfillAppCompanyId','backfillCustomerRouting']:
@@ -22,7 +22,7 @@ test('startup runs imports, data refresh and ticket tracking without automatic d
   await mod.link(()=>{});await mod.evaluate();await mod.namespace.register();
   for(const run of timers)run();
   for(let i=0;i<10;i++)await new Promise(r=>setImmediate(r));
-  assert.deepEqual(calls.sort(),['ensureHydrated','startDashboardJobWorker','startDefenderWorker','startElasticDashboardScheduler','startRiskRefreshScheduler','startTicketStatusSyncScheduler'].sort());
+  assert.deepEqual(calls.sort(),['ensureHydrated','startDashboardJobWorker','startDefenderWorker','startElasticDashboardScheduler','startRiskRefreshScheduler','startTicketStatusSyncScheduler','startPatchProgressWorker'].sort());
 });
 
 

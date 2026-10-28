@@ -24,7 +24,7 @@ export async function storedSpotlightContext(companyId: string): Promise<StoredS
  * generation; page requests must not repeat that multi-million-row aggregation.
  */
 export async function storedSpotlightProof(client: Pick<PoolClient, "query">, context: StoredSpotlightContext,
-  companyId: string, runId: string): Promise<StoredSpotlightScopeProof | null> {
+  companyId: string, runId: string, options: {allowEmpty?:boolean} = {}): Promise<StoredSpotlightScopeProof | null> {
   if (!context.reviewed) return null;
   const route = context.route;
   if (!route || route.companyId !== companyId) return stale();
@@ -35,7 +35,7 @@ export async function storedSpotlightProof(client: Pick<PoolClient, "query">, co
     JOIN spotlight_import_run_scopes pin ON pin.run_id=r.id WHERE r.id=$1::uuid`, [runId])).rows[0];
   const expected = Number(row?.expected_count);
   if (!row || row.tenant_key !== companyId || row.company_id !== companyId || row.status !== "completed" || !row.finished_at ||
-      row.checkpoint_version !== 4 || !Number.isSafeInteger(expected) || expected <= 0 || Number(row.hydrated_count) !== expected ||
+      row.checkpoint_version !== 4 || row.expected_count === null || !Number.isSafeInteger(expected) || expected < (options.allowEmpty ? 0 : 1) || Number(row.hydrated_count) !== expected ||
       row.cid !== route.sourceScope || row.binding_key !== route.bindingKey) return stale();
   return { version: 1, companyId, runId, cid: route.sourceScope, bindingKey: route.bindingKey };
 }

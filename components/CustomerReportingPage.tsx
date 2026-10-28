@@ -10,6 +10,7 @@ import TopFixes from "./TopFixes";
 import RiskDashboard from "./RiskDashboard";
 import PatchReviewQueue from "./PatchReviewQueue";
 import PatchTicketTracker from "./PatchTicketTracker";
+import PatchProgress from "./PatchProgress";
 import ElasticQueryDashboard from "./ElasticQueryDashboard";
 import { dashboardRequest } from "@/lib/dashboard-browser-client";
 import type { ElasticDashboard } from "@/lib/elastic-dashboard";
@@ -108,6 +109,7 @@ export default function CustomerReportingPage({ initialCompanyId="", canManage, 
     {companyId && <div key={`${companyId}:${refresh}:${remediation ? view : "reporting"}`} className="mt-6 space-y-6">
       {remediation && shadowCveReads && (overview || prioritize) && <CustomerPlatformComparison companyId={companyId}/>}
       {overview && <DefenderCustomerPanel companyId={companyId} hideUnconfigured/>}
+      {remediation && overview && <PatchProgress companyId={companyId} view="overview"/>}
       {savedReads && (overview || prioritize) && <CustomerSavedSources companyId={companyId} showCves={prioritize}/>}
       {overview && <CustomerTiles companyId={companyId} canManage={canManage}/>}
         {prioritize && <TopFixes companyId={companyId} canManage={canManage && remediation} reviewHref={remediation ? remediationHref(companyId,"tickets") : undefined}/>}
@@ -118,6 +120,7 @@ export default function CustomerReportingPage({ initialCompanyId="", canManage, 
         <PatchReviewQueue companyId={companyId} sla={sla}/>
         {canManage && <PatchTicketTracker companyId={companyId} sla={sla} allowGlobalActions={false}/>}
       </div>}
+      {remediation && tickets && <PatchProgress companyId={companyId} view="tickets"/>}
     </div>}
 
   </VulnShell></CustomerCveProvider>;
