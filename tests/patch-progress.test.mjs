@@ -48,3 +48,14 @@ test('CrowdStrike disappearance is a fix only after a complete later import with
  for(const change of [{complete:false},{scopeMatches:false},{assessmentAt:base},{suppressed:true}])assert.equal(api.assessProgress(p,base,{...evidence,...change}).state,'unknown');
  assert.equal(api.assessProgress({...p,source:'nessus'},base,evidence).state,'unknown');
 });
+
+test('retained Defender verification keeps its source date and still requires post-ticket evidence',()=>{
+ const p=api.progressScope(ticket()).pairs[0],base='2026-10-20T00:00:00Z';
+ const evidence={complete:true,scopeMatches:true,assessmentAt:'2026-10-21',generation:'old',present:false,covered:true,retained:true,
+  defenderProof:{deviceId:'a',revision:1,observedAt:'2026-10-22'}};
+ const result=api.assessProgress(p,base,evidence);
+ assert.equal(result.state,'clear');assert.equal(result.retained,true);assert.deepEqual(result.defenderProof,evidence.defenderProof);
+ assert.equal(result.assessmentAt,'2026-10-21');assert.match(result.reason,/earlier/i);
+ assert.equal(api.assessProgress(p,base,{...evidence,assessmentAt:base}).state,'unknown');
+ assert.equal(api.assessProgress(p,base,{...evidence,present:true,retained:false}).state,'detected');
+});
