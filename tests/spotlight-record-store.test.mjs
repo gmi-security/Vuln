@@ -22,6 +22,20 @@ await module.link(async name => {
 await module.evaluate();
 const { createSpotlightRecordStore } = module.namespace;
 
+test("automatic resume refuses to create a new run when its pinned checkpoint disappeared", async () => {
+  const calls = [];
+  const client = { query: async (sql, values) => {
+    calls.push({sql:String(sql),values});
+    return {rows:String(sql).includes("INSERT INTO spotlight_import_runs") ?
+      [{id:"new-unwanted-run",phase:"discovering",discovered_count:0,hydrated_count:0}] : [],rowCount:0};
+  }, release() {} };
+  const store = createSpotlightRecordStore({query:async()=>({rows:[]}),connect:async()=>client});
+  await assert.rejects(() => store.beginOrResumePartitionedSpotlightRun("A", ["open","reopen"], undefined,
+    "00000000-0000-0000-0000-000000000001"), /checkpoint.*no longer.*running/i);
+  assert.equal(calls.some(c=>/INSERT INTO|UPDATE spotlight_import_runs/.test(c.sql)),false);
+  assert.ok(calls.some(c=>c.sql === "ROLLBACK"));
+});
+
 const row = (id, raw = { id }) => ({
   sourceId: id, tenantKey: "CO-147284", companyId: "CO-147284",
   hostname: "atlas-host", localIp: "10.0.0.1", externalIp: "", cve: "CVE-2026-1234",

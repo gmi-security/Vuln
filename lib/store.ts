@@ -1317,6 +1317,8 @@ async function schedulerTick(): Promise<void> {
   const sched = s.settings.schedule;
   const now = Date.now();
 
+  if (sched.autoSyncEnabled) await resumeInterruptedSpotlightSync();
+
   // Nightly Arizona start, claimed durably before launching provider work.
   if (sched.autoSyncEnabled && !syncAllStatus().running) {
     const start = connectorSyncStart(now);
@@ -6582,6 +6584,7 @@ const syncJobGlobal = globalThis as unknown as {
   __vulnTidalSync?: TidalSyncStatus;
   __vulnCsDevicesSync?: CsSyncStatus;
   __vulnCsSpotlightSync?: CsSyncStatus;
+  __vulnCsSpotlightRecoveryChecked?: boolean;
   __vulnAutomateSync?: CsSyncStatus;
   __vulnSyncAll?: SyncAllStatus;
 };
@@ -6785,7 +6788,22 @@ async function resolveSpotlightSelection(companyId?: string): Promise<SpotlightT
   const demos = demoCompanyIds(store());
   return selectReviewedSpotlightTenant(falconConfigs(), companies.filter(c => !demos.has(c.id)), routes, companyId);
 }
-export async function startCsSpotlightSync(companyId?: string): Promise<{ started: boolean; error?: string }> {
+// Continue the already-started nightly job after a restart, without launching
+// a fresh daytime batch or automatically retrying provider failures.
+async function resumeInterruptedSpotlightSync(): Promise<void> {
+  if (syncJobGlobal.__vulnCsSpotlightRecoveryChecked || csSpotlightSync().running) return;
+  let selection: SpotlightTenantSelection;
+  try { selection = await resolveSpotlightSelection(); }
+  catch { return; } // Route loading can fail transiently; recheck next tick.
+  const saved = await getLatestSpotlightRunState(selection.tenantKey);
+  syncJobGlobal.__vulnCsSpotlightRecoveryChecked = true;
+  if (saved?.status !== "running") return;
+  const launch = await startCsSpotlightSync(selection.companyId, saved.id);
+  if (launch.started) console.info("[spotlight] resuming interrupted checkpoint", saved.id);
+  else console.error("[spotlight] automatic resume withheld:", launch.error);
+}
+
+export async function startCsSpotlightSync(companyId?: string, resumeRunId?: string): Promise<{ started: boolean; error?: string }> {
   let selection: SpotlightTenantSelection;
   try {
     selection = await resolveSpotlightSelection(companyId);
@@ -6797,7 +6815,7 @@ export async function startCsSpotlightSync(companyId?: string): Promise<{ starte
     fetched: 0, stored: 0, startedAt: Date.now(), finishedAt: null, result: null, error: null };
   void (async () => {
     try {
-      const r = await importFromCrowdstrikeSpotlight(selection);
+      const r = await importFromCrowdstrikeSpotlight(selection, resumeRunId);
       if ("error" in r) {
         syncJobGlobal.__vulnCsSpotlightSync = { ...csSpotlightSync(), running: false, phase: "Error", error: r.error, finishedAt: Date.now() };
       } else {
@@ -7132,6 +7150,7 @@ export type SpotlightImportResult = {
 // Postgres. Existing in-memory findings and reporting remain unchanged.
 export async function importFromCrowdstrikeSpotlight(
   selected?: SpotlightTenantSelection,
+  resumeRunId?: string,
 ): Promise<SpotlightImportResult | { error: string }> {
   let selection: SpotlightTenantSelection;
   try {
@@ -7146,7 +7165,7 @@ export async function importFromCrowdstrikeSpotlight(
     const result = await runPartitionedSpotlightImport(selection, SPOTLIGHT_DISCOVERY_PARTITIONS, {
       acquire: acquireSpotlightWorkerLock,
       createSession: createSpotlightSession,
-      begin: beginOrResumePartitionedSpotlightRun,
+      begin: (tenantKey, keys, scope) => beginOrResumePartitionedSpotlightRun(tenantKey, keys, scope, resumeRunId),
       getRunState: getPartitionedRunCheckpoint,
       savePartitionPage,
       resetPartition: resetPartitionCursor,

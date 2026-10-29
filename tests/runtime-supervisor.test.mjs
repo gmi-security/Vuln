@@ -193,6 +193,31 @@ test("worker crashes restart the entire pair with a bounded budget and no overla
   assert.ok([...children.values()].every(child => !alive(child.pid)));
 });
 
+test("a web crash restarts only web and preserves the live import worker", { timeout: 10000 }, async context => {
+  const controller = new AbortController(), events = [], children = new Map();
+  context.after(() => controller.abort());
+  let webStarts = 0, originalWorker;
+  const status = await launcher.superviseRuntime(configuration({ FIXTURE_CRASH_ROLE: "web" }), {
+    serverScript, signal: controller.signal, maxRestarts: 1, restartDelayMs: 5, shutdownMs: 200,
+    onEvent(event, child) {
+      events.push(event);
+      if (event.event === "started") {
+        children.set(event.pid, child);
+        if (event.role === "worker") originalWorker ??= event.pid;
+        if (event.role === "web") webStarts++;
+      }
+      if (event.event === "ready" && event.role === "web") {
+        if (webStarts === 1) child.send({ type: "fixture-crash" });
+        else { assert.equal(alive(originalWorker), true, "import worker must survive web replacement"); controller.abort(); }
+      }
+    },
+  });
+  assert.equal(status, 0);
+  assert.equal(events.filter(event => event.event === "started" && event.role === "worker").length, 1);
+  assert.equal(webStarts, 2);
+  assert.ok([...children.keys()].every(pid => !alive(pid)));
+});
+
 test("aborting during worker startup never starts web and reaps the worker", { timeout: 10000 }, async () => {
   assert.equal(typeof launcher.superviseRuntime, "function");
   const controller = new AbortController(), events = [];
