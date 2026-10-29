@@ -105,14 +105,14 @@ export function createSpotlightSummaryAccumulator(companyId: string, limits = su
 
 // Reconcile small saved CVE aggregates, never the raw finding table, on page reads.
 export function validateSpotlightSummary(summary: SpotlightSummary, aggregates: Record<string, unknown>[]) {
-  const instanceSeverity = emptySeverityCounts(), cveSeverity = emptySeverityCounts();
+  const instanceSeverity = emptySeverityCounts(), cveSeverity = emptySeverityCounts(), pairSeverity = emptySeverityCounts();
   let cves = 0, pairs = 0, instances = 0;
   for (const row of aggregates) {
     const severity = row.severity as SourceCveRow["severity"];
     if (!sourceSeverities.includes(severity)) throw new Error("Invalid summary severity.");
     const n = summaryCount(row.cves), p = summaryCount(row.devices), i = summaryCount(row.findings);
     if (p < n || i < p) throw new Error("Inconsistent summary CVE counts.");
-    cveSeverity[severity] = n; cves += n; pairs += p; instances += i;
+    pairSeverity[severity] = p; cveSeverity[severity] = n; cves += n; pairs += p; instances += i;
   }
   // Instance severities need not match each CVE's highest severity distribution.
   for (const key of sourceSeverities) instanceSeverity[key] = summaryCount(summary.severity.sourceInstances[key]);
@@ -124,4 +124,5 @@ export function validateSpotlightSummary(summary: SpotlightSummary, aggregates: 
       summaryCount(summary.affectedDevices) > pairs || (instances > 0 && summary.affectedDevices === 0) ||
       summary.inventoryDevices !== null || summaryCount(summary.unknownSuppressionInstances) > instances) throw new Error("Inconsistent saved summary.");
   summaryCount(summary.excludedSuppressedInstances); summaryCount(summary.excludedNonCveInstances);
+  return pairSeverity;
 }

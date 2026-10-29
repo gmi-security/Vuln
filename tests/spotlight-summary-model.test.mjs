@@ -58,7 +58,7 @@ test('deduplicates device/CVE pairs but retains source instances, nullable score
   const r=a.finish();assert.equal(r.summary.sourceInstances,3);assert.equal(r.summary.deviceCveFindings,2);assert.equal(r.summary.affectedDevices,2);
   assert.equal(r.rows[0].severity,'CRITICAL');assert.equal(r.rows[0].cvss,7.5);assert.equal(r.summary.severity.sourceInstances.HIGH,1);
   assert.equal(r.summary.severity.uniqueCves.CRITICAL,1);
-  validate(r.summary,[{severity:'CRITICAL',cves:1,devices:2,findings:3}]);
+  assert.deepEqual(validate(r.summary,[{severity:'CRITICAL',cves:1,devices:'2',findings:3}]),{CRITICAL:2,HIGH:0,MEDIUM:0,LOW:0,NONE:0,UNKNOWN:0});
 });
 test('exclusion order and unknown suppression are explicit; closed and non-CVE rows need no invented device',()=>{
   const a=create('A');a.add(row({status:'closed',aid:null}));a.add(row({cve:'CS-abc',aid:null}));
@@ -78,7 +78,7 @@ test('resource caps fail explicitly before publishing; cannot silently truncate'
   }
 });
 test('empty generation has real zero totals; stored aggregate corruption is rejected',()=>{
-  const empty=create('A').finish();validate(empty.summary,[]);assert.equal(empty.summary.uniqueCves,0);
+  const empty=create('A').finish();assert.deepEqual(validate(empty.summary,[]),{CRITICAL:0,HIGH:0,MEDIUM:0,LOW:0,NONE:0,UNKNOWN:0});assert.equal(empty.summary.uniqueCves,0);
   const a=create('A');a.add(row());const r=a.finish();
   assert.throws(()=>validate(r.summary,[]));assert.throws(()=>validate({...r.summary,affectedDevices:0},[{severity:'HIGH',cves:1,devices:1,findings:1}]));
 });
