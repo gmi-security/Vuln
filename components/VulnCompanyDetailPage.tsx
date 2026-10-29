@@ -39,6 +39,7 @@ import {
   ghostButtonClass,
   inputClass,
   primaryButtonClass,
+  selectClass,
 } from "@/components/ui";
 import {
   compositeColor,
@@ -59,11 +60,15 @@ import type {
 } from "@/lib/types";
 
 const assetSourceLabel: Record<string, string> = {
+  automate: "ConnectWise Automate",
+  defender: "Microsoft Defender",
   tidal: "Tidal",
   intune: "Intune",
   crowdstrike: "CrowdStrike",
   manual: "Manual",
   inferred: "Inferred",
+  nmap: "Nmap",
+  unknown: "Unknown",
 };
 const assetSourceClass: Record<string, string> = {
   tidal: "bg-[rgba(74,163,255,0.10)] text-sky-300 border border-sky-900/60",
@@ -103,6 +108,7 @@ export default function VulnCompanyDetailPage({
   // Asset inventory table: a large customer can have 1,000+ assets — search
   // + client-side pagination instead of rendering every row at once.
   const [assetSearch, setAssetSearch] = useState("");
+  const [assetSource, setAssetSource] = useState("");
   const [assetPage, setAssetPage] = useState(0);
   const ASSET_PAGE_SIZE = 50;
   // Monotonic request id — invalidated on company change so an in-flight load
@@ -123,6 +129,7 @@ export default function VulnCompanyDetailPage({
     setEmailPhase("idle");
     setEmailResult(null);
     setAssetSearch("");
+    setAssetSource("");
     setAssetPage(0);
   }, [companyId]);
 
@@ -193,17 +200,29 @@ export default function VulnCompanyDetailPage({
     return map;
   }, [folders, scans]);
 
+  const assetSources = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const asset of assets) {
+      const source = asset.source || "unknown";
+      counts.set(source, (counts.get(source) ?? 0) + 1);
+    }
+    // Keep a selected source visible if a refreshed inventory no longer has it.
+    if (assetSource && !counts.has(assetSource)) counts.set(assetSource, 0);
+    return [...counts].sort(([a], [b]) =>
+      (assetSourceLabel[a] ?? a).localeCompare(assetSourceLabel[b] ?? b));
+  }, [assets, assetSource]);
+
   const filteredAssets = useMemo(() => {
     const q = assetSearch.trim().toLowerCase();
-    if (!q) return assets;
     return assets.filter(
       (a) =>
-        a.identifier.toLowerCase().includes(q) ||
+        (!assetSource || (a.source || "unknown") === assetSource) &&
+        (!q || a.identifier.toLowerCase().includes(q) ||
         a.hostname.toLowerCase().includes(q) ||
         a.ipAddresses.some((ip) => ip.toLowerCase().includes(q)) ||
-        a.owner.toLowerCase().includes(q),
+        a.owner.toLowerCase().includes(q)),
     );
-  }, [assets, assetSearch]);
+  }, [assets, assetSearch, assetSource]);
   const assetPageCount = Math.max(1, Math.ceil(filteredAssets.length / ASSET_PAGE_SIZE));
   const clampedAssetPage = Math.min(assetPage, assetPageCount - 1);
   const pagedAssets = filteredAssets.slice(
@@ -506,7 +525,7 @@ export default function VulnCompanyDetailPage({
 
       <PanelCard
         eyebrow="Asset inventory"
-        description="Environmental context for real-risk scoring — synced from Tidal.io or entered manually"
+        description="Environmental context for real-risk scoring — imported inventory and manual entries"
         actions={
           <span className="text-sm text-zinc-500">
             {filteredAssets.length !== assets.length
@@ -534,24 +553,45 @@ export default function VulnCompanyDetailPage({
           </div>
         ) : (
           <>
-            <div className="relative mb-4">
-              <Search
-                size={15}
-                className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-600"
-              />
-              <input
-                value={assetSearch}
-                onChange={(e) => {
-                  setAssetSearch(e.target.value);
-                  setAssetPage(0);
-                }}
-                placeholder="Search by hostname, IP, or owner…"
-                className={`${inputClass} pl-9`}
-              />
+            <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end">
+              <div className="relative min-w-0 flex-1">
+                <Search
+                  size={15}
+                  className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-600"
+                />
+                <input
+                  aria-label="Search assets"
+                  value={assetSearch}
+                  onChange={(e) => {
+                    setAssetSearch(e.target.value);
+                    setAssetPage(0);
+                  }}
+                  placeholder="Search by hostname, IP, or owner…"
+                  className={`${inputClass} pl-9`}
+                />
+              </div>
+              <label className="flex flex-col gap-1.5 text-xs text-zinc-400">
+                Inventory source
+                <select
+                  value={assetSource}
+                  onChange={(e) => {
+                    setAssetSource(e.target.value);
+                    setAssetPage(0);
+                  }}
+                  className={`${selectClass} w-full sm:w-64`}
+                >
+                  <option value="">All sources ({assets.length.toLocaleString()})</option>
+                  {assetSources.map(([source, count]) => (
+                    <option key={source} value={source}>
+                      {assetSourceLabel[source] ?? source} ({count.toLocaleString()})
+                    </option>
+                  ))}
+                </select>
+              </label>
             </div>
             {filteredAssets.length === 0 ? (
               <div className="rounded-2xl border border-dashed border-zinc-800 bg-[#080808] px-5 py-8 text-center text-sm text-zinc-500">
-                No assets match "{assetSearch}".
+                No assets match the selected source and search.
               </div>
             ) : (
               <div className="overflow-hidden rounded-[24px] border border-[rgba(179,14,20,0.12)] bg-[#040404]">
@@ -596,8 +636,8 @@ export default function VulnCompanyDetailPage({
                       </div>
                     </div>
                     <div>
-                      <Pill className={assetSourceClass[asset.source]}>
-                        {assetSourceLabel[asset.source]}
+                      <Pill className={assetSourceClass[asset.source] ?? assetSourceClass.manual}>
+                        {assetSourceLabel[asset.source || "unknown"] ?? asset.source}
                       </Pill>
                     </div>
                     <div
