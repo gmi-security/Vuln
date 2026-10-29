@@ -66,7 +66,10 @@ export type CustomerSourceRead = {
     unknownSuppressionInstances: number | null;
     excludedSuppressedInstances: number | null;
     excludedNonCveInstances: number;
-    severity: { sourceInstances: SeverityCounts; uniqueCves: SeverityCounts };
+    severity: { sourceInstances: SeverityCounts; uniqueCves: SeverityCounts;
+      // Device/CVE pairs classified by each CVE's highest recorded severity.
+      deviceCveFindings?: SeverityCounts;
+    };
   };
   cves: { rows: SourceCveRow[]; total: number; offset: number; limit: number };
 });

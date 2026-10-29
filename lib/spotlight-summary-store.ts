@@ -174,14 +174,14 @@ export function createSpotlightSummaryStore(db: Database) {
             try {
               // Vendor CID is private routing evidence, never browser metadata.
               const { vendorScope: _privateScope, topFixes: _fixes, patchActions: _privateActions, ...summary } = saved.summary as SpotlightSummary & { vendorScope?: unknown; topFixes?: unknown; patchActions?: unknown };
-              validateSpotlightSummary(summary, aggregate);
+              const deviceCveFindings = validateSpotlightSummary(summary, aggregate);
               if (summaryCount(saved.cve_count) !== summary.uniqueCves || page.length !== Math.min(limit,Math.max(0,summary.uniqueCves-offset))) throw new Error("Incomplete summary page.");
               if (summaryCount(saved.source_rows) < summary.sourceInstances + summaryCount(summary.excludedSuppressedInstances) + summary.excludedNonCveInstances) throw new Error("Invalid source row count.");
               const rows: SourceCveRow[] = page.map(v => ({ cve:v.cve,severity:v.severity,cvss:v.cvss,affectedDevices:summaryCount(v.affected_devices),sourceInstances:summaryCount(v.source_instances) }));
               const completedAt = iso(saved.source_completed_at);
               result = { ...base, state: "available", generation: { id:saved.run_id,completedAt,clock:"import-completion",
                 connectionRevision:null,importRevision:null,revisionMatches:null,countVerification:saved.count_verification,...importFreshness(completedAt,now,staleAfterMs) },
-                summary, cves:{rows,total:summary.uniqueCves,offset,limit} };
+                summary:{...summary,severity:{...summary.severity,deviceCveFindings}}, cves:{rows,total:summary.uniqueCves,offset,limit} };
             } catch { result = unavailable("inconsistent"); }
           }
         }
