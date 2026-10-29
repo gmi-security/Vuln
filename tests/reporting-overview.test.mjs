@@ -7,9 +7,10 @@ import ts from 'typescript';
 import {company,reportingFixture} from './reporting-sections-fixture.mjs';
 const synthetic=values=>new SyntheticModule(Object.keys(values),function(){for(const [key,value] of Object.entries(values))this.setExport(key,value);});
 async function harness(){
- const data=reportingFixture(),calls=[];let loggedIn=true,saved=null;
+ const data=reportingFixture(),calls=[],sourceCalls=[];let loggedIn=true,saved=null,source=null;
  class DashboardError extends Error{constructor(message,status){super(message);this.status=status;}}
  const stubs=new Map([
+  [resolve('lib/reporting-crowdstrike.ts'),synthetic({reportingCrowdstrike:async id=>{sourceCalls.push(id);return source;}})],
   [resolve("lib/reporting-saved-overview.ts"),synthetic({savedReportingOverview:async()=>{if(saved instanceof Error)throw saved;return saved;},savedReportingSetup:async()=>null})],
   [resolve('lib/elastic-dashboard.ts'),synthetic({DashboardError})],
   [resolve('lib/store.ts'),synthetic({ensureHydrated:async()=>{},getCompany:id=>id===company.id?company:id==='DEMO'?{id,isDemo:true}:null,
@@ -30,7 +31,7 @@ async function harness(){
  }
  const service=await load('lib/reporting-store.ts');await service.evaluate();
  const route=await load('app/api/elastic-dashboard/reporting/route.ts');await route.evaluate();
- return {calls,saved:value=>saved=value,service:service.namespace,get:path=>route.namespace.GET(new Request('http://local/api/elastic-dashboard/reporting'+path)),logout:()=>{loggedIn=false;}};
+ return {calls,sourceCalls,source:value=>source=value,saved:value=>saved=value,service:service.namespace,get:path=>route.namespace.GET(new Request('http://local/api/elastic-dashboard/reporting'+path)),logout:()=>{loggedIn=false;}};
 }
 test('Overview preserves complete report sections without computing the unused executive report',async()=>{
  const h=await harness();const sections=await h.service.reportingOverview(company.id);assert.deepEqual(h.calls,['findings:'+company.id]);
@@ -51,9 +52,15 @@ test('existing setup and full reporting response retain their contract',async()=
  assert.deepEqual(Object.keys(full).sort(),['insights','model','report','sources']);assert.ok(h.calls.includes('executive'));
 });
 
+test('both report routes attach only the resolved customer summary after access checks',async()=>{
+ const h=await harness();const source={state:'available',companyId:company.id,source:'crowdstrike',summary:{sourceInstances:2500239}};h.source(source);
+ for(const suffix of ['', '&view=sections'])assert.deepEqual((await(await h.get(`?companyId=${company.id}${suffix}`)).json()).model.crowdstrikeReport,source);
+ assert.deepEqual(h.sourceCalls,[company.id,company.id]);h.logout();assert.equal((await h.get(`?companyId=${company.id}&view=sections`)).status,401);assert.equal(h.sourceCalls.length,2);
+});
+
 test('selected SQL Overview bypasses legacy aggregation; errors propagate without implicit RAM fallback',async()=>{
  const h=await harness(),model={company};h.saved({model,savedReport:{capturedAt:'2026-10-10T00:00:00Z'}});
- const response=await h.get(`?companyId=${company.id}&view=sections`);assert.equal(response.status,200);assert.deepEqual((await response.json()).model,model);assert.deepEqual(h.calls,[]);
+ const response=await h.get(`?companyId=${company.id}&view=sections`);assert.equal(response.status,200);assert.deepEqual((await response.json()).model,{...model,crowdstrikeReport:null});assert.deepEqual(h.calls,[]);
  h.saved(Object.assign(Error('Saved report awaiting refresh'),{status:503}));assert.equal((await h.get(`?companyId=${company.id}&view=sections`)).status,503);assert.deepEqual(h.calls,[]);
  h.logout();assert.equal((await h.get(`?companyId=${company.id}&view=sections`)).status,401);assert.deepEqual(h.calls,[]);
 });
