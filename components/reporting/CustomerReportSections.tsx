@@ -5,6 +5,7 @@ import CveText, {cveIdentifier} from "../CveText";
 import {useCustomerCve} from "../customer-cve-context";
 import type { CustomerReportingModel } from "@/lib/reporting-customer-model";
 import styles from "../QueryDashboard.module.css";
+import CompletedCrowdstrikeReport from "./CompletedCrowdstrikeReport";
 
 const format = (value: number) => value.toLocaleString();
 const label = (value: string) => value === "vulners" ? "Vulners" : value === "nessus" ? "Nessus" :
@@ -38,6 +39,18 @@ function FindingTable({ rows, title, companyId, total, kind = "vuln" }: {
 }
 
 export default function CustomerReportSections({ model }: { model: CustomerReportingModel }) {
+  if (model.crowdstrikeReport) return <div className="mt-6 space-y-6">
+    <CompletedCrowdstrikeReport model={model} data={model.crowdstrikeReport}/>
+    <details className="rounded-xl border border-zinc-800 bg-[#090909] p-5">
+      <summary className="cursor-pointer text-lg font-semibold text-zinc-200">Platform records and other sources</summary>
+      <p className="mt-3 text-sm text-amber-200">Historical platform snapshot: its CrowdStrike records are a limited older population. Its counts, KEV, risk, history and inventory-context coverage are separate from the completed CrowdStrike import above. Do not add these populations together. Other scanners and inventory records are preserved here.</p>
+      <PlatformReportSections model={model}/>
+    </details>
+  </div>;
+  return <PlatformReportSections model={model}/>;
+}
+
+function PlatformReportSections({ model }: { model: CustomerReportingModel }) {
   const { company, metrics, sourceActivity, assets } = model;
   // Saved reports created before customer consolidation omit this field.
   const legacyHistory = model.legacyHistory ?? [];

@@ -57,4 +57,6 @@ export function buildCustomerReportingModel(
   };
 }
 
-export type CustomerReportingModel = ReturnType<typeof buildCustomerReportingModel>;
+export type CustomerReportingModel = ReturnType<typeof buildCustomerReportingModel> & {
+  crowdstrikeReport?: import("./customer-source-read-model").ReportingCrowdstrike | null;
+};

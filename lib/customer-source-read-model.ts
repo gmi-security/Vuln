@@ -71,6 +71,8 @@ export type CustomerSourceRead = {
   cves: { rows: SourceCveRow[]; total: number; offset: number; limit: number };
 });
 
+export type ReportingCrowdstrike = CustomerSourceRead | { state: "unavailable"; message: string };
+
 export function validateSourceRead(request: CustomerSourceReadRequest) {
   const { companyId, now, staleAfterMs, offset = 0, limit = 50 } = request;
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(companyId) ||

@@ -42,7 +42,7 @@ export default function ReportingCustomer({ companyId, onCompanyChange, refreshT
       <div><p className="text-xs uppercase tracking-[0.25em] text-red-500">Customer reporting</p>
         <h2 className="mt-2 text-2xl font-semibold text-white">Customer report</h2>
         <p className="mt-2 max-w-2xl text-sm text-zinc-400">Select an app customer to see its findings across all connected scanners.</p></div>
-      {model && <Link href={`/report/${encodeURIComponent(model.company.id)}`} className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-100 hover:bg-zinc-800">Open full report</Link>}
+      {model && <Link href={`/report/${encodeURIComponent(model.company.id)}`} className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-100 hover:bg-zinc-800">{model.crowdstrikeReport ? "Open platform report" : "Open full report"}</Link>}
     </div>}
     {!setup && !error && <p role="status" className="text-sm text-zinc-400">{showReport ? "Loading customer reporting…" : "Loading customers…"}</p>}
     {setup && <label className="block max-w-xl text-sm text-zinc-200">Customer
