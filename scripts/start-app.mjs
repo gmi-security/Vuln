@@ -102,7 +102,7 @@ export async function superviseRuntime(configuration, {
           // their advisory lock. That leaves this child inactive; it does not
           // prove an external worker is supervised or require a web restart.
           if (auxiliary && code === 0) onEvent({ event: "auxiliary-inactive", role, pid: child.pid, attempt, reason: "successful-exit" }, child);
-          else failed.resolve({ type: "exit", role });
+          else if (role !== "web") failed.resolve({ type: "exit", role });
         };
         child.once("error", () => exit(1, null));
         child.once("exit", exit);
@@ -115,7 +115,7 @@ export async function superviseRuntime(configuration, {
       const waitReady = async record => {
         let timer;
         const timedOut = new Promise(resolveTimeout => { timer = setTimeout(() => resolveTimeout({ type: "timeout" }), startupMs); });
-        try { return await Promise.race([record.ready, failed.promise, stopped.promise, timedOut]); }
+        try { return await Promise.race([record.ready, record.done.then(() => ({ type: "exit", role: record.role })), failed.promise, stopped.promise, timedOut]); }
         finally { clearTimeout(timer); }
       };
       try {
@@ -126,8 +126,19 @@ export async function superviseRuntime(configuration, {
             if (status.type !== "ready" || signal?.aborted) break;
           }
         }
-        if (status.type === "ready" && !signal?.aborted) status = await waitReady(start("web"));
-        if (status.type === "ready" && !signal?.aborted) status = await Promise.race([failed.promise, stopped.promise]);
+        if (status.type === "ready" && !signal?.aborted) {
+          // A reader crash must not cancel healthy, checkpointed imports.
+          for (let webAttempt = 0; webAttempt <= maxRestarts && !signal?.aborted; webAttempt++) {
+            const web = start("web");
+            status = await waitReady(web);
+            if (status.type === "ready" && !signal?.aborted)
+              status = await Promise.race([web.done.then(() => ({ type: "exit", role: "web" })), failed.promise, stopped.promise]);
+            if (status.type !== "exit" || status.role !== "web" || webAttempt === maxRestarts || signal?.aborted) break;
+            onEvent({ event: "web-restarting", attempt, webAttempt: webAttempt + 1 });
+            status = await Promise.race([delay(restartDelayMs * (webAttempt + 1)).then(() => ({ type: "retry" })), failed.promise, stopped.promise]);
+            if (status.type !== "retry") break;
+          }
+        }
         if (status.type !== "stop" && !signal?.aborted) onEvent({ event: "generation-failed", reason: status.type, attempt });
       } finally {
         // Do not start a new writer until every process in this generation has

@@ -26,6 +26,29 @@ async function load(file, overrides, timers = []) {
 }
 const settled = () => new Promise(resolve => setImmediate(resolve));
 
+test('restart recovery resumes only the selected unfinished checkpoint once, even during daytime', async () => {
+  const ast=ts.createSourceFile('store.ts',await readFile('lib/store.ts','utf8'),ts.ScriptTarget.Latest,true);
+  const fn=ast.statements.find(node=>ts.isFunctionDeclaration(node)&&node.name?.text==='resumeInterruptedSpotlightSync');
+  assert.ok(fn, 'the scheduler needs checkpoint recovery separate from the nightly start claim');
+  for(const state of ['running','completed','failed','missing','busy','unmapped','storage-error','route-read-error']) {
+    const calls=[], globals={}; let queryFails=state==='storage-error', busy=state==='busy', routeFails=state==='route-read-error';
+    const context=vm.createContext({console,Date:ClockDate,syncJobGlobal:globals,
+      csSpotlightSync:()=>({running:busy}),
+      resolveSpotlightSelection:async()=>{if(state==='unmapped'||routeFails)throw Error('Route unavailable');return {companyId:'A',tenantKey:'A'};},
+      getLatestSpotlightRunState:async tenant=>{assert.equal(tenant,'A');if(queryFails)throw Error('db unavailable');return state==='missing'?null:{id:'saved-run',status:['storage-error','route-read-error'].includes(state)?'running':state};},
+      startCsSpotlightSync:async(...args)=>{calls.push(args);return {started:true};},
+    });
+    const mod=new vm.SourceTextModule(ts.transpileModule('export '+fn.getText(ast),{compilerOptions:{module:ts.ModuleKind.ESNext}}).outputText,{context});
+    await mod.link(()=>{});await mod.evaluate();
+    clock=Date.parse('2026-10-29T15:00:00Z');
+    if(queryFails){await assert.rejects(()=>mod.namespace.resumeInterruptedSpotlightSync(),/db unavailable/);queryFails=false;}
+    if(routeFails){await mod.namespace.resumeInterruptedSpotlightSync();routeFails=false;}
+    await mod.namespace.resumeInterruptedSpotlightSync();
+    await mod.namespace.resumeInterruptedSpotlightSync();
+    assert.deepEqual(calls,['running','storage-error','route-read-error'].includes(state)?[['A','saved-run']]:[],state);
+  }
+});
+
 test('Arizona nightly start is stable across daylight-saving changes, month boundaries and restarts', async () => {
   const {connectorSyncStart} = await load('lib/connector-sync-schedule.ts',{});
   for (const [at,want] of [
@@ -43,8 +66,9 @@ test('general connector scheduler starts at 9 PM, blocks duplicates after restar
   const fn=ast.statements.find(node=>ts.isFunctionDeclaration(node)&&node.name?.text==='schedulerTick');
   const {connectorSyncStart}=await load('lib/connector-sync-schedule.ts',{});
   const s={settings:{schedule:{autoSyncEnabled:true,autoSyncIntervalHours:24,alertsEnabled:false,monthlyReportsEnabled:false}},meta:{lastMetricsSnapshotDay:'today',lastAutoSyncAt:null}};
-  let starts=0,busy=false,claimed=null;
+  let starts=0,busy=false,claimed=null,recoveries=0;
   const context=vm.createContext({console,Date:ClockDate,store:()=>s,todayUtc:()=> 'today',markDirty(){},connectorSyncStart,
+    resumeInterruptedSpotlightSync:async()=>{recoveries++;},
     claimDailyJob:async()=>{const slot=connectorSyncStart(clock);if(claimed===slot)return false;claimed=slot;return true;},
     syncAllStatus:()=>({running:busy}),startSyncAll:options=>{assert.equal(options.scheduled,true);starts++;return {started:true};}});
   const mod=new vm.SourceTextModule(ts.transpileModule('export '+fn.getText(ast),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText,{context});
@@ -55,7 +79,9 @@ test('general connector scheduler starts at 9 PM, blocks duplicates after restar
   clock=Date.parse('2026-10-18T03:59:59Z');await mod.namespace.schedulerTick();assert.equal(starts,1);
   clock=Date.parse('2026-10-18T04:00:00Z');busy=true;await mod.namespace.schedulerTick();assert.equal(starts,1);
   busy=false;await mod.namespace.schedulerTick();assert.equal(starts,2);
+  const previousRecoveries=recoveries;
   clock=Date.parse('2026-10-19T04:00:00Z');s.settings.schedule.autoSyncEnabled=false;await mod.namespace.schedulerTick();assert.equal(starts,2);
+  assert.equal(recoveries,previousRecoveries,'disabled automatic imports must not resume');
 });
 
 test('ConnectWise automatic sync observes a durable daily claim across ticks and restarts; manual refresh remains available', async () => {

@@ -242,14 +242,15 @@ export function createSpotlightRecordStore(db: Database) {
     }
   }
 
-  async function getLatestSpotlightRunState(): Promise<SpotlightRunState | null> {
+  async function getLatestSpotlightRunState(tenantKey?: string): Promise<SpotlightRunState | null> {
     let result;
     try {
       result = await db.query(`SELECT id, tenant_key, phase, query_cursor,
       hydration_cursor, discovered_count, expected_count, hydrated_count,
       status, started_at, finished_at, error FROM spotlight_import_runs
       WHERE checkpoint_version IN (2, 3, 4) AND phase IN ('discovering', 'hydrating')
-      ORDER BY started_at DESC LIMIT 1`);
+        AND ($1::text IS NULL OR tenant_key=$1)
+      ORDER BY started_at DESC LIMIT 1`, [tenantKey ?? null]);
     } catch (error) {
       if (error && typeof error === "object" && "code" in error &&
           (error.code === "42703" || error.code === "42P01")) return null;
@@ -386,7 +387,7 @@ export function createSpotlightRecordStore(db: Database) {
         AND phase = 'discovering' AND status = 'running'`, [runId, tenantKey, reason]);
   }
 
-  async function beginOrResumePartitionedSpotlightRun(tenantKey: string, partitionKeys: string[], scope?: SpotlightRunScope): Promise<SpotlightPartitionedRunCheckpoint> {
+  async function beginOrResumePartitionedSpotlightRun(tenantKey: string, partitionKeys: string[], scope?: SpotlightRunScope, resumeRunId?: string): Promise<SpotlightPartitionedRunCheckpoint> {
     if (scope && (scope.companyId !== tenantKey || !/^[a-f0-9]{64}$/.test(scope.bindingKey) || !/^[a-f0-9]{32}$/.test(scope.cid)))
       throw new Error("Invalid Spotlight import scope.");
     await ensureSchema();
@@ -400,10 +401,12 @@ export function createSpotlightRecordStore(db: Database) {
           ${scope ? `AND EXISTS (SELECT 1 FROM spotlight_import_run_scopes pin WHERE pin.run_id=spotlight_import_runs.id
             AND pin.binding_key=$2 AND pin.company_id=$1 AND pin.cid=$3)` : ""}
           AND status IN ('running', 'failed') AND phase IN ('discovering', 'hydrating')
+          ${resumeRunId ? `AND id=$${scope ? 4 : 2}::uuid AND status='running'` : ""}
           AND started_at > COALESCE((SELECT active.started_at FROM spotlight_import_current current_run
             JOIN spotlight_import_runs active ON active.id = current_run.run_id
             WHERE current_run.tenant_key = $1), '-infinity'::timestamptz)
-        ORDER BY started_at DESC LIMIT 1 FOR UPDATE`, scope ? [tenantKey, scope.bindingKey, scope.cid] : [tenantKey]);
+        ORDER BY started_at DESC LIMIT 1 FOR UPDATE`, [...(scope ? [tenantKey, scope.bindingKey, scope.cid] : [tenantKey]), ...(resumeRunId ? [resumeRunId] : [])]);
+      if (resumeRunId && !existing.rows.length) throw new Error("Spotlight checkpoint is no longer running or its customer scope changed; automatic resume withheld.");
       let runRow;
       if (existing.rows.length) {
         const resumed = await client.query(`UPDATE spotlight_import_runs
@@ -813,7 +816,7 @@ function configuredStore() {
 export const beginSpotlightRun = (tenantKey: string) => configuredStore().beginSpotlightRun(tenantKey);
 export const acquireSpotlightWorkerLock = (tenantKey: string) => configuredStore().acquireSpotlightWorkerLock(tenantKey);
 export const beginOrResumeSpotlightRun = (tenantKey: string) => configuredStore().beginOrResumeSpotlightRun(tenantKey);
-export const getLatestSpotlightRunState = () => configuredStore().getLatestSpotlightRunState();
+export const getLatestSpotlightRunState = (tenantKey?: string) => configuredStore().getLatestSpotlightRunState(tenantKey);
 export const saveSpotlightIdPage = (runId: string, tenantKey: string, priorCursor: string,
   ids: string[], nextCursor: string, reportedTotal: number | null) =>
   configuredStore().saveSpotlightIdPage(runId, tenantKey, priorCursor, ids, nextCursor, reportedTotal);
@@ -823,8 +826,8 @@ export const writeSpotlightHydrationBatch = (runId: string, tenantKey: string, i
   configuredStore().writeSpotlightHydrationBatch(runId, tenantKey, ids, rows);
 export const abandonSpotlightDiscovery = (runId: string, tenantKey: string, reason: string) =>
   configuredStore().abandonSpotlightDiscovery(runId, tenantKey, reason);
-export const beginOrResumePartitionedSpotlightRun = (tenantKey: string, partitionKeys: string[], scope?: SpotlightRunScope) =>
-  configuredStore().beginOrResumePartitionedSpotlightRun(tenantKey, partitionKeys, scope);
+export const beginOrResumePartitionedSpotlightRun = (tenantKey: string, partitionKeys: string[], scope?: SpotlightRunScope, resumeRunId?: string) =>
+  configuredStore().beginOrResumePartitionedSpotlightRun(tenantKey, partitionKeys, scope, resumeRunId);
 export const getPartitionedRunCheckpoint = (runId: string, tenantKey: string) =>
   configuredStore().getPartitionedRunCheckpoint(runId, tenantKey);
 export const savePartitionPage = (runId: string, tenantKey: string, partitionKey: string, priorCursor: string,
