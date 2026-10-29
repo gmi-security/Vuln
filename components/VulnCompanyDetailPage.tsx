@@ -78,6 +78,16 @@ const assetSourceClass: Record<string, string> = {
   inferred: "bg-zinc-900 text-zinc-500 border border-zinc-800",
 };
 
+function assetDisplayName(asset: InventoryAsset) {
+  const hostname = asset.hostname.trim();
+  const defenderId = asset.defenderDeviceId || (asset.source === "defender" ? asset.externalId : "");
+  // Defender stores its device ID as the hostname when no DNS name was supplied.
+  if (hostname && hostname.toLowerCase() !== defenderId?.toLowerCase() && !hostname.toLowerCase().startsWith("defender:")) {
+    return hostname;
+  }
+  return asset.ipAddresses.find((ip) => ip.trim())?.trim() || asset.identifier;
+}
+
 export default function VulnCompanyDetailPage({
   companyId,
   profiles,
@@ -603,18 +613,21 @@ export default function VulnCompanyDetailPage({
                   <div>Source</div>
                   <div>Open</div>
                 </div>
-                {pagedAssets.map((asset) => (
+                {pagedAssets.map((asset) => {
+                  const displayName = assetDisplayName(asset);
+                  const otherAddresses = asset.ipAddresses.filter((ip) => ip.trim() !== displayName);
+                  return (
                   <div
                     key={asset.id}
                     className="grid grid-cols-[1.6fr_150px_140px_1fr_110px_90px] items-center gap-4 border-b border-zinc-900/70 px-5 py-3 transition-colors last:border-b-0 hover:bg-[rgba(179,14,20,0.04)]"
                   >
                     <div className="min-w-0">
-                      <div className="truncate font-medium text-white">
-                        {asset.identifier}
+                      <div className="truncate font-medium text-white" title={displayName}>
+                        {displayName}
                       </div>
-                      {asset.ipAddresses.length ? (
+                      {otherAddresses.length ? (
                         <div className="mt-1 truncate text-xs text-zinc-500">
-                          {asset.ipAddresses.join(", ")}
+                          {otherAddresses.join(", ")}
                         </div>
                       ) : null}
                     </div>
@@ -646,7 +659,8 @@ export default function VulnCompanyDetailPage({
                       {asset.openFindings}
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
             {assetPageCount > 1 ? (
