@@ -101,7 +101,7 @@ jobs:
       - name: Upload vulnerability/misconfig findings (with fix guidance) to GitHub
         if: always()
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-vuln-misconfig.sarif
           category: trivy-vuln-misconfig
@@ -139,7 +139,7 @@ jobs:
       - name: Upload secret findings to GitHub
         if: always()
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-secrets.sarif
           category: trivy-secrets
