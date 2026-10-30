@@ -66,8 +66,9 @@ async function stopChild(record, shutdownMs) {
 export async function superviseRuntime(configuration, {
   serverScript = runtimeScript, signal, maxRestarts = 3, restartDelayMs = 1000,
   startupMs = 120000, shutdownMs = 10000,
-  onEvent = event => console.log(JSON.stringify({ runtime: "supervisor", ...event })),
+  onEvent: receiveEvent = event => console.log(JSON.stringify({ runtime: "supervisor", ...event })),
 } = {}) {
+  const onEvent=(event,child)=>receiveEvent({at:new Date().toISOString(),...event},child);
   const directory = await mkdtemp(join(tmpdir(), "vuln-runtime-"));
   await chmod(directory, 0o700);
   const socketPath = configuration.socketPath ?? join(directory, "worker.sock");
@@ -79,6 +80,13 @@ export async function superviseRuntime(configuration, {
   try {
     for (let attempt = 0; attempt <= maxRestarts && !signal?.aborted; attempt++) {
       const records = [], failed = deferred();
+      // Observed outside the child event loop: a paused child cannot hide its
+      // own missing samples. Warn without restarting an in-flight writer.
+      const heartbeat=setInterval(()=>{
+        for(const record of records)if(!record.finished&&record.lastHeartbeat&&Date.now()-record.lastHeartbeat>30000){
+          onEvent({event:'child-heartbeat-delayed',role:record.role,pid:record.child.pid,delayMs:Date.now()-record.lastHeartbeat});
+        }
+      },10000);heartbeat.unref();
       const start = (role, auxiliary) => {
         const env = { ...configuration.env, VULN_RUNTIME_ROLE: role, VULN_RUNTIME_SOCKET: socketPath, VULN_RUNTIME_TOKEN: token,
           VULN_RUNTIME_HOST: configuration.hostname, VULN_RUNTIME_PORT: String(configuration.port),
@@ -93,6 +101,7 @@ export async function superviseRuntime(configuration, {
         const ready = deferred(), done = deferred();
         const record = { role, child, ready: ready.promise, done: done.promise, finished: false };
         records.push(record);
+        child.on('message',message=>{if(message?.type==='runtime-metrics')record.lastHeartbeat=Date.now();});
         const exit = (code, signal) => {
           if (record.finished) return;
           record.finished = true;
@@ -141,6 +150,7 @@ export async function superviseRuntime(configuration, {
         }
         if (status.type !== "stop" && !signal?.aborted) onEvent({ event: "generation-failed", reason: status.type, attempt });
       } finally {
+        clearInterval(heartbeat);
         // Do not start a new writer until every process in this generation has
         // exited. Stop the public listener first so no writes reach a draining worker.
         await Promise.all(records.filter(record => record.role === "web").map(record => stopChild(record, shutdownMs)));

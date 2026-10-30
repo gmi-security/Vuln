@@ -4,6 +4,7 @@ import { timingSafeEqual } from "node:crypto";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { shouldForwardToWorker } from "../lib/runtime-routing.mjs";
+import {startRuntimeMetrics} from '../lib/runtime-metrics.mjs';
 
 const internalHeader = "x-vuln-runtime-token";
 const contextKey = Symbol.for("vuln.readContext");
@@ -85,7 +86,7 @@ export function createRuntimeRequestHandler({ role, socketPath, token, handleReq
       res.once("finish", release); res.once("close", release); req.once("aborted", release);
       globalThis[contextKey].run(context, run);
     }
-    else run();
+    else globalThis[contextKey].run({internalWorker:true},run);
   };
 }
 
@@ -103,6 +104,7 @@ export function startWorkerHealthProbe({ socketPath, token, intervalMs = 10000, 
       complete = true; clearTimeout(deadline); active = undefined;
       if (stopped) return;
       status = { available: result?.available ?? false, ready: result?.ready ?? false,
+        ...((result?.persistenceStatus??status.persistenceStatus)?{persistenceStatus:result?.persistenceStatus??status.persistenceStatus}:{}),
         blocked: result?.blocked ?? status.blocked, checkedAt: new Date().toISOString() };
       onStatus(status);
       scheduled = setTimeout(probe, intervalMs); scheduled.unref?.();
@@ -120,7 +122,8 @@ export function startWorkerHealthProbe({ socketPath, token, intervalMs = 10000, 
         try {
           const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
           if (![200, 503].includes(response.statusCode) || typeof body.ready !== "boolean" || typeof body.persistence?.blocked !== "boolean") return finish();
-          finish({ available: true, ready: response.statusCode === 200 && body.ready && !body.persistence.blocked, blocked: body.persistence.blocked });
+          finish({ available: true, ready: response.statusCode === 200 && body.ready && !body.persistence.blocked, blocked: body.persistence.blocked,
+            persistenceStatus:body.persistenceStatus });
         } catch { finish(); }
       });
     });
@@ -148,6 +151,7 @@ export async function runRuntimeServer({ env = process.env, createApp } = {}) {
   process.on("SIGTERM", requestStop); process.on("SIGINT", requestStop);
   process.on("disconnect", ownerLost); process.on("message", message);
   let app, server, stopHealthProbe;
+  const stopMetrics=startRuntimeMetrics({role});
   try {
     const factory = createApp ?? (await import("next")).default;
     app = await factory({ dev: false, dir: process.cwd(), hostname, port });
@@ -165,6 +169,7 @@ export async function runRuntimeServer({ env = process.env, createApp } = {}) {
     process.send?.({ type: "ready", role });
     await stopped;
   } finally {
+    stopMetrics();
     stopHealthProbe?.();
     if (server?.listening) await new Promise(done => server.close(done));
     await app?.close();
@@ -176,6 +181,7 @@ export async function runRuntimeServer({ env = process.env, createApp } = {}) {
 // Existing dedicated workers own their SIGTERM cleanup. The wrapper adds IPC
 // ownership so abrupt supervisor loss cannot leave an orphan writer running.
 export async function runAuxiliaryWorker(script) {
+  startRuntimeMetrics({role:process.env.VULN_RUNTIME_ROLE??'auxiliary'});
   let stopping = false;
   const stop = () => {
     if (stopping) return;

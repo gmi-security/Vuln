@@ -4,6 +4,7 @@ import {readFile} from 'node:fs/promises';
 import {createContext,SourceTextModule,SyntheticModule} from 'node:vm';
 import * as crypto from 'node:crypto';
 import ts from 'typescript';
+import {EventEmitter} from 'node:events';
 import * as platform from '../lib/db/platform-store.mjs';
 import * as authority from '../lib/db/platform-authority.mjs';
 import * as reader from '../lib/db/platform-reader.mjs';
@@ -17,7 +18,7 @@ async function harness(){
  const record=platformRecord('scans',data.scans[0],1024);
  index.get('scans').set('S-1',{hash:record.record_hash,order:record.store_order,bucket:record.store_bucket});
  const queries=[],written=[],reported=[],released=[],waits=[];let onWrite,onQuery,connections=0,deadline;
- const client=()=>{let pending={...auth},closed=false;return {release(error){closed=true;released.push(error);},async query(sql,params){
+ const client=()=>{let pending={...auth},closed=false;const events=new EventEmitter();return {on:(...a)=>events.on(...a),once:(...a)=>events.once(...a),off:(...a)=>events.off(...a),release(error){closed=true;released.push(error);events.emit('end');},async query(sql,params){
   if(closed)throw Error('closed connection');
   queries.push(sql);
   await onQuery?.(sql);
@@ -33,14 +34,17 @@ async function harness(){
  const context=createContext({Buffer,URL,process:{env},console:{info(){},error(){},warn(){}},setTimeout:(fn,ms)=>{
   if(ms>=300000)deadline=fn;
   if(ms===30000){waits.push(ms);return setTimeout(fn,0);}
+  if([5000,15000,60000].includes(ms))return setTimeout(fn,0);
   return setTimeout(fn,ms);
  },clearTimeout,setImmediate});
  const revisions={createReportingInputDigests:()=>({async bucket(){},finish:()=>[],committed(){}}),publishReportingInputRevisions:async()=>{},publishSqlReportingChanges:async(c,k,t,plan)=>{reported.push(plan);},reportingSnapshotManifest:async()=>null};
  const code=ts.transpileModule(await readFile('lib/persist.ts','utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText;
  const m=new SourceTextModule(code,{context});
+ const clients=new SourceTextModule(await readFile('lib/db/publication-client.mjs','utf8'),{context});
+ await clients.link(()=>{throw Error('unexpected helper dependency');});await clients.evaluate();
  let reportError;
  const storeModule={...platform,preparePlatformReporting:async(p,plan)=>{if(reportError)throw reportError;reported.push(plan);return [];}};
- await m.link(name=>{const values=name==='pg'?{Pool:class{constructor(){return pool}}}:name.endsWith('customer-reporting-revisions.mjs')?revisions:name.endsWith('platform-store.mjs')?storeModule:name.endsWith('platform-authority.mjs')?authority:name.endsWith('platform-reader.mjs')?reader:crypto;return new SyntheticModule(Object.keys(values),function(){for(const[k,v]of Object.entries(values))this.setExport(k,v)},{context});});
+ await m.link(name=>{const values=name==='pg'?{Pool:class{constructor(){return pool}}}:name.endsWith('publication-client.mjs')?clients.namespace:name.endsWith('customer-reporting-revisions.mjs')?revisions:name.endsWith('platform-store.mjs')?storeModule:name.endsWith('platform-authority.mjs')?authority:name.endsWith('platform-reader.mjs')?reader:crypto;return new SyntheticModule(Object.keys(values),function(){for(const[k,v]of Object.entries(values))this.setExport(k,v)},{context});});
  await m.evaluate();
  const state=context.__vulnDatabasePersistenceV1;
  state.platformAuthority={...auth};state.platformState={authority:{...auth},index,metaHash:platformHash(platformJson({counter:1}))};
