@@ -74,7 +74,8 @@ try{
  // Restore reporting after the ordinary low-level writer test.
  await tx(db,async()=>publishReportingInputRevisions(db,await digests(base.data)));
  const updated=structuredClone(base.data),changed=[];
- for(let i=0;i<updated.findings.length;i++)if(updated.findings[i][1].companyId==='CO-1'){
+ const maxChanged=Number(process.env.VULN_GENERATION_TEST_CHANGED??Infinity);
+ for(let i=0;i<updated.findings.length;i++)if(updated.findings[i][1].companyId==='CO-1'&&changed.length<maxChanged-2){
   updated.findings[i][1].defender.runId='new';updated.findings[i][1].severity='Critical';changed.push(updated.findings[i][0]);
  }
  const removed=updated.findings.find(([id])=>id==='F-00000000');changed.push(removed[0]);updated.findings=updated.findings.filter(([id])=>id!==removed[0]);
