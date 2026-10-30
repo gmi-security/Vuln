@@ -686,6 +686,7 @@ function store(): StoreShape {
 
 // --- snapshot persistence --------------------------------------------------
 
+import {createPersistenceHealth} from './persistence-health.mjs';
 type PlatformChanges = Partial<Record<"companies" | "folders" | "scans" | "findings" | "assets", string[]>>;
 function serializeStore(s: StoreShape, changes?: PlatformChanges) {
   const entries = <T,>(map: Map<string, T>, kind: keyof PlatformChanges): [string, T][] => changes === undefined
@@ -817,6 +818,7 @@ const persistGlobal = globalThis as unknown as {
   __vulnDirty?: boolean;
   __vulnMutationVersion?: number;
   __vulnSaveRetryAt?: number;
+  __vulnPersistenceHealth?: ReturnType<typeof createPersistenceHealth>;
   __vulnMutationScope?: Partial<Record<keyof PlatformChanges, Set<string>>> | null;
   // 60s scheduler driving auto-sync, daily metrics snapshots, and monthly
   // reports (same singleton pattern as the flusher).
@@ -855,11 +857,13 @@ export function persistenceBlocked(): boolean {
   if (readerRole()) return (globalThis as any)[Symbol.for("vuln.workerHealth")]?.blocked === true;
   return Boolean(persistGlobal.__vulnPersistBlocked);
 }
+const persistenceHealth = () => persistGlobal.__vulnPersistenceHealth ??= createPersistenceHealth();
 
 // Record that the in-memory store changed since the last snapshot save.
 function markDirty(changes?: PlatformChanges): void {
   if (readerRole()) throw new Error("Platform mutations must run in the worker.");
   persistGlobal.__vulnDirty = true;
+  persistenceHealth().dirty();
   persistGlobal.__vulnMutationVersion = (persistGlobal.__vulnMutationVersion ?? 0) + 1;
   if (changes === undefined) persistGlobal.__vulnMutationScope = null;
   else if (persistGlobal.__vulnMutationScope !== null) {
@@ -935,6 +939,8 @@ function persistSnapshot(throwOnError = false): Promise<void> {
     // the save re-mark it and get picked up by the next flush.
     try {
       for (let attempt = 0; ; attempt++) {
+        persistenceHealth().publishing();
+        let committedRevision: string | undefined;
         persistGlobal.__vulnDirty = false;
         const version = persistGlobal.__vulnMutationVersion ?? 0;
         const changes = strictPlatformPersistence() && persistGlobal.__vulnMutationScope != null
@@ -942,6 +948,14 @@ function persistSnapshot(throwOnError = false): Promise<void> {
         try {
           await saveSnapshot(serializeStore(globalStore.__vulnStore, changes), {
             changes,
+            onProgress: event => {
+              if(event.type==='retry')persistenceHealth().retry({code:event.code,delayMs:event.delayMs??60000});
+              else if(event.type==='committed')committedRevision=event.revision;
+              else {
+                persistenceHealth().publishing(event.phase);
+                if(event.type==='checkpoint')persistenceHealth().progress();
+              }
+            },
             captureGuard: () => {
               if (strictPlatformPersistence() && version !== (persistGlobal.__vulnMutationVersion ?? 0))
                 throw Object.assign(new Error("Platform changed during save; capture will be retried."), { code: "platform-capture-changed" });
@@ -949,6 +963,7 @@ function persistSnapshot(throwOnError = false): Promise<void> {
           });
           if (version === (persistGlobal.__vulnMutationVersion ?? 0)) persistGlobal.__vulnMutationScope = {};
           persistGlobal.__vulnSaveRetryAt = 0;
+          persistenceHealth().committed(committedRevision,Boolean(persistGlobal.__vulnDirty));
           break;
         } catch (error) {
           if ((error as { code?: string })?.code !== "platform-capture-changed" || attempt >= 2) throw error;
@@ -962,6 +977,7 @@ function persistSnapshot(throwOnError = false): Promise<void> {
       if (code === "platform-publication-deferred") persistGlobal.__vulnSaveRetryAt = Date.now() + 60000;
       if (strictPlatformPersistence() && !["platform-capture-changed","platform-publication-deferred"].includes(code ?? ""))
         persistGlobal.__vulnPersistBlocked = true;
+      persistenceHealth().failed(err,Boolean(persistGlobal.__vulnPersistBlocked));
       console.error("[persist] snapshot save failed:", err);
       throw err;
     }
@@ -1768,6 +1784,12 @@ export async function storeStatus(): Promise<{
   counts: { companies: number; scans: number; findings: number; assets: number };
   oldestCompanyCreatedAt: string | null;
   runtimeRole: string;
+  persistenceState?: string;
+  lastCommittedRevision?: string | null;
+  lastCommittedAt?: string | null;
+  pendingSince?: string | null;
+  nextRetryAt?: string | null;
+  firstError?: {code:string;phase:string;at:string|null} | null;
   worker?: { available: boolean; ready: boolean; blocked: boolean; checkedAt: string };
   committedRead?: { refreshing: boolean; refreshError: string | null; checkedAt: string | null };
 }> {
@@ -1783,6 +1805,7 @@ export async function storeStatus(): Promise<{
         .sort()[0]
     : undefined;
   return {
+    ...(readerRole() ? (globalThis as any)[Symbol.for("vuln.workerHealth")]?.persistenceStatus : persistenceHealth().snapshot()),
     hydrated,
     hydrating: !hydrated,
     persistBlocked: persistenceBlocked(),

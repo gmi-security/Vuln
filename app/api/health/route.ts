@@ -19,14 +19,20 @@ export async function GET(request: NextRequest) {
   const readReady = (!persistenceEnabled() || ping.ok) && status.hydrated && (status.runtimeRole === "web" || !status.persistBlocked);
   const writeReady = status.runtimeRole === "web"
     ? Boolean(status.worker?.available && status.worker.ready && !status.worker.blocked)
-    : readReady && !status.persistBlocked;
+    : readReady && !status.persistBlocked && (!persistenceEnabled() || !status.persistenceState || status.persistenceState === "healthy");
   const ready = readReady && writeReady;
   if (!token) {
+    const internal = Boolean((globalThis as any)[Symbol.for("vuln.readContext")]?.getStore()?.internalWorker);
     return NextResponse.json({
       ok: ready,
       ready,
       readReady,
       writeReady,
+      ...(internal ? {persistenceStatus: {
+        persistenceState:status.persistBlocked?'blocked':status.persistenceState,
+        lastCommittedRevision:status.lastCommittedRevision,lastCommittedAt:status.lastCommittedAt,
+        pendingSince:status.pendingSince,nextRetryAt:status.nextRetryAt,firstError:status.firstError,
+      }} : {}),
       persistence: {
         enabled: persistenceEnabled(),
         dbReachable: ping.ok,
@@ -48,5 +54,7 @@ export async function GET(request: NextRequest) {
       snapshotUpdatedAt: meta.updatedAt,
     },
     ...status,
+    persistenceState:status.persistBlocked?'blocked':status.persistenceState,
+    lastCommittedAt:status.lastCommittedAt??meta.updatedAt,
   });
 }

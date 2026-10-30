@@ -431,7 +431,8 @@ const UPSERT_SQL = `INSERT INTO vuln_store (key, data, updated_at)
 // snapshot; the hash cache is only updated after COMMIT so a failed write is
 // fully retried on the next flush. Callers (store.ts) already serialize
 // saves through a single promise chain, so saves never overlap.
-export async function saveSnapshot(data: unknown, options?: { guard?: () => void; captureGuard?: () => void; changes?: Record<string, string[]> }): Promise<void> {
+export async function saveSnapshot(data: unknown, options?: { guard?: () => void; captureGuard?: () => void; changes?: Record<string, string[]>;
+  onProgress?: (event: {type:string;phase?:string;code?:string;delayMs?:number;revision?:string}) => void }): Promise<void> {
   if (process.env.VULN_RUNTIME_ROLE === "web") throw new Error("The web reader cannot save platform data.");
   const p = getPool();
   if (!p) return;
@@ -474,22 +475,27 @@ export async function saveSnapshot(data: unknown, options?: { guard?: () => void
       const preparedMs = Date.now() - startedAt;
       let publication: Awaited<ReturnType<typeof prepareFindingPublication>> | undefined;
       let readyReports = digests;
+      const preparingRetry = ({attempt, delayMs, code}: {attempt:number;delayMs:number;code?:string}) => {
+        options?.onProgress?.({type:'retry',code,delayMs});
+        console.warn(`[persist] Private publication retry: attempt=${attempt} delayMs=${delayMs} code=${code ?? "none"}.`);
+      };
       try {
         if (prepared.findingGeneration && prepared.findingChanges >= 10000) {
           let lastLog = 0;
           console.info(`[persist] Private finding publication started: changes=${prepared.findingChanges}.`);
           publication = await retryPublicationPreparation(() => prepareFindingPublication(p, prepared, { guard: options?.guard,
             checkpoint: progress => {
+              options?.onProgress?.({type:'checkpoint',phase:progress.phase});
               if (Date.now() - lastLog >= 30000) {
                 console.info(`[persist] Private publication progress: phase=${progress.phase} elapsedMs=${Date.now()-startedAt}.`);
                 lastLog = Date.now();
               }
             },
-          }), ({attempt, delayMs, code}) => console.warn(`[persist] Private publication retry: attempt=${attempt} delayMs=${delayMs} code=${code ?? "none"}.`));
+          }), preparingRetry);
           readyReports = publication.report_digests;
         } else if (options?.changes !== undefined) {
           readyReports = await retryPublicationPreparation(() => preparePlatformReporting(p, prepared),
-            ({attempt, delayMs, code}) => console.warn(`[persist] Private reporting retry: attempt=${attempt} delayMs=${delayMs} code=${code ?? "none"}.`));
+            preparingRetry);
         }
       } catch (error) {
         const code = (error as { code?: string })?.code;
@@ -515,6 +521,7 @@ export async function saveSnapshot(data: unknown, options?: { guard?: () => void
           if (timeoutMs > 300000) console.info(`[persist] Large SQL publication started: ${options?.changes?.findings?.length ?? prepared?.findingChanges} findings; ${timeoutMs / 1000}s limit; attempt=${attempt + 1}.`);
           const next = await withTimeout((async () => {
             phase = "write";
+            options?.onProgress?.({type:'phase',phase});
             phaseStartedAt = Date.now();
             await activeClient.query("BEGIN; SET LOCAL statement_timeout='60s'; SET LOCAL lock_timeout='10s'; SET LOCAL idle_in_transaction_session_timeout='90s'");
             const next = await commitPreparedPlatformStore(activeClient, prepared, { guard: writeGuard, publication, reportingPrepared:true });
@@ -526,10 +533,12 @@ export async function saveSnapshot(data: unknown, options?: { guard?: () => void
             reportingMs = Date.now() - phaseStartedAt;
             writeGuard();
             phase = "commit";
+            options?.onProgress?.({type:'phase',phase});
             await activeClient.query("COMMIT");
             return next;
           })(), timeoutMs, "SQL platform save", "platform-save-timeout");
           persistence.platformState = next; persistence.platformAuthority = next.authority;
+          options?.onProgress?.({type:'committed',revision:next.authority.revision});
           if ("changedKeys" in next) reportingDigestCache.clear();
           else reporting.committed();
           console.info(`[persist] SQL save committed: scope=${options?.changes === undefined ? "full" : "delta"} reason=${options?.changes === undefined ? "scope-not-declared" : "declared-records"} candidates=${candidateRecords} compared=${next.comparedRecords} prepareMs=${preparedMs} writeMs=${writeMs} reportingMs=${reportingMs} totalMs=${Date.now() - startedAt} inserted=${next.counts.inserted} updated=${next.counts.updated} deleted=${next.counts.deleted} metadata=${next.counts.metadata}.`);

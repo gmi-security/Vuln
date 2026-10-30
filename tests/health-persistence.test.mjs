@@ -41,3 +41,11 @@ test('an intentional in-memory preview is healthy once hydrated',async()=>{
  const response=await health({hydrated:true,persistBlocked:false},{ok:false},false);
  assert.equal(response.status,200);assert.equal((await response.json()).persistence.enabled,false);
 });
+
+test('reachable SQL does not make a retrying or publishing worker write-ready',async()=>{
+ for(const persistenceState of ['retrying','publishing']){
+  const response=await health({hydrated:true,persistBlocked:false,runtimeRole:'worker',persistenceState,nextRetryAt:'private',firstError:{code:'private'}});
+  assert.equal(response.status,503);const body=await response.json();assert.equal(body.writeReady,false);
+  assert.equal(body.persistenceState,undefined);assert.equal(body.firstError,undefined);assert.equal(body.nextRetryAt,undefined);
+ }
+});

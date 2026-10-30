@@ -63,6 +63,8 @@ function signed(n: number): string {
   return n > 0 ? `+${n}` : String(n);
 }
 
+import {persistenceNotice} from '@/lib/persistence-health.mjs';
+
 export default function VulnDashboardPage() {
   const [scans, setScans] = useState<Scan[]>([]);
   const [metrics, setMetrics] = useState<QuantifyMetrics | null>(null);
@@ -70,6 +72,7 @@ export default function VulnDashboardPage() {
     reachable: boolean | null;
     error: string | null;
     persistBlocked: boolean;
+    persistenceState?: string;
   }>({
     reachable: null,
     error: null,
@@ -108,21 +111,22 @@ export default function VulnDashboardPage() {
     }
   }, []);
 
-  // Check DB health once on mount to surface connection errors early.
+  // Read structured 503 responses too; they distinguish retries from a block.
   useEffect(() => {
     const read = startPolling(async signal => {
       const response = await fetch("/api/health", { cache: "no-store", signal });
-      if (!response.ok) throw new Error("Health check failed.");
+      if (!response.ok && response.status !== 503) throw new Error("Health check failed.");
       const j = await response.json();
       if (!signal.aborted) {
         setDbStatus({
           reachable: j.persistence?.dbReachable ?? null,
           error: j.persistence?.dbError ?? null,
-          persistBlocked: Boolean(j.persistBlocked),
+          persistBlocked: Boolean(j.persistBlocked ?? j.persistence?.blocked),
+          persistenceState: persistenceNotice(j),
         });
       }
-    }, { intervalMs: () => null, onError: () =>
-        setDbStatus({ reachable: false, error: "Health check failed.", persistBlocked: false }),
+    }, { intervalMs: () => 15000, onError: () =>
+        setDbStatus(previous => ({ ...previous, reachable: false, persistenceState:"unavailable", error: "Health check failed." })),
     });
     return read.stop;
   }, []);
@@ -195,6 +199,16 @@ export default function VulnDashboardPage() {
           <span className="ml-2 text-red-600">
             Do not make further changes until the storage error is resolved. Unsaved changes may be lost.
           </span>
+        </div>
+      ) : dbStatus.persistenceState === "unavailable" ? (
+        <div className="rounded-2xl border border-amber-900/60 bg-amber-950/30 px-5 py-4 text-sm text-amber-300">
+          <span className="font-semibold">Saving status is unavailable</span>
+          <span className="ml-2">Unable to verify the save worker. Pending changes are not confirmed saved.</span>
+        </div>
+      ) : ["retrying", "publishing"].includes(dbStatus.persistenceState ?? "") ? (
+        <div className="rounded-2xl border border-amber-900/60 bg-amber-950/30 px-5 py-4 text-sm text-amber-300">
+          <span className="font-semibold">{dbStatus.persistenceState === "retrying" ? "Saving interrupted — retrying automatically" : "Saving changes"}</span>
+          <span className="ml-2">The last saved data remains available. Pending changes are not yet saved.</span>
         </div>
       ) : dbStatus.reachable === false ? (
         <div className="rounded-2xl border border-amber-900/60 bg-amber-950/30 px-5 py-4 text-sm">
