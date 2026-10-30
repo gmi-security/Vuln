@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { createReportingInputDigests, publishReportingInputRevisions, reportingSnapshotManifest } from "./db/customer-reporting-revisions.mjs";
 import { readPlatformAuthority, bindPlatformWriter } from "./db/platform-authority.mjs";
 import { loadPlatformStore, preparePlatformStore, commitPreparedPlatformStore, preparePlatformDelta, platformSaveTimeoutMs, prepareFindingPublication, preparePlatformReporting } from "./db/platform-store.mjs";
+import { trackPublicationClient, retryPublicationPreparation } from "./db/publication-client.mjs";
 import { loadCommittedPlatform } from "./db/platform-reader.mjs";
 
 // Snapshot persistence. The in-memory store (companies, folders, scans,
@@ -477,31 +478,28 @@ export async function saveSnapshot(data: unknown, options?: { guard?: () => void
         if (prepared.findingGeneration && prepared.findingChanges >= 10000) {
           let lastLog = 0;
           console.info(`[persist] Private finding publication started: changes=${prepared.findingChanges}.`);
-          publication = await prepareFindingPublication(p, prepared, { guard: options?.guard,
+          publication = await retryPublicationPreparation(() => prepareFindingPublication(p, prepared, { guard: options?.guard,
             checkpoint: progress => {
               if (Date.now() - lastLog >= 30000) {
                 console.info(`[persist] Private publication progress: phase=${progress.phase} elapsedMs=${Date.now()-startedAt}.`);
                 lastLog = Date.now();
               }
             },
-          });
+          }), ({attempt, delayMs, code}) => console.warn(`[persist] Private publication retry: attempt=${attempt} delayMs=${delayMs} code=${code ?? "none"}.`));
           readyReports = publication.report_digests;
         } else if (options?.changes !== undefined) {
-          readyReports = await preparePlatformReporting(p, prepared);
+          readyReports = await retryPublicationPreparation(() => preparePlatformReporting(p, prepared),
+            ({attempt, delayMs, code}) => console.warn(`[persist] Private reporting retry: attempt=${attempt} delayMs=${delayMs} code=${code ?? "none"}.`));
         }
       } catch (error) {
         const code = (error as { code?: string })?.code;
         console.error(`[persist] Publication preparation stopped before live writes: elapsedMs=${Date.now()-startedAt} code=${code ?? "none"}.`);
-        // Private checkpoints may have committed, but no live data or authority
-        // changed. A later attempt reads those checkpoints instead of guessing.
-        if (["57014","55P03","40P01","40001","08006","08003","57P01","57P02","57P03","53300","ECONNRESET","ECONNREFUSED","ETIMEDOUT"].includes(code ?? "") ||
-            ["Connection terminated unexpectedly","Connection terminated due to connection timeout","timeout exceeded when trying to connect"].includes((error as Error)?.message))
-          throw Object.assign(new Error("Import preparation was interrupted; saved progress will retry automatically."), { code:"platform-publication-deferred", cause:error });
         throw error;
       }
       const timeoutMs = prepared.findingGeneration ? 300000 : platformSaveTimeoutMs(options?.changes, prepared?.findingChanges);
       for (let attempt = 0; ; attempt++) {
         let client: PoolClient | undefined, cancelled = false, phase = "connect";
+        let owner: ReturnType<typeof trackPublicationClient> | undefined;
         let writeMs = 0, reportingMs = 0, phaseStartedAt = Date.now(), writeDeadline = Infinity;
         const writeGuard = () => {
           if (cancelled || Date.now() >= writeDeadline)
@@ -510,6 +508,7 @@ export async function saveSnapshot(data: unknown, options?: { guard?: () => void
         };
         try {
           client = await p.connect();
+          owner = trackPublicationClient(client);
           writeGuard();
           const activeClient = client;
           writeDeadline = Date.now() + timeoutMs;
@@ -537,16 +536,17 @@ export async function saveSnapshot(data: unknown, options?: { guard?: () => void
           return;
         } catch (error) {
           cancelled = true;
+          error = owner?.firstError() ?? error;
           const code = (error as { code?: string })?.code;
           console.error(`[persist] SQL save stopped: phase=${phase} scope=${options?.changes === undefined ? "full" : "delta"} elapsedMs=${Date.now() - startedAt} writeMs=${writeMs || (phase === "write" ? Date.now() - phaseStartedAt : 0)} reportingMs=${reportingMs || (phase === "reporting" ? Date.now() - phaseStartedAt : 0)} code=${code ?? "none"} attempt=${attempt + 1}.`);
-          client?.release(error instanceof Error ? error : new Error(String(error))); client = undefined;
+          owner?.release(error instanceof Error ? error : new Error(String(error)));
           // Closing the old connection aborts its transaction. The fresh attempt
           // locks and rechecks the original authority before writing frozen rows.
           // Never retry an uncertain COMMIT, a stale writer or a transport error.
           if (attempt > 0 || !["write", "reporting"].includes(phase) || !["platform-save-timeout", "57014", "55P03", "40P01", "40001"].includes(code ?? "")) throw error;
           console.info(`[persist] Retrying frozen SQL publication in 30s after ${code}; database authority will be rechecked.`);
           await new Promise(resolve => setTimeout(resolve, 30000));
-        } finally { client?.release(); }
+        } finally { owner?.release(); }
       }
     } catch (error) {
       if (!preparedComplete) console.error(`[persist] SQL save stopped: phase=prepare scope=${options?.changes === undefined ? "full" : "delta"} elapsedMs=${Date.now() - startedAt} writeMs=0 reportingMs=0 code=${(error as {code?: string})?.code ?? "none"}.`);

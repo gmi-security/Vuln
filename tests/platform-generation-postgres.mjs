@@ -9,6 +9,7 @@ import * as crypto from 'node:crypto';
 import * as authorityModule from '../lib/db/platform-authority.mjs';
 import * as storeModule from '../lib/db/platform-store.mjs';
 import * as readerModule from '../lib/db/platform-reader.mjs';
+import * as publicationClientModule from '../lib/db/publication-client.mjs';
 import * as revisionModule from '../lib/db/customer-reporting-revisions.mjs';
 import {platformCollections,platformBucket,platformJson} from '../lib/db/platform-records.mjs';
 import {readPlatformAuthority,bindPlatformWriter} from '../lib/db/platform-authority.mjs';
@@ -31,6 +32,14 @@ try{
  assert.ok(guard.dir.startsWith('/home/codex/vuln-recovery/')&&!guard.listen);
  await admin.query(`CREATE DATABASE ${database}`);created=true;
  db=new pg.Client({...config,database});reader=new pg.Client({...config,database});pool=new pg.Pool({...config,database,max:3});await db.connect();await reader.connect();
+ const timed=await pool.connect(),timedOwner=publicationClientModule.trackPublicationClient(timed);
+ await timed.query("BEGIN READ ONLY; SET LOCAL idle_in_transaction_session_timeout='250ms'");
+ await new Promise(resolve=>setTimeout(resolve,700));
+ assert.equal(timedOwner.firstError()?.code,'25P03');
+ await assert.rejects(timed.query('SELECT 1'),/not queryable|terminated/);
+ timedOwner.release();timedOwner.release();
+ assert.equal((await pool.query('SELECT 1 n')).rows[0].n,1);
+ ok('real idle disconnect between statements is contained and the next connection works');
  const size=Number(process.env.VULN_GENERATION_TEST_ROWS??3200);assert.ok(size>=3200&&size<=1500000);
  const fixture={companies:[['CO-1',{id:'CO-1',name:'One'}],['CO-2',{id:'CO-2',name:'Two'}]],scans:[],assets:[],folders:[],counter:1,meta:{defenderGenerations:{'CO-1':'old'}},
   findings:Array.from({length:size},(_,i)=>[`F-${String(i).padStart(8,'0')}`,{id:`F-${String(i).padStart(8,'0')}`,companyId:i%4?'CO-1':'CO-2',connector:i%4?'defender':'nessus',
@@ -125,16 +134,25 @@ try{
  await assert.rejects(api.prepareFindingPublication(pool,plan),/authority changed/);
  ok('stale plans cannot stage or publish over a newer writer');
  if(size===3200){
-  let failPrivate=true,losePrivate=false,loseCommit=false,liveCommits=0;
+  let failPrivate=true,losePrivate=true,loseCommit=false,idleFinal=false,liveCommits=0;
   const observedPool={on(){},query:(...args)=>pool.query(...args),async connect(){
    const c=await pool.connect();let live=false,privateWrite=false;
-   return {release:e=>c.release(e),async query(sql,params){
+   return {on:(...a)=>c.on(...a),once:(...a)=>c.once(...a),off:(...a)=>c.off(...a),release:e=>c.release(e),async query(sql,params){
     const result=await c.query(sql,params);
+    if(idleFinal&&sql.startsWith('BEGIN;')&&sql.includes("lock_timeout='10s'")){
+     idleFinal=false;await c.query("SET LOCAL idle_in_transaction_session_timeout='250ms'");
+     await new Promise(resolve=>setTimeout(resolve,700));
+    }
     if(sql.startsWith('INSERT INTO app_finding_versions'))privateWrite=true;
     if(sql.startsWith('INSERT INTO app_finding_versions')&&failPrivate){failPrivate=false;throw Object.assign(Error('private cancellation'),{code:'57014'});}
     if(sql.startsWith('UPDATE app_finding_head')||sql.startsWith('UPDATE app_store_authority'))live=true;
     if(sql==='COMMIT'&&live){liveCommits++;if(loseCommit){loseCommit=false;throw Object.assign(Error('lost final commit acknowledgement'),{code:'08006'});}}
-    if(sql==='COMMIT'&&privateWrite&&losePrivate){losePrivate=false;throw Object.assign(Error('lost private commit acknowledgement'),{code:'08006'});}
+    if(sql==='COMMIT'&&privateWrite&&losePrivate){
+     losePrivate=false;
+     assert.equal((await readPlatformAuthority(db)).revision,committed.authority.revision);
+     assert.equal((await db.query("SELECT write_offset FROM app_finding_publications WHERE phase='writing'")).rows[0].write_offset,500);
+     throw Object.assign(Error('lost private commit acknowledgement'),{code:'08006'});
+    }
     if(sql==='COMMIT'||sql==='ROLLBACK')privateWrite=false;
     return result;
    }};
@@ -144,22 +162,21 @@ try{
   try{
    const code=ts.transpileModule(await readFile('lib/persist.ts','utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText;
    const instance=async()=>{delete globalThis.__vulnDatabasePersistenceV1;const m=new SourceTextModule(code);await m.link(name=>{
-    const values=name==='pg'?{Pool:class{constructor(){return observedPool;}}}:name.endsWith('customer-reporting-revisions.mjs')?revisionModule:name.endsWith('platform-authority.mjs')?authorityModule:name.endsWith('platform-store.mjs')?storeModule:name.endsWith('platform-reader.mjs')?readerModule:crypto;
+    const values=name==='pg'?{Pool:class{constructor(){return observedPool;}}}:name.endsWith('publication-client.mjs')?publicationClientModule:name.endsWith('customer-reporting-revisions.mjs')?revisionModule:name.endsWith('platform-authority.mjs')?authorityModule:name.endsWith('platform-store.mjs')?storeModule:name.endsWith('platform-reader.mjs')?readerModule:crypto;
     return new SyntheticModule(Object.keys(values),function(){for(const k of Object.keys(values))this.setExport(k,values[k]);});});await m.evaluate();return m.namespace;};
    let runtime=await instance(),data=await runtime.loadSnapshot();
    const extra=Array.from({length:10001},(_,i)=>[`N-${i}`,{id:`N-${i}`,companyId:'CO-1',connector:'defender',status:'Open',severity:'High'}]);
    data.findings.push(...extra);data.meta.defenderGenerations['CO-1']='runtime-import';
    const options={changes:{findings:extra.map(([id])=>id)}};
-   await assert.rejects(runtime.saveSnapshot(data,options),e=>e.code==='platform-publication-deferred');
-   assert.equal((await readPlatformAuthority(db)).revision,committed.authority.revision);
-   losePrivate=true;
-   await assert.rejects(runtime.saveSnapshot(data,options),e=>e.code==='platform-publication-deferred');
-   assert.equal((await readPlatformAuthority(db)).revision,committed.authority.revision);
-   assert.equal((await db.query("SELECT write_offset FROM app_finding_publications WHERE phase='writing'")).rows[0].write_offset,500);
    await runtime.saveSnapshot(data,options);
    assert.equal(liveCommits,1);
    for(const d of await digests(data))assert.equal((await readReportingInputRevision(db,d.companyId)).hash,d.hash);
    ok('actual persistence entrypoint resumes a private failure and commits matching reporting');
+   const beforeIdle=await readPlatformAuthority(db);idleFinal=true;data.counter++;
+   await assert.rejects(runtime.saveSnapshot(data,{changes:{}}),e=>e.code==='25P03');
+   assert.equal(liveCommits,1,'final transaction disconnect must not be replayed');
+   assert.deepEqual(await readPlatformAuthority(db),beforeIdle);
+   ok('real final-transaction idle disconnect preserves SQLSTATE and never retries');
    for(const [,row]of extra)row.severity='Critical';data.counter++;loseCommit=true;
    await assert.rejects(runtime.saveSnapshot(data,options),e=>e.code==='08006');
    const afterUnknown=await readPlatformAuthority(db);
