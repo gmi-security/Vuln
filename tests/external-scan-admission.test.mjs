@@ -63,3 +63,24 @@ test('active work, stale capacity and uncertain deduplication claim all hold',()
   assert.equal(decision({claimExists:null}).state,'hold');
   assert.equal(decision({claimExists:true}).state,'hold');
 });
+
+test('the existing +60-minute offset is a hard lower bound, but elapsed time alone cannot authorize',()=>{
+  const input=baseline();
+  input.now='2026-11-04T01:59:59Z';
+  input.window={...input.window,startsAt:'2026-11-04T01:30:00Z'};
+  input.sourceRun={...input.sourceRun,completedAt:'2026-11-04T01:50:00Z'};
+  input.capacity={...input.capacity,checkedAt:'2026-11-04T01:59:58Z'};
+  assert.match(evaluateExternalScanAdmission(input).reason,/60-minute offset/);
+  input.now='2026-11-04T02:00:01Z';
+  input.capacity={...input.capacity,checkedAt:'2026-11-04T02:00:00Z'};
+  assert.equal(evaluateExternalScanAdmission(input).state,'eligible-for-atomic-claim');
+  input.sourceRun={...input.sourceRun,status:'running'};
+  assert.equal(evaluateExternalScanAdmission(input).state,'hold');
+});
+test('a Nessus job completing later than +60 minutes still blocks until it actually finishes',()=>{
+  const input=baseline();
+  input.now='2026-11-04T02:01:00Z';
+  input.capacity={...input.capacity,checkedAt:'2026-11-04T02:00:59Z'};
+  assert.equal(evaluateExternalScanAdmission(input).state,'hold');
+  assert.match(evaluateExternalScanAdmission(input).reason,/Nessus run timing/);
+});
