@@ -110,7 +110,9 @@ export async function runNessusHistoricalShapeProbe() {
   const scanId=Number(process.env.NESSUS_PROBE_SCAN_ID), folderId=Number(process.env.NESSUS_PROBE_FOLDER_ID);
   if (!isPositive(scanId) || !isPositive(folderId)) throw Error("Set numeric NESSUS_PROBE_SCAN_ID and NESSUS_PROBE_FOLDER_ID.");
   const config=scannerConfig();
-  const rosterResponse=await getScannerJson(config,"/scans?folder_id="+folderId);
+  // The Nessus folder-filtered view can omit folder_id on each scan.
+  // Read the global scan listing to verify exact ownership safely.
+  const rosterResponse=await getScannerJson(config,"/scans");
   const roster=obj(rosterResponse.body);
   if(!Array.isArray(roster?.scans) || roster.scans.length>1000)
     throw Error("Scan roster unavailable or too large.");
