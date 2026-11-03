@@ -6,7 +6,8 @@ export type ExternalScheduleEntry = {
   scanName: string;
   enabled: boolean;
   nextOccurrence: string | null;
-  offsetNextTrigger: string | null;
+  // Legacy +1h schedule UI field; ignored by completion-triggered dispatch.
+  offsetNextTrigger?: string | null;
 };
 export type ExternalScheduleMatrix = {
   generatedAt: string;
@@ -19,7 +20,8 @@ export type ExternalScanCandidate = {
   target: string;
   nessusScanId: number;
   nessusScanName: string;
-  nominalOffsetAt: string;
+  scheduledOccurrenceAt: string;
+  trigger: "after-verified-nessus-completion";
   state: "review-required";
 };
 export type ExternalScanPlan = {
@@ -34,9 +36,11 @@ export type ExternalScanPlan = {
 /**
  * Historic Nessus findings and observed IPs are not scan authorization.
  * A candidate requires one reviewed Vulners route, an exact host/IP and
- * an enabled upcoming Nessus schedule. Even a candidate is NOT executable:
- * future dispatch must confirm Nessus actually finished its run, an approved
- * window is open and global scanner capacity is available.
+ * an enabled upcoming Nessus schedule. This is NOT a future Greenbone start
+ * time: no fixed +1h offset or timer can prove Nessus has completed. Even a
+ * candidate is NOT executable: a trusted dispatcher must verify the actual
+ * completed Nessus run and target coverage, current approved window, and
+ * globally available Greenbone capacity before any task is created.
  */
 export function buildExternalScanPlan(
   matrix: ExternalScheduleMatrix,
@@ -97,12 +101,11 @@ export function buildExternalScanPlan(
       out.blocked.push({ companyId: company.companyId, reason: "Invalid or cross-customer overlapping approved target." });
       continue;
     }
-    // Several Nessus schedules must not multiply jobs for the same host.
+    // The earliest future Nessus recurrence is previewed; Greenbone has NO
+    // nominal start time and must await a verified completion event.
     const upcoming = company.scans.filter(s => s.enabled && Number.isSafeInteger(s.nessusScanId) && s.nessusScanId > 0 &&
-      s.nextOccurrence && s.offsetNextTrigger && Number.isFinite(Date.parse(s.nextOccurrence)) &&
-      Number.isFinite(Date.parse(s.offsetNextTrigger)) && Date.parse(s.offsetNextTrigger) > now &&
-      Math.abs(Date.parse(s.offsetNextTrigger) - Date.parse(s.nextOccurrence) - 3_600_000) < 1000)
-      .sort((a, b) => Date.parse(a.offsetNextTrigger!) - Date.parse(b.offsetNextTrigger!));
+      s.nextOccurrence && Number.isFinite(Date.parse(s.nextOccurrence)) && Date.parse(s.nextOccurrence) > now)
+      .sort((a, b) => Date.parse(a.nextOccurrence!) - Date.parse(b.nextOccurrence!));
     if (!upcoming.length) {
       out.blocked.push({ companyId: company.companyId, reason: "No valid enabled future Nessus recurrence." });
       continue;
@@ -114,10 +117,11 @@ export function buildExternalScanPlan(
       seen.add(dedup);
       out.candidates.push({ companyId: company.companyId, companyName: company.companyName,
         target, nessusScanId: next.nessusScanId, nessusScanName: next.scanName,
-        nominalOffsetAt: next.offsetNextTrigger!, state: "review-required" });
+        scheduledOccurrenceAt: next.nextOccurrence!, trigger: "after-verified-nessus-completion",
+        state: "review-required" });
     }
   }
-  out.candidates.sort((a, b) => a.nominalOffsetAt.localeCompare(b.nominalOffsetAt) ||
+  out.candidates.sort((a, b) => a.scheduledOccurrenceAt.localeCompare(b.scheduledOccurrenceAt) ||
     a.companyId.localeCompare(b.companyId) || a.target.localeCompare(b.target));
   return out;
 }
