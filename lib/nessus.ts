@@ -1,4 +1,6 @@
 import { scannerTargetMatcher, assertScannerResultScope } from "./scanner-target-scope";
+import { verifyCompletedNessusOccurrence } from "./nessus-run-proof";
+import type { ExternalDispatchCandidate, NessusRunProof } from "./external-scan-admission";
 import https from "node:https";
 import http from "node:http";
 import type { Severity } from "@/lib/types";
@@ -267,6 +269,31 @@ export async function nessusScanStatus(
   const status = String(info.status ?? "running");
   if (status === "completed") progress = 100;
   return { status, progress };
+}
+
+/**
+ * Read-only, fail-closed source proof for a single historical Nessus run.
+ * The caller MUST supply a folder ID obtained from CURRENT reviewed routing,
+ * not user JSON, imported findings or a scheduled start time.
+ *
+ * No scans launch or change as a result of this call. If the Nessus API does
+ * not expose an unambiguous historical identity/target completion record,
+ * this deliberately returns null and cannot authorize a Greenbone task.
+ */
+export async function nessusCompletedRunProof(
+  candidate: ExternalDispatchCandidate,
+  reviewedFolderId: number,
+  pinned: NessusConfig,
+): Promise<NessusRunProof | null> {
+  return verifyCompletedNessusOccurrence(candidate, reviewedFolderId, {
+    listScans: (folderId) => nessusListScans(pinned, folderId),
+    scanDetails: (scanId, historyId) =>
+      api(pinned, "GET", "/scans/" + scanId +
+        (historyId === undefined ? "" : "?history_id=" + historyId)),
+    hostDetails: (scanId, hostId, historyId) =>
+      api(pinned, "GET", "/scans/" + scanId + "/hosts/" + hostId +
+        "?history_id=" + historyId),
+  });
 }
 
 export type NessusScanSchedule = {
