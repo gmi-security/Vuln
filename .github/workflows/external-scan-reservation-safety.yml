@@ -13,6 +13,8 @@ on:
       - "tests/external-scan-admission.test.mjs"
       - "tests/external-scan-plan.test.mjs"
       - "tests/nessus-run-proof.test.mjs"
+      - "scripts/nessus-historical-shape-probe.mjs"
+      - "tests/nessus-historical-shape-probe.test.mjs"
       - "lib/greenbone-capacity.ts"
       - "tests/greenbone-capacity.test.mjs"
       - "app/api/admin/external-scan-capacity/route.ts"
@@ -61,4 +63,5 @@ jobs:
           EXTERNAL_SCAN_TEST_DATABASE_URL: postgresql://testscan:testscan@127.0.0.1:5432/testscan
         run: |
           node --test tests/external-scan-claims.test.mjs tests/external-scan-claims-postgres.test.mjs
+          node --test tests/nessus-historical-shape-probe.test.mjs
           node --experimental-vm-modules --test tests/external-scan-dispatcher.test.mjs tests/vulners-health-auth.test.mjs tests/greenbone-capacity.test.mjs tests/external-scan-admission.test.mjs tests/external-scan-plan.test.mjs tests/nessus-run-proof.test.mjs
