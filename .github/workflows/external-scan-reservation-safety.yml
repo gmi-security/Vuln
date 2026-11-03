@@ -5,6 +5,10 @@ on:
     paths:
       - "lib/db/external-scan-claims.mjs"
       - "lib/db/external-scan-reconciliation.mjs"
+      - "lib/external-scan-dispatcher.ts"
+      - "lib/vulners.ts"
+      - "tests/external-scan-dispatcher.test.mjs"
+      - "tests/vulners-health-auth.test.mjs"
       - "docs/sql/external-scan-dispatch-events.sql"
       - "app/api/admin/external-scan-slot/route.ts"
       - "docs/sql/external-scan-dispatch-claims.sql"
@@ -40,7 +44,11 @@ jobs:
           cache: npm
       - name: Install locked dependencies for tests
         run: npm ci --ignore-scripts
+      - name: TypeScript type-check
+        run: npx tsc --noEmit --incremental false --pretty false
       - name: Unit and real PostgreSQL concurrency tests
         env:
           EXTERNAL_SCAN_TEST_DATABASE_URL: postgresql://testscan:testscan@127.0.0.1:5432/testscan
-        run: node --test tests/external-scan-claims.test.mjs tests/external-scan-claims-postgres.test.mjs
+        run: |
+          node --test tests/external-scan-claims.test.mjs tests/external-scan-claims-postgres.test.mjs
+          node --experimental-vm-modules --test tests/external-scan-dispatcher.test.mjs tests/vulners-health-auth.test.mjs

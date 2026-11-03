@@ -109,6 +109,51 @@ export type VulnersBridgeScope = { config: VulnersBridgeConfig; target: string; 
 
 export type VulnersBridgeJob = { jobId: string; status: string };
 
+/**
+ * Controlled dispatcher create step: does NOT start scanning.
+ * Requires an already-approved exact target and a live approval recheck.
+ * The caller MUST durably store the returned jobId before calling start.
+ */
+export async function vulnersBridgeCreateReservedTask(
+  target: string, scanName: string, scope: VulnersBridgeScope,
+): Promise<string> {
+  if (!scope?.config || !scope.verify ||
+      scannerExactTargetKey(target) !== scannerExactTargetKey(scope.target))
+    throw new Error("Reserved Bridge creation requires verified exact customer scope.");
+  await scope.verify();
+  const created = await bridgeFetch(scope.config, "/api/v1/scans", {
+    method: "POST",
+    body: { name: scanName, hosts: [target], profile: BRIDGE_SCAN_PROFILE },
+    timeoutMs: 60_000,
+  });
+  const jobId = String(created?.task_id ?? created?.id ?? "");
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId))
+    throw new Error("Reserved Bridge creation was not confirmed; reconcile before retrying.");
+  return jobId;
+}
+
+/** Only called after the new task ID has been durably recorded. */
+export async function vulnersBridgeStartReservedTask(
+  jobId: string, scope: VulnersBridgeScope,
+): Promise<VulnersBridgeJob> {
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId) || !scope?.config || !scope.verify)
+    throw new Error("Reserved Bridge start requires a known task and verified scope.");
+  await scope.verify();
+  const started = await bridgeFetch(scope.config, `/api/v1/scans/${encodeURIComponent(jobId)}/start`, {
+    method: "POST",
+    body: { authorization_confirmed: true },
+    timeoutMs: 60_000,
+  });
+  if ((started?.id != null && started.id !== jobId) ||
+      (started?.task_id != null && started.task_id !== jobId))
+    throw new Error("Bridge returned a different task identity; reconcile before retrying.");
+  const status = mapBridgeStatus(started?.status);
+  if (status !== "queued" && status !== "running")
+    throw new Error("Bridge start response was not confirmed; reconcile before retrying.");
+  return { jobId, status };
+}
+
+
 export async function vulnersBridgeStartScan(
   target: string,
   scanName?: string,
