@@ -14,7 +14,7 @@ This PR does not enable scheduling, background workers, legacy offset scanning, 
 
 - `GET /scans?folder_id=...` and requires the scan to belong to that approved folder
 - `GET /scans/{scan_id}` to select a unique completed historical occurrence
-- `GET /scans/{scan_id}?history_id={history_id}` and requires the response to be explicitly bound to the selected historical ID and UUID; the latest run is **not** silently substituted
+- `GET /scans/{scan_id}?history_id={history_id}` and requires evidence that the requested history was returned. Some Nessus versions omit root ID/UUID; in that case the adapter must verify an impossible ID is rejected, compare a different completed historical run, and reconcile each run's start with its history creation time. The latest run is **not** silently substituted
 - `GET /scans/{scan_id}/hosts/{host_id}?history_id={history_id}` for complete assessment evidence for the approved host or IP
 
 The proof rejects missing history identity, ambiguous runs, incomplete targets, missing host details, wrong folders/targets, out-of-window timestamps, stale runs, too many hosts/history entries, and failed reads. It emits an immutable run-specific UUID as the report identity, never the mutable scan schedule ID.
