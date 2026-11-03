@@ -22,7 +22,7 @@ await adapter.link(async (name, parent) => {
   return new SyntheticModule(Object.keys(values), function () { for (const [key, value] of Object.entries(values)) this.setExport(key, value); });
 });
 await adapter.evaluate();
-const { vulnersStatus, vulnersBridgeStartScan, vulnersBridgeJobStatus } = adapter.namespace;
+const { vulnersStatus, vulnersBridgeStartScan, vulnersBridgeJobStatus, vulnersBridgeCreateReservedTask, vulnersBridgeStartReservedTask } = adapter.namespace;
 
 const originalFetch = globalThis.fetch;
 const originalBridgeUrl = process.env.VULNERS_BRIDGE_URL;
@@ -102,4 +102,36 @@ test("bridge job status recognizes the real \"Queued\" value as queued, not fail
   const result = await vulnersBridgeJobStatus("e397e8e9-848a-40c4-a5a0-6cafbbc54a18");
   assert.equal(result.status, "queued");
   assert.equal(result.error, null);
+});
+
+test("reserved Bridge creation never starts a scan and requires exact approved scope", async () => {
+  let verified = 0, requests = [];
+  const scope = { config: { baseUrl: "https://bridge.example.invalid", apiKey: "test" },
+    target: "scan.example", verify: async () => { verified++; } };
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url: String(url), method: options.method });
+    return new Response(JSON.stringify({task_id:"reserved-task-123",status:"created"}),{status:200});
+  };
+  const jobId = await vulnersBridgeCreateReservedTask("scan.example","Safe pilot",scope);
+  assert.equal(jobId,"reserved-task-123");
+  assert.equal(verified,1);
+  assert.deepEqual(requests,[{url:"https://bridge.example.invalid/api/v1/scans",method:"POST"}]);
+  await assert.rejects(()=>vulnersBridgeCreateReservedTask("other.example","Escape",scope),/exact customer scope/);
+  await assert.rejects(()=>vulnersBridgeCreateReservedTask("scan.example","Missing verify",{...scope,verify:undefined}),/verified exact customer scope/);
+  assert.equal(requests.length,1);
+});
+test("reserved Bridge start validates pinned task ID and rechecks authorization", async () => {
+  let verified=0,requests=0;
+  const scope={config:{baseUrl:"https://bridge.example.invalid",apiKey:"test"},
+    target:"scan.example",verify:async()=>{verified++;}};
+  globalThis.fetch = async (url,options) => {
+    requests++;assert.match(String(url),/reserved-task-123\/start$/);
+    assert.equal(options.method,"POST");
+    return new Response(JSON.stringify({task_id:"reserved-task-123",status:"requested"}),{status:200});
+  };
+  const started=await vulnersBridgeStartReservedTask("reserved-task-123",scope);
+  assert.equal(started.jobId,"reserved-task-123");
+  assert.equal(started.status,"queued");assert.equal(verified,1);assert.equal(requests,1);
+  await assert.rejects(()=>vulnersBridgeStartReservedTask("../../bad",scope),/known task/);
+  assert.equal(requests,1);
 });
