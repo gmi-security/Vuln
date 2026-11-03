@@ -13,7 +13,7 @@ NESSUS_PROBE_SCAN_ID=123 NESSUS_PROBE_FOLDER_ID=45 \
   node scripts/nessus-historical-shape-probe.mjs
 ```
 
-Replace the example IDs. **Do not paste API keys or raw Nessus responses into chat.** The script uses the existing environment, makes at most four kinds of `GET` reads (folder scan list, scan summary, pinned historical scan and one pinned historical host), caps each reply at 6 MiB and timeout at 15 seconds, and never calls a write endpoint, scan launch, stop or export.
+Replace the example IDs. **Do not paste API keys or raw Nessus responses into chat.** The script uses the existing environment, makes at most four kinds of `GET` reads (global scan roster (to confirm folder ownership), scan summary, pinned historical scan and one pinned historical host), caps each reply at 6 MiB and timeout at 15 seconds, and never calls a write endpoint, scan launch, stop or export.
 
 If a scan has no completed historical run, the probe reports that no history was selected. If the pinned endpoint or host detail is unsupported, the output shows only the HTTP status and missing field types.
 
