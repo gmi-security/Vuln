@@ -1,0 +1,43 @@
+name: External Scan Reservation Safety
+
+on:
+  pull_request:
+    paths:
+      - "lib/db/external-scan-claims.mjs"
+      - "docs/sql/external-scan-dispatch-claims.sql"
+      - "tests/external-scan-claims*.test.mjs"
+      - ".github/workflows/external-scan-reservation-safety.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reservation-tests:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: testscan
+          POSTGRES_PASSWORD: testscan
+          POSTGRES_DB: testscan
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U testscan -d testscan"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install locked dependencies for tests
+        run: npm ci --ignore-scripts
+      - name: Unit and real PostgreSQL concurrency tests
+        env:
+          EXTERNAL_SCAN_TEST_DATABASE_URL: postgresql://testscan:testscan@127.0.0.1:5432/testscan
+        run: node --test tests/external-scan-claims.test.mjs tests/external-scan-claims-postgres.test.mjs
