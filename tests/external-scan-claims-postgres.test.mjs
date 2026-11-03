@@ -6,6 +6,7 @@ import { readFile } from 'node:fs/promises';
 import pg from 'pg';
 const { Pool } = pg;
 import { reserveExternalScanClaim, inspectExternalScanSlot } from '../lib/db/external-scan-claims.mjs';
+import { recordExternalScanRemoteTask, flagExternalScanReconciliation, inspectExternalScanReconciliation } from '../lib/db/external-scan-reconciliation.mjs';
 
 const raw = process.env.EXTERNAL_SCAN_TEST_DATABASE_URL;
 if (!raw) throw new Error('Set EXTERNAL_SCAN_TEST_DATABASE_URL to a disposable local PostgreSQL database.');
@@ -22,6 +23,8 @@ test('PostgreSQL enforces durable one-at-a-time scan reservations', {timeout:300
   try {
     const ddl = await readFile(new URL('../docs/sql/external-scan-dispatch-claims.sql',import.meta.url),'utf8');
     await pool.query(ddl); // disposable isolated database, never production
+    await pool.query(await readFile(new URL('../docs/sql/external-scan-dispatch-events.sql',import.meta.url),'utf8'));
+
 
     const race = await Promise.all([reserveExternalScanClaim(pool,payload('a')),reserveExternalScanClaim(pool,payload('b'))]);
     assert.deepEqual(race.map(x=>x.state).sort(),['busy','reserved']);
@@ -59,6 +62,24 @@ test('PostgreSQL enforces durable one-at-a-time scan reservations', {timeout:300
     const next=await reserveExternalScanClaim(pool,payload('c','2026-11-06T03:00:00Z'));
     assert.equal(next.state,'reserved');
     assert.equal((await inspectExternalScanSlot(pool)).claim_key,'c'.repeat(64));
+    // A confirmed remote task ID is durable and cannot be overwritten.
+    const key='c'.repeat(64);
+    assert.deepEqual(await recordExternalScanRemoteTask(pool,key,'greenbone-uuid-c'),
+      {state:'remote-created',taskId:'greenbone-uuid-c',unchanged:false});
+    assert.equal((await recordExternalScanRemoteTask(pool,key,'greenbone-uuid-c')).unchanged,true);
+    await assert.rejects(()=>recordExternalScanRemoteTask(pool,key,'other-task'),/already exists/);
+    // An uncertain launch is a HOLD, never a release or automatic retry.
+    assert.equal((await flagExternalScanReconciliation(pool,key,'start response timed out')).state,'needs-reconciliation');
+    const audited=await inspectExternalScanReconciliation(pool);
+    assert.equal(audited.slot.claim_key,key);
+    assert.equal(audited.slot.remote_task_id,'greenbone-uuid-c');
+    assert.equal(audited.slot.state,'needs-reconciliation');
+    assert.deepEqual(audited.events.map(e=>e.event_type),['needs-reconciliation','task-recorded']);
+    await pool.end(); // simulate application restart after ambiguous remote call
+    pool=new Pool({connectionString:raw,max:4,connectionTimeoutMillis:5000});
+    assert.equal((await reserveExternalScanClaim(pool,payload('d','2026-11-07T03:00:00Z'))).state,'busy');
+    assert.equal((await inspectExternalScanReconciliation(pool)).slot.state,'needs-reconciliation');
+  
   } finally {
     await pool.end();
   }
