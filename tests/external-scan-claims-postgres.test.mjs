@@ -79,6 +79,18 @@ test('PostgreSQL enforces durable one-at-a-time scan reservations', {timeout:300
     pool=new Pool({connectionString:raw,max:4,connectionTimeoutMillis:5000});
     assert.equal((await reserveExternalScanClaim(pool,payload('d','2026-11-07T03:00:00Z'))).state,'busy');
     assert.equal((await inspectExternalScanReconciliation(pool)).slot.state,'needs-reconciliation');
+    // In the disposable DB only: simulate operator clearing a claim after
+    // independent verification, then test an uncertain create with NO ID.
+    await pool.query('UPDATE public.external_scan_dispatch_slot SET claim_key=NULL WHERE slot_id=1');
+    const late=payload('d','2026-11-07T03:00:00Z');
+    assert.equal((await reserveExternalScanClaim(pool,late)).state,'reserved');
+    await flagExternalScanReconciliation(pool,late.dedupKey,'create timed out before task ID');
+    const recorded=await recordExternalScanRemoteTask(pool,late.dedupKey,'late-task-id');
+    assert.equal(recorded.state,'needs-reconciliation');
+    assert.equal((await inspectExternalScanReconciliation(pool)).slot.remote_task_id,'late-task-id');
+    assert.equal((await inspectExternalScanReconciliation(pool)).slot.state,'needs-reconciliation');
+    assert.equal((await reserveExternalScanClaim(pool,payload('e','2026-11-08T03:00:00Z'))).state,'busy');
+
   
   } finally {
     await pool.end();
