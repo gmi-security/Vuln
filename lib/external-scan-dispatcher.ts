@@ -85,8 +85,12 @@ export async function dispatchOneAuthorizedExternalTarget(
     nessusScanId: candidate.nessusScanId,
     occurrenceAt: candidate.scheduledOccurrenceAt,
   });
+  if (reserved.state === "busy")
+    return { state: "busy", reason: "Another global scan reservation is active." };
+  if (reserved.state === "duplicate")
+    return { state: "duplicate", reason: "This occurrence was already claimed." };
   if (reserved.state !== "reserved")
-    return { state: reserved.state, reason: "External scan slot already occupied or occurrence previously claimed." };
+    return { state: "hold", reason: "External scan reservation was not confirmed." };
   const pinned = pin(first);
   let stage = "post-reservation-check", taskId: string | null = null;
   const verify = async () => {
