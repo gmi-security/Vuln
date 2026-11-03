@@ -32,7 +32,7 @@ test('scheduled connector ticks repeat after success and failure without overlap
     const declaration=source.statements.find(node=>ts.isFunctionDeclaration(node)&&node.name?.text===name);
     assert.ok(declaration,name);
     const state={},timers=[];let runs=0,finish,fail=false;
-    const context=createContext({process:{env:{}},console:{error(){}},persistGlobal:state,persistenceBlocked:()=>state.blocked===true,
+    const context=createContext({process:{env:name==='startVulnersBridgeScheduler'?{VULNERS_BRIDGE_SCHEDULER_ENABLED:'true'}:{}},console:{error(){}},persistGlobal:state,persistenceBlocked:()=>state.blocked===true,
       setInterval:fn=>{timers.push(fn);return 1;},[tickName]:async()=>{runs++;await new Promise(resolve=>finish=resolve);if(fail)throw new Error('fixture failure');}});
     const code=ts.transpileModule(declaration.getText(source)+`; ${name}();`,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText;
     const mod=new SourceTextModule(code,{context});await mod.link(()=>{});await mod.evaluate();
@@ -41,4 +41,29 @@ test('scheduled connector ticks repeat after success and failure without overlap
     finish();await state[guard];timers[0]();assert.equal(runs,2,name+' repeats');
     fail=true;finish();await state[guard];timers[0]();assert.equal(runs,3,name+' retries future tick after failure');finish();await state[guard];
   }
+});
+
+
+test('automatic Vulners Bridge scans require an explicit enable flag',async()=>{
+  const source=ts.createSourceFile('store.ts',await readFile('lib/store.ts','utf8'),ts.ScriptTarget.Latest,true);
+  const declaration=source.statements.find(node=>ts.isFunctionDeclaration(node)&&node.name?.text==='startVulnersBridgeScheduler');
+  assert.ok(declaration);
+  for(const [value,expected] of [[undefined,0],['false',0],['TRUE',0],['true',1]]) {
+    const timers=[],state={};
+    const context=createContext({process:{env:value===undefined?{}:{VULNERS_BRIDGE_SCHEDULER_ENABLED:value}},persistGlobal:state,setInterval:fn=>{timers.push(fn);return 1;}});
+    const code=ts.transpileModule(declaration.getText(source)+'; startVulnersBridgeScheduler();',{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText;
+    const mod=new SourceTextModule(code,{context});await mod.link(()=>{});await mod.evaluate();
+    assert.equal(timers.length,expected,'scheduler timer count for '+String(value));
+  }
+});
+
+test('Vulners Bridge refuses legacy unreviewed routing',async()=>{
+  const source=ts.createSourceFile('store.ts',await readFile('lib/store.ts','utf8'),ts.ScriptTarget.Latest,true);
+  const declaration=source.statements.find(node=>ts.isFunctionDeclaration(node)&&node.name?.text==='reviewedActiveRoutes');
+  assert.ok(declaration);
+  const code=ts.transpileModule(declaration.getText(source)+'; export { reviewedActiveRoutes };',{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText;
+  const context=createContext({loadReviewedScannerRoutes:async()=>null});
+  const mod=new SourceTextModule(code,{context});await mod.link(()=>{});await mod.evaluate();
+  await assert.rejects(mod.namespace.reviewedActiveRoutes('vulners'),/reviewed customer scanner routes/);
+  assert.equal(await mod.namespace.reviewedActiveRoutes('zap'),null);
 });
