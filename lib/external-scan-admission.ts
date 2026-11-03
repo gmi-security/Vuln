@@ -84,6 +84,10 @@ export function evaluateExternalScanAdmission(input: ExternalAdmissionInput): Ex
   const dedupKey = externalScanDedupKey(input.candidate);
   if (!Number.isFinite(now) || !Number.isFinite(occurrence) || !dedupKey)
     return hold('Invalid candidate or clock.');
+  // Preserve the existing Nessus +1h cadence, but never treat that
+  // elapsed time as evidence that the Nessus run actually completed.
+  if (now < occurrence + 3_600_000)
+    return hold('Nessus +60-minute offset has not elapsed.');
   if (!input.scope || !input.scope.enabled || input.scope.companyId !== input.candidate.companyId ||
       !Number.isSafeInteger(input.scope.revision) || input.scope.revision < 1)
     return hold('Missing approved customer scope.');
