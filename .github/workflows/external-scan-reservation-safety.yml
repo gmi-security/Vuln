@@ -4,6 +4,9 @@ on:
   pull_request:
     paths:
       - "lib/db/external-scan-claims.mjs"
+      - "lib/db/external-scan-reconciliation.mjs"
+      - "docs/sql/external-scan-dispatch-events.sql"
+      - "app/api/admin/external-scan-slot/route.ts"
       - "docs/sql/external-scan-dispatch-claims.sql"
       - "tests/external-scan-claims*.test.mjs"
       - ".github/workflows/external-scan-reservation-safety.yml"
