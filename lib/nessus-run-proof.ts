@@ -108,7 +108,9 @@ export async function verifyCompletedNessusOccurrence(
       if (!hostInfo || !Array.isArray(detail?.vulnerabilities) ||
           (detail?.host_id !== undefined && detail.host_id !== hostId))
         return null;
-      const aliases = [record(host)?.hostname, hostInfo["host-fqdn"], hostInfo["host-ip"]];
+      // A configured hostname in the summary is not scan coverage.
+      // ONLY exact aliases returned in PINNED historical host detail count.
+      const aliases = [hostInfo["host-fqdn"], hostInfo["host-ip"]];
       if (aliases.some(alias => exact(alias) === wanted)) matches += 1;
     }
     if (matches !== 1) return null;
