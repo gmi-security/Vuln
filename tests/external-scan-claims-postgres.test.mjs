@@ -3,7 +3,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
-import { Pool } from 'pg';
+import pg from 'pg';
+const { Pool } = pg;
 import { reserveExternalScanClaim, inspectExternalScanSlot } from '../lib/db/external-scan-claims.mjs';
 
 const raw = process.env.EXTERNAL_SCAN_TEST_DATABASE_URL;
