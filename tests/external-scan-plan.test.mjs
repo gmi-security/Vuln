@@ -35,7 +35,9 @@ test('unique approved host produces preview only, never executable',()=>{
   assert.equal(p.mode,'preview-only');assert.equal(p.launchesEnabled,false);
   assert.equal(p.candidates.length,1);
   assert.equal(p.candidates[0].state,'review-required');
-  assert.equal(p.candidates[0].nominalOffsetAt,'2026-11-04T02:00:00Z');
+  assert.equal(p.candidates[0].scheduledOccurrenceAt,'2026-11-04T01:00:00Z');
+  assert.equal(p.candidates[0].trigger,'after-verified-nessus-completion');
+  assert.equal(Object.hasOwn(p.candidates[0],'nominalOffsetAt'),false);
 });
 test('disabled Nessus schedules do not queue scans',()=>{
   const p=buildExternalScanPlan(matrix([{nessusScanId:11,scanName:'Disabled',enabled:false,
@@ -48,11 +50,12 @@ test('same host and multiple Nessus schedules generate one candidate',()=>{
   const p=buildExternalScanPlan(m,routes(['ALPHA.example','alpha.example']));
   assert.equal(p.candidates.length,1);assert.equal(p.candidates[0].nessusScanId,11);
 });
-test('CIDR, wildcard and wrong offset are rejected',()=>{
+test('CIDR and wildcard are rejected, but a legacy +1h offset is ignored',()=>{
   for(const value of ['10.0.0.0/24','*.example'])assert.equal(buildExternalScanPlan(matrix(),routes([value])).candidates.length,0);
   const p=buildExternalScanPlan(matrix([{nessusScanId:11,scanName:'Bad offset',enabled:true,
     nextOccurrence:'2026-11-04T01:00:00Z',offsetNextTrigger:'2026-11-04T01:00:00Z'}]),routes());
-  assert.equal(p.candidates.length,0);
+  assert.equal(p.candidates.length,1);
+  assert.equal(p.candidates[0].scheduledOccurrenceAt,'2026-11-04T01:00:00Z');
 });
 test('cross-company route overlap blocks both customers',()=>{
   const m=matrix();m.companies.push({companyId:'CO-B',companyName:'Customer B',scans:m.companies[0].scans});
@@ -65,4 +68,11 @@ test('missing approval blocks scheduling even if Nessus has imported scans',()=>
   const p=buildExternalScanPlan(matrix(),[]);
   assert.equal(p.candidates.length,0);
   assert.match(p.blocked[0].reason,/No approved/);
+});
+
+test('preview requires a future Nessus occurrence and never treats +1h as a launch',()=>{
+  const p=buildExternalScanPlan(matrix([{nessusScanId:11,scanName:'Completed yesterday',enabled:true,
+    nextOccurrence:'2026-11-02T01:00:00Z',offsetNextTrigger:'2026-11-04T02:00:00Z'}]),routes());
+  assert.equal(p.candidates.length,0);
+  assert.match(p.blocked[0].reason,/No valid enabled future Nessus recurrence/);
 });
