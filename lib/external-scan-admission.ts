@@ -94,14 +94,17 @@ export function evaluateExternalScanAdmission(input: ExternalAdmissionInput): Ex
     return hold('No approved maintenance window.');
   const start = parseTime(input.window.startsAt), end = parseTime(input.window.endsAt);
   if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || end - start > 24*3600*1000 ||
-      now < start || now >= end || start < occurrence)
+      now < start || now >= end)
     return hold('Outside a valid approved maintenance window.');
   if (!input.sourceRun || input.sourceRun.scanId !== input.candidate.nessusScanId ||
       input.sourceRun.status.toLowerCase() !== 'completed' || !input.sourceRun.reportId)
     return hold('No completed Nessus source run for this exact schedule.');
   const begun = parseTime(input.sourceRun.startedAt), completed = parseTime(input.sourceRun.completedAt);
+  // A customer-approved window may start before the Nessus recurrence.
+  // Greenbone may start immediately after the *actual* Nessus completion,
+  // never at a nominal +1h offset, and only while the window is open.
   if (!Number.isFinite(begun) || !Number.isFinite(completed) || begun < occurrence ||
-      completed < begun || completed > now || completed > end)
+      completed < begun || completed > now || completed > end || now < completed)
     return hold('Nessus run timing cannot be verified for this occurrence.');
   if (!input.sourceRun.coveredTargets.some(t => normalizedTarget(t) === wanted))
     return hold('Nessus report does not attest coverage of the exact approved target.');
