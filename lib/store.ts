@@ -1236,6 +1236,8 @@ async function scannerElasticExportTick(): Promise<void> {
 // schedulerTick, so resuming it here reproduces the same cadence and volume
 // as before the scheduler was disabled -- not more.
 function startVulnersBridgeScheduler(): void {
+  // Explicit opt-in: recurring full-inventory and Nessus-offset Bridge scans are disabled by default.
+  if (process.env.VULNERS_BRIDGE_SCHEDULER_ENABLED !== "true") return;
   if (persistGlobal.__vulnVulnersBridgeScheduler) return;
   persistGlobal.__vulnVulnersBridgeScheduler = setInterval(() => {
     if (persistGlobal.__vulnVulnersBridgeTick || persistGlobal.__vulnFlushing || persistenceBlocked()) return;
@@ -1252,6 +1254,7 @@ function startVulnersBridgeScheduler(): void {
 }
 
 async function vulnersBridgeTick(): Promise<void> {
+  if (process.env.VULNERS_BRIDGE_SCHEDULER_ENABLED !== "true") return;
   const s = store();
   if (!vulnersBridgeConfig()) return;
   const now = Date.now();
@@ -7630,6 +7633,9 @@ function activeTargetKey(provider: ActiveScannerProvider, target: string) {
 }
 async function reviewedActiveRoutes(provider: ActiveScannerProvider) {
   const routes = await loadReviewedScannerRoutes(provider);
+  // Never let a Bridge scan fall back to unrestricted legacy inventory routing.
+  if (provider === "vulners" && routes === null)
+    throw new Error("Vulners Bridge requires explicitly enabled, reviewed customer scanner routes.");
   if (routes !== null && (!routes.length || routes.some(route => route.provider !== provider ||
       !store().companies.has(route.companyId) || demoCompanyIds(store()).has(route.companyId))))
     throw new Error("Active scanner requires reviewed routes to existing non-demo customers.");
