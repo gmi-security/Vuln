@@ -236,7 +236,7 @@ export async function nessusListScans(pinned?: NessusConfig, folderId?: number):
   const data = await api(config, "GET", "/scans");
   if (pinned && (!Array.isArray(data?.scans) || data.error || data.errors?.length ||
       data.scans.some((scan: any) => !Number.isSafeInteger(scan.id) || scan.id < 1 || !Number.isSafeInteger(scan.folder_id) || scan.folder_id < 1 ||
-        (folderId !== undefined && scan.folder_id !== folderId) || typeof scan.status !== "string" || !scan.status ||
+        typeof scan.status !== "string" || !scan.status ||
         (scan.last_modification_date != null && (!Number.isSafeInteger(scan.last_modification_date) || scan.last_modification_date < 0))) ||
       new Set(data.scans.map((scan: any) => scan.id)).size !== data.scans.length))
     throw new Error("Nessus returned an invalid or out-of-scope scan roster.");
