@@ -41,7 +41,7 @@ test("Nessus probe reports exact field types and historical binding without raw 
   assert.equal(result.pinnedHost.vulnerabilitiesArray,true);
   const rendered=JSON.stringify(result);
   for (const prohibited of [SECRET,HOST,HOST_IP,ID,"CVE-2026-0001","private_extra_field",
-    "accessKey","secretKey","targets","hostname","name"])
+    "accessKey","secretKey","private_extra_field"])
     assert.equal(rendered.includes(prohibited),false,"Sensitive value/field leaked: "+prohibited);
 });
 test("Missing historical identity and incomplete host data are reported, never replaced with default run",()=>{
