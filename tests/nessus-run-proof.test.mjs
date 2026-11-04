@@ -145,3 +145,41 @@ test("Nessus live shape: ignored history_id, invalid-ID acceptance or identical 
     assert.equal(r,null,variation);
   }
 });
+
+test("Nessus local API: missing incomplete_targets requires all historical hosts to prove finished",async()=>{
+  const d=idlessTwoRunFixture();
+  delete d.pinned.info.incomplete_targets;
+  d.pinned.info.uuid=historyUuid; // observed info UUID on Vuln-NYC1
+  d.details[5].info.host_start="2026-11-04T01:02:10Z";
+  d.details[5].info.host_end="2026-11-04T01:12:10Z";
+  d.details[6].info.host_start="2026-11-04T01:02:20Z";
+  d.details[6].info.host_end="2026-11-04T01:13:20Z";
+  const proof=()=>verifyCompletedNessusOccurrence(candidate,folderId,{
+    ...reader(d),
+    scanDetails:async(id,hid)=>hid===undefined?d.summary:hid===87?d.alternate:d.pinned,
+  },now);
+  assert.ok(await proof(), "observed local API can attest completed historical target without incomplete_targets");
+  const other=d.details[6].info;
+  delete other.host_end;
+  assert.equal(await proof(),null, "an unrelated unfinished host is not overlooked");
+  other.host_end="2026-11-04T01:13:20Z";
+  d.details[5].info.host_end="2026-11-04T01:01:00Z";
+  assert.equal(await proof(),null, "host finish before start rejected");
+  d.details[5].info.host_end="2026-11-04T01:12:10Z";
+  d.details[5].info.host_start="2026-11-03T01:02:10Z";
+  assert.equal(await proof(),null, "host data from an older historical run rejected");
+  d.details[5].info.host_start="2026-11-04T01:02:10Z";
+  d.details[5].info.host_end="2026-11-04T03:12:10Z";
+  assert.equal(await proof(),null, "host completion outside the actual scan end rejected");
+  d.details[5].info.host_end="2026-11-04T01:12:10Z";
+  d.details[5].info.host_start="not-a-time";
+  assert.equal(await proof(),null, "malformed host timestamp rejected");
+});
+
+test("Nessus incomplete count is never assumed to be zero",async()=>{
+  const d=data();
+  for(const incomplete of [null,"0",-1,1,true]){
+    d.pinned.info.incomplete_targets=incomplete;
+    assert.equal(await check(d),null,String(incomplete));
+  }
+});
