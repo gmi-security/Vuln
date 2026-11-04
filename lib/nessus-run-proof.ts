@@ -121,9 +121,15 @@ export async function verifyCompletedNessusOccurrence(
     const began = unixMs(info.scan_start), ended = unixMs(info.scan_end);
     if (began === null || ended === null || began < occurrence ||
         began > occurrence + START_DRIFT_MS || ended < began ||
-        ended > current || Math.abs(began - unixMs(run.creation_date)!) > START_DRIFT_MS ||
-        info.incomplete_targets !== 0)
+        ended > current || Math.abs(began - unixMs(run.creation_date)!) > START_DRIFT_MS)
       return null;
+    // Tenable omits incomplete_targets for some scan runs. A nonzero or
+    // malformed value always blocks. When missing, independently require
+    // a completed, time-bounded historical result for EVERY listed host.
+    // Missing is never silently interpreted as zero.
+    const incomplete = info.incomplete_targets;
+    if (incomplete !== undefined && incomplete !== 0) return null;
+    const mustProveEachHostFinished = incomplete === undefined;
 
     const hosts = pinned!.hosts as unknown[];
     if (hosts.some(h => !positiveInt(record(h)?.host_id)) ||
@@ -137,6 +143,21 @@ export async function verifyCompletedNessusOccurrence(
       if (!hostInfo || !Array.isArray(detail?.vulnerabilities) ||
           (detail?.host_id !== undefined && detail.host_id !== hostId))
         return null;
+      if (mustProveEachHostFinished) {
+        // The host result MUST belong to the selected completed run, not
+        // stale results from the latest/another historical scan. Nessus
+        // provides these fields as timestamp strings in the local API.
+        if (typeof hostInfo.host_start !== "string" ||
+            typeof hostInfo.host_end !== "string") return null;
+        const hostBegan = Date.parse(hostInfo.host_start);
+        const hostEnded = Date.parse(hostInfo.host_end);
+        // A small skew allowance covers timestamp rounding, not a
+        // different execution. Invalid or missing timestamps fail closed.
+        const skewMs = 120_000;
+        if (!Number.isFinite(hostBegan) || !Number.isFinite(hostEnded) ||
+            hostBegan > hostEnded || hostBegan < began - skewMs ||
+            hostEnded > ended + skewMs || hostEnded > current) return null;
+      }
       // A configured hostname in the summary is not scan coverage.
       // ONLY exact aliases returned in PINNED historical host detail count.
       const aliases = [hostInfo["host-fqdn"], hostInfo["host-ip"]];
