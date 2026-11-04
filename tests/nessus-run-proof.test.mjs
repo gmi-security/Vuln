@@ -39,6 +39,7 @@ function data() {
 function reader(d,seen=[]){
   return {
     listScans:async id=>{seen.push(["list",id]);return d.roster;},
+    rejectsUnknownHistoryId:async(id,historyId)=>{seen.push(["invalid",id,historyId]);return d.rejectsUnknown !== false;},
     scanDetails:async(id,historyId)=>{seen.push(["scan",id,historyId]);return historyId===undefined?d.summary:d.pinned;},
     hostDetails:async(id,hostId,historyId)=>{seen.push(["host",id,hostId,historyId]);return d.details[hostId];},
   };
@@ -91,7 +92,94 @@ test("missing Nessus API data or errors never produce proof",async()=>{
   const e=data();e.details[5]=null;assert.equal(await check(e),null);
   assert.equal(await verifyCompletedNessusOccurrence(candidate,15,{
     listScans:async()=>{throw Error("scanner offline");},
+    rejectsUnknownHistoryId:async()=>{throw Error("not called");},
     scanDetails:async()=>{throw Error("not called");},
     hostDetails:async()=>{throw Error("not called");},
   },now),null);
+});
+
+function idlessTwoRunFixture() {
+  const d=data();
+  delete d.pinned.history_id;
+  delete d.pinned.uuid;
+  d.summary.history.push({
+    history_id:87,
+    uuid:"889e2266-9ca3-46ed-9b2d-9a240cb58903",
+    status:"completed",
+    creation_date:timestamp("2026-11-03T21:01:00Z"),
+  });
+  d.alternate={
+    info:{status:"completed",scan_start:timestamp("2026-11-03T21:02:00Z"),
+      scan_end:timestamp("2026-11-03T21:50:00Z")},
+  };
+  return d;
+}
+test("Nessus live shape: absent top-level ID/UUID allowed only with proven historical isolation",async()=>{
+  const d=idlessTwoRunFixture();
+  const seen=[];
+  const r=await verifyCompletedNessusOccurrence(candidate,folderId,{
+    ...reader(d,seen),
+    scanDetails:async(id,hid)=>{
+      seen.push(["scan",id,hid]);
+      return hid===undefined?d.summary:hid===87?d.alternate:d.pinned;
+    },
+  },now);
+  assert.ok(r);
+  assert.equal(r.reportId,historyUuid);
+  assert.deepEqual(seen.slice(0,5),[
+    ["list",15],["scan",11,undefined],["scan",11,88],
+    ["invalid",11,2147483647],["scan",11,87],
+  ]);
+});
+test("Nessus live shape: ignored history_id, invalid-ID acceptance or identical history blocks",async()=>{
+  for(const variation of ["invalid accepted","same start","wrong historic start","missing sibling"]) {
+    const d=idlessTwoRunFixture();
+    if(variation==="invalid accepted")d.rejectsUnknown=false;
+    if(variation==="same start")d.alternate.info.scan_start=d.pinned.info.scan_start;
+    if(variation==="wrong historic start")d.alternate.info.scan_start=timestamp("2026-11-02T21:02:00Z");
+    if(variation==="missing sibling")d.summary.history.pop();
+    const r=await verifyCompletedNessusOccurrence(candidate,folderId,{
+      ...reader(d),
+      scanDetails:async(id,hid)=>hid===undefined?d.summary:hid===87?d.alternate:d.pinned,
+    },now);
+    assert.equal(r,null,variation);
+  }
+});
+
+test("Nessus local API: missing incomplete_targets requires all historical hosts to prove finished",async()=>{
+  const d=idlessTwoRunFixture();
+  delete d.pinned.info.incomplete_targets;
+  d.pinned.info.uuid=historyUuid; // observed info UUID on Vuln-NYC1
+  d.details[5].info.host_start="2026-11-04T01:02:10Z";
+  d.details[5].info.host_end="2026-11-04T01:12:10Z";
+  d.details[6].info.host_start="2026-11-04T01:02:20Z";
+  d.details[6].info.host_end="2026-11-04T01:13:20Z";
+  const proof=()=>verifyCompletedNessusOccurrence(candidate,folderId,{
+    ...reader(d),
+    scanDetails:async(id,hid)=>hid===undefined?d.summary:hid===87?d.alternate:d.pinned,
+  },now);
+  assert.ok(await proof(), "observed local API can attest completed historical target without incomplete_targets");
+  const other=d.details[6].info;
+  delete other.host_end;
+  assert.equal(await proof(),null, "an unrelated unfinished host is not overlooked");
+  other.host_end="2026-11-04T01:13:20Z";
+  d.details[5].info.host_end="2026-11-04T01:01:00Z";
+  assert.equal(await proof(),null, "host finish before start rejected");
+  d.details[5].info.host_end="2026-11-04T01:12:10Z";
+  d.details[5].info.host_start="2026-11-03T01:02:10Z";
+  assert.equal(await proof(),null, "host data from an older historical run rejected");
+  d.details[5].info.host_start="2026-11-04T01:02:10Z";
+  d.details[5].info.host_end="2026-11-04T03:12:10Z";
+  assert.equal(await proof(),null, "host completion outside the actual scan end rejected");
+  d.details[5].info.host_end="2026-11-04T01:12:10Z";
+  d.details[5].info.host_start="not-a-time";
+  assert.equal(await proof(),null, "malformed host timestamp rejected");
+});
+
+test("Nessus incomplete count is never assumed to be zero",async()=>{
+  const d=data();
+  for(const incomplete of [null,"0",-1,1,true]){
+    d.pinned.info.incomplete_targets=incomplete;
+    assert.equal(await check(d),null,String(incomplete));
+  }
 });

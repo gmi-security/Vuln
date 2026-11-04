@@ -26,6 +26,12 @@ export function summarizeNessusHistoryShape({ ordinary, selected, pinned, host, 
   const pinnedRunId = obj(pinned)?.history_id ?? obj(info)?.history_id;
   const pinnedUuid = obj(pinned)?.uuid ?? obj(info)?.uuid;
   const hostInfo = obj(host)?.info;
+  const scanBegin = obj(info)?.scan_start;
+  const scanFinish = obj(info)?.scan_end;
+  const hostBegin = typeof obj(hostInfo)?.host_start === "string" ? Date.parse(hostInfo.host_start) : NaN;
+  const hostFinish = typeof obj(hostInfo)?.host_end === "string" ? Date.parse(hostInfo.host_end) : NaN;
+  const skew = 120_000;
+  const scanTimesValid = isPositive(scanBegin) && isPositive(scanFinish) && scanFinish >= scanBegin;
   return {
     format: "gmi-nessus-history-shape-v1",
     approvedFolderScanMatched: rosterMatched === true,
@@ -55,7 +61,60 @@ export function summarizeNessusHistoryShape({ ordinary, selected, pinned, host, 
       rootFields: fields(host,["host_id","info","vulnerabilities","hostname"]),
       infoFields: fields(hostInfo,["host-fqdn","host-ip","host_start","host_end","HOST_START","HOST_END"]),
       vulnerabilitiesArray: Array.isArray(obj(host)?.vulnerabilities),
+      timeChecks: {
+        parseable: Number.isFinite(hostBegin) && Number.isFinite(hostFinish),
+        startBeforeEnd: Number.isFinite(hostBegin) && Number.isFinite(hostFinish) && hostBegin <= hostFinish,
+        withinSelectedScan: scanTimesValid && Number.isFinite(hostBegin) && Number.isFinite(hostFinish) &&
+          hostBegin >= scanBegin * 1000 - skew && hostFinish <= scanFinish * 1000 + skew &&
+          hostBegin <= hostFinish,
+      },
     },
+  };
+}
+
+
+/**
+ * Aggregate all historical host timing responses without returning any host
+ * identifiers, IPs, names, findings, raw timestamps or UUIDs.
+ * This is an offline-checkable pure function; the caller has to fetch one
+ * response per host through a bounded, GET-only scanner reader.
+ */
+export function summarizeNessusAllHostsAudit(pinned, hostResults) {
+  const run=obj(pinned);
+  const info=obj(run?.info);
+  const hosts=Array.isArray(run?.hosts)?run.hosts:null;
+  const validInventory=hosts!==null && hosts.length>0 && hosts.length<=100 &&
+    hosts.every(h=>isPositive(obj(h)?.host_id)) &&
+    new Set(hosts.map(h=>obj(h).host_id)).size===hosts.length;
+  const start=info?.scan_start, finish=info?.scan_end;
+  const runValid=info?.status==="completed" && isPositive(start) &&
+    isPositive(finish) && finish>=start;
+  const responseList=Array.isArray(hostResults)?hostResults:[];
+  const validCount=responseList.filter(r=>{
+    const h=obj(r)?.body, hostInfo=obj(h?.info);
+    if(obj(r)?.status!==200 || !hostInfo || !Array.isArray(h?.vulnerabilities))return false;
+    // The local Nessus historical host endpoint may omit root host_id.
+    // If supplied, it must match the requested host.
+    if(h.host_id!==undefined && h.host_id!==obj(r)?.hostId)return false;
+    if(typeof hostInfo.host_start!=="string" || typeof hostInfo.host_end!=="string")return false;
+    const hs=Date.parse(hostInfo.host_start), he=Date.parse(hostInfo.host_end);
+    const skew=120_000;
+    return runValid && Number.isFinite(hs) && Number.isFinite(he) &&
+      hs<=he && hs>=start*1000-skew && he<=finish*1000+skew;
+  }).length;
+  const complete=validInventory && runValid &&
+    responseList.length===hosts.length &&
+    new Set(responseList.map(r=>obj(r)?.hostId)).size===hosts.length &&
+    responseList.every(r=>hosts.some(h=>obj(h)?.host_id===obj(r)?.hostId)) &&
+    validCount===hosts.length;
+  return {
+    totalHosts:hosts===null?null:hosts.length,
+    inventoryValid:validInventory,
+    selectedRunCompleted:runValid,
+    hostResponsesChecked:responseList.length,
+    hostsWithValidBoundedCompletion:validCount,
+    hostsRejected:responseList.length-validCount,
+    allHistoricalHostsComplete:complete,
   };
 }
 
@@ -110,7 +169,9 @@ export async function runNessusHistoricalShapeProbe() {
   const scanId=Number(process.env.NESSUS_PROBE_SCAN_ID), folderId=Number(process.env.NESSUS_PROBE_FOLDER_ID);
   if (!isPositive(scanId) || !isPositive(folderId)) throw Error("Set numeric NESSUS_PROBE_SCAN_ID and NESSUS_PROBE_FOLDER_ID.");
   const config=scannerConfig();
-  const rosterResponse=await getScannerJson(config,"/scans?folder_id="+folderId);
+  // The Nessus folder-filtered view can omit folder_id on each scan.
+  // Read the global scan listing to verify exact ownership safely.
+  const rosterResponse=await getScannerJson(config,"/scans");
   const roster=obj(rosterResponse.body);
   if(!Array.isArray(roster?.scans) || roster.scans.length>1000)
     throw Error("Scan roster unavailable or too large.");
@@ -135,9 +196,25 @@ export async function runNessusHistoricalShapeProbe() {
       hostHttpStatus=hostResult.status;
     }
   }
-  return summarizeNessusHistoryShape({
+  const summary=summarizeNessusHistoryShape({
     ordinary,selected,pinned,host,rosterMatched:true,pinnedHttpStatus,hostHttpStatus,
   });
+  if(process.env.NESSUS_PROBE_ALL_HOSTS==="1") {
+    const hosts=Array.isArray(obj(pinned)?.hosts)?pinned.hosts:null;
+    const approved=hosts!==null && hosts.length>0 && hosts.length<=100 &&
+      hosts.every(h=>isPositive(obj(h)?.host_id)) &&
+      new Set(hosts.map(h=>h.host_id)).size===hosts.length;
+    if(!approved) throw Error("Invalid or oversized historical host roster.");
+    const responses=[];
+    for(const entry of hosts) {
+      const hostId=entry.host_id;
+      const result=await safeRead(config,
+        "/scans/"+scanId+"/hosts/"+hostId+"?history_id="+selected.history_id);
+      responses.push({hostId,status:result.status,body:result.body});
+    }
+    summary.allHistoricalHosts=summarizeNessusAllHostsAudit(pinned,responses);
+  }
+  return summary;
 }
 if(process.argv[1] && resolve(process.argv[1])===fileURLToPath(import.meta.url)){
   runNessusHistoricalShapeProbe().then(result=>{

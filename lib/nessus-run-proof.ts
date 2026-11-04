@@ -24,6 +24,7 @@ const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
  */
 export type NessusHistoricalEvidenceReader = {
   listScans: (folderId: number) => Promise<unknown>;
+  rejectsUnknownHistoryId: (scanId: number, impossibleId: number) => Promise<boolean>;
   scanDetails: (scanId: number, historyId?: number) => Promise<unknown>;
   hostDetails: (scanId: number, hostId: number, historyId: number) => Promise<unknown>;
 };
@@ -82,19 +83,53 @@ export async function verifyCompletedNessusOccurrence(
         !Array.isArray(pinned?.hosts) || pinned.hosts.length < 1 ||
         pinned.hosts.length > HOST_LIMIT)
       return null;
-    // A server ignoring history_id might silently return the most recent
-    // scan. Require direct identity in the PINNED result, not merely an
-    // old entry in an unpinned history list.
+    // Some Nessus versions omit ID and UUID from pinned scan details.
+    // Never infer identity from an HTTP 200 alone. If either ID is absent,
+    // require independently confirmed historical selection: the real
+    // scanner must reject an impossible ID, and a second existing history
+    // must produce a distinct timestamp matching its own history record.
     const pinnedId = pinned?.history_id ?? info.history_id;
     const pinnedUuid = pinned?.uuid ?? info.uuid;
-    if (pinnedId !== historyId || pinnedUuid !== run.uuid) return null;
+    if (pinnedId !== undefined && pinnedId !== historyId) return null;
+    if (pinnedUuid !== undefined && pinnedUuid !== run.uuid) return null;
+    if (pinnedId === undefined || pinnedUuid === undefined) {
+      const impossibleId = 2147483647;
+      if (ordinary.history.some(h => record(h)?.history_id === impossibleId) ||
+          await reader.rejectsUnknownHistoryId(candidate.nessusScanId, impossibleId) !== true)
+        return null;
+      const alternate = ordinary.history.map(record).find(h => h &&
+        h.history_id !== historyId && positiveInt(h.history_id) && h.status === "completed" &&
+        typeof h.uuid === "string" && UUID.test(h.uuid) && unixMs(h.creation_date) !== null &&
+        Math.abs(unixMs(h.creation_date)! - unixMs(run.creation_date)!) > START_DRIFT_MS);
+      if (!alternate) return null;
+      const alternativeDetail = record(await reader.scanDetails(candidate.nessusScanId, alternate.history_id as number));
+      const alternativeInfo = record(alternativeDetail?.info);
+      const alternativeStart = unixMs(alternativeInfo?.scan_start);
+      const selectedStart = unixMs(info.scan_start);
+      if (!alternativeInfo || alternativeInfo.status !== "completed" ||
+          alternativeStart === null || selectedStart === null ||
+          alternativeStart === selectedStart ||
+          Math.abs(alternativeStart - unixMs(alternate.creation_date)!) > START_DRIFT_MS ||
+          Math.abs(selectedStart - unixMs(run.creation_date)!) > START_DRIFT_MS)
+        return null;
+      const alternativeId = alternativeDetail?.history_id ?? alternativeInfo.history_id;
+      const alternativeUuid = alternativeDetail?.uuid ?? alternativeInfo.uuid;
+      if (alternativeId !== undefined && alternativeId !== alternate.history_id) return null;
+      if (alternativeUuid !== undefined && alternativeUuid !== alternate.uuid) return null;
+    }
 
     const began = unixMs(info.scan_start), ended = unixMs(info.scan_end);
     if (began === null || ended === null || began < occurrence ||
         began > occurrence + START_DRIFT_MS || ended < began ||
-        ended > current || Math.abs(began - unixMs(run.creation_date)!) > START_DRIFT_MS ||
-        info.incomplete_targets !== 0)
+        ended > current || Math.abs(began - unixMs(run.creation_date)!) > START_DRIFT_MS)
       return null;
+    // Tenable omits incomplete_targets for some scan runs. A nonzero or
+    // malformed value always blocks. When missing, independently require
+    // a completed, time-bounded historical result for EVERY listed host.
+    // Missing is never silently interpreted as zero.
+    const incomplete = info.incomplete_targets;
+    if (incomplete !== undefined && incomplete !== 0) return null;
+    const mustProveEachHostFinished = incomplete === undefined;
 
     const hosts = pinned!.hosts as unknown[];
     if (hosts.some(h => !positiveInt(record(h)?.host_id)) ||
@@ -108,6 +143,21 @@ export async function verifyCompletedNessusOccurrence(
       if (!hostInfo || !Array.isArray(detail?.vulnerabilities) ||
           (detail?.host_id !== undefined && detail.host_id !== hostId))
         return null;
+      if (mustProveEachHostFinished) {
+        // The host result MUST belong to the selected completed run, not
+        // stale results from the latest/another historical scan. Nessus
+        // provides these fields as timestamp strings in the local API.
+        if (typeof hostInfo.host_start !== "string" ||
+            typeof hostInfo.host_end !== "string") return null;
+        const hostBegan = Date.parse(hostInfo.host_start);
+        const hostEnded = Date.parse(hostInfo.host_end);
+        // A small skew allowance covers timestamp rounding, not a
+        // different execution. Invalid or missing timestamps fail closed.
+        const skewMs = 120_000;
+        if (!Number.isFinite(hostBegan) || !Number.isFinite(hostEnded) ||
+            hostBegan > hostEnded || hostBegan < began - skewMs ||
+            hostEnded > ended + skewMs || hostEnded > current) return null;
+      }
       // A configured hostname in the summary is not scan coverage.
       // ONLY exact aliases returned in PINNED historical host detail count.
       const aliases = [hostInfo["host-fqdn"], hostInfo["host-ip"]];

@@ -230,15 +230,19 @@ export async function nessusListScans(pinned?: NessusConfig, folderId?: number):
   const config = pinned ?? nessusConfig();
   if (!config) throw new Error("Nessus is not configured.");
   if (folderId !== undefined && (!Number.isSafeInteger(folderId) || folderId < 1)) throw new Error("Invalid Nessus folder scope.");
-  const data = await api(config, "GET", folderId === undefined ? "/scans" : `/scans?folder_id=${folderId}`);
+  // Nessus on Vuln-NYC1 returns scans from /scans?folder_id=N without
+  // folder_id on each row. Do not treat that filtered response as proof of
+  // ownership. Read the global roster and enforce the folder ID locally.
+  const data = await api(config, "GET", "/scans");
   if (pinned && (!Array.isArray(data?.scans) || data.error || data.errors?.length ||
       data.scans.some((scan: any) => !Number.isSafeInteger(scan.id) || scan.id < 1 || !Number.isSafeInteger(scan.folder_id) || scan.folder_id < 1 ||
-        (folderId !== undefined && scan.folder_id !== folderId) || typeof scan.status !== "string" || !scan.status ||
+        typeof scan.status !== "string" || !scan.status ||
         (scan.last_modification_date != null && (!Number.isSafeInteger(scan.last_modification_date) || scan.last_modification_date < 0))) ||
       new Set(data.scans.map((scan: any) => scan.id)).size !== data.scans.length))
     throw new Error("Nessus returned an invalid or out-of-scope scan roster.");
   const scans: any[] = data?.scans ?? [];
-  return scans.map((sc) => ({
+  const selected = folderId === undefined ? scans : scans.filter(sc => sc.folder_id === folderId);
+  return selected.map((sc) => ({
     id: Number(sc.id),
     name: String(sc.name ?? `Nessus scan ${sc.id}`),
     folderId: Number(sc.folder_id),
@@ -287,6 +291,13 @@ export async function nessusCompletedRunProof(
 ): Promise<NessusRunProof | null> {
   return verifyCompletedNessusOccurrence(candidate, reviewedFolderId, {
     listScans: (folderId) => nessusListScans(pinned, folderId),
+    // The installed Nessus API returns HTTP 404 for an impossible history ID.
+    // This catches a scanner that silently ignores the selected ID.
+    rejectsUnknownHistoryId: async (scanId, invalidHistoryId) => {
+      const response = await request(pinned, "GET",
+        "/scans/" + scanId + "?history_id=" + invalidHistoryId);
+      return response.status === 404;
+    },
     scanDetails: (scanId, historyId) =>
       api(pinned, "GET", "/scans/" + scanId +
         (historyId === undefined ? "" : "?history_id=" + historyId)),

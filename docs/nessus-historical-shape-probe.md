@@ -13,9 +13,25 @@ NESSUS_PROBE_SCAN_ID=123 NESSUS_PROBE_FOLDER_ID=45 \
   node scripts/nessus-historical-shape-probe.mjs
 ```
 
-Replace the example IDs. **Do not paste API keys or raw Nessus responses into chat.** The script uses the existing environment, makes at most four kinds of `GET` reads (folder scan list, scan summary, pinned historical scan and one pinned historical host), caps each reply at 6 MiB and timeout at 15 seconds, and never calls a write endpoint, scan launch, stop or export.
+Replace the example IDs. **Do not paste API keys or raw Nessus responses into chat.** The script uses the existing environment, makes at most four kinds of `GET` reads (global scan roster (to confirm folder ownership), scan summary, pinned historical scan and one pinned historical host), caps each reply at 6 MiB and timeout at 15 seconds, and never calls a write endpoint, scan launch, stop or export.
 
 If a scan has no completed historical run, the probe reports that no history was selected. If the pinned endpoint or host detail is unsupported, the output shows only the HTTP status and missing field types.
+
+## Optional complete historical host audit (read-only)
+
+Once the normal one-host shape probe succeeds, set \`NESSUS_PROBE_ALL_HOSTS=1\` for the same **operator-approved** scan and folder. The script rejects a missing, empty, duplicate-ID or over-100-host roster before fetching any host details. It performs at most 100 **sequential GET** host reads, each capped at 6 MiB / 15 seconds. It never launches, retries, stops, schedules, or exports a scan.
+
+\`\`\`bash
+NESSUS_PROBE_ALL_HOSTS=1 NESSUS_PROBE_SCAN_ID=146 NESSUS_PROBE_FOLDER_ID=7 \
+  node --env-file=.env --env-file=.env.local scripts/nessus-historical-shape-probe.mjs
+\`\`\`
+
+The new \`allHistoricalHosts\` section contains only aggregate counts and Boolean checks:
+
+- \`totalHosts\`, \`hostResponsesChecked\`, \`hostsWithValidBoundedCompletion\`, \`hostsRejected\`
+- \`inventoryValid\`, \`selectedRunCompleted\`, \`allHistoricalHostsComplete\`
+
+A passing Boolean attests that all *returned* historical hosts reported completed times within that run. It does **not** independently prove that every configured target was returned or authorize a new scan. The real dispatcher also requires the exact approved target, validated run timing and UUID, a current customer window, global capacity, an atomic claim and explicit rollout flags.
 
 ## Output privacy
 

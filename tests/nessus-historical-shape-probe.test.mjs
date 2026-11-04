@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { summarizeNessusHistoryShape } from "../scripts/nessus-historical-shape-probe.mjs";
+import { summarizeNessusHistoryShape, summarizeNessusAllHostsAudit } from "../scripts/nessus-historical-shape-probe.mjs";
 
 const ID = "e397e8e9-848a-40c4-a5a0-6cafbbc54a18";
 const SECRET = "DO_NOT_LOG_SECRET_ACCESS_KEY";
@@ -66,4 +66,71 @@ test("No historical run remains a metadata-only diagnostic, never a scan trigger
   assert.equal(r.selectedCompletedHistory.available,false);
   assert.equal(r.pinnedScan.httpStatus,200);
   assert.equal(r.pinnedHost.vulnerabilitiesArray,false);
+});
+
+test("historical host timestamp attestation outputs only booleans, never host times",()=>{
+  const d=fixture();
+  const begin=d.pinned.info.scan_start*1000;
+  const end=d.pinned.info.scan_end*1000;
+  d.host.info.host_start=new Date(begin+10_000).toISOString();
+  d.host.info.host_end=new Date(end-10_000).toISOString();
+  const good=summarizeNessusHistoryShape(d);
+  assert.deepEqual(good.pinnedHost.timeChecks,{
+    parseable:true,startBeforeEnd:true,withinSelectedScan:true,
+  });
+  assert.equal(JSON.stringify(good).includes(d.host.info.host_end),false);
+  d.host.info.host_end=new Date(begin-86_400_000).toISOString();
+  const bad=summarizeNessusHistoryShape(d);
+  assert.equal(bad.pinnedHost.timeChecks.withinSelectedScan,false);
+  d.host.info.host_end="not-a-time";
+  const malformed=summarizeNessusHistoryShape(d);
+  assert.equal(malformed.pinnedHost.timeChecks.parseable,false);
+});
+
+test("bounded historical all-host audit passes with two fully completed hosts",()=>{
+ const start=1793740000,finish=1793743000;
+ const pinned={info:{status:"completed",scan_start:start,scan_end:finish},
+   hosts:[{host_id:1,hostname:HOST},{host_id:2,hostname:"secret-host-2"}]};
+ const make=(id)=>({hostId:id,status:200,body:{
+   info:{"host_start":new Date((start+10)*1000).toISOString(),
+     "host_end":new Date((finish-10)*1000).toISOString(),"host-fqdn":HOST},
+   vulnerabilities:[{details:SECRET}],
+ }});
+ const items=[make(1),make(2)];
+ const audit=summarizeNessusAllHostsAudit(pinned,items);
+ assert.deepEqual(audit,{totalHosts:2,inventoryValid:true,selectedRunCompleted:true,
+   hostResponsesChecked:2,hostsWithValidBoundedCompletion:2,hostsRejected:0,
+   allHistoricalHostsComplete:true});
+ const json=JSON.stringify(audit);
+ for(const secret of [HOST,SECRET,"secret-host-2",String(start),String(finish)])
+   assert.equal(json.includes(secret),false);
+});
+test("all-host audit fails closed on missing, malformed, stale and duplicate host results",()=>{
+ const start=1793740000,finish=1793743000;
+ const pinned={info:{status:"completed",scan_start:start,scan_end:finish},
+   hosts:[{host_id:1},{host_id:2}]};
+ const good=(hostId)=>({hostId,status:200,body:{
+   info:{host_start:new Date(start*1000).toISOString(),
+     host_end:new Date(finish*1000).toISOString()},
+   vulnerabilities:[],
+ }});
+ const both=[good(1),good(2)];
+ assert.equal(summarizeNessusAllHostsAudit(pinned,both).allHistoricalHostsComplete,true);
+ const scenarios=[
+   [good(1)], [good(1),{...good(2),status:404}],
+   [good(1),{...good(2),body:{...good(2).body,info:{}}}],
+   [good(1),{...good(2),body:{...good(2).body,info:{host_start:"invalid",host_end:"invalid"}}}],
+   [good(1),{...good(2),body:{...good(2).body,vulnerabilities:null}}],
+   [good(1),{...good(2),body:{...good(2).body,host_id:1}}],
+   [good(1),{...good(2),body:{...good(2).body,info:{
+     host_start:new Date((start-600)*1000).toISOString(),
+     host_end:new Date(finish*1000).toISOString()}}}],
+   [good(1),good(1)],
+ ];
+ for (const bad of scenarios)
+   assert.equal(summarizeNessusAllHostsAudit(pinned,bad).allHistoricalHostsComplete,false);
+ const duplicate={...pinned,hosts:[{host_id:1},{host_id:1}]};
+ assert.equal(summarizeNessusAllHostsAudit(duplicate,both).allHistoricalHostsComplete,false);
+ const overflow={...pinned,hosts:Array.from({length:101},(_,i)=>({host_id:i+1}))};
+ assert.equal(summarizeNessusAllHostsAudit(overflow,[]).allHistoricalHostsComplete,false);
 });
