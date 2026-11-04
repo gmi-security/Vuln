@@ -539,6 +539,10 @@ export function createSpotlightRecordStore(db: Database) {
     const client = await db.connect();
     try {
       await client.query("BEGIN");
+      // A 2.37-million-row cold verification took five minutes; allow headroom, not an unbounded run.
+      await client.query("SET LOCAL statement_timeout = '15min'");
+      // New generations can be absent from statistics; nested anti-joins then become quadratic.
+      await client.query("SET LOCAL enable_nestloop = off");
       // Serialize final approval checks with operator review/revoke transactions.
       if (scope) await client.query("SELECT pg_advisory_xact_lock(716301,1)");
       const run = await client.query(`SELECT phase, expected_count, hydrated_count, checkpoint_version

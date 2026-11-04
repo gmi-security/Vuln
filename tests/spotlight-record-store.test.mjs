@@ -202,6 +202,24 @@ test("resumable promotion moves the active pointer only after exact staged ID re
   assert.ok(pointer < calls.findIndex(sql => sql.trim() === "COMMIT"));
 });
 
+test("final verification timeout rolls back without publication and releases the client", async () => {
+  const calls = [];
+  const timeout = Object.assign(new Error("canceling statement due to statement timeout"), {code:"57014"});
+  const client = {query:async sql => {
+    calls.push(String(sql));
+    if (String(sql).includes("SELECT phase, expected_count, hydrated_count"))
+      return {rows:[{phase:"hydrating",expected_count:"2",hydrated_count:"2"}]};
+    if (String(sql).includes("AS missing")) throw timeout;
+    return {rows:[]};
+  },release:()=>calls.push("RELEASE")};
+  const store = createSpotlightRecordStore({query:async()=>({rows:[]}),connect:async()=>client});
+  await assert.rejects(()=>store.completeResumableSpotlightRun("run-1","CO-147284"),e=>e===timeout);
+  assert.ok(calls.indexOf("SET LOCAL statement_timeout = '15min'") > calls.indexOf("BEGIN"));
+  assert.ok(calls.indexOf("SET LOCAL statement_timeout = '15min'") < calls.findIndex(sql=>sql.includes("FOR UPDATE")));
+  assert.deepEqual(calls.slice(-2),["ROLLBACK","RELEASE"]);
+  assert.equal(calls.some(sql=>sql.includes("INSERT INTO spotlight_import_current")),false);
+});
+
 test("starting a replacement run marks an interrupted prior run failed before inserting", async () => {
   const calls = [];
   const store = createSpotlightRecordStore({ query: async sql => {
