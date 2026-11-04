@@ -67,3 +67,22 @@ test("No historical run remains a metadata-only diagnostic, never a scan trigger
   assert.equal(r.pinnedScan.httpStatus,200);
   assert.equal(r.pinnedHost.vulnerabilitiesArray,false);
 });
+
+test("historical host timestamp attestation outputs only booleans, never host times",()=>{
+  const d=fixture();
+  const begin=d.pinned.info.scan_start*1000;
+  const end=d.pinned.info.scan_end*1000;
+  d.host.info.host_start=new Date(begin+10_000).toISOString();
+  d.host.info.host_end=new Date(end-10_000).toISOString();
+  const good=summarizeNessusHistoryShape(d);
+  assert.deepEqual(good.pinnedHost.timeChecks,{
+    parseable:true,startBeforeEnd:true,withinSelectedScan:true,
+  });
+  assert.equal(JSON.stringify(good).includes(d.host.info.host_end),false);
+  d.host.info.host_end=new Date(begin-86_400_000).toISOString();
+  const bad=summarizeNessusHistoryShape(d);
+  assert.equal(bad.pinnedHost.timeChecks.withinSelectedScan,false);
+  d.host.info.host_end="not-a-time";
+  const malformed=summarizeNessusHistoryShape(d);
+  assert.equal(malformed.pinnedHost.timeChecks.parseable,false);
+});
