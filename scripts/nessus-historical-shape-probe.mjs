@@ -26,6 +26,12 @@ export function summarizeNessusHistoryShape({ ordinary, selected, pinned, host, 
   const pinnedRunId = obj(pinned)?.history_id ?? obj(info)?.history_id;
   const pinnedUuid = obj(pinned)?.uuid ?? obj(info)?.uuid;
   const hostInfo = obj(host)?.info;
+  const scanBegin = obj(info)?.scan_start;
+  const scanFinish = obj(info)?.scan_end;
+  const hostBegin = typeof obj(hostInfo)?.host_start === "string" ? Date.parse(hostInfo.host_start) : NaN;
+  const hostFinish = typeof obj(hostInfo)?.host_end === "string" ? Date.parse(hostInfo.host_end) : NaN;
+  const skew = 120_000;
+  const scanTimesValid = isPositive(scanBegin) && isPositive(scanFinish) && scanFinish >= scanBegin;
   return {
     format: "gmi-nessus-history-shape-v1",
     approvedFolderScanMatched: rosterMatched === true,
@@ -55,6 +61,13 @@ export function summarizeNessusHistoryShape({ ordinary, selected, pinned, host, 
       rootFields: fields(host,["host_id","info","vulnerabilities","hostname"]),
       infoFields: fields(hostInfo,["host-fqdn","host-ip","host_start","host_end","HOST_START","HOST_END"]),
       vulnerabilitiesArray: Array.isArray(obj(host)?.vulnerabilities),
+      timeChecks: {
+        parseable: Number.isFinite(hostBegin) && Number.isFinite(hostFinish),
+        startBeforeEnd: Number.isFinite(hostBegin) && Number.isFinite(hostFinish) && hostBegin <= hostFinish,
+        withinSelectedScan: scanTimesValid && Number.isFinite(hostBegin) && Number.isFinite(hostFinish) &&
+          hostBegin >= scanBegin * 1000 - skew && hostFinish <= scanFinish * 1000 + skew &&
+          hostBegin <= hostFinish,
+      },
     },
   };
 }
