@@ -1,60 +1,24 @@
-import { withDurablePlatformMutation } from "@/lib/platform-mutation-route";
 import { NextResponse } from "next/server";
-import { ensureHydrated, listCompanies, nessusBridgeTargetsForCompany, startScan } from "@/lib/store";
 import { adminTokenOk } from "@/lib/admin-auth";
 
 export const dynamic = "force-dynamic";
 
-// Token-protected admin action: for every company with at least one Nessus
-// finding on record, launches a Vulners Bridge (gmi-vuln-api) scan against
-// the union of that company's Nessus-scanned hosts. Purely additive — reads
-// existing Nessus data, deletes/overwrites nothing. Pass ?dryRun=1 to
-// preview the company/target list without launching anything.
+// RETIRED: the former POST path gathered every Nessus-scanned alias and
+// historical finding asset for a customer, then created Greenbone tasks
+// against that cross-scan union. Those are NOT the configured or confirmed
+// host targets of an individual Nessus scan occurrence.
 //
-// Targets come from Finding.asset, not Scan.targets: an imported Nessus
-// scan (vendor.imported: true) only records a hostsScanned *count*, not the
-// host list — the actual hostnames only exist on that scan's findings.
-async function POSTHandler(request: Request) {
+// This endpoint deliberately cannot launch a scan, including when a caller
+// omits dryRun=1. Re-enable work only through the separate reviewed
+// per-occurrence dispatcher with approved scope, actual Nessus target/host
+// evidence and a durable globally bounded scan claim.
+export async function POST(request: Request) {
   if (!adminTokenOk(request)) {
     return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
   }
-  await ensureHydrated();
-  const dryRun = new URL(request.url).searchParams.get("dryRun") === "1";
-
-  const results: Array<{
-    companyId: string;
-    companyName: string;
-    targets: string[];
-    scanId?: string;
-    error?: string;
-  }> = [];
-
-  for (const company of listCompanies()) {
-    const nessusTargets = nessusBridgeTargetsForCompany(company.id);
-    if (!nessusTargets.length) continue;
-
-    if (dryRun) {
-      results.push({ companyId: company.id, companyName: company.name, targets: nessusTargets });
-      continue;
-    }
-
-    const result = await startScan({
-      name: `GMI scan: ${company.name} (ported from Nessus)`,
-      connector: "vulners",
-      profile: "full-fast",
-      targets: nessusTargets,
-      companyId: company.id,
-      requestedBy: "system@gmi.com",
-    });
-
-    results.push(
-      "error" in result
-        ? { companyId: company.id, companyName: company.name, targets: nessusTargets, error: result.error }
-        : { companyId: company.id, companyName: company.name, targets: nessusTargets, scanId: result.id },
-    );
-  }
-
-  return NextResponse.json({ dryRun, portedCompanies: results.length, results });
+  return NextResponse.json({
+    error: "Legacy company-wide Nessus-to-Greenbone port is retired. It cannot guarantee identical scan targets.",
+    action: "Use read-only per-scan parity review, then the independently approved controlled dispatcher.",
+    scansLaunched: 0,
+  }, { status: 409, headers: { "Cache-Control": "no-store" } });
 }
-
-export const POST = withDurablePlatformMutation(POSTHandler);
