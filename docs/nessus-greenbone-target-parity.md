@@ -498,3 +498,42 @@ node --experimental-vm-modules --test tests/approved-scanner-target-parity.test.
 ```
 
 A merge alone does not deploy this endpoint or launch any work.
+
+## Privacy-preserving existing-finding overlap audit (read-only)
+
+Two audit scripts are staged on this branch, **not** connected to production
+routes, imports, workers or timers:
+
+- `scripts/audit/prepare-local-vulners-hmac-token.mjs` runs on
+  **Vuln-NYC1**. Its read-only app DB transaction loads the 91 locally
+  Running scan-ID/customer associations and all 82 existing Vulners
+  `(company, asset, CVE)` keys. It HMAC-SHA256 hashes every normalized
+  `company + NUL + lower(trim(asset without trailing dot)) + NUL + upper(CVE)`
+  tuple with a **one-time 32-byte random key** provided in the local
+  `GMI_AUDIT_HMAC_HEX` environment variable. Its gzip-base64 payload
+  contains **only** scan IDs and customer identifiers plus keyed hashes
+  of existing finding identities. It prints a token, not raw findings.
+- `scripts/audit/compare-greenbone-to-app-hmac.py` runs on
+  **Vulners-v2**, with the same one-time key and the token manually
+  transferred between approved operator terminals. Its read-only
+  PostgreSQL query selects each Done tagged task's latest fully ended
+  report, joins positive-severity NVT CVE references, and checks
+  report-internal host identity against `targets.hosts` using
+  direct host fields or historical `report_host_details`.
+  It compares candidate `(company, configured target, CVE)` HMACs
+  against local existing finding HMACs, aggregates **across repeated
+  scans**, and prints only per-company matched and unmatched counts.
+  The script fails closed unless the full remote baseline is
+  unchanged (34 linked scan IDs, 2,260 CVE references, 1,839
+  distinct scan/reported-host/CVE combinations, 1,070 high/critical
+  references), and never processes the two globally orphaned IDs.
+
+Neither tool writes to either DB; both require independently controlled
+administrative hosts. Key material **must never** be shared in chat,
+logs, PRs, or third-party services. Keep it in ephemeral admin shells;
+unset immediately after the audit. HMACs are not encryption of
+fingerprints if the key is disclosed. Historical NVT CVE metadata
+may change, and a remote CVE not present in the application is **only**
+a historical candidate, not an automatically importable or
+currently open finding. Authoritative customer and completed-Nessus-run
+scope and report-ingestion provenance must be verified separately.
