@@ -79,19 +79,31 @@ export function normalizeNessusDefinition(editor,{maxHosts=4096,maxPerExpression
   const expressions=extractNessusTargetExpressions(editor);
   const hosts=new Set();
   const problems=[],networks=[];
-  for(const expression of expressions){
+  // A target repeated in one Nessus definition adds no extra host to its
+  // execution SET. Track redundancy for audit; never treat it as a new host
+  // or silently drop an INVALID expression.
+  let redundantHostSlots=0, expressionsWithOverlap=0;
+  for(const [expressionIndex,expression] of expressions.entries()){
     try{
       const list=parseExpression(expression,maxPerExpression);
       if(expression.includes("/"))networks.push({expression,count:list.length});
+      let overlap=false;
       for(const host of list) {
-        if(hosts.has(host)) throw Error("Duplicate or overlapping target in same scan");
+        if(hosts.has(host)) {
+          redundantHostSlots++;
+          overlap=true;
+          continue;
+        }
+        if(hosts.size>=maxHosts)
+          throw Error("Total target count exceeds bounded review limit");
         hosts.add(host);
-        if(hosts.size>maxHosts)throw Error("Total target count exceeds bounded review limit");
       }
-    }catch(err){problems.push({expressionIndex:expressions.indexOf(expression),
+      if(overlap) expressionsWithOverlap++;
+    }catch(err){problems.push({expressionIndex,
       reason:err instanceof Error?err.message:"Invalid target"});}
   }
   return {expressionCount:expressions.length,exactHostCount:hosts.size,
+    redundantHostSlots,expressionsWithOverlap,
     cidrExpressions:networks.length,cidrIpCount:networks.reduce((n,x)=>n+x.count,0),
     problems,hosts:[...hosts].sort()};
 }
@@ -109,6 +121,7 @@ export function compareNessusToGreenbonePerScan(input) {
     configuredExactHostCount:source.exactHostCount,
     cidrExpressions:source.cidrExpressions,
     sourceProblems:source.problems.length,
+    redundantSourceHostSlots:source.redundantHostSlots,
     plannedGreenboneCount:0,approvedCount:0,
     missingFromGreenbone:0,extraInGreenbone:0,
     unauthorizedSourceTargets:0,
