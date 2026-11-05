@@ -647,3 +647,20 @@ may change, and a remote CVE not present in the application is **only**
 a historical candidate, not an automatically importable or
 currently open finding. Authoritative customer and completed-Nessus-run
 scope and report-ingestion provenance must be verified separately.
+
+## Recovery source-identity preflight (staged, not yet executed)
+
+`scripts/audit/greenbone-recovery-identity-preflight.sql`
+is a scanner-local, read-only PostgreSQL query to identify
+available task, report and result immutable UUID columns,
+result timestamps, NVT versions and source-NVT metadata
+for a provenance-preserving historical import plan.
+It emits only aggregate counts and column definitions,
+not customer hosts, CVEs or raw IDs. Its results are not
+yet verified against the scanner. It intentionally includes
+the two remote CVE-bearing orphan IDs in the overall
+completed-report baseline; **neither is authorized
+for import**. Do not promote any imported observation to
+currently `Open` without a separate recent scan
+and customer-scope authorization. No write-mode migration,
+data transfer or import has been approved or performed.
