@@ -299,6 +299,29 @@ Operator diagnostics on **Vuln-NYC1**, without scanner writes:
   automatic backfill based on task counts. Keep the
   36 unmatched stale app scans and 15 failed app scans
   visible for further separate investigation.
+- Aggregated read-only `gvmd.results` inventory for latest
+  confirmed completed reports among all **451** Done
+  application-tagged tasks: **441** reports have result rows,
+  **285** reports have positive-severity rows, total
+  **20,045 result rows**, including **1,625** severity >0,
+  **1,048** severity ≥4, and **405** severity ≥7; **zero**
+  reports marked `processing_required <> 0`. Compare
+  cautiously against the six customers' **82** local
+  `vulners` app finding records: results contain recon
+  data, can have no CVE, may repeat findings across scans,
+  and include some reports linked to local failed or
+  unmatched scan IDs. The finding-count difference is a
+  strong ingestion-audit lead, **not** a verified number
+  of missed actionable vulnerabilities. The deployed
+  `vulnersBridgeJobFindings()` code discards result rows
+  lacking a nonempty `cves` array and strictly checks
+  `r.host === configured exact target` on its reviewed
+  path; this may fail hostname-configured targets whose
+  reporter uses IPv4 unless historical identity mapping
+  is validated in the connector and reflected in its
+  scope contract. Read-only inspect scanner CVE reference
+  schema, bridge report completeness and API pagination
+  before any backfill or status mutation.
 - Per-folder expression counts: folder 7 = 62; 11 = 62;
   114 = 13; 136 = 182; 253 = 10; 507 = 3. Literal
   expressions were not repeated between folders; this is **not**
