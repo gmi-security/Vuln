@@ -3,7 +3,7 @@
 
 Never starts/stops scans, talks to GMP, mounts volumes, extracts archives,
 reads customer reports, or modifies data. Prints aggregate evidence
-categories and salted? No: SHA256(path) *labels* only; these are not
+categories and SHA256(path) *labels* only; these are not
 authentication or privacy guarantees. No raw paths, filenames, hosts,
 CVE IDs, report contents, API credentials, or environment are printed.
 
@@ -100,10 +100,16 @@ def volumes():
     if raw is None:return []
     out=[]
     for name in raw.splitlines():
-        if not name.startswith("greenbone-community-edition_"):continue
-        if not (name.endswith("_vt_data_vol") or
-                name.endswith("_gvmd_data_vol") or
-                name.endswith("_data_objects_vol")):continue
+        # Enumerate only three known live Greenbone volume types plus
+        # separately named archive/backup volumes. Never inspect the live
+        # PostgreSQL volume or unrelated application secrets.
+        is_live=(name.startswith("greenbone-community-edition_") and
+          (name.endswith("_vt_data_vol") or
+           name.endswith("_gvmd_data_vol") or
+           name.endswith("_data_objects_vol")))
+        is_archive=(("greenbone" in name.lower() or "gvm" in name.lower()) and
+          re.search(r"(backup|archive|snapshot|history)",name,re.I))
+        if not (is_live or is_archive):continue
         data=cmd(["docker","volume","inspect",name,"--format","{{json .Mountpoint}}"])
         if data is None:continue
         try:
@@ -149,13 +155,13 @@ def main():
                           reverse=True)[:8]:
             print("  ",json.dumps(row,sort_keys=True))
     vol=volumes()
-    print("Recognized LIVE Greenbone data volumes:",len(vol))
+    print("Recognized Greenbone live or archive-labeled volumes:",len(vol))
     for _,vpath in vol:
         name=vpath.parent.name.lower()
         if "vt_data" in name: typ="live_vt_feed"
         elif "gvmd_data" in name:typ="live_gvmd_data"
         elif "data_objects" in name:typ="live_data_objects"
-        else:typ="unclassified_live_volume"
+        else:typ="named_archive_volume_candidate"
         stats=Counter()
         mtimes=[]
         for path,st in bounded_walk(vpath,max_depth=8,max_files=150000):
@@ -167,7 +173,7 @@ def main():
             "type":typ,"files_by_extension":dict(sorted(stats.items())),
             "oldest_nasl_or_inc_file_mtime_utc":iso(min(mtimes)) if mtimes else None,
             "latest_nasl_or_inc_file_mtime_utc":iso(max(mtimes)) if mtimes else None,
-            "is_historical_feed_archive":False
+            "historical_feed_provenance_verified":False
         },sort_keys=True))
     print("NO WRITES. No report contents, secrets or customer targets were read.")
     print("NOTE: file mtimes and current-volume contents cannot independently prove a")
