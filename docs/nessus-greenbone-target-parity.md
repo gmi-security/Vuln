@@ -794,3 +794,35 @@ fields. This is a read-only diagnostic with aggregate counts, not
 a report snapshot or a proof of a CVE association. Until confirmed,
 neither a historical importer nor a historical evidence manifest
 may label a present-day NVT CVE lookup `report-snapshot`.
+
+## Original CVE-lineage check — confirmed November 5, 2026
+
+The read-only `scripts/audit/greenbone-cve-lineage-readonly.sql`
+completed on Vulners-v2. All **1,172** currently CVE-bearing,
+positive-severity rows have a stored observation NVT version.
+**Zero** have a separately embedded CVE list in the scanned
+`results` or `result_nvts` schema. The current `nvts`
+table has no separately identified comparable NVT version field
+for the version-comparison query: **zero** rows had a current version
+value, meaning there were also zero possible direct version matches
+or mismatches. For all **1,172**, current NVT metadata reports a
+modification time no later than the historical report end.
+
+**Provenance correction:** a historical result's stored NVT version,
+together with a current NVT CVE list and early current
+`modification_time`, is *supporting circumstantial evidence*,
+not independently frozen scan-time NVT/CVE attribution. In particular,
+a zero `differing_observed_and_current_version` count here
+**does not** establish matched versions because there is no
+comparison field at all. Do not claim a "report-snapshot"
+CVE lineage from this source. The **913** missing historical
+company/configured-target/CVE pairs remain comparison candidates,
+not provenance-cleared historical import rows. All scans and
+application finding records are unchanged.
+
+Next inspect only safe read-only, aggregate report/source
+capabilities for an immutable original CVE record (e.g.,
+a retained exported GVM XML report or archived feed metadata).
+Do not create or launch scans, download raw customer reports
+into GitHub or chat, or bypass the strict preview's
+`cveProvenance: "report-snapshot"` requirement.
