@@ -75,6 +75,10 @@ export function compareApprovedScannerTargets(
     return result;
   }
   const customers = new Set([...nessusRoutes.map(r => r.companyId), ...vulnersRoutes.map(r => r.companyId)]);
+  if (customers.size === 0) {
+    result.unresolvedCompanyCount = 1; // no approved sources is not proof of a clean estate
+    return result;
+  }
   for (const companyId of [...customers].sort()) {
     const nRoutes = nessusRoutes.filter(r => r.companyId === companyId && r.provider === "nessus");
     const vRoutes = vulnersRoutes.filter(r => r.companyId === companyId && r.provider === "vulners");
