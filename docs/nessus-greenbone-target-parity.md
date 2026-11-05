@@ -131,6 +131,16 @@ Operator diagnostics on **Vuln-NYC1**, without scanner writes:
   (via full authenticated capacity inventory) before treating its
   7,531 tasks as the source of the application's historical jobs.
   A `0` count of active jobs does not validate remote completion.
+- Read-only scanner DB follow-up found **488** Greenbone tasks
+  with names matching `^\\[SCAN-[0-9]+\\]` and **65** distinct
+  embedded application scan IDs. Per gvmd's `task_status_t`
+  in `src/manage.h`: `1=Done` (451 tagged tasks),
+  `2=New` (1), `12=Stopped` (23),
+  `13=Interrupted` (13). These statuses are task metadata,
+  **not** independently verified complete reports or a match to
+  all 91 stale application records. Do not confuse 65 distinct
+  IDs with a count of stale IDs recovered.
+  Source: https://github.com/greenbone/gvmd/blob/main/src/manage.h
 - Per-folder expression counts: folder 7 = 62; 11 = 62;
   114 = 13; 136 = 182; 253 = 10; 507 = 3. Literal
   expressions were not repeated between folders; this is **not**
