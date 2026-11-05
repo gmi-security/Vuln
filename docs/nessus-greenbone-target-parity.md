@@ -421,6 +421,35 @@ Operator diagnostics on **Vuln-NYC1**, without scanner writes:
   evidence, **21** have no CVE-bearing positive-severity
   references in this audit, which does not prove a
   clean or complete scan.
+- Follow-up **all-customer**, read-only local ownership/findings
+  audit of Greenbone's **36** CVE-bearing tagged app scan IDs:
+  **34** match local `Running` `vulners` records for
+  the six companies (**2,260** CVE references,
+  **1,839** scan-host-CVE pairs). The other **2** are
+  **absent from the entire local `app_scans` table**,
+  not merely outside the six-company filter: **40**
+  CVE references and **28** scan-host-CVE pairs.
+  Preserve these as orphaned provenance, do not
+  associate them with any customer or backfill them
+  without additional independent ownership proof.
+  Among **82** currently persisted `vulners` findings
+  in the six customers, **57** (55 at `CO-9153`,
+  2 at `CO-9150`) reference one of the 36
+  CVE-evidence scan IDs and a locally `Running`
+  scan; the other **25** are not attached to those
+  36 IDs. All **82** have distinct local
+  `(asset,CVE)` pairs **within each customer**,
+  and none has an absent local scan foreign
+  reference in the query. The 57 proves the
+  legacy code ingested *some* partial findings
+  despite the parent scan remaining Running;
+  **do not** equate the 1,839 remotely deduped
+  within-scan pairs minus 57 local findings with
+  missing novel findings. A robust comparison
+  must normalize scan-time hostname/IP aliases,
+  deduplicate across runs per customer and
+  compare actual per-host CVE identities and
+  provenance, including the remaining 25 findings.
 - Per-folder expression counts: folder 7 = 62; 11 = 62;
   114 = 13; 136 = 182; 253 = 10; 507 = 3. Literal
   expressions were not repeated between folders; this is **not**
