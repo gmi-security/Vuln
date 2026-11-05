@@ -49,7 +49,23 @@ export function extractNessusTargetExpressions(editor) {
   if(!Array.isArray(inputs))throw Error("Nessus editor target input missing");
   const rows=inputs.filter(x=>x && (x.id==="text_targets"||x.name==="text_targets"));
   if(rows.length!==1)throw Error("Nessus target field absent/ambiguous");
-  const value=rows[0].value;
+  // The actual Nessus /editor/scan response on Vuln-NYC1 has
+  // id="text_targets", no .value, and the saved targets in .default.
+  // Some API variants expose .value. Reject divergent values instead
+  // of silently selecting the wrong source.
+  const field=rows[0];
+  const configured=field.value;
+  const savedDefault=field.default;
+  if(configured!==undefined && configured!==null &&
+     typeof configured!=="string")throw Error("Unexpected Nessus target value type");
+  if(savedDefault!==undefined && savedDefault!==null &&
+     typeof savedDefault!=="string")throw Error("Unexpected Nessus target default type");
+  if(typeof configured==="string" && configured.trim() &&
+     typeof savedDefault==="string" && savedDefault.trim() &&
+     configured.trim()!==savedDefault.trim())
+    throw Error("Conflicting Nessus configured target fields");
+  const value=typeof configured==="string" && configured.trim()
+    ? configured : savedDefault;
   if(typeof value!=="string" || !value.trim())throw Error("Empty configured target field");
   const expressions=value.split(/[,\r\n]+/).map(x=>x.trim()).filter(Boolean);
   if(expressions.length<1||expressions.length>10000)
