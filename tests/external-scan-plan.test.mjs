@@ -188,3 +188,13 @@ test("same CIDR approved on another customer blocks overlapping source host",()=
   assert.equal(p.candidates.length,0);
   assert.ok(p.blocked.length>0);
 });
+
+test("sync-all inventory importer is retired, never launches bridge scans",async()=>{
+  const store=await readFile("lib/store.ts","utf8");
+  const start=store.indexOf("export async function importFromVulnersBridge()");
+  const end=store.indexOf("\nexport type ArtemisImportResult =",start);
+  assert.ok(start>=0&&end>start);
+  const body=store.slice(start,end);
+  assert.match(body,/Legacy inventory-wide Vulners Bridge sync is retired/);
+  assert.doesNotMatch(body,/runBridgeScanToCompletion|startScan\(|runVulnersBridgeScanAsync\(/);
+});
