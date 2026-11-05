@@ -1179,3 +1179,35 @@ Nessus host coverage proof and no verified Greenbone
 target/report matching. Never infer these from 19
 configured definition records or enable the old
 company-wide target union scheduler.
+
+## Fully parsed Nessus target inventories — verified November 5, 2026
+
+The operator ran the fixed read-only Nessus per-definition audit and
+the **16/16 synthetic parity tests**, all passed, on Vuln-NYC1:
+
+- **19/19** historical Nessus definitions read, **19/19** now parsed,
+  **0** unresolved expressions, **0** Nessus or Greenbone writes.
+- **1,650** parsed *unique target slots summed within each individual
+  definition* (not a portfolio-wide unique host count and not actual
+  successful Nessus host coverage).
+- **4** redundant within-definition target slots, all confirmed
+  duplicates: Nessus definition IDs **18, 146, 158** in historical
+  folder 7, and **138** in historical folder 136.
+- Nessus definitions **14, 166 and 169** in folder 11 each
+  contain 21 configured IPv4 CIDR expressions and expand to
+  352 candidate addresses per definition, with no duplicate
+  address slots reported. These are configured address-space
+  entries, **not proof of 352 assessed or customer-approved hosts**.
+- The 19 definitions span six historically mapped folders and
+  the six app company IDs; the historical folder mappings are
+  still not independent current approval.
+
+The immediate engineering fix is to **stop using the company-wide
+union of past Nessus finding assets and all scanned host aliases**
+as each Greenbone scan's target list. Build a fail-closed
+**per-Nessus-definition and per-verified-occurrence** target
+plan; require reviewed company/target authorization and
+actual completed per-host Nessus coverage before launching
+Greenbone. Preserve the global capacity lease and durable
+task IDs. Current reviewed customer routes still contain
+zero rows, therefore nothing may auto-launch.
