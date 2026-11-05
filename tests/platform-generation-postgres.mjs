@@ -65,7 +65,25 @@ try{
  const first=loaded.data.findings[0];first[1].status='In Remediation';
  let plan=await preparePlatformDelta({...loaded.data,findings:[first]},loaded.state,{findings:[first[0]]});
  const api=await import('../lib/db/platform-publication.mjs');
- const ordinaryReports=await api.preparePlatformReporting(pool,plan);
+ let reportingBudgetChecked=false,reportingResetChecked=false;
+ const reportingPool={connect:async()=>{
+  const client=await pool.connect();
+  return new Proxy(client,{get(target,key){
+   if(key==='query')return async(sql,params)=>{
+    const result=await target.query(sql,params);
+    if(String(sql).startsWith('BEGIN')){
+     assert.equal((await target.query('SHOW statement_timeout')).rows[0].statement_timeout,'15min');reportingBudgetChecked=true;
+    }
+    if(sql==='COMMIT'){
+     assert.equal((await target.query('SHOW statement_timeout')).rows[0].statement_timeout,'1min');reportingResetChecked=true;
+    }
+    return result;
+   };
+   const value=Reflect.get(target,key);return typeof value==='function'?value.bind(target):value;
+  }});
+ }};
+ const ordinaryReports=await api.preparePlatformReporting(reportingPool,plan);
+ assert.ok(reportingBudgetChecked&&reportingResetChecked);
  const small=await tx(db,async()=>{const result=await commitPreparedPlatformStore(db,plan,{reportingPrepared:true});await publishReportingInputRevisions(db,ordinaryReports);return result;});
  assert.equal((await db.query('SELECT status FROM app_findings WHERE id=$1',[first[0]])).rows[0].status,'In Remediation');
  for(const d of await digests(loaded.data))assert.equal((await readReportingInputRevision(db,d.companyId)).hash,d.hash);
@@ -88,8 +106,45 @@ try{
   await db.query("INSERT INTO app_finding_publications(id,phase) VALUES($1,'published')",[obsolete]);
   await db.query('INSERT INTO app_finding_versions SELECT f.*, $1::uuid FROM app_findings f LIMIT 1000',[obsolete]);
  });
+ const emptyRetired=Array.from({length:32},()=>randomUUID()),partialRetired=randomUUID();
+ await tx(db,async()=>{
+  await bindPlatformWriter(db,base.state.authority);
+  await db.query("INSERT INTO app_finding_publications(id,phase) SELECT unnest($1::uuid[]),'discarded'",[[...emptyRetired,partialRetired]]);
+  await db.query('INSERT INTO app_finding_versions SELECT f.*,$1::uuid FROM app_findings f LIMIT 10',[partialRetired]);
+ });
+ await db.query('ANALYZE app_finding_versions');await db.query('ANALYZE app_finding_publications');
+ let cleanupChecked=false,transactionBudgetChecked=false;
+ const cleanupPool={connect:async()=>{
+  const client=await pool.connect();
+  return new Proxy(client,{get(target,key){
+   if(key==='query')return async(sql,params)=>{
+    if(String(sql).startsWith('DELETE FROM app_finding_versions')){
+     assert.equal((await target.query('SHOW statement_timeout')).rows[0].statement_timeout,'15min');transactionBudgetChecked=true;
+    }
+    if(String(sql).startsWith('SELECT p.id FROM app_finding_publications')){
+     const explained=(await target.query('EXPLAIN (FORMAT JSON) '+sql,params)).rows[0]['QUERY PLAN'][0].Plan;
+     const nodes=[];const visit=node=>{nodes.push(node);for(const child of node.Plans??[])visit(child);};visit(explained);
+     assert.equal(nodes.some(node=>node['Relation Name']==='app_finding_versions'&&node['Node Type']==='Seq Scan'),false,
+      'Empty retired generations must use an indexed probe, not repeated full-table scans');
+     assert.equal((await target.query('SHOW statement_timeout')).rows[0].statement_timeout,'15min');
+     const start=performance.now(),result=await target.query(sql,params),ids=result.rows.map(r=>r.id);
+     assert.ok(ids.includes(obsolete)&&ids.includes(partialRetired));
+     assert.ok(emptyRetired.every(id=>!ids.includes(id)));
+     assert.ok(!ids.includes(params[0])&&!ids.includes(params[1]));
+     cleanupChecked=true;console.log(JSON.stringify({cleanupProbeMs:Math.round(performance.now()-start),emptyGenerations:emptyRetired.length}));
+     return result;
+    }
+    return target.query(sql,params);
+   };
+   const value=Reflect.get(target,key);return typeof value==='function'?value.bind(target):value;
+  }});
+ }};
  let interrupted=false;
- await assert.rejects(api.prepareFindingPublication(pool,plan,{checkpoint:({phase})=>{if(phase==='writing'&&!interrupted){interrupted=true;throw Error('simulated process interruption');}}}),/simulated process interruption/);
+ await assert.rejects(api.prepareFindingPublication(cleanupPool,plan,{checkpoint:({phase})=>{if(phase==='writing'&&!interrupted){interrupted=true;throw Error('simulated process interruption');}}}),/simulated process interruption/);
+ assert.ok(cleanupChecked&&transactionBudgetChecked);
+ assert.equal((await db.query('SELECT count(*)::int n FROM app_finding_publications WHERE id=ANY($1::uuid[])',[emptyRetired])).rows[0].n,emptyRetired.length);
+ assert.equal((await db.query('SELECT count(*)::int n FROM app_finding_versions WHERE generation=$1',[partialRetired])).rows[0].n,0);
+ ok('indexed cleanup retains empty journal history, removes leftover discarded rows, and protects active/pending generations');
  const journal=(await db.query("SELECT * FROM app_finding_publications WHERE phase='writing'")).rows[0];
  assert.equal(Number((await db.query('SELECT count(*) n FROM app_finding_versions WHERE generation=$1',[obsolete])).rows[0].n),0,'obsolete rows must be reclaimed before another large upload');
  assert.equal(journal.write_offset,500);assert.equal((await reader.query('SELECT count(*)::int n FROM app_findings')).rows[0].n,size);
@@ -97,7 +152,15 @@ try{
  await assert.rejects(api.prepareFindingPublication(pool,plan,{checkpoint:({phase})=>{if(phase==='reporting')throw Error('report interrupted');}}),/report interrupted/);
  const progress=(await db.query('SELECT report_progress FROM app_finding_publications WHERE id=$1',[journal.id])).rows[0].report_progress;
  assert.ok(Object.keys(progress).length>0);
- const stageStart=performance.now();let staged=await api.prepareFindingPublication(pool,plan);
+ let successfulBackend;
+ const successPool={connect:async()=>{const client=await pool.connect();successfulBackend=client.processID;return client;}};
+ const stageStart=performance.now();let staged=await api.prepareFindingPublication(successPool,plan);
+ const returnedClient=await pool.connect();
+ try{
+  assert.equal(returnedClient.processID,successfulBackend);
+  assert.equal((await returnedClient.query('SHOW statement_timeout')).rows[0].statement_timeout,'1min');
+  assert.equal((await returnedClient.query('SHOW lock_timeout')).rows[0].lock_timeout,'0');
+ }finally{returnedClient.release();}
  assert.equal(staged.id,journal.id);assert.equal(staged.record_count,size-1);
  console.log(JSON.stringify({stageMs:Math.round(performance.now()-stageStart),changed:changed.length,rows:size}));
  assert.equal((await reader.query('SELECT count(*)::int n FROM app_findings')).rows[0].n,size);
