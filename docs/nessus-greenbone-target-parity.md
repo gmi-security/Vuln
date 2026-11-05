@@ -723,3 +723,53 @@ company-target-CVE count, not the number of result rows or remote tasks.
 This check made **no production changes**. The next step is an explicit,
 no-write import preview with consented target scope, quarantine of orphaned
 provenance, and no lifecycle status changes.
+
+## Standalone historical observation preview (offline, development only)
+
+The branch now contains
+`scripts/audit/preview-greenbone-historical-manifest.mjs`
+and `scripts/audit/preview-greenbone-historical-manifest.test.mjs`.
+This is **offline-only** code that reads three explicit local JSON inputs
+and produces **aggregate-only** result counts; it has no database,
+scanner API, network or write functionality.
+
+Inputs are versioned objects:
+
+- `--manifest`: `{version:1,observations:[...]}` with customer ID,
+  originating local scan ID, exact configured target, CVE, task/target/
+  report/result UUIDs, NVT OID/version, severity, three scan-time UTC
+  timestamps, complete report statuses, host attestation evidence, and
+  `cveProvenance: "report-snapshot"`.
+- `--approvals`: `{version:1,approvals:[...]}` with explicit approved
+  customer/scan/exact target, unique approval ID, reviewer, Nessus
+  occurrence ID, and approved UTC date range.
+- `--existing`: `{version:1,findings:[...]}` listing current app
+  company/asset/CVE identities in an access-controlled location.
+
+**Important:** the current 913-candidate HMAC analysis does **not**
+supply the source report-snapshot CVE attribution or independently
+reviewed scope required by this more demanding preview. Until the
+source report snapshot evidence and approvals are actually produced,
+the offline preview is useful only on synthetic fixtures.
+Do not bypass the requirements merely to reach 913, and do
+not treat company identifiers from historical imports as approvals.
+
+The preview rejects ambiguous duplicate approvals, conflicting
+source UUID/CVE identities and malformed input. It quarantines
+unapproved targets, locally orphaned scan IDs, incomplete report
+provenance, unknown historical CVE lineage, wrong timestamps, and
+out-of-window observations. It deduplicates by immutable source
+task/report/result UUID plus CVE, then aggregates distinct
+company/configured-target/CVE pairs with **maximum historical**
+severity. It prints `wouldStageHistoricalOnly` and counts by company;
+both `wouldChangeLiveFindingStatus` and
+`wouldChangeAppScanStatus` are invariably zero by construction.
+
+Synthetic test:
+`node --test scripts/audit/preview-greenbone-historical-manifest.test.mjs`.
+The tests exercise exact-target authorization, orphan quarantine,
+deduplication, conflicting source identities and no-write status
+invariants. **Execution results are not yet verified.**
+
+No schema migrations, historical observation tables, production imports,
+live finding transitions, jobs, or scans have been deployed.
