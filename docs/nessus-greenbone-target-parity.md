@@ -648,7 +648,7 @@ a historical candidate, not an automatically importable or
 currently open finding. Authoritative customer and completed-Nessus-run
 scope and report-ingestion provenance must be verified separately.
 
-## Recovery source-identity preflight (staged, not yet executed)
+## Recovery source-identity preflight (verified below)
 
 `scripts/audit/greenbone-recovery-identity-preflight.sql`
 is a scanner-local, read-only PostgreSQL query to identify
@@ -664,6 +664,34 @@ for import**. Do not promote any imported observation to
 currently `Open` without a separate recent scan
 and customer-scope authorization. No write-mode migration,
 data transfer or import has been approved or performed.
+
+## Application persistence schema preflight — confirmed November 5, 2026
+
+The app-local read-only preflight completed successfully against production
+and confirmed **91** `vulners` scans in `Running` and **82** existing
+`vulners` findings, all `Open` (27 at CO-9150 and 55 at CO-9153).
+
+Crucially, `public.app_findings` has **no indexes, primary key,
+uniqueness constraints, or other database constraints** in the
+schema/index/constraint query. Its `id`, `company_id`,
+`scan_id`, `connector`, `status`, `cve`, `asset`,
+`payload` and `last_seen` columns are all nullable.
+In contrast, `public.app_scans` has a primary key on `id`,
+several nonunique indexes, a JSON-object check on `payload`,
+and ordering/hash shape constraints. Neither table's DDL
+should be changed without a separate migration risk analysis.
+
+**Safety decision:** do NOT bulk insert recovery records directly into
+`app_findings`, which would lack database-enforced de-duplication and
+could be rewritten/reconciled by the current application store. Instead
+design a *separate*, source-UUID-keyed historical observation store
+with explicit uniqueness, provenance and quarantine constraints.
+Its records must not be counted as live `Open` vulnerabilities,
+must not alter remediation state, and must not change any of the
+91 `Running` scan rows or 82 existing findings. Start by testing
+a standalone offline, no-write preview on synthetic fixtures,
+then review a strictly authorized real-data dry run. No database
+migration or production writes have occurred.
 
 ## Source identity preflight — confirmed November 5, 2026
 
