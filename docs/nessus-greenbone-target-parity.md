@@ -217,6 +217,19 @@ Operator diagnostics on **Vuln-NYC1**, without scanner writes:
   double-counting repeated reports. A done report without a
   `report_hosts` row does not prove zero authorized targets or
   complete host-level coverage; treat as unresolved.
+- Latest read-only gvmd host-evidence aggregate: of **451 Done**
+  application-tagged tasks with a completed report, **441** tasks
+  have timed `report_hosts` rows and **10** have **zero**
+  `report_hosts` rows. There are **553** aggregate report-host
+  rows across the 451 selected **latest completed report per task**.
+  All 488 tagged tasks have a nonempty configured target record;
+  no tagged task has nonempty `targets.exclude_hosts`.
+  An individual report-host entry is not necessarily an independently
+  identified authorized scanned endpoint. Count unique host
+  identities only after comparing report-host IP/hostname, the
+  configured target and the original approved customer scope.
+  In particular, a completed report with zero `report_hosts`
+  entries must not be treated as positive coverage or as clean.
 - Per-folder expression counts: folder 7 = 62; 11 = 62;
   114 = 13; 136 = 182; 253 = 10; 507 = 3. Literal
   expressions were not repeated between folders; this is **not**
