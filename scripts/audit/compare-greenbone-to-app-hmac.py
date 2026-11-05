@@ -133,7 +133,8 @@ def signature(company, target, cve):
 fingerprints=set(digests)
 per_company=defaultdict(lambda: {
     "scan_ids":set(), "refs":0, "high_refs":0, "remote":set(),
-    "matching":set(), "same_scan_report_host_pairs":set()
+    "matching":set(), "same_scan_report_host_pairs":set(),
+    "max_severity":{}
 })
 n_refs=0
 for line in p.stdout.splitlines():
@@ -152,6 +153,10 @@ for line in p.stdout.splitlines():
     rec["refs"]+=1
     rec["high_refs"]+=int(float(severity)>=7)
     rec["remote"].add(sig)
+    # Highest historical severity for each unique (company,target,CVE)
+    # across repeated runs. This is not a current vulnerability severity.
+    rec["max_severity"][sig] = max(
+        rec["max_severity"].get(sig,0.0), float(severity))
     rec["same_scan_report_host_pairs"].add(
         (app_id,reported_host.strip().lower(),cve))
     if sig in fingerprints:
@@ -193,5 +198,32 @@ print(f"TOTAL     {num_scan_ids:>5}{n_refs:>10}{total_unique:>20}"
       f"{total_existing:>17}{total_missing:>13}")
 print("Existing app fingerprints absent from this completed remote evidence:",
       len(fingerprints-all_remote))
+print("\n=== ABSENT HISTORICAL CANDIDATES BY MAX OBSERVED SEVERITY ===")
+print("Company     critical>=9    high>=7   medium>=4      low>0   total")
+counts=[0,0,0,0]
+for company in COMPANIES:
+    rec=per_company[company]
+    missing={
+        sig:sev for sig,sev in rec["max_severity"].items()
+        if sig not in fingerprints
+    }
+    groups=[
+        sum(1 for sev in missing.values() if sev>=9),
+        sum(1 for sev in missing.values() if 7<=sev<9),
+        sum(1 for sev in missing.values() if 4<=sev<7),
+        sum(1 for sev in missing.values() if 0<sev<4)
+    ]
+    if sum(groups)!=len(missing):
+        sys.exit("Unexpected missing-candidate severity: stop")
+    counts=[a+b for a,b in zip(counts,groups)]
+    print(f"{company:<11}{groups[0]:>11}{groups[1]:>11}"
+          f"{groups[2]:>12}{groups[3]:>11}{len(missing):>8}")
+if sum(counts)!=total_missing or total_missing!=913:
+    sys.exit("Missing-candidate severity totals differ from audited 913")
+print(f"TOTAL      {counts[0]:>11}{counts[1]:>11}"
+      f"{counts[2]:>12}{counts[3]:>11}{sum(counts):>8}")
+print("Severity reflects the most severe historical result for each"
+      " absent company/target/CVE identity, not its current state.")
+
 print("\nREAD ONLY. 'Not in app' are historical comparison candidates,"
       " NOT automatically authorized or currently open vulnerabilities.")
