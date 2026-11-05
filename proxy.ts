@@ -39,6 +39,7 @@ export async function proxy(request: NextRequest) {
     pathname === "/api/admin/external-scan-plan" ||
     pathname === "/api/admin/external-scan-slot" ||
     pathname === "/api/admin/external-scan-capacity" ||
+    pathname === "/api/admin/scanner-target-parity" ||
     pathname === "/api/grc/assessment" ||
     // Exact endpoint: dedicated ingestion token and feature gate in the handler.
     pathname === "/api/elastic-vulnerabilities/ingest"
