@@ -1130,3 +1130,52 @@ parser. The new 12-test suite and live 19-definition rerun have **not
 yet been verified** on the actual Nessus server. No target
 configuration, scanner processes, databases or customer status
 were changed. The target-parity design remains strictly read-only.
+
+## Live per-definition source inventory — November 5, 2026, successful read
+
+The corrected `text_targets.default` parser plus comma/whitespace
+tokenization passed **12/12 synthetic tests on Vuln-NYC1**.
+The separate read-only Nessus GET audit now reads **19/19**
+actual editor definitions from their six historical customer
+folders, with **15/19** fully parsed, **0** unreadable editor
+responses, and **four** definitions containing exactly one
+unresolved target expression each:
+
+| Nessus definition | Expression count | Parsed unique hosts | CIDRs | Result |
+|---|---:|---:|---:|---|
+| 18 | 52 | 51 | 0 | one unresolved expression |
+| 146 | 52 | 51 | 0 | one unresolved expression |
+| 158 | 52 | 51 | 0 | one unresolved expression |
+| 138 | 157 | 156 | 0 | one unresolved expression |
+
+All remaining definitions parse without error; the 15 clean
+definitions sum to **1,341** configured *host slots*, not distinct
+hosts across the customer portfolio. Three separate Nessus
+definitions (14, 166 and 169 in folder 11) each contain
+21 CIDR expressions expanding to 352 candidate IPv4
+addresses **per definition**. CIDR address-space expansion
+is not proof that all addresses were assessed by Nessus
+or may be scanned by Greenbone.
+
+Each failing definition showed one more expression than
+accepted unique hosts. This suggests repeat target
+expressions but **does not yet prove duplicates**: the
+old parser also rejected invalid expressions as errors.
+The next audit-branch parser keeps a SET of valid source
+hosts, counts redundant exact targets and overlapping
+CIDR/host slots separately, and *still blocks* unsupported
+ranges, malformed hosts/IPs, oversized networks and
+missing/ambiguous source fields. The read-only live
+inventory now reports only non-sensitive problem categories
+and redundancy counts; no original target identities.
+Four new synthetic regression cases were added (16
+total); **16/16 and the corrected 19-definition reread
+are not yet verified**. No Greenbone or Nessus jobs
+launched and nothing changed in production.
+
+**Operational parity remains blocked:** no reviewed
+`customer_scanner_routes` rows, no per-run immutable
+Nessus host coverage proof and no verified Greenbone
+target/report matching. Never infer these from 19
+configured definition records or enable the old
+company-wide target union scheduler.
