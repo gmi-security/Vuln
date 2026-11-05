@@ -1078,3 +1078,32 @@ a durable globally bounded per-target dispatch worker using that
 set only, verified Greenbone task/report IDs, and fail-closed
 per-source-scan accounting. Nothing has been launched, changed
 in the DB or deployed by these audit files.
+
+## Per-scan live editor audit — failed closed November 5, 2026
+
+The synthetic per-scan target parity suite passed **8/8** on
+`Vuln-NYC1` with 0 failed or skipped tests, but the *real*
+Nessus editor target audit returned **0 of 19 parsed definitions**.
+The `GET /scans?folder_id=<id>` roster checks found all **19**
+expected scan IDs in six historically mapped folders (4, 5, 3, 2,
+3 and 2 definitions respectively). Every single
+`GET /editor/scan/<id>` read OR `text_targets` parse returned
+the undifferentiated `editor read/parse failed` diagnostic.
+
+**Do NOT interpret `configuredHostSlotsAcrossDefinitions: 0` as
+zero Nessus targets**: it is merely the sum of *successfully parsed*
+definitions, and none parsed. The prior read-only folder audit had
+observed 332 configured target expression strings across these
+same 19 definitions. The new audit's editor parser or HTTP read
+contract must be diagnosed against the real API response shape;
+do not guess, invent empty targets, enable scanning, or import data.
+
+A new single-scan read-only diagnostic
+`scripts/audit/diagnose-nessus-editor-target-shape.mjs`
+returns only HTTP status, schema-field types and the count/type
+of candidate `text_targets` nodes (never target values, scanner
+URL, API keys or raw error messages). Use one known definition ID,
+such as **9** in historical folder 7, to isolate 401/403/404,
+response-shape or target-field encoding issues. Adjust the
+parser only after that evidence; all scan launch flags remain
+disabled. No production data or customer scans were changed.
