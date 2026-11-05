@@ -322,6 +322,19 @@ Operator diagnostics on **Vuln-NYC1**, without scanner writes:
   scope contract. Read-only inspect scanner CVE reference
   schema, bridge report completeness and API pagination
   before any backfill or status mutation.
+- The `gvmd` schema includes `nvts(oid,cve,name,cvss_base)`
+  and `result_nvts(id,nvt)` / `results(result_nvt,nvt)`.
+  Among **20,045** result rows from the 451 selected latest
+  completed GMI-tagged reports, **20,016** have nonempty
+  `results.nvt`, representing **956** distinct NVT
+  identifiers; **all 20,045** have a nonnull
+  `result_nvt` integer. A nonnull foreign-key field
+  does not prove successful NVT metadata resolution,
+  nor that any NVT maps to a valid CVE; test both
+  direct OID and `result_nvts` joins and independently
+  validate the presence of CVE identifiers before
+  building an importer. `nvts` metadata may be
+  updated after historical scans; keep that provenance.
 - Per-folder expression counts: folder 7 = 62; 11 = 62;
   114 = 13; 136 = 182; 253 = 10; 507 = 3. Literal
   expressions were not repeated between folders; this is **not**
