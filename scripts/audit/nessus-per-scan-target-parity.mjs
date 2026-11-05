@@ -67,7 +67,10 @@ export function extractNessusTargetExpressions(editor) {
   const value=typeof configured==="string" && configured.trim()
     ? configured : savedDefault;
   if(typeof value!=="string" || !value.trim())throw Error("Empty configured target field");
-  const expressions=value.split(/[,\r\n]+/).map(x=>x.trim()).filter(Boolean);
+  // Nessus text_targets can contain comma- or whitespace-delimited
+  // exact hosts / IPv4 CIDRs. Keep all unsupported expressions blocked
+  // later by parseExpression; do not expand arbitrary ranges or exclusions.
+  const expressions=value.split(/[,\s]+/).filter(Boolean);
   if(expressions.length<1||expressions.length>10000)
     throw Error("Configured target expression count outside bounded review limits");
   return expressions;
