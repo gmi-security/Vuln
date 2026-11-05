@@ -154,6 +154,24 @@ Operator diagnostics on **Vuln-NYC1**, without scanner writes:
   join to the **91** stale local scans. Remote task *names* include
   the app `[SCAN-*]` prefix but expose hostnames and must not be
   copied wholesale into reports or GitHub.
+- Cross-host **read-only ID reconciliation** (65 remote `SCAN-*`
+  names, 488 remote tagged tasks, 451 report-confirmed Done tasks)
+  against the six customers' `app_scans` records:
+  `Running` **91** → **55** distinct local scans have at least one
+  matching remote task with a completed report; **36** have no
+  tagged remote task in this inventory; **0** matched only unfinished
+  remote tasks. Per company (matched/no tagged task): `CO-9150`
+  22/8; `CO-9153` 11/8; `CO-9156` 9/7; `CO-9159`
+  8/6; `CO-9162` 3/7; `CO-9165` 2/0.
+  `Failed` **15** → **7** tagged matches, **3** with at least one
+  completed remote task report. `Completed` **29** → **zero**
+  matches in this *name-filtered* remote inventory; historical
+  scan/import paths must be independently inspected.
+  **3** remote tagged app scan IDs are absent from the selected
+  six customers' local records. The counts support recovery triage,
+  **not 55 fully completed multi-host scans**: compare expected
+  target identities and all remote task/report outcomes before
+  any status or finding mutation.
 - Per-folder expression counts: folder 7 = 62; 11 = 62;
   114 = 13; 136 = 182; 253 = 10; 507 = 3. Literal
   expressions were not repeated between folders; this is **not**
