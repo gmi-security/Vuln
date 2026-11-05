@@ -256,6 +256,23 @@ Operator diagnostics on **Vuln-NYC1**, without scanner writes:
   `results.hostname` before making any association.
   Do **not** use present-day DNS alone to claim historical
   coverage or silently bind IPs to customer hostnames.
+- **Historical hostname identity now fully reconciled for
+  report-host-bearing Done tasks:** all **139** tasks whose
+  `targets.hosts` hostname did not directly match
+  `report_hosts.host/hostname` had an exact scan-time
+  hostname match via `report_host_details` entry with
+  `lower(name) = 'hostname'` and the configured target.
+  `results.hostname` independently matched on **134** of
+  these 139 tasks. Thus among 451 Done tasks: **302**
+  direct report-host text matches + **139** exact historical
+  report-host-detail hostname matches = **441** tasks
+  with report-backed configured-target identity; **10**
+  tasks still have no report-host rows. Historical hostname
+  details support associating each report row's IPv4 to the
+  configured hostname at the time of the scan, without a
+  present-day DNS assumption. The remaining gates are
+  individual scan-scope completeness, task/report findings
+  ingestibility, and authorized Nessus occurrence coverage.
 - Per-folder expression counts: folder 7 = 62; 11 = 62;
   114 = 13; 136 = 182; 253 = 10; 507 = 3. Literal
   expressions were not repeated between folders; this is **not**
