@@ -570,7 +570,18 @@ identities)** from the successful privacy-preserving scanner audit:
 
 The **380 critical/high** missing historical host-CVE pairs are
 not 380 *currently open* vulnerabilities or necessarily present-day
-risks. **320** belong to internal customer CO-9150. Preserve per-result
+risks.
+
+The separate read-only scanner-side
+`scripts/audit/greenbone-nvt-scan-time-provenance.sql` checks whether
+the **current NVT metadata was created or modified after the historical
+report end**, counts result-embedded NVT versions, and groups CVE-bearing
+completed reports by UTC month. The query is evidence triage only:
+`nvts.modification_time > reports.end_time` means current
+metadata may not represent what the historical scan originally
+knew, while an earlier modification time alone cannot prove that
+the historical CVE association was immutable. It must not update
+findings or rewrite scan completion states. **320** belong to internal customer CO-9150. Preserve per-result
 timestamp, source identity and NVT provenance before representing these
 as historical observations; never automatically open, close, or
 escalate current remediation tickets based on unreviewed old results.
