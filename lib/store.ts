@@ -1236,21 +1236,14 @@ async function scannerElasticExportTick(): Promise<void> {
 // schedulerTick, so resuming it here reproduces the same cadence and volume
 // as before the scheduler was disabled -- not more.
 function startVulnersBridgeScheduler(): void {
-  // Explicit opt-in: recurring full-inventory and Nessus-offset Bridge scans are disabled by default.
-  if (process.env.VULNERS_BRIDGE_SCHEDULER_ENABLED !== "true") return;
-  if (persistGlobal.__vulnVulnersBridgeScheduler) return;
-  persistGlobal.__vulnVulnersBridgeScheduler = setInterval(() => {
-    if (persistGlobal.__vulnVulnersBridgeTick || persistGlobal.__vulnFlushing || persistenceBlocked()) return;
-    const run = vulnersBridgeTick().catch((err) => {
-      console.error("[vulners-bridge] tick failed:", err);
-    });
-    const tracked = run.finally(() => {
-      if (persistGlobal.__vulnVulnersBridgeTick === tracked) {
-        persistGlobal.__vulnVulnersBridgeTick = null;
-      }
-    });
-    persistGlobal.__vulnVulnersBridgeTick = tracked;
-  }, 60_000);
+  // RETIRED: This legacy scheduler starts the Nessus-offset company-wide
+  // target union AND an unrelated full-inventory scan sweep. Neither path
+  // guarantees equality with the individual completed Nessus occurrence.
+  // Even an accidental VULNERS_BRIDGE_SCHEDULER_ENABLED=true must never
+  // resurrect these destructive and overlapping customer scan launches.
+  if (process.env.VULNERS_BRIDGE_SCHEDULER_ENABLED === "true") {
+    console.error("[vulners-bridge] LEGACY SCHEDULER RETIRED: exact Nessus per-scan target parity is required; no scans launched.");
+  }
 }
 
 async function vulnersBridgeTick(): Promise<void> {
