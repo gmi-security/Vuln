@@ -245,6 +245,17 @@ Operator diagnostics on **Vuln-NYC1**, without scanner writes:
   independently verifiable host binding. The 302 direct
   matches still do not prove authorization or complete
   multi-host application scans.
+- Follow-up classification of all **139** completed tasks with
+  report-host rows but no direct target-text identity match:
+  every configured target was classified as a **hostname**;
+  `report_hosts.hostname` was empty across all of them,
+  while `report_hosts.host` contained IPv4 addresses.
+  They account for **251 report-host rows** (not deduplicated
+  devices or verified historical DNS resolutions). Investigate
+  scan-time `report_host_details` hostname metadata and
+  `results.hostname` before making any association.
+  Do **not** use present-day DNS alone to claim historical
+  coverage or silently bind IPs to customer hostnames.
 - Per-folder expression counts: folder 7 = 62; 11 = 62;
   114 = 13; 136 = 182; 253 = 10; 507 = 3. Literal
   expressions were not repeated between folders; this is **not**
