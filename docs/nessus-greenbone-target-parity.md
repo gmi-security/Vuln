@@ -187,6 +187,24 @@ Operator diagnostics on **Vuln-NYC1**, without scanner writes:
   intersection, durable per-host task id and independent
   completion/report proof. No automatic restart or legacy
   scheduler reactivation.
+- Read-only SQL analysis of all 91 stale local `Running`
+  `vulners` records shows **13,310 stored target slots** across
+  11 company × origin groups; within those groups, only
+  **1,501 grouped distinct target expressions** and **11,809
+  repeated target slots** (**88.7%**). These 1,501 grouped
+  distinct expressions **must not** be treated as an estate-wide
+  union because targets can overlap across origin groups.
+  Among the **71 Nessus-offset** records there are
+  **11,238 target slots**, **983 grouped distinct expressions**
+  and **10,255 repetitions (91.3%)**. The remaining
+  **20 manual/other** records have **2,072 target slots**,
+  **518 grouped distinct** and **1,554 repetitions (75.0%)**.
+  **55 of the 91** stale scans requested more than 100 targets
+  (47 offset and 8 other). For `CO-9159` specifically, the
+  10 offset scans requested 4,914 target slots but only
+  637 distinct target strings within that group.
+  Local requested slots do not prove corresponding remote task
+  creations, successful executions or host coverage.
 - Per-folder expression counts: folder 7 = 62; 11 = 62;
   114 = 13; 136 = 182; 253 = 10; 507 = 3. Literal
   expressions were not repeated between folders; this is **not**
