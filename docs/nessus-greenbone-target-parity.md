@@ -826,3 +826,25 @@ a retained exported GVM XML report or archived feed metadata).
 Do not create or launch scans, download raw customer reports
 into GitHub or chat, or bypass the strict preview's
 `cveProvenance: "report-snapshot"` requirement.
+
+## Saved result-text CVE corroboration — staged
+
+A separate scanner-local, no-write query,
+`scripts/audit/greenbone-result-text-cve-provenance.sql`,
+checks whether *saved per-result description/summary/extra text*
+actually mentions CVEs independently of the present-day
+`nvts.cve` join. It prints only aggregate counts:
+positive CVE results, rows with result text, rows with
+any saved CVE references, rows mentioning any or all current
+NVT CVEs, and rows with contradictory other-only CVEs.
+The query does **not** print saved descriptions, hosts,
+CVEs, report UUIDs, or targets, and rolls back.
+
+Even full textual agreement, if present, would be
+**corroborating evidence**, not automatic proof that
+the text was immutable, sourced from a frozen NVT feed,
+or sufficient to label a candidate `report-snapshot`.
+If there is no saved CVE text, require an archived trusted
+report/feed snapshot, or track provisional CVE associations
+in a quarantined historical-only store. No live-finding
+ingestion is approved by this audit.
