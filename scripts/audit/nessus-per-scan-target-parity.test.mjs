@@ -113,3 +113,11 @@ test("non-string or empty Nessus editor target values cannot be treated as scans
     settings:{basic:{inputs:[{id:"text_targets",default:""}]}}
   }),/Empty configured target field/);
 });
+
+test("saved Nessus text_targets accepts comma and whitespace separators",()=>{
+  const actual={settings:{basic:{inputs:[{id:"text_targets",
+    default:"host-one.example host-two.example,\n10.5.0.1\t10.5.0.2"}]}}};
+  assert.deepEqual(extractNessusTargetExpressions(actual),[
+    "host-one.example","host-two.example","10.5.0.1","10.5.0.2"
+  ]);
+});
