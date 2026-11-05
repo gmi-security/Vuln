@@ -273,6 +273,32 @@ Operator diagnostics on **Vuln-NYC1**, without scanner writes:
   present-day DNS assumption. The remaining gates are
   individual scan-scope completeness, task/report findings
   ingestibility, and authorized Nessus occurrence coverage.
+- Historical request-to-remote task accounting on the **55** stale
+  `Running` app scans with tagged gvmd task matches:
+  **9,691** stored requested target expressions across these
+  scans (each distinct *within its respective scan*, but often
+  repeated across different scans), versus only **456** matching
+  remote Greenbone tasks, of which **423** have Done status and
+  completed report evidence and **33** do not. Every one of
+  the 55 local scans has fewer tagged remote tasks than its
+  stored requested target expressions. **41** local scans have
+  all their *created* remote tasks Done; the other **14**
+  also have incompletely terminated remote tasks. Per company
+  `requested / remote / Done` (for linked stale app scans):
+  `CO-9150` 3564/294/262;
+  `CO-9153` 1339/110/109;
+  `CO-9156` 330/22/22;
+  `CO-9159` 4418/19/19;
+  `CO-9162` 30/9/9;
+  `CO-9165` 10/2/2.
+  The **9,235** difference between request slots and created
+  task counts measures the missing task *assignments*, not
+  9,235 independently approved or vulnerable hosts; the
+  legacy source targets were overinclusive and repetitive.
+  No local scan is eligible for full-success status or
+  automatic backfill based on task counts. Keep the
+  36 unmatched stale app scans and 15 failed app scans
+  visible for further separate investigation.
 - Per-folder expression counts: folder 7 = 62; 11 = 62;
   114 = 13; 136 = 182; 253 = 10; 507 = 3. Literal
   expressions were not repeated between folders; this is **not**
