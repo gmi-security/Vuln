@@ -49,6 +49,54 @@ post or commit it. This endpoint is admin-token gated, no-store and fail-closed.
 Missing `VULN_REVIEWED_SCANNER_PROVIDERS` flags means approved route reads return
 null; the endpoint never falls back to name-based customer matching.
 
+## Live read-only baseline (November 5, 2026)
+
+Operator diagnostics on **Vuln-NYC1**, without scanner writes:
+
+- PM2 `vuln` online; Nessus `ready`; Vulners bridge `Connected`.
+- Admin external-scan-plan: `mode=preview-only`,
+  `routeStatus=unavailable`, `launchesEnabled=false`,
+  `candidates=0`; reports reviewed Vulners customer routing not enabled.
+- Verified complete gvmd capacity snapshot: healthy; active, queued,
+  and requested tasks were all zero **at the time checked**, not proof
+  of absent historical scans.
+- `VULN_REVIEWED_SCANNER_PROVIDERS`,
+  `VULNERS_BRIDGE_SCHEDULER_ENABLED`,
+  `GMI_SCAN_ADMISSION_ENABLED`, and
+  `VULN_EXTERNAL_SCAN_DISPATCH_ENABLED` all unset in the environment
+  file and PM2 environment.
+- Application DB `customer_scanner_routes` returned **zero rows**.
+  Legacy Nessus imports may still operate independently.
+- Nessus global roster: 33 scan definitions, 31 reported completed,
+  2 running; 19 definitions in six custom customer folders
+  (17 completed and 2 running). The other 14 definitions were outside
+  those six folders.
+- Read-only `GET /editor/scan/{id}` showed configured targets at
+  `settings.basic.inputs[]` under the `text_targets` input,
+  **not** `settings.text_targets`. Initial zero-target diagnostic
+  was a parser error. Subsequent audit read **all 19/19** custom-folder
+  definitions, with no unreadable definitions, and found **332
+  distinct target expression strings** across the six folders.
+- Per-folder expression counts: folder 7 = 62; 11 = 62;
+  114 = 13; 136 = 182; 253 = 10; 507 = 3. Literal
+  expressions were not repeated between folders; this is **not**
+  proof that CIDR/range networks, DNS aliases, or resolved hosts
+  do not overlap.
+- CIDR-bearing definitions: folder 11 had three scans each with
+  21 CIDR entries. Folder 136 had two running scans each with
+  55 hyphen-containing entries; their actual range/hostname syntax
+  remains to be classified. The **332 expressions are not 332
+  effective IPs** and are not completed scan coverage.
+- Current `scannerTargetMatcher` and plan preview each limit a
+  reviewed customer scope to 100 expressions; the reviewed
+  Vulners adapter supports exact hosts/IPs, not range expressions.
+  Do **not** bypass these checks or bulk fan out unverified scopes.
+
+**Remaining priority:** classify network and hyphen expression forms,
+determine exact effective endpoints, independently review folder-to-company
+ownership and approved windows, then implement bounded per-scan targeting
+and proof-backed dispatch. Do not activate the legacy inventory sweep.
+
 ## Remaining release gates for actual parity
 
 1. Read the current **Nessus scan definitions** for each independently verified
