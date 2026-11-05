@@ -1023,3 +1023,58 @@ Inventory scope was bounded and is not proof no
 other backup exists. Preserve all 913 provisional
 comparison candidates and the two orphaned scan IDs
 quarantined; do not import to `app_findings`.
+
+## Correction: the actual engineering objective is PER-NESSUS-SCAN TARGET PARITY
+
+**Priority, November 5, 2026:** Ignore the separate historical CVE
+recovery as a prerequisite for scan-target alignment. The user wants
+**each Nessus scan definition / verified completed occurrence** to have
+the **same explicitly authorized host/IP target set** scanned by
+Vulners-v2/Greenbone. Combining all Nessus scans and old finding
+assets for a company is an implementation defect, not intended
+operational parity.
+
+Verified source defect in the deployed `de4357c` runtime:
+- `nessusBridgeTargetsForCompany(companyId)` unions historic aliases and
+  finding assets from ALL customer Nessus scans.
+- `vulnersBridgeOffsetTick()` calls that company-wide union on EACH
+  Nessus scan's nominal +1h occurrence.
+- `POST /api/admin/port-nessus-to-bridge` does the same thing and
+  can launch full-company scans unless `dryRun=1`.
+- `buildExternalScanPlan` previously selected the earliest company
+  schedule and generated candidates against the whole company's
+  reviewed route, not the exact configured targets of that
+  Nessus definition.
+
+This can launch many duplicate/out-of-scan targets. **Do not enable
+the old scheduler or use the legacy port endpoint as a fix.**
+An approved customer route is a maximum permission ceiling,
+not a substitute for the source scan's target list. Completing
+a scan is separately contingent on exact coverage and report identity.
+
+New audit-branch files:
+- `scripts/audit/nessus-per-scan-target-parity.mjs`:
+  pure deterministic parser of the verified Nessus editor
+  `settings.basic.inputs[].id="text_targets"` value,
+  bounded IPv4 CIDR expansion, per-definition comparison against a
+  reviewed exact target ceiling and proposed Greenbone set. It rejects
+  unapproved, missing and unexpected targets; no customer-wide union;
+  it never claims executed parity or dispatch permission.
+- `scripts/audit/nessus-per-scan-target-parity.test.mjs`:
+  synthetic per-scan equality, CIDR, overlap, exclusion and no-live-launch
+  cases.
+- `scripts/audit/audit-nessus-per-scan-targets.mjs`:
+  read-only live `GET /scans?folder_id=` and
+  `GET /editor/scan/{id}` against the **six historically known
+  customer folders** (19 definitions), printing counts by definition
+  only, not customer targets or credentials. It fails closed if
+  any folder roster, parser or target expression changes. Historical
+  company/folder mappings are NOT authorization to run Greenbone.
+
+**Still needed for real synchronization:** independently reviewed
+customer/host authority, a trustworthy exact target set from a
+pinned completed Nessus occurrence (and completeness/exclusions),
+a durable globally bounded per-target dispatch worker using that
+set only, verified Greenbone task/report IDs, and fail-closed
+per-source-scan accounting. Nothing has been launched, changed
+in the DB or deployed by these audit files.
