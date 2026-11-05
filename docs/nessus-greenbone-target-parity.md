@@ -97,6 +97,27 @@ Operator diagnostics on **Vuln-NYC1**, without scanner writes:
   in-memory poller. Their ages and remote report IDs require read-only
   reconciliation; **do not bulk-mark them completed, delete them,
   or launch replacements**.
+- Follow-up read-only scan-record audit on the **deployed** `de4357c`
+  build confirmed all **91 of 91** locally `Running` Vulners records
+  were created over 24 hours previously, from **October 6–31, 2026**:
+  71 identified as `nessus-offset`, 20 `manual-or-other`,
+  all 91 marked `bridgeScan`, **none with `bridgeScan.taskId`
+  or `bridgeScan.jobId`**. By customer: `CO-9150` 30,
+  `CO-9153` 19, `CO-9156` 16, `CO-9159` 14,
+  `CO-9162` 10, `CO-9165` 2. This is conclusive evidence
+  of stale *local* state, not a verified remote-task outcome.
+- Stored scanner findings across these customers: Nessus
+  **53,863**, Vulners **82** (`CO-9150` 27;
+  `CO-9153` 55; the remaining four 0).
+  Finding-count disparity cannot measure executed host parity.
+- Historical legacy task creation in `runVulnersBridgeScanAsync` names
+  each Greenbone target `[<local SCAN id>] <target> <scan name>`.
+  A read-only exhaustive **gvmd** name/ID/report inventory on
+  Vulners-v2 may permit recovery matching using that embedded
+  scan ID. First verify gvmd reports and scope; names alone cannot
+  confirm a successful or complete scan. The bridge
+  `GET /api/v1/scans` endpoint has been observed to truncate large
+  inventories, so do not use its result to conclude tasks are absent.
 - Per-folder expression counts: folder 7 = 62; 11 = 62;
   114 = 13; 136 = 182; 253 = 10; 507 = 3. Literal
   expressions were not repeated between folders; this is **not**
