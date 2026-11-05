@@ -15,14 +15,14 @@ const keys=value=>{
     throw Error("Invalid exact target");
   return value.toLowerCase().replace(/\.$/,"");
 };
-const ip4=s=>/^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$/.test(s)&&
+const ip4=s=>/^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(s)&&
   s.split(".").every(n=>Number(n)<=255)
     ?s.split(".").reduce((v,n)=>v*256+Number(n),0):null;
 const matcher=targets=>{
   if(!Array.isArray(targets)||!targets.length||targets.length>100)
     throw Error("Invalid Nessus reviewed scope");
   const rules=targets.map(t=>{
-    const m=t.match(/^((?:[0-9]{1,3}\\.){3}[0-9]{1,3})\\/([0-9]|[12][0-9]|3[0-2])$/);
+    const m=t.match(/^((?:[0-9]{1,3}\.){3}[0-9]{1,3})\/([0-9]|[12][0-9]|3[0-2])$/);
     if(!m)return {exact:keys(t)};
     const n=ip4(m[1]),size=2**(32-Number(m[2]));
     if(n===null)throw Error("Invalid network");
