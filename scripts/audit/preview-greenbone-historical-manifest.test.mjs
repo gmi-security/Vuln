@@ -82,3 +82,25 @@ test("unreviewed targets and time windows are quarantined",()=>{
   assert.equal(result.quarantine.outside_approval_window,1);
   assert.equal(result.wouldStageHistoricalOnly,0);
 });
+
+test("current-NVT mappings remain provisional despite valid UUIDs and target approval",()=>{
+  const base=manifestRows()[0];
+  const result=previewHistorical({version:1,observations:[
+    {...base,cveProvenance:"current-nvt-at-recovery"},
+    {...base,appScanId:"SCAN-9999",cveProvenance:"current-nvt-at-recovery",
+      resultUuid:"00000000-0000-4000-8000-000000000008"}
+  ]},approvals,existing);
+  assert.equal(result.quarantine.provisional_current_nvt_cve_mapping,1);
+  assert.equal(result.quarantine.unapproved_exact_target_or_orphan_scan,1);
+  assert.equal(result.acceptedSourceObservations,0);
+  assert.equal(result.wouldStageHistoricalOnly,0);
+  assert.equal(result.wouldChangeLiveFindingStatus,0);
+  assert.equal(result.wouldChangeAppScanStatus,0);
+});
+test("no approved scope means no historically staged observations",()=>{
+  const result=previewHistorical({version:1,observations:manifestRows()},
+    {version:1,approvals:[]},existing);
+  assert.equal(result.acceptedSourceObservations,0);
+  assert.equal(result.wouldStageHistoricalOnly,0);
+  assert.equal(result.quarantine.unapproved_exact_target_or_orphan_scan,6);
+});
