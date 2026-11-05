@@ -1124,8 +1124,9 @@ Updated the audit-branch per-definition target extractor to use
 `text_targets.default` when `.value` is missing/empty,
 support `.value` on other variants, and reject non-string
 or conflicting dual-field values rather than silently guessing.
-Added three synthetic regression tests, for **11 total**.
-The new 11-test suite and live 19-definition rerun have **not
+Added four synthetic regression tests, for **12 total**, including
+comma/whitespace-delimited `text_targets` as accepted by the pure
+parser. The new 12-test suite and live 19-definition rerun have **not
 yet been verified** on the actual Nessus server. No target
 configuration, scanner processes, databases or customer status
 were changed. The target-parity design remains strictly read-only.
