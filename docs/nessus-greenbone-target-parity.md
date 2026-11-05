@@ -82,11 +82,7 @@ Operator diagnostics on **Vuln-NYC1**, without scanner writes:
   expressions were not repeated between folders; this is **not**
   proof that CIDR/range networks, DNS aliases, or resolved hosts
   do not overlap.
-- CIDR-bearing definitions: folder 11 had three scans each with
-  21 CIDR entries. Folder 136 had two running scans each with
-  55 hyphen-containing entries; their actual range/hostname syntax
-  remains to be classified. The **332 expressions are not 332
-  effective IPs** and are not completed scan coverage.
+- Follow-up network classification (read-only): folder 11's **21 distinct IPv4 CIDRs** jointly cover **352 IPv4 addresses** (raw address-space union; no adjustment for network/broadcast or target exclusions). Its other **41** distinct target expressions are not yet reconciled against those CIDRs. Folder 136's **182** distinct target expressions were all classified as **hostnames**, including 55 hyphenated expressions in each of its two running scan definitions. No actual DNS resolution, completed-host evidence, or Nessus-vs-Greenbone run parity was established. The **332 expressions are not 332 effective endpoints**.
 - Current `scannerTargetMatcher` and plan preview each limit a
   reviewed customer scope to 100 expressions; the reviewed
   Vulners adapter supports exact hosts/IPs, not range expressions.
