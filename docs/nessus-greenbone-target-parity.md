@@ -848,3 +848,37 @@ If there is no saved CVE text, require an archived trusted
 report/feed snapshot, or track provisional CVE associations
 in a quarantined historical-only store. No live-finding
 ingestion is approved by this audit.
+
+## Saved-result text CVE check — confirmed November 5, 2026
+
+The read-only `scripts/audit/greenbone-result-text-cve-provenance.sql`
+finished successfully and rolled back on Vulners-v2.
+`results.description` is a stored text field, but **none** of the
+**1,172** positive current-NVT-CVE-associated historical rows had a
+CVE identifier in saved result text. All 1,172 had non-empty saved
+text, but **zero** mentioned any CVE, **zero** matched even one of
+the CVEs now listed on their associated NVT, **zero** mentioned all
+the currently associated CVEs, and **zero** mentioned only different
+CVEs. These zeros are *absence of textual corroboration*, not
+evidence of agreement or disagreement.
+
+This corroborates the earlier finding that `results` stores an
+observed NVT version and task/report/result UUIDs, but neither
+`results` nor `result_nvts` contains an independently saved
+original CVE list. The **913** absent company/target/CVE combinations
+are therefore **provisional, current-NVT-mapped historical
+reconciliation candidates**, not original-scan-time-CVE-proven
+observations. The 380 Critical/High severities are *historical
+maximum severities* on those candidates, not present-day exposures.
+Neither zero postscan NVT modifications nor non-empty report
+descriptions fills this proof gap.
+
+**Do not** set `cveProvenance: "report-snapshot"` on a manifest
+derived only from this `gvmd` join, backfill the 913 into live
+`app_findings`, change the 82 existing finding statuses, complete
+the 91 stale scans, or trigger new customer scans. Seek a
+trustworthy contemporaneous feed archive or immutable independent
+original report. Until then, handle current-feed-derived CVE
+associations exclusively as provenance-uncertain historical
+evidence candidates with a source lineage label. No production
+data were modified by this audit.
