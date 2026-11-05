@@ -983,3 +983,43 @@ ownership and exact Nessus-occurrence match. If not
 available, maintain the 913 combinations as *provisional
 historical CVE associations* and do not bypass the
 offline preview's quarantine.
+
+## Scanner-local archive inventory — verified November 5, 2026
+
+On **Vulners-v2**, the read-only bounded metadata inventory
+completed successfully and reported only **3 recognized
+backup/export directories** under the existing search roots.
+No files matching explicitly named feed, report or database
+backup categories were identified in that bounded search;
+**26 files** were categorized as `other_archive_candidate`
+without further metadata classification. Their file types,
+contents and relevance are currently **unknown** and must
+not be interpreted as 26 genuine historic feed backups.
+The initial script only reported a count for these 26,
+since no file name matched its reporting keywords.
+
+**Three** recognized live Docker data volumes were detected:
+- `live_vt_feed`: 95,105 `.nasl` files, 147 `.inc`
+  files and one `.json`; earliest and latest observed NASL/INC
+  filesystem modification date both **2026-11-03**.
+- `live_gvmd_data`: four `.xml` files.
+- `live_data_objects`: 24 `.xml` files.
+
+These volumes have **no independently verified historical
+feed revision**. The `.xml` extension alone does not
+establish preserved scan report content, and feed file mtimes
+are not NVT source revision dates. The historical
+CVE-bearing completed report end dates are October 10–
+November 1, 2026, preceding the observed live VT file
+modification date. This comparison does **not** establish
+that the NVT/CVE associations changed after scan time.
+
+**Next audit:** classify metadata of the 26 generic
+archive candidates without opening report bodies,
+listing sensitive filenames, or altering scanner state;
+then evaluate any relevant original report/feed snapshot
+under restricted, explicit provenance checks.
+Inventory scope was bounded and is not proof no
+other backup exists. Preserve all 913 provisional
+comparison candidates and the two orphaned scan IDs
+quarantined; do not import to `app_findings`.
