@@ -230,6 +230,21 @@ Operator diagnostics on **Vuln-NYC1**, without scanner writes:
   configured target and the original approved customer scope.
   In particular, a completed report with zero `report_hosts`
   entries must not be treated as positive coverage or as clean.
+- Follow-up strict target/report-host audit on **451** Done,
+  report-confirmed tasks: **302** tasks had an exact case-insensitive
+  text match between `targets.hosts` and `report_hosts.host` or
+  `report_hosts.hostname`; **139** had timed report-host rows
+  but no direct text identity match; **10** had no report-host
+  rows. The 10 missing-host cases are confined to:
+  `SCAN-269452` (2), `SCAN-269453` (3),
+  `SCAN-269454` (3), `SCAN-272220` (1),
+  `SCAN-276454` (1). The 139 text mismatches
+  may reflect hostname→IP representation, DNS aliases, or
+  actual mismatched identities. Never count them as
+  unauthorized nor successfully covered without an
+  independently verifiable host binding. The 302 direct
+  matches still do not prove authorization or complete
+  multi-host application scans.
 - Per-folder expression counts: folder 7 = 62; 11 = 62;
   114 = 13; 136 = 182; 253 = 10; 507 = 3. Literal
   expressions were not repeated between folders; this is **not**
