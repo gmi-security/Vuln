@@ -374,6 +374,26 @@ Operator diagnostics on **Vuln-NYC1**, without scanner writes:
   immutable scan-time snapshot. Deduplicate by customer,
   task/report/result/host/CVE with explicit provenance
   before importing any finding.
+- CVE fan-out/dedup read-only audit using latest complete
+  Greenbone reports from application-tagged Done tasks and
+  the currently stored `nvts.cve`: **2,300** individual
+  CVE references across positive-severity result rows,
+  **541** distinct CVE identifiers, **1,867** distinct
+  `(application scan ID, reported host, CVE)` combinations,
+  **157** distinct `(application scan ID, reported host)`
+  combinations, **36** scan IDs with CVE-bearing positive
+  results, and **1,094** CVE references originating from
+  severity ≥7 results. The latter is *not* a count of
+  high/critical unique vulnerabilities (one result may
+  reference multiple CVEs). This global 36-ID result
+  **must still be joined against local Running vs Failed
+  vs Completed status**; some app-tagged tasks were outside
+  the 55 matched stale Running scans. Current `nvts`
+  metadata can change after scan execution; do not pretend
+  every CVE was observed in the historical feed version.
+  Host identity was validated at report level separately.
+  Deduplicate and compare existing app findings before
+  any transactional recovery.
 - Per-folder expression counts: folder 7 = 62; 11 = 62;
   114 = 13; 136 = 182; 253 = 10; 507 = 3. Literal
   expressions were not repeated between folders; this is **not**
