@@ -931,3 +931,55 @@ The matching fields in a manifest remain self-declared unless
 a trusted exporter verifies them against authorized Nessus
 occurrence and immutable Greenbone report sources. The current
 production evidence does not yet satisfy this provenance contract.
+
+## Independent archive/source inventory — November 5, 2026
+
+GitHub connector inspection of `gmi-security/Vuln` and relevant
+`gmi-security` code found a **read-only** Nessus
+history/host verifier (`lib/nessus-run-proof.ts`) and an
+older application-side archive recorded in
+`docs/vuln2-combined-release.md` at
+`/home/codex/vuln-recovery/server-local-tools-20261011.tar.gz`.
+The archive is explicitly a preservation of two
+server-local scripts, **not** verified Greenbone NVT feed
+or completed report evidence.
+
+Historical DigitalOcean fleet metadata in
+`gmi-security/infra_analysis` for October 10, October 20 and
+October 27 records `Vulners-v2` with
+`backupEnabled: false` on all three snapshots. This does
+not prove that manual Droplet snapshots, on-disk backup
+archives or third-party backups do not exist; no
+DigitalOcean image listing has been retrieved.
+
+Greenbone's documented Community Container setup maintains
+a live VT feed in a `vt_data_vol` Docker volume and its
+`get_reports` XML API can include NVT reference metadata
+and `scan_nvt_version`. **A newly rendered XML report
+may use contemporary NVT reference data:** having a
+`<ref type="cve">` in an export made today is not,
+by itself, an immutable original-scan-time NVT/CVE
+association. Likewise, NASL files in the present-day
+VT volume do **not** constitute a preserved October feed.
+
+The branch now includes
+`scripts/audit/greenbone-archived-evidence-inventory.py`.
+It discovers potential archival files by **metadata only**
+within bounded scanner-side directories and enumerates only
+known live Greenbone data volumes and explicitly archive-
+labeled Docker volumes. It does not read any customer report,
+open ZIP/tar contents, mount drives, start scans, change
+database rows or contact remote APIs. Its output is aggregate
+categories and path hashes rather than raw paths/filenames.
+Candidate file existence or old mtime is **not
+provenance verification**. No result from this scanner-local
+inventory has yet been supplied or verified.
+
+A genuine scan-time attribution source would need a
+trusted dated feed revision or independently preserved
+original scan/export with demonstrably immutable CVE
+references, plus source UUID, timestamp, approved
+ownership and exact Nessus-occurrence match. If not
+available, maintain the 913 combinations as *provisional
+historical CVE associations* and do not bypass the
+offline preview's quarantine.
