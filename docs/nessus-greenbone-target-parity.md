@@ -86,6 +86,17 @@ Operator diagnostics on **Vuln-NYC1**, without scanner writes:
   Greenbone scope. Prior migration documentation warns that the legacy
   GMI/Valor identities can differ from consolidated identities; verify
   active `app_companies` ownership before creating approvals.
+- Platform SQL shows all six historical Nessus identities exist:
+  `CO-9150` internal and five client customers. Local Vulners scan
+  records total **135** across them: **91 Running**, **29 Completed**
+  and **15 Failed**. This is application state, **not** gvmd task state.
+  Source shows the legacy bridge launches `void
+  runVulnersBridgeScanAsync(...)` in-process, and persists
+  `bridgeScan:{done:boolean}` rather than a durable remote task ID.
+  Local jobs marked Running may survive a restart without their
+  in-memory poller. Their ages and remote report IDs require read-only
+  reconciliation; **do not bulk-mark them completed, delete them,
+  or launch replacements**.
 - Per-folder expression counts: folder 7 = 62; 11 = 62;
   114 = 13; 136 = 182; 253 = 10; 507 = 3. Literal
   expressions were not repeated between folders; this is **not**
