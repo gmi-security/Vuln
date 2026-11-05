@@ -141,6 +141,17 @@ Operator diagnostics on **Vuln-NYC1**, without scanner writes:
   all 91 stale application records. Do not confuse 65 distinct
   IDs with a count of stale IDs recovered.
   Source: https://github.com/greenbone/gvmd/blob/main/src/manage.h
+- Read-only `gvmd.reports` join to 488 application-tagged tasks
+  confirms every **451 Done** tasks has at least one report with
+  `scan_run_status=1` and valid non-zero start/end timestamps.
+  These Done tasks represent **61** distinct embedded local `SCAN-*`
+  IDs. Among the remaining tagged tasks: 23 Stopped and 13 Interrupted
+  have reports but no completed report; 1 New task has no report.
+  This is evidence of remote execution and report timestamps, **not**
+  proven per-host coverage, report completeness/pagination, or an exact
+  join to the **91** stale local scans. Remote task *names* include
+  the app `[SCAN-*]` prefix but expose hostnames and must not be
+  copied wholesale into reports or GitHub.
 - Per-folder expression counts: folder 7 = 62; 11 = 62;
   114 = 13; 136 = 182; 253 = 10; 507 = 3. Literal
   expressions were not repeated between folders; this is **not**
