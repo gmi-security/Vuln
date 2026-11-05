@@ -882,3 +882,25 @@ original report. Until then, handle current-feed-derived CVE
 associations exclusively as provenance-uncertain historical
 evidence candidates with a source lineage label. No production
 data were modified by this audit.
+
+## Preview treatment of current-feed CVE mappings — November 5, 2026
+
+The offline preview was tightened on the audit branch. A manifest
+row declaring `cveProvenance: "current-nvt-at-recovery"` is
+**explicitly quarantined** as
+`provisional_current_nvt_cve_mapping` and can **never**
+increase `wouldStageHistoricalOnly`, even with all UUIDs,
+host-attestation assertions, timestamps and target approval
+fields present. Invalid or missing approvals take precedence
+and quarantine as `unapproved_exact_target_or_orphan_scan`.
+An unsupported lineage label remains
+`unverified_scan_time_cve_lineage`. The preview still requires
+an independently trusted source reader before accepting an
+assertion of `report-snapshot`; JSON input by itself is
+not authenticated evidence.
+
+Two synthetic tests were added for fail-closed provisional and
+missing-approval cases, bringing the suite to **six** cases.
+The first four passed against Vuln-NYC1 on November 5;
+**the additional two have not yet been run/verified**.
+No app DB or Greenbone production code changed.
