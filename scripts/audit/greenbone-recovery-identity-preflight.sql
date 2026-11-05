@@ -20,7 +20,7 @@ WHERE table_schema='public'
 ORDER BY table_name,column_name;
 
 WITH tagged AS (
-  SELECT t.id AS task_id, t.uuid AS task_uuid
+  SELECT t.id AS task_id, to_jsonb(t)->>'uuid' AS task_uuid
   FROM public.tasks t
   WHERE t.name ~ '^\[SCAN-[0-9]+\]' AND t.run_status=1
 ),
