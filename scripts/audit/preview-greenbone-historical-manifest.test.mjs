@@ -5,6 +5,7 @@ import {previewHistorical} from "./preview-greenbone-historical-manifest.mjs";
 const manifestRows=()=>{
   const base={
     companyId:"CO-9150",appScanId:"SCAN-1001",
+    nessusOccurrenceId:"test-nessus-occurrence-123",
     configuredTarget:"host.example.invalid",
     taskUuid:"00000000-0000-4000-8000-000000000001",
     reportUuid:"00000000-0000-4000-8000-000000000002",
@@ -103,4 +104,21 @@ test("no approved scope means no historically staged observations",()=>{
   assert.equal(result.acceptedSourceObservations,0);
   assert.equal(result.wouldStageHistoricalOnly,0);
   assert.equal(result.quarantine.unapproved_exact_target_or_orphan_scan,6);
+});
+
+test("approved target cannot use another Nessus scan occurrence",()=>{
+  const bad={...manifestRows()[0],
+    nessusOccurrenceId:"different-nessus-occurrence",
+    resultUuid:"00000000-0000-4000-8000-000000000009"};
+  const p=previewHistorical({version:1,observations:[bad]},approvals,existing);
+  assert.equal(p.quarantine.nessus_occurrence_not_verified,1);
+  assert.equal(p.wouldStageHistoricalOnly,0);
+});
+test("reused result UUID with a different target UUID fails closed",()=>{
+  const base=manifestRows()[0];
+  const contradictory={...base,
+    targetUuid:"00000000-0000-4000-8000-000000000010"};
+  assert.throws(()=>previewHistorical(
+    {version:1,observations:[base,contradictory]},
+    approvals,existing),/Conflicting immutable source/);
 });
