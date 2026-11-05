@@ -125,12 +125,14 @@ Operator diagnostics on **Vuln-NYC1**, without scanner writes:
   Primary task schema includes numeric `id`, text `uuid`,
   text `name`, integer `run_status`/`target`, and Unix time
   integers `creation_time`/`modification_time`.
-  **Identity discrepancy:** the currently configured `GMI_SCANNER_URL`
-  on Vuln-NYC1 points instead to `165.245.151.124:8088`.
-  Confirm that the endpoint corresponds to this `gvmd` instance
-  (via full authenticated capacity inventory) before treating its
-  7,531 tasks as the source of the application's historical jobs.
-  A `0` count of active jobs does not validate remote completion.
+  **Endpoint identity resolved:** DigitalOcean control-plane details
+  show `165.245.151.124` is the **Reserved IP** of this same
+  `Vulners-v2` droplet (primary IPv4 `165.245.167.168`), with
+  scanner API exposed on port 8088. The application targets that
+  Reserved IP using `GMI_SCANNER`. The scanner's 7,531-task history
+  is therefore on the intended droplet. A `0` active-task count
+  does not validate remote completion; the authenticated API's
+  full inventory should still be cross-checked.
 - Read-only scanner DB follow-up found **488** Greenbone tasks
   with names matching `^\\[SCAN-[0-9]+\\]` and **65** distinct
   embedded application scan IDs. Per gvmd's `task_status_t`
