@@ -664,3 +664,34 @@ for import**. Do not promote any imported observation to
 currently `Open` without a separate recent scan
 and customer-scope authorization. No write-mode migration,
 data transfer or import has been approved or performed.
+
+## Source identity preflight — confirmed November 5, 2026
+
+The scanner-local, read-only identity preflight completed with `ROLLBACK`:
+
+| Check | Result |
+| --- | ---: |
+| CVE-bearing positive result rows | **1,172** |
+| Distinct source Greenbone tasks | **154** |
+| Distinct completed reports | **154** |
+| Distinct result rows | **1,172** |
+| Result rows with task UUID | **1,172** |
+| Result rows with report UUID | **1,172** |
+| Result rows with result UUID | **1,172** |
+| Result rows with NVT version | **1,172** |
+| Result rows with valid observation timestamp | **1,172** |
+| Result rows with source NVT metadata existing by scan time | **1,172** |
+| Result rows without linked source NVT | **0** |
+
+`tasks.uuid`, `reports.uuid`, `results.uuid`, `targets.uuid`
+and `nvts.uuid` exist in the observed schema. `report_hosts`
+and `report_host_details` support scan-time target-identity checks.
+The 154 tasks and 1,172 rows are source-level figures that include the
+two orphaned application scan IDs; they are **not** counts of authorized
+importable observations. Preserve task/report/result UUIDs, NVT OID and
+version, report timestamps and attested configured target before any
+idempotent dry run. `913` is the deduplicated historical missing
+company-target-CVE count, not the number of result rows or remote tasks.
+This check made **no production changes**. The next step is an explicit,
+no-write import preview with consented target scope, quarantine of orphaned
+provenance, and no lifecycle status changes.
