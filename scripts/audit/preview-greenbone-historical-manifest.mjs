@@ -92,9 +92,8 @@ export function previewHistorical(manifest,approvalsInput,existingInput) {
       !["direct","report_hostname","report_host_details"].includes(o.hostAttestation))
       reason="incomplete_report_or_host_attestation";
     else if(typeof o.nvtOid!=="string" || !o.nvtOid.trim() ||
-      typeof o.nvtVersion!=="string" || !o.nvtVersion.trim() ||
-      o.cveProvenance!=="report-snapshot")
-      reason="unverified_scan_time_cve_lineage";
+      typeof o.nvtVersion!=="string" || !o.nvtVersion.trim())
+      reason="invalid_source_nvt_identity";
     else if(!validTime(o.reportStartUtc) || !validTime(o.reportEndUtc) ||
       !validTime(o.observedUtc) ||
       Date.parse(o.reportStartUtc)>Date.parse(o.observedUtc) ||
@@ -110,6 +109,15 @@ export function previewHistorical(manifest,approvalsInput,existingInput) {
     if(!reason && (Date.parse(o.observedUtc)<Date.parse(approval.validFromUtc) ||
                    Date.parse(o.observedUtc)>Date.parse(approval.validThroughUtc)))
       reason="outside_approval_window";
+    // A contemporaneous recorded NVT version is NOT a saved original
+    // report CVE list. Explicitly account for provisional current-feed
+    // mappings, but never promote them to historical staging eligibility.
+    // This string is input data, not sufficient evidence by itself;
+    // a separately trusted report reader must corroborate any snapshot.
+    if(!reason && o.cveProvenance==="current-nvt-at-recovery")
+      reason="provisional_current_nvt_cve_mapping";
+    else if(!reason && o.cveProvenance!=="report-snapshot")
+      reason="unverified_scan_time_cve_lineage";
 
     if(reason) {tally(quarantined,reason);continue;}
 
