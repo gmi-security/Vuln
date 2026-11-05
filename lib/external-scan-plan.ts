@@ -1,4 +1,4 @@
-import { scannerExactTargetKey } from "./scanner-target-scope";
+import { scannerExactTargetKey, scannerTargetMatcher } from "./scanner-target-scope";
 
 // Read-only preview of ONE Nessus scan definition -> precisely its OWN
 // proposed Greenbone target set. These are configured targets, not proof
@@ -111,17 +111,18 @@ export function buildExternalScanPlan(
     const key=k(d.companyId,d.nessusScanId);
     defs.set(key,[...(defs.get(key)??[]),d]);
   }
-  // Cross-company overlap is an explicit hold, not permission for either
-  // tenant's Greenbone scan. Compare both approved route types.
+  // Build cross-company exact Greenbone ownership conflicts.
+  // Nessus approved scopes may contain CIDRs; those are separately checked
+  // with scannerTargetMatcher against each proposed exact host below.
   const owners=new Map<string,string>(), contested=new Set<string>();
-  for(const route of [...vulnersRoutes,...nessusRoutes]){
+  for(const route of vulnersRoutes){
     for(const item of route.targets??[]){
       try{
         const key=scannerExactTargetKey(item);
         const prior=owners.get(key);
         if(prior && prior!==route.companyId)contested.add(key);
         else owners.set(key,route.companyId);
-      }catch{/* Later scope parsing fails closed. */}
+      }catch{/* Invalid routes are rejected when their own company is checked. */}
     }
   }
   const scansSeen=new Set<string>();
@@ -134,8 +135,14 @@ export function buildExternalScanPlan(
       continue;
     }
     const folderId=Number(nMatches[0].sourceScope);
-    const V=canonicalScope(vMatches[0].targets),N=canonicalScope(nMatches[0].targets);
-    if(!Number.isSafeInteger(folderId)||folderId<1||!V||!N){
+    const V=canonicalScope(vMatches[0].targets);
+    // Nessus approval can authorize bounded CIDR networks; Greenbone
+    // still requires exact reviewed IP/hostname targets. Never construe
+    // a subset of network addresses as exact completed run coverage.
+    let nessusAllows: ((host:string)=>boolean) | null=null;
+    try { nessusAllows=scannerTargetMatcher(nMatches[0].targets); }
+    catch { /* missing, empty or invalid source approval */ }
+    if(!Number.isSafeInteger(folderId)||folderId<1||!V||!nessusAllows){
       out.blocked.push({companyId:company.companyId,
         reason:"Malformed approved Nessus folder or scanner scope."});
       continue;
@@ -180,7 +187,22 @@ export function buildExternalScanPlan(
       }
       // Fail closed for the ENTIRE scan if even ONE configured host lacks
       // dual approval. A partial approved intersection is not target parity.
-      if([...T.keys()].some(key=>!N.has(key)||!V.has(key)||contested.has(key))){
+      let crossTenant=false;
+      for(const host of T.values()){
+        // Any other tenant's reviewed Nessus route covering this exact
+        // host (even via a CIDR) is an ownership conflict. Fail closed.
+        for(const peer of nessusRoutes){
+          if(peer.provider!=="nessus"||peer.companyId===company.companyId)
+            continue;
+          try {
+            if(scannerTargetMatcher(peer.targets)(host))crossTenant=true;
+          }catch { crossTenant=true; }
+          if(crossTenant)break;
+        }
+        if(crossTenant)break;
+      }
+      if(crossTenant || [...T].some(([key,host])=>
+        !nessusAllows!(host)||!V.has(key)||contested.has(key))){
         out.blocked.push({companyId:company.companyId,
           reason:"Not every exact Nessus definition target is independently approved for both scanners.",
           nessusScanId:id});
