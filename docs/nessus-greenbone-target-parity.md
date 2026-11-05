@@ -354,6 +354,26 @@ Operator diagnostics on **Vuln-NYC1**, without scanner writes:
   reporting completeness, and current-metadata-vs-scan-time
   provenance; treat non-CVE findings as separate security
   observations instead of silently declaring them clean.
+- Direct scan-time target/report host attestation of results
+  from the latest completed reports on the **451** GMI-tagged
+  Done tasks: **all 1,172** positive-severity result rows with
+  CVE-bearing NVT metadata were linked to a
+  `report_hosts.host` inside the same report whose
+  `report_host_details` hostname or direct
+  `report_hosts.host/hostname` matched the task's
+  configured Greenbone target; **zero** such rows
+  failed this attestation. All **352** high/critical
+  CVE-linked rows passed, as did all **453** positive
+  severity rows without a matching CVE. This proves
+  report-internal host binding to a configured Greenbone
+  target, **not** that the historic target had independent
+  customer authorization, appeared in a particular
+  completed Nessus run, or that any full legacy app scan
+  covered all requested hosts. The CVE counts reflect
+  NVT metadata as currently stored, not necessarily an
+  immutable scan-time snapshot. Deduplicate by customer,
+  task/report/result/host/CVE with explicit provenance
+  before importing any finding.
 - Per-folder expression counts: folder 7 = 62; 11 = 62;
   114 = 13; 136 = 182; 253 = 10; 507 = 3. Literal
   expressions were not repeated between folders; this is **not**
