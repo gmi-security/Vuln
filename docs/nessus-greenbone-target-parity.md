@@ -205,6 +205,18 @@ Operator diagnostics on **Vuln-NYC1**, without scanner writes:
   637 distinct target strings within that group.
   Local requested slots do not prove corresponding remote task
   creations, successful executions or host coverage.
+- Scanner-side schema inspection identifies direct evidence joins:
+  `tasks.target` → `targets.id` (`targets.hosts`,
+  `targets.exclude_hosts`), `reports.task` → `tasks.id`,
+  `report_hosts.report` → `reports.id` (`host`,
+  `hostname`, `start_time`, `end_time`), and
+  `results.report` → `reports.id`. The last two carry
+  sensitive host identifiers; only share aggregate counts or
+  private encrypted evidence across hosts. Audit the **latest
+  completed report per task** rather than joining all reports and
+  double-counting repeated reports. A done report without a
+  `report_hosts` row does not prove zero authorized targets or
+  complete host-level coverage; treat as unresolved.
 - Per-folder expression counts: folder 7 = 62; 11 = 62;
   114 = 13; 136 = 182; 253 = 10; 507 = 3. Literal
   expressions were not repeated between folders; this is **not**
