@@ -335,6 +335,25 @@ Operator diagnostics on **Vuln-NYC1**, without scanner writes:
   validate the presence of CVE identifiers before
   building an importer. `nvts` metadata may be
   updated after historical scans; keep that provenance.
+- Read-only `result_nvts` → `nvts` reference audit
+  across all **20,045** results in the 451 GMI-tagged Done
+  tasks' latest complete reports: **20,045** result-to-NVT
+  reference rows resolved, **20,016** results with current
+  `nvts` metadata, **0** direct/referenced NVT OID
+  disagreements. **2,635** results were associated with a
+  `nvts.cve` text field containing a CVE-pattern match,
+  including **1,172** positive-severity results of the
+  **1,625** positive-severity rows (**72.1%**),
+  **901** severity ≥4 and **352** severity ≥7.
+  **453** positive-severity results had no matching CVE-pattern
+  metadata, and **359** distinct CVE-linked NVT OIDs
+  were represented (not 359 distinct CVEs or endpoints).
+  These are potential historical recovery candidates, not
+  directly importable unique findings. Validate per-result
+  target/report-host linkage, CVE parsing, duplicate keys,
+  reporting completeness, and current-metadata-vs-scan-time
+  provenance; treat non-CVE findings as separate security
+  observations instead of silently declaring them clean.
 - Per-folder expression counts: folder 7 = 62; 11 = 62;
   114 = 13; 136 = 182; 253 = 10; 507 = 3. Literal
   expressions were not repeated between folders; this is **not**
