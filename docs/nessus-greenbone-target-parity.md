@@ -1107,3 +1107,25 @@ such as **9** in historical folder 7, to isolate 401/403/404,
 response-shape or target-field encoding issues. Adjust the
 parser only after that evidence; all scan launch flags remain
 disabled. No production data or customer scans were changed.
+
+## Nessus editor target parsing defect — isolated November 5, 2026
+
+The scanner-side request was not failing: a single live read-only
+probe of Nessus definition **9** confirmed HTTP **200**, valid JSON,
+`settings`/ `settings.basic` objects, `settings.basic.inputs`
+array of seven fields and exactly one `id="text_targets"` node.
+That node's `value` field was **missing**; its `default`
+field was a **string**, the form used by the installed Nessus
+editor API for configured scan targets. The original per-scan
+audit read only `.value`, so its **0/19** result was a
+**parser defect, not zero target coverage or failed API access**.
+
+Updated the audit-branch per-definition target extractor to use
+`text_targets.default` when `.value` is missing/empty,
+support `.value` on other variants, and reject non-string
+or conflicting dual-field values rather than silently guessing.
+Added three synthetic regression tests, for **11 total**.
+The new 11-test suite and live 19-definition rerun have **not
+yet been verified** on the actual Nessus server. No target
+configuration, scanner processes, databases or customer status
+were changed. The target-parity design remains strictly read-only.
