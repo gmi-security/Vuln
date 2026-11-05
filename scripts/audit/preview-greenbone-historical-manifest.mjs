@@ -106,6 +106,12 @@ export function previewHistorical(manifest,approvalsInput,existingInput) {
     const approvalKey=reason?"":tuple(o.companyId,o.appScanId,normalizeTarget(o.configuredTarget));
     const approval=allowed.get(approvalKey);
     if(!reason && !approval) reason="unapproved_exact_target_or_orphan_scan";
+    // A generic approved target is insufficient: the observation must
+    // reference the EXACT approved, completed Nessus occurrence.
+    // Approval assertions also require independent evidence review.
+    if(!reason && (typeof o.nessusOccurrenceId!=="string" ||
+                   o.nessusOccurrenceId!==approval.nessusOccurrenceId))
+      reason="nessus_occurrence_not_verified";
     if(!reason && (Date.parse(o.observedUtc)<Date.parse(approval.validFromUtc) ||
                    Date.parse(o.observedUtc)>Date.parse(approval.validThroughUtc)))
       reason="outside_approval_window";
@@ -124,8 +130,11 @@ export function previewHistorical(manifest,approvalsInput,existingInput) {
     const sourceKey=tuple("greenbone",o.taskUuid.toLowerCase(),
       o.reportUuid.toLowerCase(),o.resultUuid.toLowerCase(),normCve(o.cve));
     const findingKey=tuple(o.companyId,normalizeTarget(o.configuredTarget),normCve(o.cve));
-    const obsCanonical=tuple(findingKey,o.nvtOid,o.nvtVersion,
-      o.observedUtc,o.severity);
+    const obsCanonical=tuple(
+      findingKey,o.companyId,o.appScanId,o.nessusOccurrenceId,
+      o.targetUuid.toLowerCase(),o.hostAttestation,
+      o.nvtOid,o.nvtVersion,o.reportStartUtc,o.reportEndUtc,
+      o.observedUtc,o.severity,o.cveProvenance);
     if(sourceEvents.has(sourceKey)) {
       if(sourceEvents.get(sourceKey)!==obsCanonical)
         throw Error("Conflicting immutable source UUID/CVE identity; STOP");
