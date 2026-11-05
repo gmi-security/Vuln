@@ -499,6 +499,57 @@ node --experimental-vm-modules --test tests/approved-scanner-target-parity.test.
 
 A merge alone does not deploy this endpoint or launch any work.
 
+## Exact historical finding overlap — November 5, 2026 (read-only)
+
+The two-host HMAC audit completed successfully against the six approved
+application company *identities* (approval of active targets remains separate).
+Its scanner-side evidence baseline was **34** locally stale Running scans,
+**2,260** CVE references, **1,839** distinct within-scan reported-host/CVE
+pairs, and **1,070** high/critical references. It deduplicated candidate
+observations **across repeated scan runs per company and configured target**,
+then compared keyed `(company, configured target, CVE)` identities to the
+currently stored 82 Vulners application findings. Output:
+
+| Company | Linked stale scan IDs | Historical target/CVE pairs | Already in app | Absent from app |
+| --- | ---: | ---: | ---: | ---: |
+| CO-9150 | 21 | 812 | 2 | 810 |
+| CO-9153 | 5 | 114 | 55 | 59 |
+| CO-9156 | 2 | 25 | 0 | 25 |
+| CO-9159 | 1 | 2 | 0 | 2 |
+| CO-9162 | 3 | 15 | 0 | 15 |
+| CO-9165 | 2 | 2 | 0 | 2 |
+| **Total** | **34** | **970** | **57** | **913** |
+
+**913** distinct historical, report-backed configured-target/CVE
+combinations are absent from the app; only **57** (5.88%) are represented.
+The **25** other existing application Vulners findings have HMAC identities
+absent from this historical subset and **must be preserved**, not
+automatically resolved or deleted. All 34 included scan IDs are currently
+stuck in local `Running`; no local app status or findings were changed.
+The two remotely tagged CVE-bearing IDs with no `app_scans` owner
+anywhere in the database remain **quarantined** and excluded from this
+970/913 inventory.
+
+**Interpretation and gates:** 913 is not the number of actively open
+vulnerabilities, nor a license to relaunch 9,691 historical target
+assignments. It is a vetted, scan-time report-host-attested historical
+*comparison candidate* count. Before any import: verify customer ownership
+and authorized Nessus occurrence scope for each source target, freeze
+immutable Greenbone task/report/result IDs and scan timestamps, validate
+CVE provenance (current NVT metadata can differ from scan-time feed),
+ensure results pagination and historical host identity, respect existing
+app finding states, and build a reversible idempotent dry run.
+The per-scan parent record must remain **partial/incomplete**
+until its independently verified expected scope is complete.
+Do not equate `Completed` remote report with completed local scan.
+
+The temporary HMAC token was pasted into user-facing chat in an earlier
+step; its initial one-time secret was also exposed there and was
+subsequently rotated. Treat any exposed key as compromised and use
+fresh private keys for any new round of comparing hashes. Delete
+transient evidence token files and unset shell secrets after auditing;
+do not commit tokens, HMAC keys, hosts or CVE mappings.
+
 ## Privacy-preserving existing-finding overlap audit (read-only)
 
 Two audit scripts are staged on this branch, **not** connected to production
