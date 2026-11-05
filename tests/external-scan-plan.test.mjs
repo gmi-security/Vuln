@@ -15,11 +15,31 @@ const keys=value=>{
     throw Error("Invalid exact target");
   return value.toLowerCase().replace(/\.$/,"");
 };
+const ip4=s=>/^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$/.test(s)&&
+  s.split(".").every(n=>Number(n)<=255)
+    ?s.split(".").reduce((v,n)=>v*256+Number(n),0):null;
+const matcher=targets=>{
+  if(!Array.isArray(targets)||!targets.length||targets.length>100)
+    throw Error("Invalid Nessus reviewed scope");
+  const rules=targets.map(t=>{
+    const m=t.match(/^((?:[0-9]{1,3}\\.){3}[0-9]{1,3})\\/([0-9]|[12][0-9]|3[0-2])$/);
+    if(!m)return {exact:keys(t)};
+    const n=ip4(m[1]),size=2**(32-Number(m[2]));
+    if(n===null)throw Error("Invalid network");
+    return {low:Math.floor(n/size)*size,size};
+  });
+  return host=>rules.some(r=>{
+    if(r.exact!==undefined)return r.exact===keys(host);
+    const n=ip4(host);
+    return n!==null&&n>=r.low&&n<r.low+r.size;
+  });
+};
 const module=new SourceTextModule(js);
 await module.link(async name=>{
   assert.equal(name,"./scanner-target-scope");
-  return new SyntheticModule(["scannerExactTargetKey"],function(){
+  return new SyntheticModule(["scannerExactTargetKey","scannerTargetMatcher"],function(){
     this.setExport("scannerExactTargetKey",keys);
+    this.setExport("scannerTargetMatcher",matcher);
   });
 });
 await module.evaluate();
@@ -149,4 +169,22 @@ test("the legacy scheduler starter never creates an interval",async()=>{
   assert.ok(start>=0&&end>start);
   const body=store.slice(start,end);
   assert.doesNotMatch(body,/setInterval|vulnersBridgeTick\(/);
+});
+
+test("reviewed Nessus CIDR can approve the full exact Greenbone host set",()=>{
+  const m=matrix();
+  const exacts=["192.0.2.0","192.0.2.1","192.0.2.2","192.0.2.3"];
+  const p=run(m,[v(exacts)],[n(["192.0.2.0/30"])],[d(11,exacts)]);
+  assert.equal(p.candidates.length,4);
+  assert.equal(p.blocked.length,0);
+  assert.equal(p.launchesEnabled,false);
+});
+test("same CIDR approved on another customer blocks overlapping source host",()=>{
+  const p=run(matrix(),[v(["192.0.2.2"])],
+    [n(["192.0.2.0/30"]),
+     {companyId:"CO-B",provider:"nessus",
+       sourceScope:"10",targets:["192.0.2.0/29"]}],
+    [d(11,["192.0.2.2"])]);
+  assert.equal(p.candidates.length,0);
+  assert.ok(p.blocked.length>0);
 });
