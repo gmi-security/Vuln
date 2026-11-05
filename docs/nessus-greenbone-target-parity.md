@@ -118,6 +118,19 @@ Operator diagnostics on **Vuln-NYC1**, without scanner writes:
   confirm a successful or complete scan. The bridge
   `GET /api/v1/scans` endpoint has been observed to truncate large
   inventories, so do not use its result to conclude tasks are absent.
+- On `Vulners-v2` (host-reported public IPv4
+  `165.245.167.168`), Docker `greenbone-community-edition-gvmd-1`
+  and `greenbone-community-edition-pg-gvm-1` were healthy.
+  Read-only `gvmd.public.tasks` contained **7,531** records.
+  Primary task schema includes numeric `id`, text `uuid`,
+  text `name`, integer `run_status`/`target`, and Unix time
+  integers `creation_time`/`modification_time`.
+  **Identity discrepancy:** the currently configured `GMI_SCANNER_URL`
+  on Vuln-NYC1 points instead to `165.245.151.124:8088`.
+  Confirm that the endpoint corresponds to this `gvmd` instance
+  (via full authenticated capacity inventory) before treating its
+  7,531 tasks as the source of the application's historical jobs.
+  A `0` count of active jobs does not validate remote completion.
 - Per-folder expression counts: folder 7 = 62; 11 = 62;
   114 = 13; 136 = 182; 253 = 10; 507 = 3. Literal
   expressions were not repeated between folders; this is **not**
