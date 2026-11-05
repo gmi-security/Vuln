@@ -925,9 +925,7 @@ a contradictory target UUID now fails closed.
 Two additional synthetic regression tests were added (eight total):
 unmatched Nessus occurrence is quarantined, and contradictory
 source-target UUID under a reused result UUID throws.
-**The new eight-test suite has not yet been independently verified**
-on Vuln-NYC1; the last completed test run was 6/6 passing
-before these changes. No production records or scan state changed.
+**All eight synthetic tests passed on Vuln-NYC1 on November 5, 2026**, with 0 failures, 0 skipped and 0 cancellations (Node built-in test runner, 116.210844 ms). The suite includes the exact Nessus occurrence and contradictory target UUID cases. No deployment or production mutation was performed. No production records or scan state changed.
 
 The matching fields in a manifest remain self-declared unless
 a trusted exporter verifies them against authorized Nessus
