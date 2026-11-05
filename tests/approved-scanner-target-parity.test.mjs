@@ -66,6 +66,13 @@ test("disabled reviewed routing is a global unknown, not a clean empty estate", 
   }
 });
 
+test("two empty reviewed rosters do not represent verified coverage", () => {
+  const result = compare([], []);
+  assert.equal(result.matchedApprovedScopeCount, 0);
+  assert.equal(result.unresolvedCompanyCount, 1);
+  assert.equal(result.executedScanParityVerified, false);
+});
+
 test("missing source review or duplicate targets cannot pass", () => {
   const missing = compare([], [bridge(["a.example"])]);
   assert.equal(missing.companies[0].status, "unverifiable");
