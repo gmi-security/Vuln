@@ -543,6 +543,18 @@ The per-scan parent record must remain **partial/incomplete**
 until its independently verified expected scope is complete.
 Do not equate `Completed` remote report with completed local scan.
 
+The HMAC comparison script also supports a follow-up **read-only**
+severity rollup of the 913 absent historical candidates, keyed by
+their maximum observed severity across repeated remote reports:
+critical ≥9; high 7–8.9; medium 4–6.9; low >0–3.9. It fails
+closed if these groups do not sum to the verified 913. The
+severity histogram is not yet confirmed against production
+and is **not** a current active-exposure count. Prioritize
+`CO-9150` (810 of 913 absent historical pairs) as an
+internally owned recovery test cohort only after independent
+source-scope review; do not use recovery work to reactivate
+the legacy inventory-wide scanner scheduler.
+
 The temporary HMAC token was pasted into user-facing chat in an earlier
 step; its initial one-time secret was also exposed there and was
 subsequently rotated. Treat any exposed key as compromised and use
