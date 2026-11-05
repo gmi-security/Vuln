@@ -908,3 +908,28 @@ validate provisional current-NVT quarantine despite valid identifiers
 and approved target assertions, plus denial of staging when approval
 list is empty. Production records were not changed.
 No app DB or Greenbone production code changed.
+
+## Preview strengthening after 6/6 verification — same day
+
+After all six synthetic cases passed, the offline preview was hardened
+to bind each accepted observation to the **exact approved finished
+Nessus occurrence ID** as well as company/app scan/exact target
+and approval time window. A company and approved host alone no
+longer suffice. The immutable source-event conflict check also
+considers the Greenbone configured target UUID, app scan ID,
+Nessus occurrence, host-attestation assertion, report timestamps,
+NVT OID/version and evidence provenance, not just the source
+result UUID and host/CVE. A reused Greenbone result UUID with
+a contradictory target UUID now fails closed.
+
+Two additional synthetic regression tests were added (eight total):
+unmatched Nessus occurrence is quarantined, and contradictory
+source-target UUID under a reused result UUID throws.
+**The new eight-test suite has not yet been independently verified**
+on Vuln-NYC1; the last completed test run was 6/6 passing
+before these changes. No production records or scan state changed.
+
+The matching fields in a manifest remain self-declared unless
+a trusted exporter verifies them against authorized Nessus
+occurrence and immutable Greenbone report sources. The current
+production evidence does not yet satisfy this provenance contract.
