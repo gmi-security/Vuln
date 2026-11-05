@@ -394,6 +394,33 @@ Operator diagnostics on **Vuln-NYC1**, without scanner writes:
   Host identity was validated at report level separately.
   Deduplicate and compare existing app findings before
   any transactional recovery.
+- Cross-host scan-status ownership reconciliation of the
+  **36** Greenbone app scan IDs with positive-severity CVE
+  references: **34** match local `Running` records
+  among six customers, contributing **2,260 CVE references**,
+  **1,839 distinct within-scan (reported host,CVE) pairs**,
+  and **1,070 high/critical CVE references**. The other
+  **2** Greenbone scan IDs (**40 CVE references**,
+  **28 within-scan host/CVE pairs**, **24 high/critical
+  references**) match **no local Vulners record in
+  these six customers** and must remain quarantined
+  pending provenance/ownership review. `Failed` and
+  `Completed` local scan cohorts have no CVE-bearing
+  remote tagged data in this audit. Per customer running
+  `scan IDs / refs / distinct within-scan host-CVE pairs /
+  high-critical refs`: `CO-9150` 21/1869/1454/804;
+  `CO-9153` 5/328/328/246;
+  `CO-9156` 2/34/28/16;
+  `CO-9159` 1/6/6/0;
+  `CO-9162` 3/16/16/4;
+  `CO-9165` 2/7/7/0. This is *not*
+  a count of novel vulnerability records: cross-scan
+  host-CVE repeats and preexisting `app_findings`
+  still require explicit deduplication. Among the
+  55 stale Running scans with Done remote report
+  evidence, **21** have no CVE-bearing positive-severity
+  references in this audit, which does not prove a
+  clean or complete scan.
 - Per-folder expression counts: folder 7 = 62; 11 = 62;
   114 = 13; 136 = 182; 253 = 10; 507 = 3. Literal
   expressions were not repeated between folders; this is **not**
