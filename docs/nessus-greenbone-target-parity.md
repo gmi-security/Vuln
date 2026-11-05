@@ -572,6 +572,22 @@ The **380 critical/high** missing historical host-CVE pairs are
 not 380 *currently open* vulnerabilities or necessarily present-day
 risks.
 
+**Confirmed scan-time metadata audit on Vulners-v2 (November 5, 2026):**
+The query ran in a read-only transaction and rolled back. Of **1,172**
+positive-severity result rows associated with current CVE-bearing NVT
+records, all **1,172** have nonblank result NVT versions, result
+timestamps no later than the associated report end, and no NVT record
+created or modified after scan completion; **zero** are missing NVT
+version, created-after-scan or modified-after-scan. Oldest checked
+completed report end: **2026-10-10 03:47:41 UTC**; newest:
+**2026-11-01 04:07:58 UTC**. **154** latest completed reports contain
+these rows: **144** in October (**1,056** result rows), **10**
+in November (**116** rows). This 1,172 refers to **result rows, not
+2,300 CVE fan-out references or 913 deduped missing combinations**.
+Result metadata chronology is a useful corroborating gate, not proof
+of immutability or contemporary vulnerability state. All data came
+from read-only report queries; no Greenbone or app updates occurred.
+
 The separate read-only scanner-side
 `scripts/audit/greenbone-nvt-scan-time-provenance.sql` checks whether
 the **current NVT metadata was created or modified after the historical
