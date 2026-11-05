@@ -77,6 +77,15 @@ Operator diagnostics on **Vuln-NYC1**, without scanner writes:
   was a parser error. Subsequent audit read **all 19/19** custom-folder
   definitions, with no unreadable definitions, and found **332
   distinct target expression strings** across the six folders.
+- Read-only `app_scans` import ownership audit matched **all 19**
+  scan definitions, with no missing/conflicting platform assignment:
+  folder 7 → `CO-9150` (4 definitions), 11 → `CO-9153` (5),
+  114 → `CO-9156` (3), 136 → `CO-9159` (2),
+  253 → `CO-9162` (3), 507 → `CO-9165` (2).
+  These are **historical imported associations**, not approved
+  Greenbone scope. Prior migration documentation warns that the legacy
+  GMI/Valor identities can differ from consolidated identities; verify
+  active `app_companies` ownership before creating approvals.
 - Per-folder expression counts: folder 7 = 62; 11 = 62;
   114 = 13; 136 = 182; 253 = 10; 507 = 3. Literal
   expressions were not repeated between folders; this is **not**
