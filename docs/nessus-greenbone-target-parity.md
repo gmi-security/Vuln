@@ -901,6 +901,10 @@ not authenticated evidence.
 
 Two synthetic tests were added for fail-closed provisional and
 missing-approval cases, bringing the suite to **six** cases.
-The first four passed against Vuln-NYC1 on November 5;
-**the additional two have not yet been run/verified**.
+**All six** synthetic cases passed on Vuln-NYC1 on November 5,
+2026, with 0 failures, 0 skipped and 0 cancellations
+(Node built-in test runner; ~119 ms elapsed). The additional cases
+validate provisional current-NVT quarantine despite valid identifiers
+and approved target assertions, plus denial of staging when approval
+list is empty. Production records were not changed.
 No app DB or Greenbone production code changed.
