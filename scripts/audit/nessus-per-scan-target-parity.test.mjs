@@ -75,11 +75,9 @@ test("target outside approved scope blocks parity approval",()=>{
   assert.equal(r.status,"scope-review-required");
   assert.equal(r.unauthorizedSourceTargets,1);
 });
-test("no reviewed targets, duplicate target or missing occurrence fails closed",()=>{
+test("no reviewed targets or missing occurrence fails closed",()=>{
   assert.equal(compareNessusToGreenbonePerScan(entry(
     "a.example",[],["a.example"])).status,"blocked");
-  assert.equal(compareNessusToGreenbonePerScan(entry(
-    "a.example,a.example",["a.example"],["a.example"])).status,"blocked");
   assert.throws(()=>compareNessusToGreenbonePerScan({
     ...entry("a.example",["a.example"],["a.example"]),nessusOccurrenceId:""
   }),/Missing exact Nessus/);
@@ -120,4 +118,35 @@ test("saved Nessus text_targets accepts comma and whitespace separators",()=>{
   assert.deepEqual(extractNessusTargetExpressions(actual),[
     "host-one.example","host-two.example","10.5.0.1","10.5.0.2"
   ]);
+});
+
+test("duplicate exact source targets contribute one SET member and an audit warning",()=>{
+  const r=compareNessusToGreenbonePerScan(entry(
+    "a.example,a.example",["a.example"],["a.example"]
+  ));
+  assert.equal(r.status,"planned-targets-match");
+  assert.equal(r.configuredExactHostCount,1);
+  assert.equal(r.redundantSourceHostSlots,1);
+  assert.equal(r.sourceProblems,0);
+  assert.equal(r.canDispatch,false);
+});
+test("overlapping CIDR and exact IP targets dedupe without creating extra scan targets",()=>{
+  const p=normalizeNessusDefinition(editor("192.0.2.0/30,192.0.2.2"));
+  assert.equal(p.exactHostCount,4);
+  assert.equal(p.redundantHostSlots,1);
+  assert.equal(p.expressionsWithOverlap,1);
+  assert.equal(p.problems.length,0);
+});
+test("unsupported expressions cannot hide behind duplicate valid hosts",()=>{
+  const p=normalizeNessusDefinition(editor("a.example,a.example,10.0.0.1-10.0.0.3"));
+  assert.equal(p.exactHostCount,1);
+  assert.equal(p.redundantHostSlots,1);
+  assert.equal(p.problems.length,1);
+  assert.equal(compareNessusToGreenbonePerScan(entry(
+    "a.example,a.example,10.0.0.1-10.0.0.3",
+    ["a.example"],["a.example"])).status,"blocked");
+});
+test("overflowed scan set remains blocked even when valid hosts were partially parsed",()=>{
+  const p=normalizeNessusDefinition(editor("192.0.2.0/30"),{maxHosts:3});
+  assert.equal(p.problems.length,1);
 });
