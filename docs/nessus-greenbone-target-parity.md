@@ -555,6 +555,26 @@ internally owned recovery test cohort only after independent
 source-scope review; do not use recovery work to reactivate
 the legacy inventory-wide scanner scheduler.
 
+**Confirmed maximum historical severity (same 913 deduplicated candidate
+identities)** from the successful privacy-preserving scanner audit:
+
+| Company | Critical ≥9 | High 7–8.9 | Medium 4–6.9 | Low >0–3.9 | Total |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| CO-9150 | 62 | 258 | 391 | 99 | 810 |
+| CO-9153 | 19 | 24 | 14 | 2 | 59 |
+| CO-9156 | 0 | 13 | 7 | 5 | 25 |
+| CO-9159 | 0 | 0 | 2 | 0 | 2 |
+| CO-9162 | 0 | 4 | 6 | 5 | 15 |
+| CO-9165 | 0 | 0 | 2 | 0 | 2 |
+| **Total** | **81** | **299** | **422** | **111** | **913** |
+
+The **380 critical/high** missing historical host-CVE pairs are
+not 380 *currently open* vulnerabilities or necessarily present-day
+risks. **320** belong to internal customer CO-9150. Preserve per-result
+timestamp, source identity and NVT provenance before representing these
+as historical observations; never automatically open, close, or
+escalate current remediation tickets based on unreviewed old results.
+
 The temporary HMAC token was pasted into user-facing chat in an earlier
 step; its initial one-time secret was also exposed there and was
 subsequently rotated. Treat any exposed key as compromised and use
