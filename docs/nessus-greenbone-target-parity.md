@@ -172,6 +172,21 @@ Operator diagnostics on **Vuln-NYC1**, without scanner writes:
   **not 55 fully completed multi-host scans**: compare expected
   target identities and all remote task/report outcomes before
   any status or finding mutation.
+- Verified root-cause design defect in deployed `de4357c`
+  `lib/store.ts`: `nessusBridgeTargetsForCompany(companyId)`
+  accumulates aliases from **all stored Nessus scans** and asset
+  values from **historical Nessus findings** for the customer,
+  instead of taking the actual covered host set from the specific
+  completed Nessus occurrence. `vulnersBridgeOffsetTick()`
+  reuses the accumulated cross-scan list for each due Nessus
+  schedule, thereby multiplying overlap and unconstrained active
+  bridge work. The old `startScan` starts one asynchronous
+  in-process target loop per offset record; remote task IDs are
+  not persisted in `bridgeScan`. New scheduling must use a
+  single verified occurrence, customer-approved exact target
+  intersection, durable per-host task id and independent
+  completion/report proof. No automatic restart or legacy
+  scheduler reactivation.
 - Per-folder expression counts: folder 7 = 62; 11 = 62;
   114 = 13; 136 = 182; 253 = 10; 507 = 3. Literal
   expressions were not repeated between folders; this is **not**
