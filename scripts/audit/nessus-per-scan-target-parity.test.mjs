@@ -84,3 +84,32 @@ test("no reviewed targets, duplicate target or missing occurrence fails closed",
     ...entry("a.example",["a.example"],["a.example"]),nessusOccurrenceId:""
   }),/Missing exact Nessus/);
 });
+
+test("real Nessus editor shape uses text_targets.default when value is absent",()=>{
+  const actualShape={settings:{basic:{inputs:[
+    {id:"schedule",default:"schedule-not-a-target"},
+    {id:"text_targets",name:"textarea",
+     default:"SERVER.EXAMPLE.\n10.2.0.1"}
+  ]}}};
+  assert.deepEqual(extractNessusTargetExpressions(actualShape),
+    ["SERVER.EXAMPLE.","10.2.0.1"]);
+  const result=compareNessusToGreenbonePerScan({
+    ...entry("",["server.example","10.2.0.1"],
+      ["10.2.0.1","server.example"]),nessusEditor:actualShape
+  });
+  assert.equal(result.status,"planned-targets-match");
+});
+test("divergent value and default fields fail closed",()=>{
+  assert.throws(()=>extractNessusTargetExpressions({
+    settings:{basic:{inputs:[{id:"text_targets",value:"host-a.example",
+      default:"host-b.example"}]}}
+  }),/Conflicting Nessus configured target fields/);
+});
+test("non-string or empty Nessus editor target values cannot be treated as scans",()=>{
+  assert.throws(()=>extractNessusTargetExpressions({
+    settings:{basic:{inputs:[{id:"text_targets",default:["host.example"]}]}}
+  }),/Unexpected Nessus target default type/);
+  assert.throws(()=>extractNessusTargetExpressions({
+    settings:{basic:{inputs:[{id:"text_targets",default:""}]}}
+  }),/Empty configured target field/);
+});
