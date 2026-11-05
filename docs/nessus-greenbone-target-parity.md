@@ -765,11 +765,12 @@ severity. It prints `wouldStageHistoricalOnly` and counts by company;
 both `wouldChangeLiveFindingStatus` and
 `wouldChangeAppScanStatus` are invariably zero by construction.
 
-Synthetic test:
-`node --test scripts/audit/preview-greenbone-historical-manifest.test.mjs`.
-The tests exercise exact-target authorization, orphan quarantine,
-deduplication, conflicting source identities and no-write status
-invariants. **Execution results are not yet verified.**
+**Tested November 5, 2026 on Vuln-NYC1:** `node --check` succeeded and
+`node --test scripts/audit/preview-greenbone-historical-manifest.test.mjs`
+passed **4/4 tests, 0 failures**. Tests exercise exact-target authorization,
+orphan quarantine, deduplication, conflicting source identities and no-write
+status invariants. These are **synthetic inputs**, not proof of source
+CVE attribution or active customer approval.
 
 No schema migrations, historical observation tables, production imports,
 live finding transitions, jobs, or scans have been deployed.
