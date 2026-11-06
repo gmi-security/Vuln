@@ -1,6 +1,9 @@
-import { scannerExactTargetKey } from "./scanner-target-scope";
+import { scannerExactTargetKey, scannerTargetMatcher } from "./scanner-target-scope";
 
-// A preview of recurring Nessus-to-Greenbone scans. No scan initiation here.
+// Read-only preview of ONE Nessus scan definition -> precisely its OWN
+// proposed Greenbone target set. These are configured targets, not proof
+// that a particular completed Nessus run reached or assessed each host.
+// No launch/admission functions are called from this module.
 export type ExternalScheduleEntry = {
   nessusScanId: number;
   scanName: string;
@@ -12,7 +15,21 @@ export type ExternalScheduleMatrix = {
   generatedAt: string;
   companies: Array<{ companyId: string; companyName: string; scans: ExternalScheduleEntry[] }>;
 };
-export type ExternalApprovedRoute = { companyId: string; provider: string; targets: string[] };
+export type ExternalApprovedRoute = {
+  companyId: string;
+  provider: string;
+  targets: string[];
+  sourceScope?: string;
+};
+// Sourced ONLY from a bounded GET /editor/scan/<id>, after a global Nessus
+// roster confirms actual folder ownership against reviewed routing.
+export type ExternalNessusDefinition = {
+  companyId: string;
+  nessusScanId: number;
+  folderId: number;
+  targets: string[];
+  source: "nessus-editor";
+};
 export type ExternalScanCandidate = {
   companyId: string;
   companyName: string;
@@ -28,96 +45,180 @@ export type ExternalScanPlan = {
   launchesEnabled: false;
   routeStatus: "unavailable" | "reviewed";
   candidates: ExternalScanCandidate[];
-  blocked: Array<{ companyId: string; reason: string }>;
+  blocked: Array<{ companyId: string; reason: string; nessusScanId?: number }>;
 };
 
+function canonicalScope(values: readonly string[] | undefined): Map<string,string> | null {
+  if (!Array.isArray(values) || values.length < 1 || values.length > 4096)
+    return null;
+  const m=new Map<string,string>();
+  try {
+    for(const item of values){
+      const key=scannerExactTargetKey(item);
+      if(m.has(key))return null;
+      m.set(key,item);
+    }
+  }catch{return null;}
+  return m;
+}
+const k=(company:string,scanId:number)=>JSON.stringify([company,scanId]);
+
 /**
- * Historic Nessus findings and observed IPs are not scan authorization.
- * A candidate requires one reviewed Vulners route, an exact host/IP and
- * an enabled upcoming Nessus schedule. Even a candidate is NOT executable:
- * future dispatch must confirm Nessus actually finished its run, an approved
- * window is open and global scanner capacity is available.
+ * The old planner used all reviewed Vulners targets for a company and
+ * assigned them to the earliest Nessus schedule, multiplying unrelated
+ * scans. This version requires BOTH independently reviewed provider
+ * routes AND an exact trusted Nessus definition for EACH scan ID.
+ * There is no historical findings/asset inventory fallback.
+ *
+ * Equal configured lists are PREVIEW equality, not assessed coverage.
+ * Future dispatch still requires pinned Nessus run proof for each host,
+ * approved customer window, globally bounded remote worker and durable
+ * per-target task claims. This function never enables or launches scans.
  */
 export function buildExternalScanPlan(
   matrix: ExternalScheduleMatrix,
-  routes: readonly ExternalApprovedRoute[] | null,
+  vulnersRoutes: readonly ExternalApprovedRoute[] | null,
+  nessusRoutes: readonly ExternalApprovedRoute[] | null = null,
+  definitions: readonly ExternalNessusDefinition[] | null = null,
 ): ExternalScanPlan {
-  const out: ExternalScanPlan = {
-    mode: "preview-only", generatedAt: matrix.generatedAt, launchesEnabled: false,
-    routeStatus: routes === null ? "unavailable" : "reviewed", candidates: [], blocked: [],
+  const out: ExternalScanPlan={
+    mode:"preview-only",generatedAt:matrix.generatedAt,launchesEnabled:false,
+    routeStatus:vulnersRoutes===null||nessusRoutes===null?"unavailable":"reviewed",
+    candidates:[],blocked:[],
   };
-  if (routes === null) {
-    out.blocked.push({ companyId: "*", reason: "Reviewed Vulners customer routing is not enabled. No legacy fallback." });
+  if(vulnersRoutes===null||nessusRoutes===null||definitions===null) {
+    out.blocked.push({companyId:"*",reason:
+      "Both approved scanner routes and read-only per-definition Nessus targets are required. No company-wide fallback."});
     return out;
   }
-  const byCompany = new Map<string, ExternalApprovedRoute[]>();
-  const owners = new Map<string, string>();
-  const contested = new Set<string>();
-  for (const route of routes) {
-    if (route.provider !== "vulners") continue;
-    const existing = byCompany.get(route.companyId) ?? [];
-    existing.push(route);
-    byCompany.set(route.companyId, existing);
-    for (const target of route.targets ?? []) {
-      try {
-        const key = scannerExactTargetKey(target);
-        const previous = owners.get(key);
-        if (previous && previous !== route.companyId) contested.add(key);
-        else owners.set(key, route.companyId);
-      } catch { /* invalid scope is rejected when candidates are built */ }
-    }
-  }
-  const now = Date.parse(matrix.generatedAt);
-  if (!Number.isFinite(now)) {
-    out.blocked.push({ companyId: "*", reason: "Invalid schedule matrix timestamp." });
+  const now=Date.parse(matrix.generatedAt);
+  if(!Number.isFinite(now)||!Array.isArray(matrix.companies)||matrix.companies.length>100){
+    out.blocked.push({companyId:"*",reason:"Schedule matrix invalid or oversized."});
     return out;
   }
-  const seen = new Set<string>();
-  for (const company of matrix.companies) {
-    const matches = byCompany.get(company.companyId) ?? [];
-    if (matches.length !== 1) {
-      out.blocked.push({ companyId: company.companyId, reason: matches.length ? "Ambiguous approved customer route." : "No approved Vulners route." });
-      continue;
+  const defs=new Map<string,ExternalNessusDefinition[]>();
+  if(definitions.length>100){
+    out.blocked.push({companyId:"*",reason:"Nessus definition inventory is oversized."});
+    return out;
+  }
+  for(const d of definitions){
+    if(!Number.isSafeInteger(d.nessusScanId)||d.nessusScanId<1 ||
+       !Number.isSafeInteger(d.folderId)||d.folderId<1 ||
+       d.source!=="nessus-editor"||!d.companyId){
+      out.blocked.push({companyId:"*",reason:"Unverified Nessus definition identity."});
+      return out;
     }
-    const route = matches[0];
-    if (!route.targets?.length || route.targets.length > 100) {
-      out.blocked.push({ companyId: company.companyId, reason: "Approved scope is empty or too large." });
-      continue;
-    }
-    const normalized = new Map<string, string>();
-    let invalid = false;
-    for (const target of route.targets) {
-      try {
-        const key = scannerExactTargetKey(target);
-        if (contested.has(key)) { invalid = true; break; }
-        normalized.set(key, target);
-      } catch { invalid = true; break; }
-    }
-    if (invalid) {
-      out.blocked.push({ companyId: company.companyId, reason: "Invalid or cross-customer overlapping approved target." });
-      continue;
-    }
-    // Several Nessus schedules must not multiply jobs for the same host.
-    const upcoming = company.scans.filter(s => s.enabled && Number.isSafeInteger(s.nessusScanId) && s.nessusScanId > 0 &&
-      s.nextOccurrence && s.offsetNextTrigger && Number.isFinite(Date.parse(s.nextOccurrence)) &&
-      Number.isFinite(Date.parse(s.offsetNextTrigger)) && Date.parse(s.offsetNextTrigger) > now &&
-      Math.abs(Date.parse(s.offsetNextTrigger) - Date.parse(s.nextOccurrence) - 3_600_000) < 1000)
-      .sort((a, b) => Date.parse(a.offsetNextTrigger!) - Date.parse(b.offsetNextTrigger!));
-    if (!upcoming.length) {
-      out.blocked.push({ companyId: company.companyId, reason: "No valid enabled future Nessus recurrence." });
-      continue;
-    }
-    const next = upcoming[0];
-    for (const [key, target] of normalized) {
-      const dedup = company.companyId + ":" + key;
-      if (seen.has(dedup)) continue;
-      seen.add(dedup);
-      out.candidates.push({ companyId: company.companyId, companyName: company.companyName,
-        target, nessusScanId: next.nessusScanId, nessusScanName: next.scanName,
-        nominalOffsetAt: next.offsetNextTrigger!, state: "review-required" });
+    const key=k(d.companyId,d.nessusScanId);
+    defs.set(key,[...(defs.get(key)??[]),d]);
+  }
+  // Build cross-company exact Greenbone ownership conflicts.
+  // Nessus approved scopes may contain CIDRs; those are separately checked
+  // with scannerTargetMatcher against each proposed exact host below.
+  const owners=new Map<string,string>(), contested=new Set<string>();
+  for(const route of vulnersRoutes){
+    for(const item of route.targets??[]){
+      try{
+        const key=scannerExactTargetKey(item);
+        const prior=owners.get(key);
+        if(prior && prior!==route.companyId)contested.add(key);
+        else owners.set(key,route.companyId);
+      }catch{/* Invalid routes are rejected when their own company is checked. */}
     }
   }
-  out.candidates.sort((a, b) => a.nominalOffsetAt.localeCompare(b.nominalOffsetAt) ||
-    a.companyId.localeCompare(b.companyId) || a.target.localeCompare(b.target));
+  const scansSeen=new Set<string>();
+  for(const company of matrix.companies){
+    const vMatches=vulnersRoutes.filter(r=>r.companyId===company.companyId&&r.provider==="vulners");
+    const nMatches=nessusRoutes.filter(r=>r.companyId===company.companyId&&r.provider==="nessus");
+    if(vMatches.length!==1||nMatches.length!==1){
+      out.blocked.push({companyId:company.companyId,
+        reason:"Exactly one reviewed route per scanner is required."});
+      continue;
+    }
+    const folderId=Number(nMatches[0].sourceScope);
+    const V=canonicalScope(vMatches[0].targets);
+    // Nessus approval can authorize bounded CIDR networks; Greenbone
+    // still requires exact reviewed IP/hostname targets. Never construe
+    // a subset of network addresses as exact completed run coverage.
+    let nessusAllows: ((host:string)=>boolean) | null=null;
+    try { nessusAllows=scannerTargetMatcher(nMatches[0].targets); }
+    catch { /* missing, empty or invalid source approval */ }
+    if(!Number.isSafeInteger(folderId)||folderId<1||!V||!nessusAllows){
+      out.blocked.push({companyId:company.companyId,
+        reason:"Malformed approved Nessus folder or scanner scope."});
+      continue;
+    }
+    if(!Array.isArray(company.scans)||company.scans.length>100){
+      out.blocked.push({companyId:company.companyId,
+        reason:"Unverifiable Nessus schedule list."});
+      continue;
+    }
+    for(const scan of company.scans){
+      if(!scan.enabled)continue;
+      const id=scan.nessusScanId;
+      if(!Number.isSafeInteger(id)||id<1||
+         !scan.nextOccurrence||!scan.offsetNextTrigger||
+         !Number.isFinite(Date.parse(scan.nextOccurrence))||
+         !Number.isFinite(Date.parse(scan.offsetNextTrigger))||
+         Date.parse(scan.offsetNextTrigger)<=now||
+         Math.abs(Date.parse(scan.offsetNextTrigger)-
+           Date.parse(scan.nextOccurrence)-3_600_000)>1000){
+        out.blocked.push({companyId:company.companyId,
+          reason:"Invalid enabled Nessus recurrence or +60m offset.",nessusScanId:id});
+        continue;
+      }
+      const scanKey=k(company.companyId,id);
+      if(scansSeen.has(scanKey)){
+        out.blocked.push({companyId:company.companyId,
+          reason:"Duplicate Nessus definition in schedule matrix.",nessusScanId:id});
+        continue;
+      }
+      scansSeen.add(scanKey);
+      const match=defs.get(scanKey)??[];
+      if(match.length!==1||match[0].folderId!==folderId){
+        out.blocked.push({companyId:company.companyId,
+          reason:"Missing or wrong-folder live Nessus definition targets.",nessusScanId:id});
+        continue;
+      }
+      const T=canonicalScope(match[0].targets);
+      if(!T){
+        out.blocked.push({companyId:company.companyId,
+          reason:"Nessus definition has invalid or duplicate expanded targets.",nessusScanId:id});
+        continue;
+      }
+      // Fail closed for the ENTIRE scan if even ONE configured host lacks
+      // dual approval. A partial approved intersection is not target parity.
+      let crossTenant=false;
+      for(const host of T.values()){
+        // Any other tenant's reviewed Nessus route covering this exact
+        // host (even via a CIDR) is an ownership conflict. Fail closed.
+        for(const peer of nessusRoutes){
+          if(peer.provider!=="nessus"||peer.companyId===company.companyId)
+            continue;
+          try {
+            if(scannerTargetMatcher(peer.targets)(host))crossTenant=true;
+          }catch { crossTenant=true; }
+          if(crossTenant)break;
+        }
+        if(crossTenant)break;
+      }
+      if(crossTenant || [...T].some(([key,host])=>
+        !nessusAllows!(host)||!V.has(key)||contested.has(key))){
+        out.blocked.push({companyId:company.companyId,
+          reason:"Not every exact Nessus definition target is independently approved for both scanners.",
+          nessusScanId:id});
+        continue;
+      }
+      // Use only this definition, never a company-wide union or a
+      // single earliest Nessus recurrence for all hosts.
+      for(const target of T.values())out.candidates.push({
+        companyId:company.companyId,companyName:company.companyName,
+        target,nessusScanId:id,nessusScanName:scan.scanName,
+        nominalOffsetAt:scan.offsetNextTrigger,state:"review-required",
+      });
+    }
+  }
+  out.candidates.sort((a,b)=>a.nominalOffsetAt.localeCompare(b.nominalOffsetAt)||
+    a.companyId.localeCompare(b.companyId)||
+    a.nessusScanId-b.nessusScanId||a.target.localeCompare(b.target));
   return out;
 }
