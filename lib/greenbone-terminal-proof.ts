@@ -72,7 +72,8 @@ export function verifyGreenboneTerminalTarget(
   const greenboneEnd=positiveTime(payload?.completedAt);
   const inspected=positiveTime(payload?.generatedAt);
   if (!Number.isFinite(clockMs) ||
-      !candidate || !target || !sourceTarget || target!==sourceTarget ||
+      !candidate || typeof candidate.companyId!=="string" || !candidate.companyId.trim() ||
+      !target || !sourceTarget || target!==sourceTarget ||
       target!==attestedTarget || target!==assessedTarget ||
       !Number.isSafeInteger(candidate.nessusScanId) || candidate.nessusScanId<1 ||
       !JOB_ID.test(expectedTaskId) || !payload ||
@@ -80,14 +81,16 @@ export function verifyGreenboneTerminalTarget(
       payload.taskStatus!=="Done" || payload.reportStatus!=="Done" ||
       payload.reportComplete!==true || payload.allPagesComplete!==true ||
       payload.knownTargetCount!==1 || payload.reportedHostCount!==1 ||
-      payload.taskId!==expectedTaskId || !UUID.test(String(payload.reportId ?? "")) ||
+      payload.taskId!==expectedTaskId || typeof payload.reportId!=="string" ||
+      !UUID.test(payload.reportId) ||
       !host || host.status!=="completed" || host.assessed!==true ||
       typeof host.evidenceId!=="string" || !UUID.test(host.evidenceId) ||
       payload.skippedHostCount!==0 || payload.failedHostCount!==0 ||
       !Number.isSafeInteger(payload.reportResultCount) ||
       (payload.reportResultCount as number)<0 ||
       nessus.scanId!==candidate.nessusScanId ||
-      nessus.status!=="completed" || !UUID.test(String(nessus.reportId??"")) ||
+      nessus.status!=="completed" || typeof nessus.reportId!=="string" ||
+      !UUID.test(nessus.reportId) ||
       occurrence===null || sourceStarted===null || sourceEnd===null ||
       greenboneStart===null || greenboneEnd===null || inspected===null ||
       sourceStarted<occurrence || sourceEnd<sourceStarted ||
