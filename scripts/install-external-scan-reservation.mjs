@@ -27,7 +27,7 @@ const CHECKS = Object.freeze([
   ["events","public.external_scan_dispatch_events"],
 ]);
 
-function guardFlags(env) {
+export function guardFlags(env) {
   for (const key of [
     "VULNERS_BRIDGE_SCHEDULER_ENABLED",
     "GMI_SCAN_ADMISSION_ENABLED",
@@ -52,10 +52,10 @@ async function status(db) {
   }
   return {tables:result,slotOccupied:occupied};
 }
-function complete(value) {return Object.values(value.tables).every(Boolean);}
-function empty(value) {return Object.values(value.tables).every(x=>!x);}
+export function complete(value) {return Object.values(value.tables).every(Boolean);}
+export function empty(value) {return Object.values(value.tables).every(x=>!x);}
 
-function pgEnvironment(urlText) {
+export function pgEnvironment(urlText) {
   const url=new URL(urlText);
   if (!["postgres:","postgresql:"].includes(url.protocol) ||
       !url.pathname || !url.username) throw Error("Invalid application PostgreSQL target.");
