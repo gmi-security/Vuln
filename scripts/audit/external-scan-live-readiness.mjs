@@ -68,9 +68,17 @@ export function evaluateReadiness({ probes, database, flags }) {
     pass("scannerCapacity");
   else fail("scannerCapacity", "Fresh complete GMP capacity attestation is unavailable or the scanner is busy.");
 
-  if (validStatus(probes.slot) && probes.slot.body.slot?.claim_key === null)
+  const tables = database?.tables;
+  if (tables?.claims === true && tables?.slot === true && tables?.events === true)
+    pass("reservationSchema");
+  else fail("reservationSchema", "Claim, singleton slot or audit-event migration missing.");
+  if (tables?.slot !== true || tables?.claims !== true || tables?.events !== true)
+    fail("globalReservationSlot", "Global reservation schema unavailable.");
+  else if (database?.slotOccupied === true)
+    fail("globalReservationSlot", "A durable external scan reservation already occupies the slot.");
+  else if (validStatus(probes.slot) && probes.slot.body.slot?.claim_key === null)
     pass("globalReservationSlot");
-  else fail("globalReservationSlot", "Global slot schema is unavailable or the slot is occupied.");
+  else fail("globalReservationSlot", "Global slot API unavailable or state unverified.");
 
   if (flags.VULNERS_BRIDGE_SCHEDULER_ENABLED !== "true")
     pass("legacySchedulerDisabled");
@@ -133,7 +141,20 @@ async function readDatabase() {
       "SELECT to_regclass('public.app_store_authority') IS NOT NULL AS authority," +
       "to_regclass('public.customer_scanner_routes') IS NOT NULL AS routes"
     )).rows[0];
-    const result = {authority:null, routes:{nessus:0,vulners:0}};
+    const result = {authority:null, routes:{nessus:0,vulners:0},
+      tables:{claims:false,slot:false,events:false},slotOccupied:null};
+    const scanTables = (await client.query(
+      "SELECT to_regclass('public.external_scan_dispatch_claims') IS NOT NULL AS claims,"+
+      "to_regclass('public.external_scan_dispatch_slot') IS NOT NULL AS slot,"+
+      "to_regclass('public.external_scan_dispatch_events') IS NOT NULL AS events"
+    )).rows[0];
+    result.tables=scanTables;
+    if (scanTables.claims && scanTables.slot) {
+      const slot=(await client.query(
+        "SELECT (claim_key IS NOT NULL) AS occupied FROM public.external_scan_dispatch_slot WHERE slot_id=1"
+      )).rows;
+      result.slotOccupied=slot.length===1?slot[0].occupied:null;
+    }
     if (tables.authority) {
       result.authority = (await client.query(
         "SELECT mode,enforced,epoch::text,revision::text FROM public.app_store_authority WHERE id=1"

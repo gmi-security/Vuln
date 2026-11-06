@@ -14,7 +14,7 @@ const readiness = (overrides = {}) => ({
     slot: {http:200,body:{slot:{claim_key:null}}},
   },
   database: {authority:{mode:"sql",enforced:true,epoch:"2",revision:"19587"},
-    routes:{nessus:1,vulners:1}},
+    routes:{nessus:1,vulners:1},tables:{claims:true,slot:true,events:true},slotOccupied:false},
   flags: {VULNERS_BRIDGE_SCHEDULER_ENABLED:"false",
     GMI_SCAN_ADMISSION_ENABLED:"true",VULN_EXTERNAL_SCAN_DISPATCH_ENABLED:"true"},
   ...overrides,
@@ -56,6 +56,16 @@ test("Greenbone capacity must be fresh, complete and idle", () => {
     const v=readiness();change(v);
     assert.equal(evaluateReadiness(v).checks.scannerCapacity.ready,false);
   }
+});
+test("schema audit distinguishes absent migrations and busy reserved slot",()=>{
+  const missing=readiness();
+  missing.database.tables={claims:false,slot:false,events:false};
+  assert.equal(evaluateReadiness(missing).checks.reservationSchema.ready,false);
+  assert.equal(evaluateReadiness(missing).checks.globalReservationSlot.reason,
+    "Global reservation schema unavailable.");
+  const occupied=readiness();occupied.database.slotOccupied=true;
+  assert.equal(evaluateReadiness(occupied).checks.globalReservationSlot.reason,
+    "A durable external scan reservation already occupies the slot.");
 });
 test("claimed or missing global SQL slot blocks new starts", () => {
   for(const value of [{http:503,body:null},{http:200,body:{slot:{claim_key:"a".repeat(64)}}}]){
