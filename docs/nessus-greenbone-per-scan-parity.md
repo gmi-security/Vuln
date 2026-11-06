@@ -1,4 +1,21 @@
-# Nessus → Greenbone: exact target parity per scan (staged)
+# Nessus → Greenbone: exact target parity per scan
+
+## Production deployment (November 6, 2026 UTC)
+
+The fail-closed target-planning and legacy-scheduler retirement source from
+PR #123 **is deployed** on Vuln-NYC1 as merge commit
+`23ec37532162c90d00e591e189e2ee62d523353f`.
+The operator confirmed the new PM2 release is online, anonymous
+`/api/health` reports both `readReady` and `writeReady` true,
+PostgreSQL SQL authority remains enforced (epoch 2, revision 19587 at
+acceptance), and the 23 targeted regression tests all passed.
+The existing legacy checkout and cutover recovery directory were preserved.
+
+**This is a deployed safety correction, NOT activation of Greenbone scanning.**
+All three scanner launch flags were disabled at cutover. Current approved
+routes, GMP capacity, maintenance windows, terminal report evidence and
+real host-by-host parity still need production verification. The go-live
+readiness audit is `scripts/audit/external-scan-live-readiness.mjs`.
 
 ## Purpose
 
@@ -80,14 +97,13 @@ association or retroactively claim equal scan execution.
    if its old flag is accidentally enabled, and
    \`importFromVulnersBridge\` no longer starts an unscoped
    inventory sweep through nightly sync-all. These changes
-   are **staged source only**, not deployed.
+   are now deployed as part of the fail-closed production release.
 6. Test coverage includes exact per-definition source,
    Nessus CIDR scope, dual provider target authorization,
    no partial source target acceptance, historic-host union
    rejection, cross-tenant collision, duplicate/source ID
    rejection, read-only endpoint, and retired scan paths.
-   New runtime tests/CI have not yet been verified and
-   must pass before any merge/deployment consideration.
+   The 23 targeted tests and deployment build passed on Vuln-NYC1.
 
 ## Important distinction
 
