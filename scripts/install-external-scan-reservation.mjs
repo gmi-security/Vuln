@@ -11,16 +11,17 @@
  *
  * No scanner, PM2, routing, existing findings or SQL-authority changes.
  */
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { chmod, mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { pathToFileURL, fileURLToPath } from "node:url";
 import pg from "pg";
 import { applicationDatabaseSsl } from "../lib/db/connection-target.mjs";
 import { readPlatformAuthority } from "../lib/db/platform-authority.mjs";
 
+const PINNED_PRODUCTION_RELEASE = "23ec37532162c90d00e591e189e2ee62d523353f";
 const CHECKS = Object.freeze([
   ["claims","public.external_scan_dispatch_claims"],
   ["slot","public.external_scan_dispatch_slot"],
@@ -58,7 +59,7 @@ export function empty(value) {return Object.values(value.tables).every(x=>!x);}
 export function pgEnvironment(urlText) {
   const url=new URL(urlText);
   if (!["postgres:","postgresql:"].includes(url.protocol) ||
-      !url.pathname || !url.username) throw Error("Invalid application PostgreSQL target.");
+      !url.pathname || url.pathname.length < 2 || !url.username) throw Error("Invalid application PostgreSQL target.");
   const socket=url.searchParams.get("host");
   const output=Object.fromEntries(Object.entries(process.env).filter(([key])=>!key.startsWith("PG")));
   Object.assign(output,{
@@ -123,10 +124,19 @@ async function backupDatabase(url,authority) {
   }
 }
 async function install(client) {
-  const claims=(await readFile(new URL("../docs/sql/external-scan-dispatch-claims.sql",import.meta.url),"utf8")).replaceAll("\r\n","\n");
-  const events=(await readFile(new URL("../docs/sql/external-scan-dispatch-events.sql",import.meta.url),"utf8")).replaceAll("\r\n","\n");
-  if(claims.includes("DROP ") || events.includes("DROP "))
-    throw Error("Unexpected destructive migration token.");
+  // Only the DDL from the verified deployed release is permitted.
+  const repoDir=fileURLToPath(new URL("../",import.meta.url));
+  const current=execFileSync("git",["-C",repoDir,"rev-parse","HEAD"],{encoding:"utf8"}).trim();
+  if(current!==PINNED_PRODUCTION_RELEASE)
+    throw Error("STOP: The application release changed. Re-review migrations.");
+  const readPinned = async filename => {
+    const local=(await readFile(new URL("../docs/sql/"+filename,import.meta.url),"utf8")).replaceAll("\r\n","\n");
+    const trusted=execFileSync("git",["-C",repoDir,"show",PINNED_PRODUCTION_RELEASE+":docs/sql/"+filename],{encoding:"utf8"}).replaceAll("\r\n","\n");
+    if(local!==trusted)throw Error("STOP: Deployed migration differs from reviewed Git source.");
+    return local;
+  };
+  const claims=await readPinned("external-scan-dispatch-claims.sql");
+  const events=await readPinned("external-scan-dispatch-events.sql");
   let inTxn=false;
   try {
     await client.query("BEGIN");inTxn=true;
