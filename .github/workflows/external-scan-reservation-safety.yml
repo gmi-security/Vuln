@@ -10,6 +10,11 @@ on:
       - "lib/external-scan-plan.ts"
       - "lib/nessus-run-proof.ts"
       - "lib/nessus.ts"
+      - "lib/nessus-definition-targets.ts"
+      - "app/api/admin/external-scan-plan/route.ts"
+      - "app/api/admin/port-nessus-to-bridge/route.ts"
+      - "lib/store.ts"
+      - "tests/nessus-definition-targets.test.mjs"
       - "tests/external-scan-admission.test.mjs"
       - "tests/external-scan-plan.test.mjs"
       - "tests/nessus-run-proof.test.mjs"
@@ -64,4 +69,5 @@ jobs:
         run: |
           node --test tests/external-scan-claims.test.mjs tests/external-scan-claims-postgres.test.mjs
           node --test tests/nessus-historical-shape-probe.test.mjs
+          node --experimental-vm-modules --test tests/nessus-definition-targets.test.mjs
           node --experimental-vm-modules --test tests/external-scan-dispatcher.test.mjs tests/vulners-health-auth.test.mjs tests/greenbone-capacity.test.mjs tests/external-scan-admission.test.mjs tests/external-scan-plan.test.mjs tests/nessus-run-proof.test.mjs

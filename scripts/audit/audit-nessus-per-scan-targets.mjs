@@ -48,7 +48,7 @@ function get(path) {
   });
 }
 const table=[];
-let failed=0,totalConfigured=0;
+let failed=0,totalConfigured=0,totalRedundant=0;
 for(const [folder,company,expectedDefinitions] of FOLDERS) {
   try {
     const roster=await get("/scans?folder_id="+folder);
@@ -67,13 +67,31 @@ for(const [folder,company,expectedDefinitions] of FOLDERS) {
         const parsed=normalizeNessusDefinition(editor);
         const problems=parsed.problems.length;
         if(problems)failed++;
-        else totalConfigured+=parsed.exactHostCount;
+        else {
+          totalConfigured+=parsed.exactHostCount;
+          totalRedundant+=parsed.redundantHostSlots;
+        }
+        // Source expression values are sensitive. Categories come only from
+        // fixed parser error messages, never the target strings.
+        const recognized=new Map([
+          ["Not one exact host/IP","non-exact-expression"],
+          ["Unsupported hostname/target expression","unsupported-expression"],
+          ["IPv6 requires a separately reviewed canonicalizer","ipv6-review-required"],
+          ["Invalid IPv4","invalid-ip"],
+          ["Invalid prefix","invalid-prefix"],
+          ["Network expansion exceeds bounded review limit","cidr-too-large"],
+          ["Total target count exceeds bounded review limit","scan-too-large"],
+        ]);
+        const problemCategories=[...new Set(parsed.problems.map(p=>
+          recognized.get(p.reason) ?? "other-unsupported-expression"))].sort();
         table.push({
           company,folder,scanId:scan.id,
           expressions:parsed.expressionCount,
           configuredTargets:parsed.exactHostCount,
+          redundantHostSlots:parsed.redundantHostSlots,
           networks:parsed.cidrExpressions,
-          problems:problems?"unresolved-target-expression":"none"
+          problems:problems?"unresolved-target-expression":"none",
+          problemCategories:problemCategories.join(",")||"none"
         });
       }catch{
         failed++;
@@ -93,11 +111,13 @@ console.table(table);
 console.log(JSON.stringify({
   expectedDefinitions:19,readDefinitions:table.filter(x=>x.scanId!==null).length,
   fullyParsedDefinitions:table.filter(x=>x.scanId!==null && x.problems==="none").length,
-  configuredHostSlotsAcrossDefinitions:totalConfigured,
+  configuredHostSlotsAcrossParsedDefinitions:totalConfigured,
+  redundantHostSlotsAcrossParsedDefinitions:totalRedundant,
   unresolved:failed,executedNessusGreenboneParityVerified:false,
   canLaunchGreenbone:false
 },null,2));
 console.log("IMPORTANT: scans are individual definitions; totals may overlap.");
+console.log("Repeated targets within one definition count once; redundant slots are visible.");
 console.log("CIDR expansion is a bounded planning comparison, not a launch list.");
 console.log("No target identities, customer addresses or API keys were displayed.");
 console.log("NO SCANS STARTED. NO CUSTOMER RECORDS CHANGED.");
