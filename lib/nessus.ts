@@ -1,3 +1,4 @@
+import { readNessusDefinitionTargets, type NessusDefinitionTargetSet } from "./nessus-definition-targets";
 import { scannerTargetMatcher, assertScannerResultScope } from "./scanner-target-scope";
 import { verifyCompletedNessusOccurrence } from "./nessus-run-proof";
 import type { ExternalDispatchCandidate, NessusRunProof } from "./external-scan-admission";
@@ -249,6 +250,21 @@ export async function nessusListScans(pinned?: NessusConfig, folderId?: number):
     status: String(sc.status ?? "completed"),
     lastModified: sc.last_modification_date ? Number(sc.last_modification_date) : null,
   }));
+}
+
+/** Read configured targets of exactly one Nessus scan definition.
+ * Read-only GET. Does NOT prove those hosts were assessed by a completed
+ * historical Nessus occurrence and does NOT permit Greenbone dispatch.
+ */
+export async function nessusConfiguredTargetsForDefinition(
+  scanId: number, pinned?: NessusConfig,
+): Promise<NessusDefinitionTargetSet> {
+  const config = pinned ?? nessusConfig();
+  if (!config) throw new Error("Nessus is not configured.");
+  if (!Number.isSafeInteger(scanId) || scanId < 1)
+    throw new Error("Invalid Nessus definition ID.");
+  const editor = await api(config, "GET", "/editor/scan/" + scanId);
+  return readNessusDefinitionTargets(editor);
 }
 
 export async function nessusScanStatus(
