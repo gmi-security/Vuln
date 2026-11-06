@@ -15,8 +15,8 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { chmod, mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import pg from "pg";
 import { applicationDatabaseSsl } from "../lib/db/connection-target.mjs";
 import { readPlatformAuthority } from "../lib/db/platform-authority.mjs";
@@ -194,7 +194,7 @@ export async function main(argv=process.argv.slice(2)) {
     await db.end().catch(()=>{});
   }
 }
-if(import.meta.url===new URL("file://"+process.argv[1]).href) {
+if(process.argv[1] && import.meta.url===pathToFileURL(resolve(process.argv[1])).href) {
   main().catch(e=>{
     console.error("STOP:",e.message);
     process.exitCode=2;
