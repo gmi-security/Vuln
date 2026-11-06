@@ -49,9 +49,28 @@ export function extractNessusTargetExpressions(editor) {
   if(!Array.isArray(inputs))throw Error("Nessus editor target input missing");
   const rows=inputs.filter(x=>x && (x.id==="text_targets"||x.name==="text_targets"));
   if(rows.length!==1)throw Error("Nessus target field absent/ambiguous");
-  const value=rows[0].value;
+  // The actual Nessus /editor/scan response on Vuln-NYC1 has
+  // id="text_targets", no .value, and the saved targets in .default.
+  // Some API variants expose .value. Reject divergent values instead
+  // of silently selecting the wrong source.
+  const field=rows[0];
+  const configured=field.value;
+  const savedDefault=field.default;
+  if(configured!==undefined && configured!==null &&
+     typeof configured!=="string")throw Error("Unexpected Nessus target value type");
+  if(savedDefault!==undefined && savedDefault!==null &&
+     typeof savedDefault!=="string")throw Error("Unexpected Nessus target default type");
+  if(typeof configured==="string" && configured.trim() &&
+     typeof savedDefault==="string" && savedDefault.trim() &&
+     configured.trim()!==savedDefault.trim())
+    throw Error("Conflicting Nessus configured target fields");
+  const value=typeof configured==="string" && configured.trim()
+    ? configured : savedDefault;
   if(typeof value!=="string" || !value.trim())throw Error("Empty configured target field");
-  const expressions=value.split(/[,\r\n]+/).map(x=>x.trim()).filter(Boolean);
+  // Nessus text_targets can contain comma- or whitespace-delimited
+  // exact hosts / IPv4 CIDRs. Keep all unsupported expressions blocked
+  // later by parseExpression; do not expand arbitrary ranges or exclusions.
+  const expressions=value.split(/[,\s]+/).filter(Boolean);
   if(expressions.length<1||expressions.length>10000)
     throw Error("Configured target expression count outside bounded review limits");
   return expressions;
@@ -60,19 +79,31 @@ export function normalizeNessusDefinition(editor,{maxHosts=4096,maxPerExpression
   const expressions=extractNessusTargetExpressions(editor);
   const hosts=new Set();
   const problems=[],networks=[];
-  for(const expression of expressions){
+  // A target repeated in one Nessus definition adds no extra host to its
+  // execution SET. Track redundancy for audit; never treat it as a new host
+  // or silently drop an INVALID expression.
+  let redundantHostSlots=0, expressionsWithOverlap=0;
+  for(const [expressionIndex,expression] of expressions.entries()){
     try{
       const list=parseExpression(expression,maxPerExpression);
       if(expression.includes("/"))networks.push({expression,count:list.length});
+      let overlap=false;
       for(const host of list) {
-        if(hosts.has(host)) throw Error("Duplicate or overlapping target in same scan");
+        if(hosts.has(host)) {
+          redundantHostSlots++;
+          overlap=true;
+          continue;
+        }
+        if(hosts.size>=maxHosts)
+          throw Error("Total target count exceeds bounded review limit");
         hosts.add(host);
-        if(hosts.size>maxHosts)throw Error("Total target count exceeds bounded review limit");
       }
-    }catch(err){problems.push({expressionIndex:expressions.indexOf(expression),
+      if(overlap) expressionsWithOverlap++;
+    }catch(err){problems.push({expressionIndex,
       reason:err instanceof Error?err.message:"Invalid target"});}
   }
   return {expressionCount:expressions.length,exactHostCount:hosts.size,
+    redundantHostSlots,expressionsWithOverlap,
     cidrExpressions:networks.length,cidrIpCount:networks.reduce((n,x)=>n+x.count,0),
     problems,hosts:[...hosts].sort()};
 }
@@ -90,6 +121,7 @@ export function compareNessusToGreenbonePerScan(input) {
     configuredExactHostCount:source.exactHostCount,
     cidrExpressions:source.cidrExpressions,
     sourceProblems:source.problems.length,
+    redundantSourceHostSlots:source.redundantHostSlots,
     plannedGreenboneCount:0,approvedCount:0,
     missingFromGreenbone:0,extraInGreenbone:0,
     unauthorizedSourceTargets:0,
