@@ -1,8 +1,32 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { loadTs } from "./helpers/load-ts-module.mjs";
+import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { SourceTextModule, SyntheticModule } from "node:vm";
+import ts from "typescript";
 
-const {verifyGreenboneTerminalTarget} = await loadTs("lib/greenbone-terminal-proof.ts");
+const tsSource=await readFile("lib/greenbone-terminal-proof.ts","utf8");
+const js=ts.transpileModule(tsSource,{compilerOptions:{
+  target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext
+}}).outputText;
+const strictExact=value=>{
+  if(typeof value!=="string"||!value||value.includes("/")||
+     value.includes("*")||value.includes("://")||value.includes(" "))
+    throw Error("Invalid exact target");
+  return value.toLowerCase().replace(/\.$/,"");
+};
+const module=new SourceTextModule(js);
+await module.link(async name=>{
+  if(name==="node:crypto")return new SyntheticModule(["createHash"],function(){
+    this.setExport("createHash",createHash);
+  });
+  assert.equal(name,"./scanner-target-scope");
+  return new SyntheticModule(["scannerExactTargetKey"],function(){
+    this.setExport("scannerExactTargetKey",strictExact);
+  });
+});
+await module.evaluate();
+const {verifyGreenboneTerminalTarget}=module.namespace;
 
 const NOW = Date.parse("2026-11-06T02:00:00.000Z");
 const C = {
