@@ -13,7 +13,7 @@
  */
 import { spawn, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, statfsSync } from "node:fs";
 import { chmod, mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -76,14 +76,43 @@ export function pgEnvironment(urlText) {
   });
   return output;
 }
-function command(command,args,env,log) {
+export const MIN_BACKUP_FREE_BYTES = 30 * 1024 ** 3;
+export function backupSpaceIsSafe(availableBytes) {
+  return availableBytes >= MIN_BACKUP_FREE_BYTES;
+}
+function command(command,args,env,log,guardPath=null) {
   return new Promise((resolve,reject)=>{
+    const freeBytes=()=>{
+      const info=statfsSync(guardPath,{bigint:true});
+      return Number(info.bavail*info.bsize);
+    };
+    if(guardPath && !backupSpaceIsSafe(freeBytes())) {
+      reject(Error("STOP: Less than 30 GiB free on backup filesystem; schema unchanged."));
+      return;
+    }
     const child=spawn(command,args,{
       env,stdio:["ignore","ignore",log],timeout:BACKUP_COMMAND_TIMEOUT_MS
     });
-    child.once("error",()=>reject(Error("Backup utility unavailable; schema unchanged.")));
-    child.once("exit",(code,signal)=>code===0
-      ?resolve():reject(Error(command+" failed ("+(signal||code)+"); schema unchanged.")));
+    let abortReason=null;
+    const watchdog=guardPath?setInterval(()=>{
+      try {
+        if(!backupSpaceIsSafe(freeBytes())) {
+          abortReason="STOP: Backup stopped to preserve 30 GiB free disk; schema unchanged.";
+          child.kill("SIGTERM");
+        }
+      }catch{
+        abortReason="STOP: Unable to monitor backup disk capacity; schema unchanged.";
+        child.kill("SIGTERM");
+      }
+    },10000):null;
+    watchdog?.unref();
+    const clear=()=>{if(watchdog)clearInterval(watchdog);};
+    child.once("error",()=>{clear();reject(Error(abortReason||"Backup utility unavailable; schema unchanged."));});
+    child.once("exit",(code,signal)=>{
+      clear();
+      if(code===0 && !abortReason)resolve();
+      else reject(Error(abortReason||command+" failed ("+(signal||code)+"); schema unchanged."));
+    });
   });
 }
 async function checksum(path) {
@@ -106,7 +135,7 @@ async function backupDatabase(url,authority) {
     console.log("BACKUP_DIRECTORY="+dir);
     console.log("=== CONSISTENT APPLICATION DATABASE BACKUP ===");
     await command("pg_dump",["--format=custom","--compress=1",
-      "--no-owner","--no-acl","--file",dump],env,fd);
+      "--no-owner","--no-acl","--file",dump],env,fd,parent);
     await command("pg_restore",["--list",dump],env,fd);
     // Parse/decompress every archive entry, not merely list the TOC.
     await command("pg_restore",["--file=/dev/null",dump],env,fd);
