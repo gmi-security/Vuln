@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { guardFlags, pgEnvironment, complete, empty } from "../scripts/install-external-scan-reservation.mjs";
+import { guardFlags, pgEnvironment, complete, empty, BACKUP_COMMAND_TIMEOUT_MS } from "../scripts/install-external-scan-reservation.mjs";
 
+test("large database backup and full archive validation receive six hours each",()=>{
+  assert.equal(BACKUP_COMMAND_TIMEOUT_MS,6*60*60*1000);
+});
 test("scanner flags must remain disabled when operator performs schema maintenance",()=>{
   assert.doesNotThrow(()=>guardFlags({}));
   for(const name of [
