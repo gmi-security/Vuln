@@ -21,6 +21,8 @@ import pg from "pg";
 import { applicationDatabaseSsl } from "../lib/db/connection-target.mjs";
 import { readPlatformAuthority } from "../lib/db/platform-authority.mjs";
 
+export const BACKUP_COMMAND_TIMEOUT_MS = 6 * 60 * 60 * 1000;
+
 const PINNED_PRODUCTION_RELEASE = "23ec37532162c90d00e591e189e2ee62d523353f";
 const CHECKS = Object.freeze([
   ["claims","public.external_scan_dispatch_claims"],
@@ -77,7 +79,7 @@ export function pgEnvironment(urlText) {
 function command(command,args,env,log) {
   return new Promise((resolve,reject)=>{
     const child=spawn(command,args,{
-      env,stdio:["ignore","ignore",log],timeout:3600000
+      env,stdio:["ignore","ignore",log],timeout:BACKUP_COMMAND_TIMEOUT_MS
     });
     child.once("error",()=>reject(Error("Backup utility unavailable; schema unchanged.")));
     child.once("exit",(code,signal)=>code===0
