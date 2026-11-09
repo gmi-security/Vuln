@@ -1,9 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { guardFlags, pgEnvironment, complete, empty, BACKUP_COMMAND_TIMEOUT_MS } from "../scripts/install-external-scan-reservation.mjs";
+import { guardFlags, pgEnvironment, complete, empty, BACKUP_COMMAND_TIMEOUT_MS, MIN_BACKUP_FREE_BYTES, backupSpaceIsSafe } from "../scripts/install-external-scan-reservation.mjs";
 
 test("large database backup and full archive validation receive six hours each",()=>{
   assert.equal(BACKUP_COMMAND_TIMEOUT_MS,6*60*60*1000);
+});
+test("backup aborts before exhausting the live host disk reserve",()=>{
+  assert.equal(MIN_BACKUP_FREE_BYTES,30*1024**3);
+  assert.equal(backupSpaceIsSafe(MIN_BACKUP_FREE_BYTES-1),false);
+  assert.equal(backupSpaceIsSafe(MIN_BACKUP_FREE_BYTES),true);
 });
 test("scanner flags must remain disabled when operator performs schema maintenance",()=>{
   assert.doesNotThrow(()=>guardFlags({}));
