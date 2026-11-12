@@ -34,6 +34,8 @@ try {
         const nodes=[];const visit=p=>{nodes.push(p);for(const child of p.Plans??[])visit(child);};visit(plan);
         assert.equal(nodes.some(p=>p['Node Type']==='Nested Loop'&&p['Join Type']==='Anti'),false,
           'Stale generation statistics must not choose a quadratic nested-loop anti-join');
+        assert.equal(nodes.some(p=>p['Node Type']==='Index Scan'&&p['Index Name']==='spotlight_import_progress_pairs'),false,
+          'Final verification must not fetch the heap in CVE/asset order through the reporting index');
         planChecked=true;
         if(injectTimeout){await client.query("SET LOCAL statement_timeout='1ms'");await client.query('SELECT pg_sleep(0.05)');}
       }
@@ -44,6 +46,8 @@ try {
   const seed=await store.beginOrResumePartitionedSpotlightRun(tenant,['open']);
   await pool.query('ALTER TABLE spotlight_import_ids SET (autovacuum_enabled=false)');
   await pool.query('ALTER TABLE spotlight_import_records SET (autovacuum_enabled=false)');
+  await pool.query(`CREATE INDEX spotlight_import_progress_pairs ON spotlight_import_records
+    (run_id,tenant_key,company_id,cve,((raw->>'aid')))`);
   async function stage(run,number){
     await pool.query(`INSERT INTO spotlight_import_ids SELECT $1,$2,'source-'||lpad(n::text,8,'0') FROM generate_series(1,$3::int) n`,[run,tenant,number]);
     await pool.query(`INSERT INTO spotlight_import_records
@@ -67,15 +71,22 @@ try {
   let settings=(await pool.query("SELECT current_setting('enable_nestloop') nested,current_setting('statement_timeout') timeout")).rows[0];
   assert.deepEqual(settings,{nested:'on',timeout:'30s'});
   console.log('PASS publication and transaction-local settings reset after commit');
+  const fresh=await store.beginOrResumePartitionedSpotlightRun(tenant,['open']);await stage(fresh.id,100000);
+  await pool.query("UPDATE spotlight_import_records SET hostname='' WHERE run_id=$1 AND source_id='source-00000001'",[fresh.id]);
+  await pool.query('ANALYZE spotlight_import_ids');await pool.query('ANALYZE spotlight_import_records');
+  planChecked=false;
+  assert.deepEqual(await store.completeResumableSpotlightRun(fresh.id,tenant),{findingsImported:100000,hostsAffected:100});
+  assert.ok(planChecked);assert.equal(await current(),fresh.id);
+  console.log('PASS fresh-statistics finalization preserves host counting and avoids reporting-index heap reads');
   const bad=await store.beginOrResumePartitionedSpotlightRun(tenant,['open']);await stage(bad.id,100);
   await pool.query("UPDATE spotlight_import_records SET source_id='unexpected-id' WHERE run_id=$1 AND source_id='source-00000001'",[bad.id]);
   await assert.rejects(()=>store.completeResumableSpotlightRun(bad.id,tenant),/count mismatch/);
-  assert.equal(await current(),next.id);
+  assert.equal(await current(),fresh.id);
   console.log('PASS equal counts with different source IDs cannot publish');
   await pool.query("UPDATE spotlight_import_records SET source_id='source-00000001' WHERE run_id=$1 AND source_id='unexpected-id'",[bad.id]);
   injectTimeout=true;
   await assert.rejects(()=>store.completeResumableSpotlightRun(bad.id,tenant),e=>e.code==='57014');
-  assert.equal(await current(),next.id);
+  assert.equal(await current(),fresh.id);
   settings=(await pool.query("SELECT current_setting('enable_nestloop') nested,current_setting('statement_timeout') timeout")).rows[0];
   assert.deepEqual(settings,{nested:'on',timeout:'30s'});
   console.log('PASS actual statement timeout retains prior publication and resets session settings');
