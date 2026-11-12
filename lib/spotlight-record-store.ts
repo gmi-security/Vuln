@@ -572,6 +572,7 @@ export function createSpotlightRecordStore(db: Database) {
             approval.proposal?.tenantId?.toLowerCase() !== scope.cid || approval.proposal?.datasets?.length || approval.proposal?.targets?.length)
           throw new Error("Spotlight approval changed; previous completed results were retained.");
       }
+      // Hydration writes source-ID batches; keep heap reads in that order, not the CVE reporting index's order.
       const counts = await client.query(`SELECT
         (SELECT COUNT(*) FROM spotlight_import_ids WHERE run_id = $1::uuid AND tenant_key = $2)::text AS ids,
         COUNT(*)::text AS records,
@@ -591,7 +592,8 @@ export function createSpotlightRecordStore(db: Database) {
             AND NOT EXISTS (SELECT 1 FROM spotlight_import_ids i
               WHERE i.run_id = r.run_id AND i.tenant_key = r.tenant_key
                 AND i.source_id = r.source_id))::text AS extra
-        FROM spotlight_import_records WHERE run_id = $1::uuid AND tenant_key = $2`, scope ? [runId, tenantKey, scope.companyId, scope.cid] : [runId, tenantKey]);
+        FROM (SELECT * FROM spotlight_import_records
+          WHERE run_id = $1::uuid AND tenant_key = $2 ORDER BY source_id) ordered_records`, scope ? [runId, tenantKey, scope.companyId, scope.cid] : [runId, tenantKey]);
       if (scope && (Number(counts.rows[0]?.wrong_scope) !== 0 || !(Number(counts.rows[0]?.verified_scope) > 0)))
         throw new Error("Spotlight generation cannot prove reviewed customer ownership; previous results were retained.");
       const ids = Number(counts.rows[0]?.ids ?? 0);
