@@ -26,6 +26,24 @@ async function load(file, overrides, timers = []) {
 }
 const settled = () => new Promise(resolve => setImmediate(resolve));
 
+test('scheduler resumes an already-claimed nightly batch after a daytime restart', async () => {
+  const ast=ts.createSourceFile('store.ts',await readFile('lib/store.ts','utf8'),ts.ScriptTarget.Latest,true);
+  const fn=ast.statements.find(node=>ts.isFunctionDeclaration(node)&&node.name?.text==='schedulerTick');
+  const {connectorSyncStart}=await load('lib/connector-sync-schedule.ts',{});
+  const batch={startedAt:'2026-11-18T04:00:14.677Z',release:async()=>{}};
+  const s={settings:{schedule:{autoSyncEnabled:true}},meta:{lastMetricsSnapshotDay:'today',lastAutoSyncAt:Date.parse(batch.startedAt)}};
+  let recovered=0;
+  const context=vm.createContext({console,Date:ClockDate,store:()=>s,todayUtc:()=> 'today',markDirty(){},connectorSyncStart,
+    resumeInterruptedSpotlightSync:async()=>{},claimDailyJob:async()=>false,
+    acquireScheduledConnectorBatch:async()=>batch,syncAllStatus:()=>({running:false}),
+    startSyncAll:options=>{assert.equal(options.batch,batch);recovered++;return {started:true};}});
+  const mod=new vm.SourceTextModule(ts.transpileModule('export '+fn.getText(ast),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText,{context});
+  await mod.link(()=>{});await mod.evaluate();
+  clock=Date.parse('2026-11-18T20:00:00Z');
+  await mod.namespace.schedulerTick();
+  assert.equal(recovered,1,'the saved nightly claim must not discard unfinished connector starts');
+});
+
 test('restart recovery resumes only the selected unfinished checkpoint once, even during daytime', async () => {
   const ast=ts.createSourceFile('store.ts',await readFile('lib/store.ts','utf8'),ts.ScriptTarget.Latest,true);
   const fn=ast.statements.find(node=>ts.isFunctionDeclaration(node)&&node.name?.text==='resumeInterruptedSpotlightSync');
@@ -70,6 +88,7 @@ test('general connector scheduler starts at 9 PM, blocks duplicates after restar
   const context=vm.createContext({console,Date:ClockDate,store:()=>s,todayUtc:()=> 'today',markDirty(){},connectorSyncStart,
     resumeInterruptedSpotlightSync:async()=>{recoveries++;},
     claimDailyJob:async()=>{const slot=connectorSyncStart(clock);if(claimed===slot)return false;claimed=slot;return true;},
+    acquireScheduledConnectorBatch:async()=>{const slot=connectorSyncStart(clock);if(slot===null||claimed===slot)return null;claimed=slot;return {startedAt:new ClockDate().toISOString(),release:async()=>{}};},
     syncAllStatus:()=>({running:busy}),startSyncAll:options=>{assert.equal(options.scheduled,true);starts++;return {started:true};}});
   const mod=new vm.SourceTextModule(ts.transpileModule('export '+fn.getText(ast),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText,{context});
   await mod.link(()=>{});await mod.evaluate();
