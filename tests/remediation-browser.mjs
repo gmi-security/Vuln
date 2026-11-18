@@ -89,6 +89,8 @@ try{
     const p=url.pathname.replace('/api/elastic-dashboard/',''),companyId=url.searchParams.get('companyId')||companies[0].id;
     const body=req.method()==='POST'?req.postDataJSON():null;calls.push({path:p,companyId:url.searchParams.get('companyId'),view:url.searchParams.get('view'),method:req.method(),body});
     const json=(data,status=200)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(data)});
+    if(p==='patch-progress')return json({state:'available',tickets:[],trends:[],hasMore:false});
+    if(p==='patch-priority')return json({companyId,version:1,byCve:[],byRemediation:[],totalCves:0,totalRemediations:0,notices:[]});
     if(p==='preview'){
       assert.equal(body.companyId,companies[0].id);assert.equal(body.source,'crowdstrike');
       return json({jobId:id,status:'queued'});
@@ -208,6 +210,7 @@ try{
   await page.screenshot({path:join(artifacts,'procedure-variants-desktop.png')});
   await page.setViewportSize({width:390,height:844});
   assert.ok(await panel.evaluate(e=>e.scrollWidth<=e.clientWidth+1));
+  await panel.getByText('2 source variants combined — review versions',{exact:true}).scrollIntoViewIfNeeded();
   await page.screenshot({path:join(artifacts,'procedure-variants-mobile.png')});
   await page.setViewportSize({width:1440,height:1000});
   assert.equal(calls.filter(c=>c.body?.action==='create').length,0);
