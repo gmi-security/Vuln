@@ -10,14 +10,16 @@ export type FixTicketStatus = {
 };
 export type TicketFixRow = {id:string;source?:string;cve?:string;cves?:string[];deviceCount:number;findingCount:number};
 export type FixTicket = {id:string;kind?:"single"|"group";companyId:string;tenantId:string;remediationId:string;vendorRemediationId?:string;
+  remediationVariants?:{remediationId:string}[];
   title:string;action:string;reference:string;link:string;vendorUrl:string;published:string;cves:string[];connectors?:string[];
   state:string;reviewState:string;ticketId:number|null;ticketUrl:string|null;closed:boolean};
-export type TicketScope = {id:string;coverage?:PatchCoverage;devices?:{cid:string;hostId:string;cve:string}[]};
+export type TicketScope = {id:string;coverage?:PatchCoverage;devices?:{cid:string;hostId:string;cve:string}[];remediationVariants?:{remediationId:string;deviceCves:{cid:string;hostId:string;cve:string}[]}[]};
 export type FixEvidence = {id:string;coverage:PatchCoverage;findingCount:number};
 const clean=(value:string)=>value.trim().replace(/\s+/g," ").toLowerCase();
 export function ticketMatchesFix(companyId:string,row:TicketFixRow,ticket:FixTicket) {
   if(ticket.companyId!==companyId || ticket.kind==="single")return false;
   if(row.source==="crowdstrike") {
+    if(ticket.remediationVariants)return ticket.remediationVariants.some(v=>row.id===`crowdstrike:${ticket.tenantId}:${v.remediationId.replace(/^manual:/,"")}`);
     const base=ticket.remediationId.replace(/^manual:/,"");
     if(row.id===`crowdstrike:${ticket.tenantId}:${base}`)return true;
     if(ticket.vendorRemediationId) {
@@ -43,6 +45,13 @@ function coverage(row:TicketFixRow,exact:FixTicket[],scopes:TicketScope[],eviden
     const matches=scopes.filter(scope=>exact.some(ticket=>ticket.id===scope.id));
     if(matches.length!==exact.length)return;
     const lookup=matches.map(scope=>{
+      if(scope.remediationVariants) {
+        const ticket=exact.find(t=>t.id===scope.id)!;
+        const variants=scope.remediationVariants.filter(v=>row.id===`crowdstrike:${ticket.tenantId}:${v.remediationId.replace(/^manual:/,"")}`);
+        if(!variants.length)throw Error("Missing source variant membership");
+        const pairs=new Set(variants.flatMap(v=>v.deviceCves).map(d=>JSON.stringify([d.cid,d.hostId,d.cve])));
+        return (cid:string,hostId:string,cve:string)=>pairs.has(JSON.stringify([cid,hostId,cve]));
+      }
       if(scope.coverage)return readPatchCoverage(scope.coverage).has;
       if(!Array.isArray(scope.devices))throw Error("Missing ticket membership");
       const set=new Set(scope.devices.map(d=>JSON.stringify([d.cid,d.hostId,d.cve])));

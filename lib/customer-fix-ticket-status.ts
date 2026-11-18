@@ -19,7 +19,7 @@ export async function withFixTicketStatus(db:Pick<Pool,"connect">,result:TopFixe
     // Limit records AND bytes before transferring metadata or scope to Node.
     const found=await client.query(`WITH candidates AS (
       SELECT updated_at,id,jsonb_build_object('id',id,'kind','group','companyId',packet->>'appCompanyId','tenantId',tenant_id,'remediationId',remediation_id,
-        'vendorRemediationId',packet->>'vendorRemediationId','title',COALESCE(packet->>'title',''),'action',COALESCE(packet->>'action',''),
+        'vendorRemediationId',packet->>'vendorRemediationId','remediationVariants',(SELECT jsonb_agg(jsonb_build_object('remediationId',v->>'remediationId')) FROM jsonb_array_elements(packet->'remediationVariants') v),'title',COALESCE(packet->>'title',''),'action',COALESCE(packet->>'action',''),
         'reference',COALESCE(packet->>'reference',''),'link',COALESCE(packet->>'link',''),'vendorUrl',COALESCE(packet->>'vendorUrl',''),
         'published',COALESCE(packet->>'published',''),'connectors',packet->'connectors','cves',cves,'state',state,'reviewState',review_state,
         'ticketId',ticket_id,'ticketUrl',ticket_url,'closed',closed) AS meta
@@ -42,7 +42,7 @@ export async function withFixTicketStatus(db:Pick<Pool,"connect">,result:TopFixe
     if(current.length && runId) {
       const ids=records.filter(t=>t.ticketId && !t.closed && current.some(row=>ticketMatchesFix(result.companyId,row,t))).map(t=>t.id);
       const savedScopes=await client.query(`WITH selected AS (
-        SELECT id,jsonb_build_object('id',id,'coverage',packet->'deviceCveCoverage','devices',packet->'deviceCves') AS scope
+        SELECT id,jsonb_build_object('id',id,'coverage',packet->'deviceCveCoverage','devices',packet->'deviceCves','remediationVariants',packet->'remediationVariants') AS scope
         FROM patch_group_ticket_requests WHERE id=ANY($1::uuid[]) AND packet->>'appCompanyId'=$2
       ) SELECT CASE WHEN sum(octet_length(scope::text)) OVER ()<=8388608 THEN scope END AS scope FROM selected`,[ids,result.companyId]);
       scopes=savedScopes.rows.filter(row=>row.scope).map(row=>row.scope);

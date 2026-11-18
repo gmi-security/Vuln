@@ -20,6 +20,14 @@ const ticket=(changes={})=>({id:'request-1',companyId:company,tenantId:cid,remed
  id:'request-1',cves,source:'stored-findings',connectors:['crowdstrike'],state:'created',reviewState:'approved',ticketId:101,ticketUrl:'https://tickets.example/101',closed:false,...changes});
 const evidence={id:actionId,coverage,findingCount:3};
 function status(tickets,scopes=[{id:'request-1',coverage}],current=evidence,r=row){return api.fixTicketStatus(company,r,tickets,scopes,current);}
+test('consolidated tickets report coverage only for devices in the matching source variant',()=>{
+ const variants=[{remediationId:variant,deviceCves:[{cid,hostId:'h1',cve:cves[0]}]},
+   {remediationId:'different-fix',deviceCves:[{cid,hostId:'h1',cve:cves[1]},{cid,hostId:'h2',cve:cves[0]}]}];
+ const result=status([ticket({remediationId:'manual:procedure:test',vendorRemediationId:undefined,remediationVariants:variants})],
+   [{id:'request-1',remediationVariants:variants,devices:variants.flatMap(v=>v.deviceCves)}]);
+ assert.equal(result.state,'partial');assert.equal(result.tickets[0].sameFix,true);
+ assert.deepEqual(result.coverage,{coveredDevices:0,remainingDevices:2,totalDevices:2});
+});
 
 test('open ticket coverage is exact device/CVE membership, not a Cartesian product',()=>{
  const result=status([ticket()]);assert.equal(result.state,'open');assert.deepEqual(result.coverage,{coveredDevices:2,remainingDevices:0,totalDevices:2});assert.equal(result.tickets[0].ticketId,101);

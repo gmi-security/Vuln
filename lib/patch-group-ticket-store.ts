@@ -6,6 +6,7 @@ import { customerFalconTenantIds } from "./reporting-tenant-scope";
 import { atlasFalconReviewPacket } from "./reporting-direct-sources";
 import { requiresConsolidationManualReview } from "./customer-consolidation-hold";
 import type { PatchConsolidation, PatchGroup } from "./patch-request";
+import { groupTicketsOverlap } from "./patch-coverage";
 import { automatedGroupTicketBody, type PatchGroupTicketSummary } from "./patch-group-ticket-types";
 import { cwId, cwRequest, findCWRequest, CWRequestError, parseRouting, ticketUrl, uploadPatchCsv, validateCWRouting, type ConnectWiseConnection, type CWRecord, type TicketRouting } from "./connectwise-client";
 
@@ -210,6 +211,14 @@ export async function createGroupTicket(id: string, value: unknown, actor: strin
       [saved.target,[baseRemediation,`manual:${baseRemediation}`],row.tenant_id,routing.companyId,row.scope_hash,id,legacyIds,
         packet.vendorRemediationId ? null : baseRemediation,JSON.stringify(action),!!packet.deviceCveCoverage,packet.hostScope])).rows[0];
     if (existing) throw new DashboardError(`This patch and device scope already has ${existing.ticket_id ? `ticket #${existing.ticket_id}` : "a ticket request in progress"}. Open its saved request below.`, 409);
+    const variants=await client.query(`WITH candidates AS (SELECT id,ticket_id,packet FROM patch_group_ticket_requests WHERE cw_target=$1 AND tenant_id=$2 AND company_id=$3
+      AND (packet->>'appCompanyId'=$4 OR packet->>'appCompanyId' IS NULL OR $4::text IS NULL) AND packet->'hostScope' ?| $5::text[]
+      AND (packet ? 'remediationVariants' OR $6::boolean) AND state IN ('creating','uncertain','created') AND closed=false AND id<>$7 LIMIT 101)
+      SELECT id,ticket_id,CASE WHEN sum(octet_length(packet::text)) OVER ()<=33554432 THEN packet END AS packet FROM candidates`,
+      [saved.target,row.tenant_id,routing.companyId,packet.appCompanyId??null,packet.hostScope,!!packet.remediationVariants,id]);
+    if(variants.rows.length>100 || variants.rows.some(v=>!v.packet))throw new DashboardError("Too many overlapping requests to verify safely. Review the existing tickets before sending.",409);
+    const overlap=variants.rows.find(v=>groupTicketsOverlap(packet,v.packet));
+    if(overlap)throw new DashboardError(`A source action and device scope already has ${overlap.ticket_id?`ticket #${overlap.ticket_id}`:"a ticket request in progress"}. Review that request before sending.`,409);
     await client.query(`UPDATE patch_group_ticket_requests SET state='creating',created_by=$2,cw_target=$3,cw_revision=$4,company_id=$5,routing=$6::jsonb,title=$7,body=$8,
       started_at=now(),updated_at=now(),last_error=NULL WHERE id=$1`, [id, actor, saved.target, saved.revision, routing.companyId, JSON.stringify(routing), body.title.trim(), body.body.trim()]);
     await client.query("INSERT INTO patch_group_ticket_audit(request_id,actor,action) VALUES($1,$2,'ticket.requested')", [id, actor]);

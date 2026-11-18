@@ -19,6 +19,14 @@ function Draft({entry,companyId,close}:{entry:Packet["groups"][number];companyId
     <h3 className="font-semibold">{entry.group.title}</h3>
     <p className="my-2 text-sm text-zinc-300">{entry.group.deviceCount.toLocaleString()} devices · {entry.group.findingCount.toLocaleString()} findings</p>
     <p className="whitespace-pre-wrap text-sm">{entry.group.action}</p>
+    {entry.group.remediationVariants && <details className="my-3 text-sm">
+      <summary className="cursor-pointer">{entry.group.remediationVariants.length} source variants combined — review versions</summary>
+      <p className="mt-2 text-zinc-300">Matching recorded instructions and advisory. Confirm applicability for each version. The host CSV keeps each device assigned to its source variant.</p>
+      <ul className="mt-2 space-y-3">{entry.group.remediationVariants.map(variant=><li key={variant.remediationId}>
+        <p className="break-words font-medium">{variant.reference} · {variant.deviceCount.toLocaleString()} devices</p>
+        <p className="whitespace-pre-wrap">{variant.action}</p>
+      </li>)}</ul>
+    </details>}
     <button className={`${styles.button} my-3`} onClick={()=>download(entry.group)}>Download host CSV</button>
     <details><summary className="cursor-pointer text-sm">Ticket contents</summary><pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap rounded-lg bg-black p-3 text-sm text-zinc-200">{entry.group.ticketBody}</pre></details>
     <Link className={`${styles.button} mt-3 inline-flex`} onClick={close} href={`/remediation?companyId=${encodeURIComponent(companyId)}&view=tickets`}>Review on Tickets page</Link>
