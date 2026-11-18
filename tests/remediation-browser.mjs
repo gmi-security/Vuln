@@ -231,7 +231,7 @@ try{
   pass('chart CVE uses the same panel; failed preparation saves no partial UI; CSV stays scoped and approval plus simulated ticket send require the Tickets page');
 
   await page.keyboard.press('Escape');emptyQueue=true;await page.getByRole('button',{name:'Prioritize',exact:true}).click();
-  const fixes=page.getByRole('region',{name:'Patching posture â€” top fixes',exact:true});
+  const fixes=page.getByRole('region',{name:'Patching posture — top fixes',exact:true});
   await fixes.getByText('Install the open vulnerability update',{exact:true}).waitFor();
   assert.match(await fixes.innerText(),/18/);
   assert.equal(calls.filter(c=>c.path==='top-fixes').at(-1).companyId,companies[0].id);
@@ -284,7 +284,7 @@ try{
   await page.waitForURL(/view=tickets/);await page.getByRole('button',{name:`View ${cve} details`}).first().click();await panel.getByText(`${companies[0].id}-device`,{exact:true}).waitFor();await page.keyboard.press('Escape');
   pass('Prioritize threat and Tickets CVE links share the flow; failed enrichment refresh keeps its last result');
 
-  delayDetail=true;await page.getByRole('button',{name:`View ${cve} details`}).first().click();await panel.getByText('Loading saved customer evidenceâ€¦').waitFor();
+  delayDetail=true;await page.getByRole('button',{name:`View ${cve} details`}).first().click();await panel.getByText('Loading saved customer evidence…').waitFor();
   await page.keyboard.press('Escape');await page.getByLabel('Customer',{exact:true}).selectOption(companies[1].id);
   await page.getByRole('button',{name:`View ${cve} details`}).first().click();await panel.getByText(`${companies[1].id}-device`,{exact:true}).waitFor();
   releaseDetail();await delay(150);assert.doesNotMatch(await panel.innerText(),/CO-TEST-A-device/);
