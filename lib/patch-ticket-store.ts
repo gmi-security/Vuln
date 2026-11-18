@@ -203,10 +203,10 @@ export async function activeTicketedPairs(): Promise<Set<string>> {
       try { const [cid, hostId] = JSON.parse(deviceKey); if (cid && hostId) pairs.add(JSON.stringify([cid, hostId, row.cve])); } catch { /* skip malformed scope entries */ }
     }
   }
-  const groupRows = await db.query(`SELECT packet->'deviceCves' AS device_cves,packet->'deviceCveCoverage' AS coverage,remediation_id FROM patch_group_ticket_requests WHERE state IN ('creating','uncertain','created') AND closed=false`);
+  const groupRows = await db.query(`SELECT packet->'deviceCves' AS device_cves,packet->'deviceCveCoverage' AS coverage,packet->'remediationVariants' AS variants,remediation_id FROM patch_group_ticket_requests WHERE state IN ('creating','uncertain','created') AND closed=false`);
   for (const row of groupRows.rows) {
-    pairs.addCoverage(row.coverage,row.remediation_id);
-    if (!row.coverage) for (const entry of (row.device_cves ?? []) as { cid?: string; hostId?: string; cve?: string }[]) {
+    if(row.variants)pairs.addVariants(row.variants);else pairs.addCoverage(row.coverage,row.remediation_id);
+    if (!row.coverage && !row.variants) for (const entry of (row.device_cves ?? []) as { cid?: string; hostId?: string; cve?: string }[]) {
       if (entry?.cid && entry?.hostId && entry?.cve) pairs.add(JSON.stringify([entry.cid, entry.hostId, entry.cve]));
     }
   }

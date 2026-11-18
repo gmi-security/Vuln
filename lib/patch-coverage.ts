@@ -1,4 +1,5 @@
 import { patchRecommendationIds, recommendedRemediationIds, remediationVariantId, type PatchFinding, type Remediation } from "./patch-recommendations";
+import type { PatchGroup, RemediationVariant } from "./patch-request";
 // Lossless device/CVE membership for large remediation tickets. A bit at index
 // n means that host has cves[n]; it never implies a hosts-by-CVEs cross product.
 export type PatchCoverage = { cves: string[]; hosts: { cid: string; hostId: string; bits: string }[] };
@@ -31,13 +32,44 @@ export function readPatchCoverage(value: PatchCoverage) {
 // Legacy entries keep their existing whole device/CVE meaning. New compact
 // tickets cover one exact action; they must not hide another required fix.
 export class TicketedPairs extends Set<string> {
+  private variants=new Map<string,Set<string>>();
+  addVariants(variants:RemediationVariant[]|undefined|null) {
+    if(variants==null)return;
+    if(!Array.isArray(variants) || !variants.length)throw Error("Invalid ticket source variants.");
+    for(const variant of variants) {
+      if(!variant.remediationId || !Array.isArray(variant.deviceCves) || !variant.deviceCves.length)throw Error("Invalid ticket source variant scope.");
+      const action=variant.remediationId.replace(/^manual:/,""),pairs=this.variants.get(action)??new Set<string>();
+      for(const d of variant.deviceCves) {
+        if(!d.cid || !d.hostId || !/^CVE-\d{4}-\d{4,19}$/.test(d.cve))throw Error("Invalid ticket source variant device.");
+        pairs.add(JSON.stringify([d.cid,d.hostId,d.cve]));
+      }
+      this.variants.set(action,pairs);
+    }
+  }
   private coverage: {action:string;data:ReturnType<typeof readPatchCoverage>}[]=[];
   addCoverage(value: PatchCoverage | undefined | null, action?:string) {
     if(value){if(!action)throw new Error("Missing ticket remediation identity.");this.coverage.push({action:action.replace(/^manual:/,""),data:readPatchCoverage(value)});}
   }
   hasAction(cid:string,hostId:string,cve:string,action:string) {
-    return this.has(JSON.stringify([cid,hostId,cve])) || this.coverage.some(c=>c.action===action && c.data.has(cid,hostId,cve));
+    const pair=JSON.stringify([cid,hostId,cve]);
+    return this.has(pair) || !!this.variants.get(action)?.has(pair) || this.coverage.some(c=>c.action===action && c.data.has(cid,hostId,cve));
   }
+}
+// Compare exact source actions when either packet contains several procedures' source variants.
+export function groupTicketsOverlap(a:PatchGroup,b:PatchGroup):boolean {
+  if(a.tenantId!==b.tenantId || (a.appCompanyId && b.appCompanyId && a.appCompanyId!==b.appCompanyId))return false;
+  const composite=a.remediationVariants ? a:b, other=composite===a ? b:a;
+  if(!composite.remediationVariants)return false;
+  const pairs=new TicketedPairs();
+  if(other.remediationVariants)pairs.addVariants(other.remediationVariants);
+  else {
+    const base=other.remediationId.replace(/^manual:/,"");
+    const action=!other.vendorRemediationId && /:[a-f0-9]{64}$/.test(base) ? base:
+      remediationVariantId({...other,id:other.vendorRemediationId??base,recommendationType:"recommended"});
+    if(other.deviceCveCoverage)pairs.addCoverage(other.deviceCveCoverage,action);
+    else pairs.addVariants([{...other,remediationId:action}]);
+  }
+  return composite.remediationVariants.some(v=>v.deviceCves.some(d=>pairs.hasAction(d.cid,d.hostId,d.cve,v.remediationId.replace(/^manual:/,""))));
 }
 export function ticketedAction(pairs:Set<string>,row:PatchFinding,remedy:Remediation) {
   return typeof (pairs as TicketedPairs).hasAction === "function" ? (pairs as TicketedPairs).hasAction(row.cid,row.hostId,row.cve,remediationVariantId(remedy)) : pairs.has(JSON.stringify([row.cid,row.hostId,row.cve]));

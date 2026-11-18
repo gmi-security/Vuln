@@ -33,7 +33,7 @@ const artifacts=await mkdtemp(join(tmpdir(),'vuln2-browser-'));
 const cve='CVE-2026-1234',when='2026-10-09T12:00:00Z',id='00000000-0000-4000-8000-000000000001';
 const companies=[{id:'CO-TEST-A',name:'Fixture A'},{id:'CO-TEST-B',name:'Fixture B'}];
 const summary=(companyId)=>({id,cves:[cve],hostCount:2,findingCount:2,remediationTitle:'Install recommended patch',companyName:companyId===companies[0].id?'Fixture A':'Fixture B',source:'stored-findings',state:'prepared',reviewState:'pending',preparedAt:when,updatedAt:when,worstSeverity:'High',maxRisk:72,closed:false,attachmentState:'not_started',slaEscalations:0,createdBy:null});
-const group=(companyId)=>({manualOnly:true,source:'stored-findings',appCompanyId:companyId,companyName:companyId===companies[0].id?'Fixture A':'Fixture B',connectors:['defender'],title:'Install recommended patch',action:'Install recommended update',tenantId:companyId,remediationId:'manual:fixture',cves:[cve],deviceCount:2,findingCount:2,hostScope:[],deviceCves:[],maxRisk:72,worstSeverity:'High',label:cve,csv:`cve,hostname,cvss,remediation\r\n${cve},${companyId}-device,8.1,Install recommended update\r\n`,ticketTitle:`${companyId}: ${cve}`,ticketBody:`Customer: ${companyId}\nCVE: ${cve}\nRecommended remediation: Install recommended update\nCVSS: 8.1\nSee attached CSV for devices.`});
+const group=(companyId)=>({manualOnly:true,source:'stored-findings',appCompanyId:companyId,companyName:companyId===companies[0].id?'Fixture A':'Fixture B',connectors:['defender'],title:'Install recommended patch',action:'Install recommended update',remediationVariants:['22h2','21h1'].map(version=>({remediationId:version,reference:'cpe:/o:microsoft:windows_10:'+version+'::x64',action:'Apply the shared vendor procedure',deviceCount:1})),tenantId:companyId,remediationId:'manual:fixture',cves:[cve],deviceCount:2,findingCount:2,hostScope:[],deviceCves:[],maxRisk:72,worstSeverity:'High',label:cve,csv:`cve,hostname,cvss,remediation\r\n${cve},${companyId}-device,8.1,Install recommended update\r\n`,ticketTitle:`${companyId}: ${cve}`,ticketBody:`Customer: ${companyId}\nCVE: ${cve}\nRecommended remediation: Install recommended update\nCVSS: 8.1\nSee attached CSV for devices.`});
 const detail=companyId=>({companyId,cve,companyName:companyId===companies[0].id?'Fixture A':'Fixture B',observedAt:when,sourceObservations:{platform:when,crowdstrike:null},findingCount:2,deviceCount:2,hosts:[{host:`${companyId}-device`,source:'defender',severity:'High',cvss:8.1}],enrichment:{cvss_score:8.1,epss_probability:0.9,cisa_kev:true,active_exploitation:true,active_exploitation_source:'MISP',active_exploitation_detail:'Synthetic retained signal',updated_at:when},tickets:[],moreTickets:false});
 let approved=false,created=false,failPrepare=false,failIntel=false,delayDetail=false,releaseDetail;
 let ticketStatusMode='none';
@@ -203,6 +203,13 @@ try{
   assert.equal(await panel.getByRole('button',{name:'Download host CSV'}).count(),0);
   failPrepare=false;await panel.getByRole('button',{name:'Prepare patch request',exact:true}).click();
   await panel.getByRole('button',{name:'Download host CSV'}).waitFor();
+  await panel.getByText('2 source variants combined — review versions',{exact:true}).click();
+  for(const version of ['22h2','21h1'])await panel.getByText(`cpe:/o:microsoft:windows_10:${version}::x64 · 1 devices`,{exact:true}).waitFor();
+  await page.screenshot({path:join(artifacts,'procedure-variants-desktop.png')});
+  await page.setViewportSize({width:390,height:844});
+  assert.ok(await panel.evaluate(e=>e.scrollWidth<=e.clientWidth+1));
+  await page.screenshot({path:join(artifacts,'procedure-variants-mobile.png')});
+  await page.setViewportSize({width:1440,height:1000});
   assert.equal(calls.filter(c=>c.body?.action==='create').length,0);
   const downloadPromise=page.waitForEvent('download');await panel.getByRole('button',{name:'Download host CSV'}).click();
   const download=await downloadPromise;let csv='';for await(const chunk of await download.createReadStream())csv+=chunk;
@@ -224,7 +231,7 @@ try{
   pass('chart CVE uses the same panel; failed preparation saves no partial UI; CSV stays scoped and approval plus simulated ticket send require the Tickets page');
 
   await page.keyboard.press('Escape');emptyQueue=true;await page.getByRole('button',{name:'Prioritize',exact:true}).click();
-  const fixes=page.getByRole('region',{name:'Patching posture — top fixes',exact:true});
+  const fixes=page.getByRole('region',{name:'Patching posture â€” top fixes',exact:true});
   await fixes.getByText('Install the open vulnerability update',{exact:true}).waitFor();
   assert.match(await fixes.innerText(),/18/);
   assert.equal(calls.filter(c=>c.path==='top-fixes').at(-1).companyId,companies[0].id);
@@ -277,7 +284,7 @@ try{
   await page.waitForURL(/view=tickets/);await page.getByRole('button',{name:`View ${cve} details`}).first().click();await panel.getByText(`${companies[0].id}-device`,{exact:true}).waitFor();await page.keyboard.press('Escape');
   pass('Prioritize threat and Tickets CVE links share the flow; failed enrichment refresh keeps its last result');
 
-  delayDetail=true;await page.getByRole('button',{name:`View ${cve} details`}).first().click();await panel.getByText('Loading saved customer evidence…').waitFor();
+  delayDetail=true;await page.getByRole('button',{name:`View ${cve} details`}).first().click();await panel.getByText('Loading saved customer evidenceâ€¦').waitFor();
   await page.keyboard.press('Escape');await page.getByLabel('Customer',{exact:true}).selectOption(companies[1].id);
   await page.getByRole('button',{name:`View ${cve} details`}).first().click();await panel.getByText(`${companies[1].id}-device`,{exact:true}).waitFor();
   releaseDetail();await delay(150);assert.doesNotMatch(await panel.innerText(),/CO-TEST-A-device/);

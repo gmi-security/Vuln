@@ -64,6 +64,8 @@ export function parseVerifyInput(value: unknown): { source: "crowdstrike"; ticke
 }
 
 export type PatchGroup = {
+  remediationVariants?: RemediationVariant[];
+  sourceFindingIds?: string[];
   queryScope?: QueryScopeProof;
   storedSpotlightScope?: StoredSpotlightScopeProof;
   manualOnly?: boolean;
@@ -85,6 +87,7 @@ export type PatchGroup = {
   maxRisk: number;
   label: string; ticketTitle: string; ticketBody: string;
 };
+export type RemediationVariant = Pick<PatchGroup,"remediationId"|"vendorRemediationId"|"title"|"action"|"reference"|"vendorUrl"|"link"|"published"|"deviceCves"|"deviceCount"|"findingCount">;
 export type PatchConsolidation = {
   appCompanyId?: string; queryScope?: QueryScopeProof;
   cves: string[]; region: string; collectedAt: string; totalDevices: number; totalFindings: number;

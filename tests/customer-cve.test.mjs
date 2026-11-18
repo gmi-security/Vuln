@@ -31,6 +31,50 @@ const cs=(changes={})=>({id:'cs1',cid:'cid-A',hostId:'device-1',hostname:'host-o
   remediations:[{id:'r1',title:'Recommended patch',action:'Install recommended update',recommendationType:'recommended',reference:'KB1',vendorUrl:'',link:'',published:''}],...changes});
 const model=await loadModule('lib/customer-cve-model.ts',{'./store':{getCompany:()=>company}});
 
+const windows=(version,changes={})=>cs({id:`finding-${version}`,hostId:`device-${version}`,hostname:`host-${version}`,os:`Windows 10 ${version}`,
+  remediations:[{...cs().remediations[0],id:`remedy-${version}`,title:'Update Microsoft Windows 10',action:'Complete the remediation steps required by the vendor advisory for Windows 10',
+    reference:`cpe:/o:microsoft:windows_10:${version}::x64`,vendorUrl:'https://vendor.example/advisory',...changes}]});
+test('CVE drafts combine matching product procedures while retaining version-specific scope and instructions',()=>{
+  const rows=[windows('22h2'),windows('21h1'),windows('21h2')];
+  const groups=model.buildCustomerCveGroups(company,cve,[],rows,new Set(),when);
+  assert.equal(groups.length,1,'matching recorded procedures should produce one review draft');
+  const g=groups[0];assert.equal(g.deviceCount,3);assert.equal(g.findingCount,3);
+  assert.equal(g.remediationVariants.length,3);assert.equal(g.deviceCves.length,3);
+  for(const version of ['22h2','21h1','21h2']) {
+    assert.match(g.csv,new RegExp(`cpe:/o:microsoft:windows_10:${version}`));
+    assert.match(g.ticketBody,new RegExp(`cpe:/o:microsoft:windows_10:${version}`));
+    const variant=g.remediationVariants.find(v=>v.vendorRemediationId===`remedy-${version}`);
+    assert.deepEqual(variant.deviceCves,[{cid:'cid-A',hostId:`device-${version}`,cve}]);
+  }
+  assert.doesNotMatch(g.ticketBody,/host-22h2/,'hostnames stay in the CSV');
+  assert.equal(model.buildCustomerCveGroups(company,cve,[],rows.reverse(),new Set(),when)[0].remediationId,g.remediationId);
+});
+test('CVE consolidation requires matching full procedures, product and advisory evidence',()=>{
+  for(const change of [{action:'Install a different target version'},{vendorUrl:'https://vendor.example/other'},
+    {reference:'cpe:/o:microsoft:windows_11:22h2::x64'},{published:'2026-11-18'},
+    {reference:'KB999'},{vendorUrl:''}]) {
+    assert.equal(model.buildCustomerCveGroups(company,cve,[],[windows('22h2'),windows('21h1',change)],new Set(),when).length,2);
+  }
+  const other=windows('21h1');other.cid='other-tenant';
+  assert.equal(model.buildCustomerCveGroups(company,cve,[],[windows('22h2'),other],new Set(),when).length,2);
+});
+test('consolidated ticket coverage and send overlap retain exact source action membership',async()=>{
+  const {TicketedPairs,groupTicketsOverlap}=await loadModule('lib/patch-coverage.ts');
+  const rows=[windows('22h2'),windows('21h1')];
+  const [group]=model.buildCustomerCveGroups(company,cve,[],rows,new Set(),when);
+  const pairs=new TicketedPairs();pairs.addVariants(group.remediationVariants);
+  assert.throws(()=>model.buildCustomerCveGroups(company,cve,[],rows,pairs,when),/No unticketed/);
+  const different=windows('22h2',{action:'Perform another required fix'});
+  assert.equal(model.buildCustomerCveGroups(company,cve,[],[different],pairs,when).length,1);
+  const [single]=model.buildCustomerCveGroups(company,cve,[],[rows[0]],new Set(),when);
+  assert.equal(groupTicketsOverlap(group,single),true);assert.equal(groupTicketsOverlap(single,group),true);
+  const legacy={...single,remediationId:`manual:${single.vendorRemediationId}`,vendorRemediationId:undefined,appCompanyId:undefined};
+  assert.equal(groupTicketsOverlap(group,legacy),true,'legacy source identity and absent app scope must not bypass destination-scoped overlap');
+  assert.equal(groupTicketsOverlap(group,model.buildCustomerCveGroups(company,cve,[],[different],new Set(),when)[0]),false);
+  assert.equal(groupTicketsOverlap(group,{...single,tenantId:'other'}),false);
+  assert.equal(groupTicketsOverlap(group,{...single,deviceCves:[{cid:'cid-A',hostId:'unrelated',cve}]}),false);
+});
+
 test('CVE input canonicalization and exact customer, state and source filtering',()=>{
   assert.equal(model.customerCve('cve-2026-1234'),cve);
   assert.throws(()=>model.customerCve('CVE-1'),/valid CVE/);
@@ -89,6 +133,21 @@ async function service({records=[],generation=null,findings=[finding()],tickets=
     './persist':{applicationDatabase:()=>db},'./patch-ticket-store':{patchTicketDatabase:async()=>db},
   });return{api,calls,released:()=>released};
 }
+test('preparing a consolidated draft supersedes only fully covered pending components with an audit trail',async()=>{
+  const [group]=model.buildCustomerCveGroups(company,cve,[],[windows('22h2'),windows('21h1')],new Set(),when);
+  const {api,calls}=await service();
+  await api.persistManualCustomerGroups(company.id,[group],'analyst');
+  const replacements=calls.filter(c=>c.sql.includes('group.superseded.procedure'));
+  assert.equal(replacements.length,2,'each covered source variant must replace its old pending draft');
+  for(const {sql,params} of replacements){
+    assert.match(sql,/state='prepared'/);assert.match(sql,/review_state='pending'/);
+    assert.match(sql,/ticket_id IS NULL/);assert.match(sql,/<@/);
+    assert.equal(params[0],company.id);assert.equal(params[1],group.tenantId);
+    assert.equal(JSON.parse(params[4]).length,1);
+  }
+  assert.ok(calls.findIndex(c=>c.sql==='BEGIN')<calls.findIndex(c=>c.sql.includes('group.superseded.procedure')));
+  assert.equal(calls.at(-1).sql,'COMMIT');
+});
 
 const defenderRun='00000000-0000-4000-8000-000000000001';
 const publishedDefenderFinding=(id,deviceId)=>finding({id,asset:deviceId,remediation:`windows_11 · installed-${id} · Security Updates · 5127648`,
