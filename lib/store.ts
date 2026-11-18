@@ -3705,7 +3705,9 @@ export async function enrichThreatIntel(): Promise<{
   const allCves = new Set<string>();
   const missingCvss: string[] = [];
   let realCveFindings = 0;
+  let visited = 0;
   for (const f of s.findings.values()) {
+    if (++visited % 500 === 0) await new Promise<void>(resolve => setImmediate(resolve));
     const ec = effectiveCves(f);
     if (!ec.length) continue;
     realCveFindings += 1;
@@ -3752,6 +3754,8 @@ export async function enrichThreatIntel(): Promise<{
     if (f.kev !== beforeKev || f.epss !== beforeEpss || f.realRisk !== beforeRisk) {
       findingsUpdated += 1;
     }
+    // Keep health checks, saves and source imports moving during a full-store rescore.
+    if (findingsScanned % 500 === 0) await new Promise<void>(resolve => setImmediate(resolve));
   }
   await flushNow();
   return {
