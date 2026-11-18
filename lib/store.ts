@@ -1,6 +1,6 @@
 import { createCommittedCache } from "./committed-cache.mjs";
-import { connectorSyncStart } from "./connector-sync-schedule";
-import { claimDailyJob, recordJobRun } from "./background-job-runs";
+import { acquireScheduledConnectorBatch, runConnectorSyncJobs, ConnectorSyncDeferredError, type ScheduledConnectorBatch, type ConnectorSyncJob, type SyncAllEntry } from "./connector-sync-batch";
+export type { SyncAllEntry } from "./connector-sync-batch";
 import { buildExecutiveReport, type ExecReport } from "./executive-report";
 import { cachedTopFixes } from "./reporting-top-fixes";
 import { loadReviewedScannerRoutes } from "@/lib/customer-scanner-routing-server";
@@ -11,7 +11,6 @@ import { nessusEvidenceScope } from "@/lib/nessus-evidence-scope";
 import { loadReviewedSpotlightRoutes } from "@/lib/customer-spotlight-routing-server";
 import { DEMO_ASSETS, DEMO_PORTS, VULN_CATALOG } from "@/lib/catalog";
 import { normalizeCompanyName, findNearDuplicateCompanyName } from "@/lib/company-name";
-import { connectorImportWarnings } from "@/lib/connector-import-result";
 import { loadReviewedInventoryRoutes } from "@/lib/customer-inventory-routing-server";
 import type { InventoryRoute } from "@/lib/customer-inventory-routing";
 import { getDemoProfile, isPlanned } from "@/lib/connectors";
@@ -1331,17 +1330,20 @@ async function schedulerTick(): Promise<void> {
 
   if (sched.autoSyncEnabled) await resumeInterruptedSpotlightSync();
 
-  // Nightly Arizona start, claimed durably before launching provider work.
+  // Resume the saved queue first; only a fresh batch needs the nightly Arizona window.
   if (sched.autoSyncEnabled && !syncAllStatus().running) {
-    const start = connectorSyncStart(now);
-    const last = s.meta.lastAutoSyncAt ?? 0;
-    if (start !== null && last < start && await claimDailyJob("connector-sync-all")) {
-      s.meta.lastAutoSyncAt = now;
-      markDirty({});
-      const r = startSyncAll({ scheduled: true });
-      if (r.started) {
-        console.log("[scheduler] nightly Arizona connector sync started");
-      }
+    const batch = await acquireScheduledConnectorBatch();
+    if (batch) {
+      let transferred = false;
+      try {
+        const startedAt = Date.parse(batch.startedAt);
+        if (s.meta.lastAutoSyncAt !== startedAt) {
+          s.meta.lastAutoSyncAt = startedAt;
+          markDirty({});
+        }
+        transferred = startSyncAll({ scheduled: true, batch }).started;
+        if (transferred) console.log("[scheduler] nightly Arizona connector batch started/resumed", batch.startedAt);
+      } finally { if (!transferred) await batch.release(); }
     }
   }
 
@@ -5775,23 +5777,11 @@ function buildDomainsByCompany(s: StoreShape): Map<string, string[]> {
   return out;
 }
 
-export type SyncAllEntry = {
-  connector: string;
-  configured: boolean;
-  ok: boolean;
-  result?: unknown;
-  error?: string;
-};
-
 // One-shot: pull results from every *configured* connector, so an analyst can
 // bring the whole console up to date with a single click. Unconfigured
 // connectors are reported (configured:false) rather than errored.
-export async function syncAllConnectors(options: { scheduled?: boolean } = {}): Promise<SyncAllEntry[]> {
-  const jobs: {
-    connector: string;
-    ready: boolean;
-    run: () => Promise<any>;
-  }[] = [
+export async function syncAllConnectors(options: { scheduled?: boolean; batch?: ScheduledConnectorBatch } = {}): Promise<SyncAllEntry[]> {
+  const jobs: ConnectorSyncJob[] = [
     { connector: "Nessus", ready: Boolean(nessusConfig()), run: importFromNessus },
     // CrowdStrike: fire background jobs (avoids DO 120s gateway timeout).
     // Results appear on the next manual sync or page refresh.
@@ -5807,14 +5797,17 @@ export async function syncAllConnectors(options: { scheduled?: boolean } = {}): 
     {
       connector: "CrowdStrike Spotlight",
       ready: falconConfigs().length > 0,
-      run: async () => {
-        const r = await startCsSpotlightSync();
+      getScope: async () => spotlightSelectionScope(await resolveSpotlightSelection()),
+      recover: recoverScheduledSpotlightStart,
+      run: async scope => {
+        if (options.batch && csSpotlightSync().running) throw new ConnectorSyncDeferredError("Spotlight import is in progress; scheduled start will retry after it finishes.");
+        const r = await startCsSpotlightSync(undefined, undefined, !!options.batch, scope);
         if (!r.started) return { error: r.error ?? "Could not start sync." };
         return { message: "Sync started in background." };
       },
     },
     { connector: "Defender", ready: process.env.DATABASE_URL ? (await defenderStore().list().catch(() => [])).length > 0 : false, run: () => importFromDefender(options) },
-    { connector: "Tidal", ready: Boolean(tidalConfig()), run: importFromTidal },
+    { connector: "Tidal", ready: Boolean(tidalConfig()), run: () => importFromTidal() },
     {
       connector: "ConnectWise Automate",
       ready: Boolean(automateConfig()),
@@ -5833,47 +5826,7 @@ export async function syncAllConnectors(options: { scheduled?: boolean } = {}): 
     { connector: "Vulners Bridge", ready: Boolean(vulnersBridgeConfig()), run: importFromVulnersBridge },
   ];
 
-  // Stagger each connector's START, not just rely on the loop's natural
-  // sequencing: CrowdStrike Devices, CrowdStrike Spotlight, and ConnectWise
-  // Automate are each fire-and-forget background jobs (their run() returns
-  // almost instantly once started, to avoid the DO 120s gateway timeout --
-  // see the comment below), so without a deliberate gap the loop would
-  // launch all three in the same instant and they'd run concurrently,
-  // hammering CrowdStrike's and Automate's APIs and this server's own CPU
-  // at once. A fixed delay between starts (rather than waiting for each to
-  // fully finish) avoids that pile-up without blocking the rest of the
-  // pipeline behind Spotlight specifically, whose own import is
-  // deliberately resumable/checkpointed because a full sync can
-  // legitimately run for hours.
-  const SYNC_STAGGER_MS = 25 * 60_000;
-  const out: SyncAllEntry[] = [];
-  let started = 0;
-  for (const job of jobs) {
-    if (!job.ready) {
-      out.push({ connector: job.connector, configured: false, ok: false });
-      continue;
-    }
-    if (started > 0) await new Promise((resolve) => setTimeout(resolve, SYNC_STAGGER_MS));
-    started += 1;
-    try {
-      const r = await job.run();
-      if (r && typeof r === "object" && "error" in r) {
-        out.push({ connector: job.connector, configured: true, ok: false, error: (r as any).error });
-      } else {
-        const warnings = connectorImportWarnings(r);
-        out.push({ connector: job.connector, configured: true, ok: warnings.length === 0, result: r,
-          ...(warnings.length ? { error: `Import needs attention: ${warnings.join("; ")}. Successful results were retained.` } : {}) });
-      }
-    } catch (err) {
-      out.push({
-        connector: job.connector,
-        configured: true,
-        ok: false,
-        error: err instanceof Error ? err.message : "sync failed",
-      });
-    }
-  }
-  return out;
+  return runConnectorSyncJobs(jobs, options.batch);
 }
 
 export type OsintPreview = {
@@ -6631,6 +6584,26 @@ async function resolveSpotlightSelection(companyId?: string): Promise<SpotlightT
   const demos = demoCompanyIds(store());
   return selectReviewedSpotlightTenant(falconConfigs(), companies.filter(c => !demos.has(c.id)), routes, companyId);
 }
+
+function spotlightSelectionScope(selection: SpotlightTenantSelection): string {
+  return JSON.stringify([selection.companyId, selection.tenantKey, selection.config.sourceRef ?? selection.config.label,
+    selection.config.clientId, selection.config.baseUrl, selection.reviewedScope?.bindingKey ?? null]);
+}
+
+async function recoverScheduledSpotlightStart(startedAt: number, expectedScope?: string): Promise<{ message: string } | { error: string }> {
+  if (csSpotlightSync().running) throw new ConnectorSyncDeferredError("Spotlight import is in progress; queued recovery will recheck its durable outcome.");
+  const selection = await resolveSpotlightSelection();
+  if (expectedScope !== undefined && spotlightSelectionScope(selection) !== expectedScope)
+    return { error: "Spotlight customer scope changed; automatic recovery withheld." };
+  const saved = await getLatestSpotlightRunState(selection.tenantKey);
+  if (saved?.status !== "running" && saved?.finishedAt && Date.parse(saved.finishedAt) >= startedAt) {
+    return saved.status === "completed" ? { message: "Spotlight import already completed." } :
+      { error: "Spotlight already failed during this batch; retry manually or on the next nightly run." };
+  }
+  const launch = await startCsSpotlightSync(selection.companyId, saved?.status === "running" ? saved.id : undefined, true, expectedScope);
+  return launch.started ? { message: "Spotlight start recovered in background." } :
+    { error: launch.error ?? "Could not recover Spotlight start." };
+}
 // Continue the already-started nightly job after a restart, without launching
 // a fresh daytime batch or automatically retrying provider failures.
 async function resumeInterruptedSpotlightSync(): Promise<void> {
@@ -6646,29 +6619,36 @@ async function resumeInterruptedSpotlightSync(): Promise<void> {
   else console.error("[spotlight] automatic resume withheld:", launch.error);
 }
 
-export async function startCsSpotlightSync(companyId?: string, resumeRunId?: string): Promise<{ started: boolean; error?: string }> {
+export async function startCsSpotlightSync(companyId?: string, resumeRunId?: string, waitForCheckpoint = false, expectedScope?: string): Promise<{ started: boolean; error?: string }> {
   let selection: SpotlightTenantSelection;
   try {
     selection = await resolveSpotlightSelection(companyId);
   } catch (error) {
     return { started: false, error: error instanceof Error ? error.message : "CrowdStrike tenant selection failed." };
   }
+  if (expectedScope !== undefined && spotlightSelectionScope(selection) !== expectedScope)
+    return { started: false, error: "Spotlight customer scope changed; automatic start withheld." };
   if (csSpotlightSync().running) return { started: false, error: "Spotlight sync already running." };
   syncJobGlobal.__vulnCsSpotlightSync = { running: true, phase: "Starting", tenant: selection.config.label,
     fetched: 0, stored: 0, startedAt: Date.now(), finishedAt: null, result: null, error: null };
+  let acknowledge!: (result: { started: boolean; error?: string }) => void;
+  const checkpointReady = new Promise<{ started: boolean; error?: string }>(resolve => { acknowledge = resolve; });
   void (async () => {
     try {
-      const r = await importFromCrowdstrikeSpotlight(selection, resumeRunId);
+      const r = await importFromCrowdstrikeSpotlight(selection, resumeRunId, () => acknowledge({ started: true }));
       if ("error" in r) {
+        acknowledge({ started: false, error: r.error });
         syncJobGlobal.__vulnCsSpotlightSync = { ...csSpotlightSync(), running: false, phase: "Error", error: r.error, finishedAt: Date.now() };
       } else {
+        acknowledge({ started: true });
         syncJobGlobal.__vulnCsSpotlightSync = { ...csSpotlightSync(), running: false, phase: "Done", result: r, finishedAt: Date.now() };
       }
     } catch (err) {
+      acknowledge({ started: false, error: err instanceof Error ? err.message : "Sync failed." });
       syncJobGlobal.__vulnCsSpotlightSync = { ...csSpotlightSync(), running: false, phase: "Error", error: err instanceof Error ? err.message : "Sync failed.", finishedAt: Date.now() };
     }
   })();
-  return { started: true };
+  return waitForCheckpoint ? checkpointReady : { started: true };
 }
 
 // --- Background "sync all" job -----------------------------------------------
@@ -6699,7 +6679,7 @@ export function syncAllStatus(): SyncAllStatus {
 }
 
 // Kick off the background sync-all. Returns immediately; poll syncAllStatus().
-export function startSyncAll(options: { scheduled?: boolean } = {}): { started: boolean; error?: string } {
+export function startSyncAll(options: { scheduled?: boolean; batch?: ScheduledConnectorBatch } = {}): { started: boolean; error?: string } {
   if (syncAllStatus().running) return { started: false, error: "A sync-all is already running." };
   syncJobGlobal.__vulnSyncAll = {
     running: true,
@@ -6728,19 +6708,13 @@ export function startSyncAll(options: { scheduled?: boolean } = {}): { started: 
       syncJobGlobal.__vulnSyncAll = {
         ...syncAllStatus(),
         running: false,
-        error: err instanceof Error ? err.message : "Sync-all failed.",
-        finishedAt: Date.now(),
+        error: err instanceof ConnectorSyncDeferredError ? null : err instanceof Error ? err.message : "Sync-all failed.",
+        finishedAt: err instanceof ConnectorSyncDeferredError ? null : Date.now(),
       };
-    }
+      if (options.batch) return; // The durable queue is unfinished, so completion hooks must wait.
+    } finally { await options.batch?.release(); }
     // Post-sync hooks: metrics history snapshot + alert evaluation. The job
     // status above is already finalized, so failures here can't break it.
-    if (options.scheduled) {
-      const status = syncAllStatus();
-      const failed = !!status.error || !!status.results?.some(result => result.configured && !result.ok);
-      await recordJobRun("connector-sync-all", failed ? "failed" : "succeeded", undefined,
-        failed ? "One or more connector starts/imports failed; inspect connector sync status." : undefined)
-        .catch(() => {});
-    }
     try {
       await runPostSyncTasks(syncAllStatus().results ?? []);
     } catch (err) {
@@ -6994,10 +6968,13 @@ export type SpotlightImportResult = {
 export async function importFromCrowdstrikeSpotlight(
   selected?: SpotlightTenantSelection,
   resumeRunId?: string,
+  onCheckpoint?: () => void,
 ): Promise<SpotlightImportResult | { error: string }> {
   let selection: SpotlightTenantSelection;
   try {
     selection = await resolveSpotlightSelection(selected?.companyId);
+    if (selected && spotlightSelectionScope(selection) !== spotlightSelectionScope(selected))
+      throw new Error("Spotlight customer scope changed before import; automatic start withheld.");
   } catch (error) {
     return { error: error instanceof Error ? error.message : "CrowdStrike tenant selection failed." };
   }
@@ -7008,7 +6985,11 @@ export async function importFromCrowdstrikeSpotlight(
     const result = await runPartitionedSpotlightImport(selection, SPOTLIGHT_DISCOVERY_PARTITIONS, {
       acquire: acquireSpotlightWorkerLock,
       createSession: createSpotlightSession,
-      begin: (tenantKey, keys, scope) => beginOrResumePartitionedSpotlightRun(tenantKey, keys, scope, resumeRunId),
+      begin: async (tenantKey, keys, scope) => {
+        const checkpoint = await beginOrResumePartitionedSpotlightRun(tenantKey, keys, scope, resumeRunId);
+        onCheckpoint?.();
+        return checkpoint;
+      },
       getRunState: getPartitionedRunCheckpoint,
       savePartitionPage,
       resetPartition: resetPartitionCursor,
