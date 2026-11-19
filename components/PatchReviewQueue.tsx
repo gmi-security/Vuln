@@ -79,14 +79,14 @@ export default function PatchReviewQueue({ companyId, sla }: { companyId: string
     catch (cause) { setError(cause instanceof Error ? cause.message : "Could not open this draft."); }
     finally { setBusy(""); }
   }
-  async function review(action: "approve" | "dismiss" | "reopen") {
-    if (!selected) return;
-    setBusy(action); setError("");
+  async function review(action: "approve" | "dismiss" | "reopen", id = selected?.request.id) {
+    if (!id) return;
+    setBusy(`${action}:${id}`); setError("");
     try {
-      const data = await dashboardRequest<{ request: PatchGroupTicketSummary }>(`patch-group-tickets/${selected.request.id}?companyId=${encodeURIComponent(companyId)}`, {
+      const data = await dashboardRequest<{ request: PatchGroupTicketSummary }>(`patch-group-tickets/${id}?companyId=${encodeURIComponent(companyId)}`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action }),
       });
-      setSelected({ ...selected, request: data.request });
+      setSelected(current => current?.request.id === id ? { ...current, request: data.request } : current);
       setRows(current => current.map(row => row.id === data.request.id ? data.request : row));
       await load();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not save the review decision."); }
@@ -150,7 +150,10 @@ export default function PatchReviewQueue({ companyId, sla }: { companyId: string
             <span>{ageBadge(ageDays(row.preparedAt), pending, sla ? slaDaysFor(row.worstSeverity, sla) : null)}</span>
           </div>
         </div>
-        <button type="button" className={`${styles.button} h-fit shrink-0`} disabled={Boolean(busy)} onClick={() => void open(row.id)}>{busy === row.id ? "Opening…" : "Review"}</button>
+        <div className="flex shrink-0 flex-col gap-2 sm:flex-row">
+          <button type="button" className={`${styles.button} h-fit`} disabled={Boolean(busy)} onClick={() => void open(row.id)}>{busy === row.id ? "Opening…" : "Review"}</button>
+          {pending && row.state === "prepared" && !row.ticketId && <button type="button" className={`${styles.button} h-fit`} disabled={Boolean(busy)} onClick={() => void review("dismiss", row.id)}>{busy === `dismiss:${row.id}` ? "Dismissing…" : "Dismiss"}</button>}
+        </div>
       </div>;
     })}</div>
     {more && <button type="button" className={`${styles.button} mt-4`} disabled={Boolean(busy)} onClick={() => void load(page + 1)}>Load more</button>}
