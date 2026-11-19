@@ -35,7 +35,7 @@ const companies=[{id:'CO-TEST-A',name:'Fixture A'},{id:'CO-TEST-B',name:'Fixture
 const summary=(companyId)=>({id,cves:[cve],hostCount:2,findingCount:2,remediationTitle:'Install recommended patch',companyName:companyId===companies[0].id?'Fixture A':'Fixture B',source:'stored-findings',state:'prepared',reviewState:'pending',preparedAt:when,updatedAt:when,worstSeverity:'High',maxRisk:72,closed:false,attachmentState:'not_started',slaEscalations:0,createdBy:null});
 const group=(companyId)=>({manualOnly:true,source:'stored-findings',appCompanyId:companyId,companyName:companyId===companies[0].id?'Fixture A':'Fixture B',connectors:['defender'],title:'Install recommended patch',action:'Install recommended update',remediationVariants:['22h2','21h1'].map(version=>({remediationId:version,reference:'cpe:/o:microsoft:windows_10:'+version+'::x64',action:'Apply the shared vendor procedure',deviceCount:1})),tenantId:companyId,remediationId:'manual:fixture',cves:[cve],deviceCount:2,findingCount:2,hostScope:[],deviceCves:[],maxRisk:72,worstSeverity:'High',label:cve,csv:`cve,hostname,cvss,remediation\r\n${cve},${companyId}-device,8.1,Install recommended update\r\n`,ticketTitle:`${companyId}: ${cve}`,ticketBody:`Customer: ${companyId}\nCVE: ${cve}\nRecommended remediation: Install recommended update\nCVSS: 8.1\nSee attached CSV for devices.`});
 const detail=companyId=>({companyId,cve,companyName:companyId===companies[0].id?'Fixture A':'Fixture B',observedAt:when,sourceObservations:{platform:when,crowdstrike:null},findingCount:2,deviceCount:2,hosts:[{host:`${companyId}-device`,source:'defender',severity:'High',cvss:8.1}],enrichment:{cvss_score:8.1,epss_probability:0.9,cisa_kev:true,active_exploitation:true,active_exploitation_source:'MISP',active_exploitation_detail:'Synthetic retained signal',updated_at:when},tickets:[],moreTickets:false});
-let approved=false,created=false,failPrepare=false,failIntel=false,delayDetail=false,releaseDetail;
+let approved=false,created=false,dismissed=false,failDismiss=false,failPrepare=false,failIntel=false,delayDetail=false,releaseDetail;
 let ticketStatusMode='none';
 function fixStatus(related=false){
  const state=['none','unavailable'].includes(ticketStatusMode)?ticketStatusMode:related||ticketStatusMode==='single'?'related':ticketStatusMode;
@@ -126,7 +126,7 @@ try{
     if(p==='top-fixes')return failFixes ? json({error:'Top fixes temporarily unavailable.'},503) : json({companyId,calculatedAt:when,totalFixes:1,affectedDevices:18,findingCount:20,uniqueCves:1,missingRemediation:0,missingDevice:0,limit:50,
       rows:[{id:'fixture-fix',cve,remediation:'Install the open vulnerability update',deviceCount:18,findingCount:20,maxRisk:72,severity:'High',ticketStatus:fixStatus(true)}],
       remediationWorklist:{totalGroups:1,limit:50,rows:[{id:'shared-action',cves:[cve,...Array.from({length:60},(_,i)=>`CVE-2026-${5678+i}`)],remediation:'One recommended patch across CVEs',deviceCount:9,findingCount:70,maxRisk:90,severity:'Critical',source:'crowdstrike',grouping:'vendor-remediation',ticketStatus:fixStatus()}]}});
-    if(p==='patch-group-tickets')return json({requests:emptyQueue?[]:[summary(companyId)],more:false,total:emptyQueue?0:1});
+    if(p==='patch-group-tickets')return json({requests:emptyQueue?[]:[{...summary(companyId),reviewState:dismissed?'dismissed':approved?'approved':'pending'}],more:false,total:emptyQueue?0:1,pending:emptyQueue||dismissed||approved?0:1,approved:approved?1:0});
     if(p==='risk/summary')return json({totalOpenRisk:1,criticalRiskCount:0,swath1Open:0,swath2Open:1,kevOpen:1,internetFacingCriticalRisk:0,verifiedRemediations:0,awaitingVerification:0});
     if(p==='risk/top')return json({rows:[{id:'risk-1',cve,companyId,hostname:'fixture-host',severity:'High',riskScore:720,effectiveSwath:2,calculatedSwath:2,reasons:[],cisaKev:true,epssProbability:0.9,verificationStatus:'detected',lastSeen:when}],total:1});
     if(p==='customer-threat-intelligence')return failIntel?json({error:'Fixture refresh unavailable'},503):json({companyId,available:true,total:1,rows:[{cve,cisa_kev:true,epss_probability:0.9,active_exploitation:true,active_exploitation_source:'MISP',active_exploitation_detail:'Synthetic retained signal',updated_at:when}]});
@@ -151,9 +151,11 @@ try{
     if(p==='connectwise')return json({configured:true,revision:1,defaults:{boardId:9}});
     if(p==='connectwise/options')return json({options:url.searchParams.get('kind')==='companies'?[{id:55,name:'Fixture ConnectWise company'}]:url.searchParams.get('kind')==='boards'?[{id:9,name:'Fixture Patch Board'}]:[],more:false,page:1,revision:1});
     if(p===`patch-group-tickets/${id}`){
+      if(body?.action==='dismiss'){if(failDismiss)return json({error:'Fixture dismiss failure'},500);dismissed=true;}
+      if(body?.action==='reopen')dismissed=false;
       if(body?.action==='approve')approved=true;
       if(body?.action==='create'){assert.ok(approved);created=true;}
-      return json({group:group(companyId),request:{...summary(companyId),reviewState:approved?'approved':'pending',state:created?'created':'prepared',ticketId:created?999:null,attachmentState:created?'attached':'not_started',ticketStatus:created?'New':null}});
+      return json({group:group(companyId),request:{...summary(companyId),reviewState:dismissed?'dismissed':approved?'approved':'pending',state:created?'created':'prepared',ticketId:created?999:null,attachmentState:created?'attached':'not_started',ticketStatus:created?'New':null}});
     }
     unexpected.push(p);return json({error:'Unexpected fixture request'},500);
   });
@@ -222,8 +224,30 @@ try{
   assert.equal(calls.filter(c=>c.body?.action==='approve'||c.body?.action==='create').length,0);
   await panel.getByRole('link',{name:'Review on Tickets page'}).click();await page.waitForURL(/view=tickets/);
   await panel.waitFor({state:'hidden'});
+  const queue=page.getByRole('region',{name:'Consolidation review queue',exact:true});
+  await queue.getByRole('button',{name:'Dismiss',exact:true}).scrollIntoViewIfNeeded();
+  await page.screenshot({path:join(artifacts,'direct-dismiss-desktop.png')});
+  await page.setViewportSize({width:390,height:844});
+  await queue.getByRole('button',{name:'Dismiss',exact:true}).scrollIntoViewIfNeeded();
+  assert.ok(await queue.evaluate(e=>e.scrollWidth<=e.clientWidth+1));
+  await page.screenshot({path:join(artifacts,'direct-dismiss-mobile.png')});
+  await page.setViewportSize({width:1440,height:1000});
+  const detailReads=calls.filter(c=>c.path===`patch-group-tickets/${id}`&&c.method==='GET').length;
+  failDismiss=true;await queue.getByRole('button',{name:'Dismiss',exact:true}).click();
+  await queue.getByRole('alert').filter({hasText:'Fixture dismiss failure'}).waitFor();
+  assert.equal(await queue.getByRole('button',{name:'Approve for ticket',exact:true}).count(),0);
+  failDismiss=false;await queue.getByRole('button',{name:'Dismiss',exact:true}).click();
+  await queue.getByRole('button',{name:'Awaiting review (0)',exact:true}).waitFor();
+  assert.equal(await queue.getByRole('button',{name:'Dismiss',exact:true}).count(),0);
+  assert.equal(calls.filter(c=>c.path===`patch-group-tickets/${id}`&&c.method==='GET').length,detailReads,'direct dismissal does not open the review packet');
+  assert.equal(calls.filter(c=>c.body?.action==='approve'||c.body?.action==='create').length,0);
+  await queue.getByRole('button',{name:'Review',exact:true}).click();
+  await queue.getByRole('button',{name:'Reopen for review',exact:true}).click();
+  await queue.getByRole('button',{name:'Close',exact:true}).click();
+  pass('pending drafts dismiss directly, retain errors on failure, update counts and reopen without sending');
   await page.getByRole('button',{name:'Review',exact:true}).first().click();
   await page.getByRole('button',{name:'Approve for ticket',exact:true}).click();
+  assert.equal(await queue.getByRole('button',{name:'Dismiss',exact:true}).count(),0);
   await page.getByRole('button',{name:'Review ConnectWise ticket',exact:true}).click();
   await page.getByLabel('ConnectWise company',{exact:true}).selectOption('55');await page.getByLabel('Service board',{exact:true}).selectOption('9');
   await page.getByRole('button',{name:'Create ConnectWise ticket',exact:true}).click();await page.getByText(/#999/).first().waitFor();
